@@ -1294,7 +1294,7 @@ async fn wait_agents_returns_when_the_named_children_settle() {
     let wait_result = tool_results(third).pop().unwrap();
     assert!(!wait_result.contains("Waited"), "{wait_result}");
     assert_eq!(
-        wait_result.matches("finished; its answer follows").count(),
+        wait_result.matches("finished; its answer arrives").count(),
         2,
         "{wait_result}"
     );
@@ -1396,7 +1396,7 @@ async fn cancel_agent_stops_the_child_and_delivers_what_it_had() {
     let cancel_result = tool_results(third).pop().unwrap();
     assert!(
         cancel_result
-            .ends_with("was cancelled. What it reported so far follows as a runtime notice."),
+            .ends_with("was cancelled. What it reported so far arrives as a runtime notice."),
         "{cancel_result}"
     );
     let delivered = delivered_answers(&requests);
@@ -1782,5 +1782,617 @@ async fn a_report_split_across_messages_in_one_turn_is_joined() {
         answer.content,
         "the sub-agent run was cancelled\n\nIts latest progress report:\n\nwidgets live in inventory.rs:4"
     );
+    store.close().await.unwrap();
+}
+
+/// A parent that keeps reading until it has seen `until` runtime notices
+/// matching `marker`, then replies with text. Every request is recorded.
+struct ReadsUntil {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    marker: &'static str,
+    until: usize,
+    spawn_first: bool,
+}
+
+impl Provider for ReadsUntil {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let seen = request_texts(&request)
+            .iter()
+            .filter(|text| text.contains(self.marker))
+            .count();
+        let turn = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len()
+        };
+        let usage = Some(qq_provider::ProviderUsage {
+            input_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: None,
+        });
+        let call = |name: &str, arguments: String| {
+            let id = format!("call_{turn}");
+            [
+                Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                    id: id.clone(),
+                    json: arguments,
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                Ok(qq_provider::ProviderEvent::Completed { usage }),
+            ]
+        };
+        if turn == 1 && self.spawn_first {
+            let (name, arguments) = spawn("survey");
+            return Box::pin(stream::iter(call(name, arguments)));
+        }
+        if seen < self.until {
+            // Pace the parent so the child's report turns can land between
+            // its boundaries.
+            return Box::pin(
+                stream::iter(call("read_file", r#"{"path":"notes.txt"}"#.to_owned())).then(
+                    |event| async {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        event
+                    },
+                ),
+            );
+        }
+        Box::pin(stream::iter([
+            Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                text: "done".to_owned(),
+            }),
+            Ok(qq_provider::ProviderEvent::Completed { usage }),
+        ]))
+    }
+}
+
+/// A child that reads until its stall report, answers it with a numbered
+/// report, keeps reading, and gives its final answer on its final-answer
+/// notice (ADR-0054 § 3). A gate holds its first request so the parent's
+/// boundaries can be observed before any report exists.
+struct ReportingChild {
+    reports: StdMutex<usize>,
+}
+
+impl Provider for ReportingChild {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let usage = Some(qq_provider::ProviderUsage {
+            input_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 2,
+            reasoning_tokens: None,
+        });
+        let last = request
+            .messages()
+            .last()
+            .and_then(|message| match message.content() {
+                [ContentBlock::Text { text }] => Some(text.clone()),
+                _ => None,
+            });
+        let text = |text: String| {
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta { text }),
+                Ok(qq_provider::ProviderEvent::Completed { usage }),
+            ])) as ProviderStream
+        };
+        match last.as_deref() {
+            Some(notice) if notice == crate::SUBAGENT_FINAL_ANSWER_NOTICE => {
+                return text("final: widgets live in inventory.rs:1".to_owned());
+            }
+            Some(notice) if notice == crate::STALL_REPORT_NOTICE => {
+                let mut reports = self.reports.lock().unwrap();
+                *reports += 1;
+                return text(format!("partial {}: notes.txt mentions widgets", *reports));
+            }
+            _ => {}
+        }
+        let mut events = Vec::new();
+        for index in 0..crate::MAX_TOOL_CALLS_PER_TURN {
+            let id = format!("read-{}-{index}", request.messages().len());
+            events.extend([
+                Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: "read_file".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                    id: id.clone(),
+                    json: r#"{"path":"notes.txt"}"#.to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+            ]);
+        }
+        events.push(Ok(qq_provider::ProviderEvent::Completed { usage }));
+        Box::pin(stream::iter(events))
+    }
+}
+
+/// End to end through the session runtime: a background child's report
+/// reaches its working parent as an interim notice at a turn boundary,
+/// each report once, before that turn's request; the child's final answer
+/// still arrives once; and a follow-up run's assembled context begins with
+/// exactly the parent's last live request (ADR-0054 § 4).
+#[tokio::test]
+async fn a_working_parent_receives_interim_reports_and_replays_them() {
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(ReadsUntil {
+        requests: Arc::clone(&parent_requests),
+        marker: "A sub-agent you started has finished.",
+        until: 1,
+        spawn_first: true,
+    });
+    let child: Arc<dyn Provider> = Arc::new(ReportingChild {
+        reports: StdMutex::new(0),
+    });
+    let harness = spawn_harness(
+        vec![("test/child", child)],
+        vec![Arc::clone(&parent), parent],
+        8,
+    )
+    .await;
+    std::fs::write(harness_root(&harness).join("notes.txt"), "widgets").unwrap();
+    let mut delegation = Delegation {
+        harness,
+        parent_requests: Arc::clone(&parent_requests),
+        gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        children_started: Arc::new(AtomicUsize::new(0)),
+        parent_turn: Arc::new(tokio::sync::Notify::new()),
+    };
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(30),
+        collect_until_run_finished(&mut delegation.harness.events, run),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = parent_requests.lock().unwrap().clone();
+    let last = requests.last().unwrap();
+    let texts = request_texts(last);
+    let reports = texts
+        .iter()
+        .filter(|text| text.contains("A sub-agent you started is still working."))
+        .collect::<Vec<_>>();
+    assert!(!reports.is_empty(), "no interim report reached the parent");
+    // Each report once, numbered in order: never re-sent, never out of order.
+    let numbers = reports
+        .iter()
+        .map(|text| {
+            let tail = text.rsplit_once("partial ").unwrap().1;
+            tail.split(':').next().unwrap().parse::<usize>().unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] < pair[1]),
+        "{numbers:?}"
+    );
+    // The answer arrives once, after every report.
+    let answer = texts
+        .iter()
+        .position(|text| text.contains("A sub-agent you started has finished."))
+        .unwrap();
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("A sub-agent you started has finished."))
+            .count(),
+        1
+    );
+    assert!(texts[answer].ends_with("final: widgets live in inventory.rs:1"));
+    let last_report = texts
+        .iter()
+        .rposition(|text| text.contains("is still working."))
+        .unwrap();
+    assert!(last_report < answer);
+    // A report enters context at a boundary: it is the newest user message
+    // of the first request that carries it.
+    let first_carrying = requests
+        .iter()
+        .position(|request| {
+            request_texts(request)
+                .iter()
+                .any(|text| text.contains("is still working."))
+        })
+        .unwrap();
+    assert!(
+        request_texts(&requests[first_carrying])
+            .last()
+            .unwrap()
+            .contains("is still working."),
+        "the report is the last message of the request that first carries it"
+    );
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// Two children, one released: `wait_agents` with no ids returns as soon as
+/// one has finished and names the other as still working; cancelling the
+/// finished one says so instead of cancelling it.
+#[tokio::test]
+async fn wait_with_no_ids_returns_on_the_first_finished_child() {
+    fn cancel_both(children: &[String]) -> String {
+        format!(r#"{{"id":"{}"}}"#, children[0])
+    }
+    let mut delegation = delegation(
+        vec![
+            ParentTurn::Calls(vec![spawn("one"), spawn("two")]),
+            ParentTurn::Calls(vec![(
+                "wait_agents",
+                r#"{"timeout_seconds":10}"#.to_owned(),
+            )]),
+            ParentTurn::WithChildren("cancel_agent", cancel_both),
+        ],
+        "first answer",
+    )
+    .await;
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    parent_sent(&delegation, 2).await;
+    children_started(&delegation, 2).await;
+    delegation.gate.add_permits(1);
+    parent_sent(&delegation, 3).await;
+    let (wait_result, finished_id) = {
+        let requests = delegation.parent_requests.lock().unwrap();
+        let result = tool_results(&requests[2]).pop().unwrap();
+        // The one delivered answer names its child.
+        let finished = request_texts(&requests[2])
+            .into_iter()
+            .find(|text| text.contains("has finished."))
+            .unwrap();
+        let id = finished
+            .split("Sub-agent ")
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_owned();
+        (result, id)
+    };
+    assert!(!wait_result.starts_with("Waited"), "{wait_result}");
+    assert_eq!(
+        wait_result.matches("finished; its answer arrives").count(),
+        1,
+        "{wait_result}"
+    );
+    assert_eq!(
+        wait_result.matches("still working.").count(),
+        1,
+        "{wait_result}"
+    );
+    assert!(
+        wait_result.contains(&format!("Sub-agent {finished_id}: finished")),
+        "{wait_result}"
+    );
+    delegation.gate.add_permits(1);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    let requests = delegation.parent_requests.lock().unwrap().clone();
+    // Each answer once in total, across every boundary.
+    let last = requests.last().unwrap();
+    assert_eq!(
+        request_texts(last)
+            .iter()
+            .filter(|text| text.contains("A sub-agent you started has finished."))
+            .count(),
+        2
+    );
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// A child whose last report is closed only by its final-answer notice
+/// still has that report delivered while it works on the final answer, and
+/// a report not yet closed is never sent.
+#[tokio::test]
+async fn a_report_closed_by_the_final_answer_notice_is_delivered() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x74; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
+    let run_id = claimed_child.identity.run_id;
+    report_turn(&store, run_id, 1, "almost there", false).await;
+    assert!(
+        store
+            .deliver_children(&parent, 2, 8)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json, notice)
+                 VALUES (?1, 2, '[]', 'final_answer')",
+                [run_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert!(delivered[0].interim);
+    assert!(delivered[0].notice.ends_with("almost there"));
+    store.close().await.unwrap();
+}
+
+/// A report delivered at a parent boundary whose turn never committed (the
+/// process stopped) is replayed once, after the parent's run, and is not
+/// delivered again after recovery.
+#[tokio::test]
+async fn a_report_delivered_before_a_crash_replays_once_and_is_not_resent() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(database_path.clone()).await.unwrap();
+    let (_, parent_session, parent) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .create_child_run(
+            &parent,
+            ToolCallId::from_bytes([0x75; 16]),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: ModelSelection {
+                    model_is_fallback: false,
+                    model: Some("test/child".to_owned()),
+                    max_output_tokens: Some(256),
+                    organization: None,
+                },
+                task: "survey".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
+    report_turn(&store, claimed_child.identity.run_id, 1, "halfway", true).await;
+    let delivered = store.deliver_children(&parent, 2, 8).await.unwrap();
+    assert_eq!(delivered.len(), 1);
+    let notice = delivered[0].notice.clone();
+    store.close().await.unwrap();
+    drop(store);
+
+    let store = Store::open(database_path).await.unwrap();
+    store.recover_interrupted_runs().await.unwrap();
+    let reports: u32 = store
+        .call(Priority::Control, |connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM child_reports", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(reports, 1, "recovery delivers answers, never reports again");
+    let assembled = store
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, parent_session, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let texts = assembled
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts.iter().filter(|text| **text == notice).count(), 1);
+    // The interrupted child's answer follows the report.
+    let report = texts.iter().position(|text| *text == notice).unwrap();
+    let answer = texts
+        .iter()
+        .position(|text| text.contains("A sub-agent you started has finished."))
+        .unwrap();
+    assert!(report < answer);
+    store.close().await.unwrap();
+}
+
+/// An interim report that arrives while the parent waits tool-free for
+/// answers does not end the wait: the parent already said nothing is left
+/// until answers arrive (ADR-0054 § 4). The run loop's wait wakes on a
+/// settlement; here child A has settled but its spend is unreadable (its own
+/// child still runs), so the wake delivers only child B's report. The parent
+/// must keep waiting, with the report in context, and start its next turn
+/// once A's answer is delivered.
+#[tokio::test]
+async fn an_interim_report_does_not_end_a_tool_free_wait() {
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent_turn = Arc::new(tokio::sync::Notify::new());
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedParent {
+        requests: Arc::clone(&parent_requests),
+        script: vec![ParentTurn::Calls(vec![spawn("a"), spawn("b")])],
+        turn: AtomicUsize::new(0),
+        turn_started: Arc::clone(&parent_turn),
+    });
+    // Both children are held on their first request; the test writes their
+    // durable state directly, as their runs would.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let child: Arc<dyn Provider> = Arc::new(GatedChild {
+        gate: Arc::clone(&gate),
+        answer: "a's answer",
+        started: Arc::clone(&started),
+    });
+    let harness = spawn_harness(
+        vec![("test/child", child)],
+        vec![Arc::clone(&parent), parent],
+        8,
+    )
+    .await;
+    let mut delegation = Delegation {
+        harness,
+        parent_requests: Arc::clone(&parent_requests),
+        gate,
+        children_started: started,
+        parent_turn,
+    };
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    children_started(&delegation, 2).await;
+    // Child B (the second spawn) writes a closed report.
+    let session_id = delegation.harness.session_id;
+    let store = &delegation.harness.runtime.inner.store;
+    let children: Vec<(String, String)> = store
+        .call(Priority::Control, move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT r.id, r.session_id FROM runs r JOIN sessions s ON s.id = r.session_id
+                 WHERE s.parent_id = ?1 ORDER BY s.created_at_ms, s.rowid",
+            )?;
+            let rows = statement
+                .query_map([session_id.to_string()], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+    assert_eq!(children.len(), 2);
+    let b: RunId = children[1].0.parse().unwrap();
+    report_turn(store, b, 90, "b is halfway", true).await;
+    // Release A alone; B stays held. A settles and is delivered: the wake
+    // also carries B's report, and the wait ends on A's answer.
+    delegation.gate.add_permits(1);
+    parent_sent(&delegation, 3).await;
+    let third = delegation.parent_requests.lock().unwrap()[2].clone();
+    let texts = request_texts(&third);
+    let report = texts
+        .iter()
+        .position(|text| text.contains("is still working.") && text.ends_with("b is halfway"));
+    let answer = texts
+        .iter()
+        .position(|text| text.contains("has finished.") && text.ends_with("a's answer"));
+    assert!(answer.is_some(), "{texts:#?}");
+    assert!(report.is_some(), "{texts:#?}");
+    assert!(answer < report, "answers precede reports at a boundary");
+    delegation.gate.add_permits(1);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
+}
+
+/// The wait's rule in isolation: a delivery that is only interim reports is
+/// not an answer, so the tool-free wait goes on.
+#[tokio::test]
+async fn a_report_only_delivery_is_not_an_answer() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let admission = |detached| ChildAdmission {
+        reasoning_effort: None,
+        profile: AgentProfileId::default(),
+        model: ModelSelection {
+            model_is_fallback: false,
+            model: Some("test/child".to_owned()),
+            max_output_tokens: Some(256),
+            organization: None,
+        },
+        task: "survey".to_owned(),
+        limits: RunLimits::default(),
+        approval_mode: ApprovalMode::ReadOnly,
+        purpose: SessionPurpose::Task,
+        detached,
+    };
+    // A settles with a grandchild still running; B reports.
+    store
+        .create_child_run(&parent, ToolCallId::from_bytes([0x76; 16]), admission(true))
+        .await
+        .unwrap();
+    let a = store.claim_next_run(true).await.unwrap().unwrap();
+    store
+        .create_child_run(&a, ToolCallId::from_bytes([0x77; 16]), admission(false))
+        .await
+        .unwrap();
+    let grandchild = store.reserve_next_run_at_depth(2).await.unwrap().unwrap();
+    store
+        .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_child_run(&parent, ToolCallId::from_bytes([0x78; 16]), admission(true))
+        .await
+        .unwrap();
+    let b = store.claim_next_run(true).await.unwrap().unwrap();
+    store
+        .finish_run(
+            &a,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    report_turn(&store, b.identity.run_id, 1, "b is halfway", true).await;
+    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "A's spend is unreadable; only B's report"
+    );
+    assert!(delivered[0].interim && !delivered[0].answered());
     store.close().await.unwrap();
 }

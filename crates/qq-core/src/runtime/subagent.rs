@@ -88,6 +88,8 @@ pub(crate) struct DeliveredChild {
     /// Whether the child answered (a failed or cancelled child did not, and
     /// an interim report from a child still working is not an answer).
     pub(crate) answered: bool,
+    /// A running child's interim report: the child stays outstanding.
+    pub(crate) interim: bool,
     pub(crate) spend: SpawnAgentSpend,
 }
 
@@ -124,23 +126,28 @@ pub(crate) struct WaitReport {
 
 impl WaitReport {
     /// The tool result text. Answers are not repeated here: each finished
-    /// child's answer follows this result as a delivered notice, through the
-    /// one delivery path that keeps it exactly-once (ADR-0054 § 4).
+    /// child's answer arrives as a delivered notice, normally right after
+    /// this result (later only while a grandchild's spend is still settling),
+    /// through the one delivery path that keeps it exactly-once (ADR-0054
+    /// § 4).
     pub(crate) fn render(&self, timeout_seconds: u64) -> String {
+        use std::fmt::Write as _;
         if self.children.is_empty() {
             return "No background sub-agents are outstanding; there is nothing to wait for."
                 .to_owned();
         }
         let mut text = String::new();
+        // Writing into a `String` cannot fail.
         if self.timed_out {
-            text.push_str(&format!(
-                "Waited {timeout_seconds}s; the sub-agents still working keep working.\n"
-            ));
+            let _ = writeln!(
+                text,
+                "Waited {timeout_seconds}s; the sub-agents still working keep working."
+            );
         }
         for (id, status) in &self.children {
-            text.push_str(&format!("Sub-agent {id}: "));
+            let _ = write!(text, "Sub-agent {id}: ");
             text.push_str(match status {
-                ChildStatus::Finished => "finished; its answer follows as a runtime notice.",
+                ChildStatus::Finished => "finished; its answer arrives as a runtime notice.",
                 ChildStatus::Working => "still working.",
                 ChildStatus::Unknown => {
                     "not a background sub-agent of this run that is still outstanding (its \
@@ -170,14 +177,14 @@ impl CancelOutcome {
         match self {
             Self::Cancelled => (
                 format!(
-                    "Sub-agent {id} was cancelled. What it reported so far follows as a runtime \
+                    "Sub-agent {id} was cancelled. What it reported so far arrives as a runtime \
                      notice."
                 ),
                 false,
             ),
             Self::AlreadyFinished => (
                 format!(
-                    "Sub-agent {id} had already finished; its answer follows as a runtime notice."
+                    "Sub-agent {id} had already finished; its answer arrives as a runtime notice."
                 ),
                 false,
             ),

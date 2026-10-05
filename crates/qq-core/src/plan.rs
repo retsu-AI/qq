@@ -771,9 +771,11 @@ impl CompiledAgentPlan {
             exposed_tools.map(|names| names.into_iter().collect::<std::collections::BTreeSet<_>>());
         if let Some(names) = &exposed_tools {
             // Validate before either restriction removes tools. load_skill
-            // is known even when this workspace has no disclosed skills.
+            // is known even when this workspace has no disclosed skills; the
+            // tools that follow spawn_agent are not names of their own.
             let known = static_tools
                 .iter()
+                .filter(|tool| !matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent))
                 .map(|tool| tool.spec.name())
                 .chain(std::iter::once("load_skill"))
                 .chain(
@@ -792,10 +794,16 @@ impl CompiledAgentPlan {
         // inputs (rather than the compiled catalog) keeps every catalog
         // invariant intact and makes the digest reflect the policy. The
         // selector and loader are never filtered out: they are how the model
-        // reaches what the policy does allow.
+        // reaches what the policy does allow. `wait_agents` and
+        // `cancel_agent` follow `spawn_agent` through both restrictions:
+        // they act only on its children, so the three come and go together
+        // and the delegation prompt never names a tool the run lacks.
+        let follows_spawn =
+            |tool: &StaticTool| matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent);
         if let Some(selection) = &pack {
             static_tools.retain(|tool| {
                 matches!(tool.host, ToolHost::SelectTools | ToolHost::LoadSkill)
+                    || follows_spawn(tool)
                     || selection.permits(tool.spec.name())
             });
             for contribution in &mut contributions {
@@ -806,13 +814,19 @@ impl CompiledAgentPlan {
             }
         }
         if let Some(names) = &exposed_tools {
-            static_tools.retain(|tool| names.contains(tool.spec.name()));
+            static_tools.retain(|tool| follows_spawn(tool) || names.contains(tool.spec.name()));
             for contribution in &mut contributions {
                 contribution
                     .catalog
                     .tools
                     .retain(|tool| names.contains(tool.spec.name()));
             }
+        }
+        if !static_tools
+            .iter()
+            .any(|tool| tool.host == ToolHost::SpawnAgent)
+        {
+            static_tools.retain(|tool| !follows_spawn(tool));
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
@@ -1244,6 +1258,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(narrow.digest(), same.digest());
+    }
+
+    /// `wait_agents` and `cancel_agent` are never named in policy: they
+    /// follow `spawn_agent` through exposure and pack filtering, so the three
+    /// delegation tools are always present together or absent together.
+    #[test]
+    fn the_delegation_tools_follow_spawn_agent_through_every_filter() {
+        let workspace = canonical_temp();
+        let delegation = |plan: &CompiledAgentPlan| {
+            ["spawn_agent", "wait_agents", "cancel_agent"]
+                .into_iter()
+                .filter(|name| plan.catalog().names().any(|tool| tool == *name))
+                .collect::<Vec<_>>()
+        };
+        let all = ["spawn_agent", "wait_agents", "cancel_agent"];
+        let default = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        assert_eq!(delegation(&default), all);
+        let with_spawn = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["read_file".to_owned(), "spawn_agent".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(delegation(&with_spawn), all);
+        let without = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        assert!(delegation(&without).is_empty());
+        // They are not policy vocabulary of their own.
+        assert!(matches!(
+            CompiledAgentPlan::compile_blocking(
+                profile(workspace.path()).with_exposed_tools(vec!["wait_agents".to_owned()]),
+            ),
+            Err(PlanCompileError::UnknownExposedTool { .. })
+        ));
     }
 
     #[test]

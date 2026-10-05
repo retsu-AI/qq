@@ -17,7 +17,7 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// Version 17 of the base agent prompt (10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 17. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -26,7 +26,7 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// line for read children, and asks parents for a question-shaped brief;
 /// 15 → 16 says a read sub-agent runs in the background and its answer
 /// arrives later as a runtime notice; 16 → 17 adds interim reports,
-/// wait_agents, and cancel_agent).
+/// wait_agents, and cancel_agent.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///

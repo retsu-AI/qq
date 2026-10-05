@@ -912,3 +912,87 @@ for the `sessions::tests::deadlines` timeouts in one loaded full run: they
 pass 13 of 13, three times each, on both `main` and the branch. AC0's soak
 work owns fsync-heavy timing; this is not fixed here.
 
+### 2026-10-05: AP4.2 independent review: changes requested, all fixed
+
+The reviewer requested changes: 1 blocking, 5 should-fix, 4 nits.
+
+1. **(Blocking) Interim reports were not tested end to end.** Both report
+   tests called the store directly, so no live parent turn, turn-notice
+   placement or replay check covered them.
+   - `a_working_parent_receives_interim_reports_and_replays_them` runs a
+     parent that keeps reading while a real child answers stall reports and
+     then its final-answer turn. It checks:
+     - each report reaches the parent once, in order, as the newest message
+       of the first request that carries it;
+     - the answer arrives once, after the reports;
+     - `assert_replay_matches_live` holds, with the reference loader reading
+       `child_reports`.
+   - It fails when reports are disabled, and when their replay order is
+     shifted.
+2. **Policy could split the three delegation tools.** Pack policy or
+   `exposed_tools` could keep `spawn_agent` but drop the other two, and the
+   prompt then named tools the run lacked.
+   - `wait_agents` and `cancel_agent` now follow `spawn_agent` through both
+     filters and are dropped whenever it is.
+   - They are not policy names: the config vocabulary is reverted, and the
+     plan's `known` set excludes them.
+   - Tests: `the_delegation_tools_follow_spawn_agent_through_every_filter`
+     and the root `configured_static_exposure_…`.
+3. **A report could end the tool-free wait.** A wake that delivered only a
+   report (child A settled with its spend unreadable while B reported) ended
+   the wait and spent a turn.
+   - `deliver_children` now returns `Delivered { answers, reports }`. The
+     wait ends only on an answer or steering. A report-only wake keeps
+     waiting, and the report stays in context for the next turn
+     (`wait_delivered_for` is set, so that boundary is not delivered twice).
+   - Tests: `a_tool_free_wait_ends_on_an_answer_not_on_a_report` (run loop,
+     deterministic; fails if reports end the wait),
+     `an_interim_report_does_not_end_a_tool_free_wait` and
+     `a_report_only_delivery_is_not_an_answer`.
+4. **Teardown could miss an owner task.** Turn-top delivery now runs while
+   children are working, so the store can deliver a child before its owner
+   task finishes, and `forget_delivered` would drop it from the registry.
+   Teardown's drain would then not wait for it.
+   - `ChildTask.delivered` keeps the entry, no longer outstanding, until the
+     task completes.
+   - Test: `a_child_delivered_before_its_owner_finishes_is_still_drained`.
+     It fails if delivered tasks are dropped at once.
+5. **`report_spans` loaded every span's text.**
+   - It now collects message ids per span. `newest_report` loads text newest
+     first and stops at the first eligible span with text, so a boundary
+     reads one report in the usual case.
+   - The doc comment is corrected.
+6. **Test gaps, now covered:**
+   - `wait_with_no_ids_returns_on_the_first_finished_child`: with no ids,
+     the wait returns on the first finished child; a cancel of it reports
+     `AlreadyFinished`.
+   - `a_report_closed_by_the_final_answer_notice_is_delivered`.
+   - `a_report_delivered_before_a_crash_replays_once_and_is_not_resent`:
+     recovery never re-sends a report, it replays once after the run, and
+     the answer follows it.
+
+**Nits:**
+
+- the `NamedChild` struct replaces the `type_complexity` allow;
+- "follows" is now "arrives", since an answer can be several boundaries
+  late while a grandchild settles;
+- `write!` replaces `push_str(&format!(..))`;
+- the prompt version note reads as a history.
+
+The reviewer also checked several suspicions and found them fine:
+
+- the `after` filter in `report_spans`;
+- the AP3b effect of the first-row-per-turn change (only one complete
+  assistant message per turn exists live);
+- exactly-once for reports;
+- the shared ordinal;
+- `delivered_by_wait`;
+- budget;
+- migration lists;
+- request-order dispatch;
+- interrupt handling.
+
+**Verification:** 2102 workspace tests pass on a quiet machine (load 1.4);
+fmt and clippy are clean; the soak passes; the nonblocking, delegation and
+progress suites pass 5 of 5.
+

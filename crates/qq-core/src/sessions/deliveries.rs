@@ -139,23 +139,23 @@ pub(super) fn run_final_text(
     Ok(format!("{output}\n{refusal}"))
 }
 
-/// One report a run made: the turn whose notice asked for it, its text
-/// joined across the attempts that continued it, and whether a later notice
-/// closed it (the run moved on, so no further attempt can extend it).
+/// One report a run made: the turn whose notice asked for it, the messages
+/// its text spans, and whether a later notice closed it (the run moved on,
+/// so no further attempt can extend it).
 struct ReportSpan {
     turn_ordinal: u32,
-    text: String,
+    messages: Vec<String>,
     closed: bool,
 }
 
-/// The run's reports opened after turn `after`, in turn order. A report keeps
-/// its notice on the first attempt's row and spans the rows after it up to
-/// the next notice. Every later row in the span was asked to continue the same
-/// reply from where it stopped (an output cut, a mid-stream fault, an
-/// interrupt), so the report is the span's text joined in order. Text is
-/// loaded only for the reports returned, and turns up to `after` are not
-/// read: a span opened there is never returned, and the rows that continue
-/// it carry no notice, so skipping them changes nothing.
+/// The run's reports opened after turn `after`, in turn order, without
+/// their text. A report keeps its notice on the first attempt's row and spans
+/// the rows after it up to the next notice. Every later row in the span was
+/// asked to continue the same reply from where it stopped (an output cut, a
+/// mid-stream fault, an interrupt), so the report is the span's messages
+/// joined in order. Turns up to `after` are not read: a span opened there is
+/// never returned, and the rows that continue it carry no notice, so skipping
+/// them changes nothing.
 fn report_spans(
     connection: &Connection,
     run_id: RunId,
@@ -172,21 +172,19 @@ fn report_spans(
          WHERE t.run_id = ?1 AND t.turn_ordinal > ?2
          ORDER BY t.turn_ordinal, m.ordinal",
     )?;
-    let rows = statement
-        .query_map(params![run_id.to_string(), after], |row| {
-            Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
+    let rows = statement.query_map(params![run_id.to_string(), after], |row| {
+        Ok((
+            row.get::<_, u32>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
     let mut spans: Vec<ReportSpan> = Vec::new();
-    // The span the rows are currently extending, when it is one returned.
+    // The span the rows are currently extending, when it is a report.
     let mut open: Option<usize> = None;
     let mut previous_turn = None;
-    for (turn_ordinal, notice, message) in rows {
+    for row in rows {
+        let (turn_ordinal, notice, message) = row?;
         // A turn with several assistant messages repeats its notice on each
         // row; only its first row opens a span.
         let first_row = previous_turn != Some(turn_ordinal);
@@ -208,19 +206,37 @@ fn report_spans(
             if report {
                 spans.push(ReportSpan {
                     turn_ordinal,
-                    text: String::new(),
+                    messages: Vec::new(),
                     closed: false,
                 });
                 open = Some(spans.len() - 1);
             }
         }
         if let (Some(index), Some(id)) = (open, message) {
-            spans[index]
-                .text
-                .push_str(&load_message(connection, parse_id(&id)?)?.output);
+            spans[index].messages.push(id);
         }
     }
     Ok(spans)
+}
+
+/// The newest span `eligible` admits whose joined text is not blank, with
+/// that text. Text is loaded newest first and only until one qualifies, so a
+/// run with many reports reads one in the usual case.
+fn newest_report(
+    connection: &Connection,
+    spans: Vec<ReportSpan>,
+    eligible: impl Fn(&ReportSpan) -> bool,
+) -> Result<Option<(u32, String)>, SessionRuntimeError> {
+    for span in spans.into_iter().rev().filter(|span| eligible(span)) {
+        let mut text = String::new();
+        for id in &span.messages {
+            text.push_str(&load_message(connection, parse_id(id)?)?.output);
+        }
+        if !text.trim().is_empty() {
+            return Ok(Some((span.turn_ordinal, text)));
+        }
+    }
+    Ok(None)
 }
 
 /// The run's latest report with text: the reply to the last report or
@@ -230,11 +246,10 @@ pub(super) fn run_latest_report_text(
     connection: &Connection,
     run_id: RunId,
 ) -> Result<Option<String>, SessionRuntimeError> {
-    Ok(report_spans(connection, run_id, 0)?
-        .into_iter()
-        .rev()
-        .find(|span| !span.text.trim().is_empty())
-        .map(|span| span.text))
+    Ok(
+        newest_report(connection, report_spans(connection, run_id, 0)?, |_| true)?
+            .map(|(_, text)| text),
+    )
 }
 
 /// The settled run's own spend plus its exact owned descendants'. Later user
@@ -605,10 +620,11 @@ pub(super) fn deliver_interim_reports(
         crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(spent);
     for (child_run, child_session, title, parent_session, seen_through) in running {
         let child_run_id: RunId = parse_id(&child_run)?;
-        let Some(report) = report_spans(transaction, child_run_id, seen_through)?
-            .into_iter()
-            .rev()
-            .find(|span| span.closed && !span.text.trim().is_empty())
+        let Some((report_turn, report)) = newest_report(
+            transaction,
+            report_spans(transaction, child_run_id, seen_through)?,
+            |span| span.closed && !span.messages.is_empty(),
+        )?
         else {
             continue;
         };
@@ -616,7 +632,7 @@ pub(super) fn deliver_interim_reports(
         let notice = interim_notice(
             child_session_id,
             &title,
-            report.text,
+            report,
             boundary_remaining.clamp(
                 crate::tools::output::MIN_MODEL_TEXT_BYTES,
                 MAX_DELIVERED_ANSWER_BYTES,
@@ -634,7 +650,7 @@ pub(super) fn deliver_interim_reports(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 child_run,
-                report.turn_ordinal,
+                report_turn,
                 parent_session,
                 parent_run,
                 now,

@@ -7920,8 +7920,16 @@ mod tests {
         };
         let factory = fixture.factory();
         let default = factory.plan_for(&fixture.request(document(""))).unwrap();
-        let names: Vec<_> = default.catalog().names().map(str::to_owned).collect();
+        // wait_agents and cancel_agent follow spawn_agent and are not policy
+        // names: exposing spawn_agent exposes them.
+        let names: Vec<_> = default
+            .catalog()
+            .names()
+            .filter(|name| !matches!(*name, "wait_agents" | "cancel_agent"))
+            .map(str::to_owned)
+            .collect();
         assert!(names.iter().any(|name| name == "load_skill"));
+        assert!(names.iter().any(|name| name == "spawn_agent"));
         for name in &names {
             let request = fixture.request(document(&format!("exposed_tools: [{name:?}]")));
             let snapshot = factory.load(&request).unwrap();

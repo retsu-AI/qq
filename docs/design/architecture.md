@@ -1140,7 +1140,9 @@ run is granted the parent's whole remainder, so overlapping children could
 overspend it.
 
 The parent controls its background children with two tools, declared exactly
-when `spawn_agent` is. Both name a child by the session id its receipt gave,
+when `spawn_agent` is: they follow it through `exposed_tools` and a pack's
+tool policy and are not policy names of their own, so the three come and go
+together. Both name a child by the session id its receipt gave,
 run in request order after the spawns before them in a turn, and return no
 answer themselves: answers reach the parent only through the delivery above,
 so each stays exactly-once whichever path settles it.
@@ -1152,7 +1154,7 @@ so each stays exactly-once whichever path settles it.
   already delivered); finished answers follow it at the next boundary.
 - **`cancel_agent { id }`** cancels one child through the ordinary child
   cancellation path and returns once it has settled. Its answer, the
-  cancellation with its latest report, follows at the next boundary and its
+  cancellation with its latest report, arrives at the next boundary and its
   spend is charged there once.
 
 A child still working sends its newest closed report (a report or stall
@@ -1163,9 +1165,13 @@ row records each delivered report by the child's report turn, so a report is
 sent once, an older undelivered one is superseded by the newer, and a child
 that has settled is answered instead. Interim reports share the boundary's
 tool-output budget after the answers, carry no spend, and are never
-progress: only a child's answer restarts the parent's stall count. Answers
-and reports share one delivery ordinal per parent run, so assembly replays
-them in the order the live run applied them.
+progress: only a child's answer restarts the parent's stall count, and only
+an answer (or steering) ends a tool-free wait; a report that arrives during
+the wait joins context for the next turn. Answers and reports share one
+delivery ordinal per parent run, so assembly replays them in the order the
+live run applied them. A child whose answer the store delivered before its
+owner task finished stays in the run's child registry, no longer
+outstanding, until that task ends, so teardown still awaits it.
 
 A model-spawned task run's system prompt carries a `Sub-agent:` section
 (ADR-0054 § 5). It says that a parent is waiting and receives only the final

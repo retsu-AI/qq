@@ -436,7 +436,7 @@ pub(crate) fn wait_agents_spec() -> ToolSpec {
         "Wait for background sub-agents you started with spawn_agent, when your next step needs \
          their answers. Returns when every named sub-agent has finished (or, with no ids, when any \
          one has), or when the timeout passes; the ones still working keep working. Each \
-         finished sub-agent's answer follows as a runtime notice.",
+         finished sub-agent's answer arrives as a runtime notice.",
         json!({
             "type": "object",
             "properties": {
@@ -464,7 +464,7 @@ pub(crate) fn cancel_agent_spec() -> ToolSpec {
     ToolSpec::new(
         CANCEL_AGENT_TOOL,
         "Cancel one background sub-agent whose answer you no longer need. What it reported so far \
-         follows as a runtime notice.",
+         arrives as a runtime notice.",
         json!({
             "type": "object",
             "properties": {

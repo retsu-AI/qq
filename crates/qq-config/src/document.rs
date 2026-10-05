@@ -1387,8 +1387,6 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "ask_user"
                     | "fetch"
                     | "spawn_agent"
-                    | "wait_agents"
-                    | "cancel_agent"
                     | "search_history"
                     | "read_tool_result"
                     | "select_tools"

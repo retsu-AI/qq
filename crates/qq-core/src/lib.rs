@@ -308,7 +308,8 @@ async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, hand
 /// context; each answer is charged once here. Only a child that answered is
 /// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
 /// for the parent, not output, exactly as a blocking spawn's error result is
-/// not progress. Returns how many were delivered.
+/// not progress, and neither is an interim report. Returns how many answers
+/// and how many interim reports were delivered.
 async fn deliver_children(
     spawner: &Arc<dyn SubagentSpawner>,
     turn_ordinal: u32,
@@ -317,10 +318,16 @@ async fn deliver_children(
     budget: &mut BudgetMeter,
     stall: &mut runtime::StallScope,
     checkpoint: Option<&mut runtime::CheckpointContext>,
-) -> Result<usize, runtime::DeliveryError> {
+) -> Result<Delivered, runtime::DeliveryError> {
     let delivered = spawner.deliver(turn_ordinal).await?;
     let mut checkpoint = checkpoint;
+    let mut count = Delivered::default();
     for child in &delivered {
+        if child.interim {
+            count.reports += 1;
+        } else {
+            count.answers += 1;
+        }
         budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
         // Answers are output the parent asked for, like tool results: they
         // count against its tool-output bound. The store bounded each
@@ -339,7 +346,14 @@ async fn deliver_children(
             irreducible_message_bytes.saturating_add(measure_message(&notice));
         messages.push(notice);
     }
-    Ok(delivered.len())
+    Ok(count)
+}
+
+/// What one boundary delivery added to the parent's context.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Delivered {
+    answers: usize,
+    reports: usize,
 }
 
 /// One steering message the loop has injected: its id and the files it read.
@@ -3114,18 +3128,28 @@ impl plan::CompiledAgentPlan {
                             )
                             .await
                             {
-                                // A settled child whose own descendants are
-                                // still settling has no readable spend yet;
-                                // its delivery is retried after they settle.
-                                // Pause briefly so the wake does not spin.
-                                Ok(0) if spawner.settled_detached() => {
-                                    tokio::time::sleep(delivery_retry).await;
-                                    delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
-                                }
-                                Ok(0) => {}
-                                Ok(_) => {
+                                // Only an answer ends the wait. An interim
+                                // report from another child stays in context
+                                // for the next turn, and the wait goes on: the
+                                // reply already said nothing is left to do
+                                // until answers arrive (ADR-0054 § 4).
+                                Ok(delivered) if delivered.answers > 0 => {
                                     wait_delivered_for = Some(turn_ordinal.saturating_add(1));
                                     break;
+                                }
+                                Ok(delivered) => {
+                                    if delivered.reports > 0 {
+                                        wait_delivered_for = Some(turn_ordinal.saturating_add(1));
+                                    }
+                                    // A settled child whose own descendants
+                                    // are still settling has no readable spend
+                                    // yet; its delivery is retried after they
+                                    // settle. Pause briefly so the wake does
+                                    // not spin.
+                                    if spawner.settled_detached() {
+                                        tokio::time::sleep(delivery_retry).await;
+                                        delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
+                                    }
                                 }
                                 Err(error) => {
                                     yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -11182,16 +11206,23 @@ mod tests {
     /// notice that the child failed or was cancelled is still context the
     /// parent sees and spend it pays, but it does not hold off the parent's
     /// stall report: a parent spawning children that fail must still report.
+    /// An interim report from a child still working is neither progress nor
+    /// an answer.
     #[tokio::test]
     async fn only_a_delivered_answer_restarts_the_stall_count() {
-        let child = |answered: bool| runtime::DeliveredChild {
+        let child = |answered: bool, interim: bool| runtime::DeliveredChild {
             notice: format!("child answered: {answered}"),
             answered,
+            interim,
             spend: SpawnAgentSpend::NONE,
         };
-        for (answered, restarts) in [(false, false), (true, true)] {
+        for (answered, interim, restarts) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, false),
+        ] {
             let spawner: Arc<dyn SubagentSpawner> = Arc::new(DeliveringSpawner {
-                delivered: Mutex::new(vec![child(answered)]),
+                delivered: Mutex::new(vec![child(answered, interim)]),
             });
             let mut stall = runtime::StallScope::new(runtime::StallPolicy::Root);
             for _ in 0..runtime::STALL_REPORT_CALLS {
@@ -11213,7 +11244,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(delivered, 1);
+            assert_eq!(
+                delivered,
+                Delivered {
+                    answers: usize::from(!interim),
+                    reports: usize::from(interim),
+                }
+            );
             // Either way the notice is in context.
             assert_eq!(
                 messages.last().unwrap(),
@@ -11290,6 +11327,133 @@ mod tests {
                 .tools()
                 .iter()
                 .any(|spec| spec.name() == runtime::SEARCH_HISTORY_TOOL)
+        );
+    }
+
+    /// The tool-free wait ends on an answer, never on an interim report
+    /// alone (ADR-0054 § 4): a wake that delivers only a report keeps
+    /// waiting, and the next turn's request carries the report, then the
+    /// answer.
+    #[tokio::test]
+    async fn a_tool_free_wait_ends_on_an_answer_not_on_a_report() {
+        struct AllowAllGate;
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+        /// One detached child: each wake delivers the next scripted batch.
+        struct ScriptedDeliveries {
+            batches: Mutex<std::collections::VecDeque<Vec<runtime::DeliveredChild>>>,
+        }
+        impl SubagentSpawner for ScriptedDeliveries {
+            fn acknowledge(&self, _: ToolCallId) {}
+            fn drain(&self) -> runtime::ChildDrainFuture {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+                Box::pin(std::future::ready(SpawnAgentOutcome {
+                    content: "started".to_owned(),
+                    is_error: false,
+                    spend: SpawnAgentSpend::NONE,
+                    session_id: None,
+                    detached: true,
+                }))
+            }
+            fn outstanding_detached(&self) -> usize {
+                usize::from(!self.batches.lock().unwrap().is_empty())
+            }
+            fn child_settled(&self) -> runtime::ChildWaitFuture {
+                Box::pin(std::future::ready(()))
+            }
+            fn deliver(&self, _: u32) -> runtime::DeliverFuture {
+                let batch = self.batches.lock().unwrap().pop_front().unwrap_or_default();
+                Box::pin(std::future::ready(Ok(batch)))
+            }
+        }
+        let notice = |text: &str, answered: bool, interim: bool| runtime::DeliveredChild {
+            notice: text.to_owned(),
+            answered,
+            interim,
+            spend: SpawnAgentSpend::NONE,
+        };
+        // The boundaries of turns 1 and 2 deliver nothing (the child still
+        // runs); the tool-free reply then waits: the first wake brings a
+        // report alone, the second the answer.
+        let spawner = Arc::new(ScriptedDeliveries {
+            batches: Mutex::new(
+                [
+                    Vec::new(),
+                    Vec::new(),
+                    vec![notice("interim report", false, true)],
+                    vec![notice("the answer", true, false)],
+                ]
+                .into(),
+            ),
+        });
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        struct Recording {
+            inner: SpawnCallProvider,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+        impl Provider for Recording {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                self.inner.stream(request)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            Recording {
+                inner: SpawnCallProvider {
+                    turn: Mutex::new(0),
+                    model: None,
+                },
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("go")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(Some(spawner)),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let requests = requests.lock().unwrap();
+        // spawn turn, the tool-free reply that waits, then one more turn:
+        // a report-only wake did not start a turn of its own.
+        assert_eq!(requests.len(), 3);
+        // After the reply that waited: the report, then the answer.
+        let tail = requests[2]
+            .messages()
+            .iter()
+            .rev()
+            .take(3)
+            .map(|message| (message.role(), message.content().to_vec()))
+            .collect::<Vec<_>>();
+        let text = |text: &str| {
+            vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }]
+        };
+        assert_eq!(
+            tail,
+            [
+                (Role::User, text("the answer")),
+                (Role::User, text("interim report")),
+                (Role::Assistant, text("done")),
+            ]
         );
     }
 
