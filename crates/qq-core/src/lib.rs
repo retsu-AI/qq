@@ -142,6 +142,10 @@ brief from what you have: the answer first, then the evidence as path:line, then
 unknown.";
 const SUBAGENT_FINAL_ANSWER_REJECTION: &str = "not executed: this reply was the sub-agent's \
 final answer, which ends the run without running tools";
+/// A compaction summarizer declares the session's tools only so its request
+/// shares the provider cache; it never runs one (ADR-0056 § 5).
+const SUMMARIZER_TOOL_REJECTION: &str = "not executed: this is a compaction request and tools \
+are unavailable; reply with the summary only";
 pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
 instruction]\nContinue the task from the report above. Tools are available again. Do not stop \
 at a progress summary: complete the user's request unless an explicit overall budget, \
@@ -717,6 +721,11 @@ pub(crate) struct RunCapabilities {
     /// Audit children keep no stall count: they are already bounded at a
     /// few turns (ADR-0054 § 1).
     stall_exempt: bool,
+    /// Set for a compaction summarizer: the prompt prefix of the session's
+    /// prompt runs. The request declares that tool list under that system
+    /// prompt, so it reads the provider cache those runs wrote; every call is
+    /// rejected unexecuted (ADR-0056 § 5).
+    summarizer: Option<plan::PromptPrefixKey>,
 }
 
 impl RunCapabilities {
@@ -741,6 +750,7 @@ impl RunCapabilities {
             output: None,
             subagent: None,
             stall_exempt: false,
+            summarizer: None,
         }
     }
 
@@ -752,6 +762,7 @@ impl RunCapabilities {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn without_tools(mut self) -> Self {
         self.allow_tools = false;
         self
@@ -827,6 +838,17 @@ impl RunCapabilities {
         self
     }
 
+    /// Makes the run a compaction summarizer whose request carries the
+    /// prompt prefix `key`: the same system prompt and tool list as the
+    /// session's prompt runs. Context sources and an output contract are
+    /// never applied to it, it keeps no stall count, and every call it makes
+    /// is rejected unexecuted; a second turn that calls a tool fails the run.
+    pub(crate) fn summarizer(mut self, key: plan::PromptPrefixKey) -> Self {
+        self.summarizer = Some(key);
+        self.output = None;
+        self
+    }
+
     /// Installs a spawner on a restricted run: a model-authored child task at a
     /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
@@ -866,6 +888,7 @@ impl RunCapabilities {
             output: None,
             subagent: None,
             stall_exempt: false,
+            summarizer: None,
         }
     }
 }
@@ -1019,26 +1042,41 @@ impl Runtime {
         self
     }
 
-    /// The summarizer request of an in-run compaction: provider turns with no
-    /// tools, continued up to `MAX_OUTPUT_CONTINUATIONS` times when the reply
-    /// is cut at the output limit, exactly as the run loop and the
-    /// between-run path do. A cut turn resumes mid-token, so its continuation
-    /// is appended verbatim. Returns the joined text and the summed usage. A
-    /// tool call, refusal, protocol violation, or transport failure is an
-    /// error naming it; the caller settles the compaction run failed. The
-    /// provider owns retries exactly as for any other request.
+    /// The summarizer request of an in-run compaction, under the run's own
+    /// system prompt and tools (ADR-0056 § 5). It is continued up to
+    /// `MAX_OUTPUT_CONTINUATIONS` times when the reply is cut at the output
+    /// limit, exactly as the run loop and the between-run path do; a cut turn
+    /// resumes mid-token, so its continuation is appended verbatim. A turn
+    /// that calls tools gets a rejection result for each call and is asked
+    /// again once, dropping what it wrote; a second such turn, a refusal, a
+    /// protocol violation, or a transport failure is an error naming it, and
+    /// the caller settles the compaction run failed. Returns the joined text
+    /// and the summed usage. The provider owns retries as for any request.
     pub(crate) async fn summarize(
         &self,
         messages: Vec<Message>,
+        system: Arc<str>,
+        tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
     ) -> Result<(String, Option<TokenUsage>), String> {
         let mut messages = messages;
         let mut summary = String::new();
         let mut total_usage: Option<TokenUsage> = None;
         let mut continuations: u16 = 0;
+        // One turn of calls is answered with rejections so the model can
+        // still write the summary; a second fails the step.
+        let mut rejected_call_turn = false;
         loop {
+            // The run's own system prompt and tools, so this request shares
+            // the run's provider cache (ADR-0056 § 5). Calls are never run.
             let request =
-                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens);
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
+                    .with_system(Arc::clone(&system));
+            let request = if tools.is_empty() {
+                request
+            } else {
+                request.with_tools(Arc::clone(&tools))
+            };
             let request = match self.reasoning_effort {
                 Some(effort) => request.with_reasoning_effort(effort),
                 None => request,
@@ -1047,12 +1085,21 @@ impl Runtime {
             let mut text = String::new();
             let mut truncated = None;
             let mut usage = None;
+            // Calls in this turn, in order, and the turn's replay data: a
+            // rejected-call turn is sent back exactly as it was produced.
+            struct SummarizerCall {
+                id: String,
+                name: String,
+                arguments: String,
+            }
+            let mut calls: Vec<SummarizerCall> = Vec::new();
+            let mut replay = None;
             loop {
                 let Some(event) = events.next().await else {
                     return Err("summarizer stream ended without completing".to_owned());
                 };
                 match event {
-                    Ok(ProviderEvent::Replay { .. }) => {} // Summaries have no provider continuation.
+                    Ok(ProviderEvent::Replay { data }) => replay = Some(data),
                     Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
                         if summary
                             .len()
@@ -1072,13 +1119,38 @@ impl Runtime {
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
                         return Err("summarizer refused".to_owned());
                     }
-                    Ok(
-                        ProviderEvent::ToolCallStarted { .. }
-                        | ProviderEvent::ToolCallArgumentsDelta { .. }
-                        | ProviderEvent::ToolCallCompleted { .. },
-                    ) => {
-                        return Err("summarizer attempted a tool call".to_owned());
+                    Ok(ProviderEvent::ToolCallStarted { id, name }) => {
+                        if rejected_call_turn {
+                            return Err("summarizer called a tool on two turns".to_owned());
+                        }
+                        if calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN
+                            || id.is_empty()
+                            || id.len() > MAX_TOOL_CALL_ID_BYTES
+                            || name.is_empty()
+                            || name.len() > MAX_TOOL_NAME_BYTES
+                            || calls.iter().any(|call| call.id == id)
+                        {
+                            return Err("summarizer streamed a malformed tool call".to_owned());
+                        }
+                        calls.push(SummarizerCall {
+                            id,
+                            name,
+                            arguments: String::new(),
+                        });
                     }
+                    Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
+                        let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
+                            return Err(
+                                "summarizer streamed arguments for an unknown call".to_owned()
+                            );
+                        };
+                        if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES
+                        {
+                            return Err("summarizer tool arguments exceeded their bound".to_owned());
+                        }
+                        call.arguments.push_str(&json);
+                    }
+                    Ok(ProviderEvent::ToolCallCompleted { .. }) => {}
                     Ok(ProviderEvent::Completed { usage: reported }) => {
                         usage = reported.map(provider_usage);
                         break;
@@ -1090,7 +1162,6 @@ impl Runtime {
                     Err(error) => return Err(error.to_string()),
                 }
             }
-            summary.push_str(&text);
             // Overflowing the sum is a provider protocol fault; fail the
             // compaction rather than persist an understated total.
             total_usage = match (total_usage, usage) {
@@ -1101,6 +1172,59 @@ impl Runtime {
                 (Some(total), None) | (None, Some(total)) => Some(total),
                 (None, None) => None,
             };
+            if !calls.is_empty() {
+                // Answer each call with a rejection and ask again. The model
+                // abandoned its reply, so nothing written so far is kept. A
+                // cut turn's calls are incomplete and cannot be answered.
+                if truncated.is_some() {
+                    return Err("summarizer called a tool and was cut off".to_owned());
+                }
+                rejected_call_turn = true;
+                summary.clear();
+                continuations = 0;
+                let mut blocks = Vec::with_capacity(calls.len() + 1);
+                if !text.is_empty() {
+                    blocks.push(ContentBlock::Text { text });
+                }
+                let mut results = Vec::with_capacity(calls.len());
+                for SummarizerCall {
+                    id,
+                    name,
+                    arguments,
+                } in calls
+                {
+                    let arguments = if arguments.trim().is_empty() {
+                        "{}".to_owned()
+                    } else {
+                        arguments
+                    };
+                    let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
+                        return Err(
+                            "summarizer streamed tool arguments that are not JSON".to_owned()
+                        );
+                    };
+                    blocks.push(ContentBlock::ToolCall {
+                        id: id.clone(),
+                        name,
+                        arguments,
+                    });
+                    results.push(ContentBlock::ToolResult {
+                        call_id: id,
+                        content: SUMMARIZER_TOOL_REJECTION.to_owned(),
+                        is_error: true,
+                    });
+                }
+                // Reasoning providers (Anthropic thinking) require the turn's
+                // replay data alongside its tool calls.
+                let assistant = Message::new(Role::Assistant, blocks);
+                messages.push(match replay {
+                    Some(data) => assistant.with_replay(data),
+                    None => assistant,
+                });
+                messages.push(Message::tool_results(results));
+                continue;
+            }
+            summary.push_str(&text);
             let Some(reason) = truncated else {
                 return Ok((summary, total_usage));
             };
@@ -1561,6 +1685,7 @@ impl plan::CompiledAgentPlan {
                 output,
                 subagent,
                 stall_exempt,
+                summarizer,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1655,7 +1780,10 @@ impl plan::CompiledAgentPlan {
             // changes. A fail-closed failure settles the run here.
             let mut context_blocks = String::new();
             let mut context_records = Vec::new();
-            if !context_sources.is_empty() {
+            // A summarizer reads no context sources: its system prompt is the
+            // session's plan-constant prefix, which is what the provider
+            // cached (ADR-0056 § 5).
+            if !context_sources.is_empty() && summarizer.is_none() {
                 let latest_user_text = messages
                     .last()
                     .filter(|message| message.role() == Role::User)
@@ -1706,13 +1834,22 @@ impl plan::CompiledAgentPlan {
             // for durable session runs) plus every external tool under full
             // exposure. Under progressive exposure the model pins external
             // tools with `select_tools`; pins extend this base list.
-            let static_filter = allow_tools.then_some(catalog::StaticFilter {
-                spawn_agent: spawner.is_some(),
-                search_history: history.is_some(),
-                read_tool_result: spills.is_some(),
-                load_skill: allow_guidance,
-                read_only,
-            });
+            let prefix_key = match summarizer {
+                Some(key) => key,
+                None => plan::PromptPrefixKey {
+                    tools: allow_tools.then_some(catalog::StaticFilter {
+                        spawn_agent: spawner.is_some(),
+                        search_history: history.is_some(),
+                        read_tool_result: spills.is_some(),
+                        load_skill: allow_guidance,
+                        read_only,
+                    }),
+                    guidance: allow_guidance,
+                    subagent,
+                },
+            };
+            let static_filter = prefix_key.tools;
+            let allow_tools = static_filter.is_some();
             let base_specs: Arc<[ToolSpec]> = match &static_filter {
                 Some(filter) => catalog.base_specs(filter),
                 None => Arc::from([]),
@@ -1731,14 +1868,7 @@ impl plan::CompiledAgentPlan {
             // The plan-constant prefix is built once per capability set and
             // its SHA-256 state continued over this run's suffix, so neither
             // the prompt body nor its hash is recomputed per run.
-            let prompt_prefix = plan.prompt_prefix(
-                plan::PromptPrefixKey {
-                    tools: static_filter,
-                    guidance: allow_guidance,
-                    subagent,
-                },
-                &base_specs,
-            );
+            let prompt_prefix = plan.prompt_prefix(prefix_key, &base_specs);
             let (system, system_prompt_hash) = {
                 let mut suffix = String::new();
                 if let Some(guidance) = &selected_guidance {
@@ -1793,7 +1923,7 @@ impl plan::CompiledAgentPlan {
             let mut slice_tool_calls = 0_usize;
             // Calls since the run last produced output (ADR-0054 § 1). Only
             // a run that can call tools has anything to report.
-            let mut stall = runtime::StallScope::new(if stall_exempt || !allow_tools {
+            let mut stall = runtime::StallScope::new(if stall_exempt || !allow_tools || summarizer.is_some() {
                 runtime::StallPolicy::Exempt
             } else if subagent.is_some() {
                 runtime::StallPolicy::Subagent
@@ -1846,6 +1976,9 @@ impl plan::CompiledAgentPlan {
             // second rejection of the same turn fails the run as before.
             let mut provider_overflowed = false;
             let mut reactive_compaction_turn: Option<u32> = None;
+            // A summarizer gets one turn of rejected calls to recover with a
+            // summary; a second fails closed.
+            let mut summarizer_rejected_turns = 0_u8;
             // The turn a wait for sub-agent answers already delivered for.
             let mut wait_delivered_for: Option<u32> = None;
             'turns: for turn_ordinal in 1..=u32::MAX {
@@ -2085,6 +2218,7 @@ impl plan::CompiledAgentPlan {
                 // the prompt and the session context before it stay. A
                 // failure here is the same context failure the session layer
                 // would have raised, with the compactor's reason attached.
+                let provider_rejected_window = provider_overflowed;
                 let still_overflows = std::mem::take(&mut provider_overflowed)
                     || over_window(estimate_input_tokens(
                         compatible_request,
@@ -2099,9 +2233,44 @@ impl plan::CompiledAgentPlan {
                     );
                     if let Some((replace_through, replaced_turns)) = boundary {
                         let turn_cutoff = compacted_turns.saturating_add(replaced_turns);
-                        let transcript = messages[reducible_messages..run_start + replace_through].to_vec();
+                        // The summarizer sends the request this turn would
+                        // have sent, cut at the boundary: the same system
+                        // prompt, tools, and message prefix, so it reads the
+                        // provider cache the run's own turns wrote. It is
+                        // judged on the same estimate as every decision in
+                        // this loop. When that says it would not fit with the
+                        // summarizer's reserve, or the provider has just
+                        // rejected the estimate, the session context before
+                        // the prompt is dropped: a cache miss, not a request
+                        // over the window.
+                        let cut = run_start + replace_through;
+                        let summarizer_fits = !provider_rejected_window
+                            && plan.runtime.context_window.is_none_or(|window| {
+                                estimate_input_tokens(
+                                    compatible_request,
+                                    reducible_message_bytes,
+                                    measure_messages(&messages[reducible_messages..cut]),
+                                )
+                                .saturating_add(u64::from(
+                                    sessions::context::summarizer_output_tokens(
+                                        model_max_output_tokens,
+                                        Some(window),
+                                    ),
+                                ))
+                                    <= u64::from(window)
+                            });
+                        let transcript = if summarizer_fits {
+                            messages[..cut].to_vec()
+                        } else {
+                            messages[reducible_messages..cut].to_vec()
+                        };
                         match compactor
-                            .compact(runtime::InRunCompactionRequest { transcript, turn_cutoff })
+                            .compact(runtime::InRunCompactionRequest {
+                                transcript,
+                                turn_cutoff,
+                                system: Arc::clone(&system),
+                                tools: Arc::clone(&tool_specs),
+                            })
                             .await
                         {
                             Ok(summary) => {
@@ -2377,7 +2546,9 @@ impl plan::CompiledAgentPlan {
                             // so they do not count against the slice or the
                             // run's tool-call budget.
                             let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
-                            let rejection = if final_answer_turn {
+                            let rejection = if summarizer.is_some() {
+                                Some(SUMMARIZER_TOOL_REJECTION.to_owned())
+                            } else if final_answer_turn {
                                 Some(SUBAGENT_FINAL_ANSWER_REJECTION.to_owned())
                             } else if checkpoint_turn && slice_report {
                                 Some(SLICE_CHECKPOINT_REJECTION.to_owned())
@@ -2737,6 +2908,16 @@ impl plan::CompiledAgentPlan {
                 };
                 budget.charge_turn(terminal_usage);
                 budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
+                if summarizer.is_some() && !calls.is_empty() {
+                    summarizer_rejected_turns += 1;
+                    if summarizer_rejected_turns > 1 {
+                        yield RuntimeEvent::Failed {
+                            kind: RunFailureKind::ProviderProtocol,
+                            message: "the compaction summarizer called a tool on two turns; tools are unavailable during compaction".to_owned(),
+                        };
+                        return;
+                    }
+                }
 
                 if let Some((kind, message)) = turn_fault {
                     // The partial turn is durable. Re-issue the turn after a
@@ -4912,6 +5093,279 @@ mod tests {
         // default-set runs shared one.
         assert_ne!(systems[1], systems[2]);
         assert_ne!(systems[1], systems[3]);
+    }
+
+    /// Scripted turns for `Runtime::summarize`: each request pops the next
+    /// event list and is recorded.
+    struct SummarizeScript {
+        turns: Mutex<std::collections::VecDeque<Vec<Result<ProviderEvent, ProviderError>>>>,
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for SummarizeScript {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            let turn = self
+                .turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a scripted turn");
+            Box::pin(stream::iter(turn))
+        }
+    }
+
+    fn summarize_call(id: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
+        vec![
+            Ok(ProviderEvent::ToolCallStarted {
+                id: id.to_owned(),
+                name: "read_file".to_owned(),
+            }),
+            Ok(ProviderEvent::ToolCallArgumentsDelta {
+                id: id.to_owned(),
+                json: r#"{"path":"x"}"#.to_owned(),
+            }),
+            Ok(ProviderEvent::ToolCallCompleted { id: id.to_owned() }),
+        ]
+    }
+
+    async fn run_summarize(
+        turns: Vec<Vec<Result<ProviderEvent, ProviderError>>>,
+    ) -> (Result<String, String>, Vec<ModelRequest>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(turns.into()),
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let tools: Arc<[ToolSpec]> = Arc::from([ToolSpec::new(
+            "read_file",
+            "read",
+            serde_json::json!({"type": "object"}),
+        )]);
+        let result = runtime
+            .summarize(
+                vec![Message::user("summarize")],
+                Arc::from("system"),
+                tools,
+                256,
+            )
+            .await
+            .map(|(summary, _)| summary);
+        let requests = requests.lock().unwrap().clone();
+        (result, requests)
+    }
+
+    #[tokio::test]
+    async fn in_run_summarize_answers_one_call_turn_with_rejections_and_keeps_only_the_new_reply() {
+        // Turn one is cut mid-reply; turn two continues it but calls a tool,
+        // abandoning the reply; turn three writes the summary. Only turn
+        // three is the summary: no fragment of the abandoned reply survives.
+        let mut call_turn = vec![
+            Ok(ProviderEvent::Replay {
+                data: Arc::from("thinking-signature"),
+            }),
+            Ok(ProviderEvent::OutputTextDelta {
+                text: "let me check".to_owned(),
+            }),
+        ];
+        call_turn.extend(summarize_call("call_1"));
+        call_turn.push(Ok(ProviderEvent::Completed { usage: None }));
+        let (result, requests) = run_summarize(vec![
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "1. Intent: half".to_owned(),
+                }),
+                Ok(ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ],
+            call_turn,
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "the summary".to_owned(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ],
+        ])
+        .await;
+        assert_eq!(result.as_deref(), Ok("the summary"));
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert_eq!(request.system(), Some("system"));
+            assert_eq!(request.tools().len(), 1);
+        }
+        // The retry carries the call with its replay data, then a rejection.
+        let messages = requests[2].messages();
+        let (call, result) = (&messages[messages.len() - 2], &messages[messages.len() - 1]);
+        assert_eq!(call.replay(), Some("thinking-signature"));
+        assert!(call.content().iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolCall { id, name, .. } if id == "call_1" && name == "read_file"
+        )));
+        assert!(matches!(
+            result.content(),
+            [ContentBlock::ToolResult { call_id, is_error: true, content }]
+                if call_id == "call_1" && content == SUMMARIZER_TOOL_REJECTION
+        ));
+    }
+
+    #[tokio::test]
+    async fn in_run_summarize_fails_on_a_second_call_turn_and_on_a_cut_call_turn() {
+        let mut first = summarize_call("call_1");
+        first.push(Ok(ProviderEvent::Completed { usage: None }));
+        let mut second = summarize_call("call_2");
+        second.push(Ok(ProviderEvent::Completed { usage: None }));
+        let (result, requests) = run_summarize(vec![first, second]).await;
+        assert_eq!(
+            result,
+            Err("summarizer called a tool on two turns".to_owned())
+        );
+        assert_eq!(requests.len(), 2);
+
+        let mut cut = summarize_call("call_1");
+        cut.push(Ok(ProviderEvent::Incomplete {
+            usage: None,
+            reason: qq_provider::IncompleteReason::OutputTokens,
+        }));
+        let (result, _) = run_summarize(vec![cut]).await;
+        assert_eq!(
+            result,
+            Err("summarizer called a tool and was cut off".to_owned())
+        );
+    }
+
+    /// ADR-0056 § 5: a summarizer run carries the system prompt and tools
+    /// of the prompt runs whose prefix key it is given, fetches no context
+    /// sources, and sends no output-contract notice, so its request shares
+    /// the cached prefix of those runs.
+    #[tokio::test]
+    async fn a_summarizer_run_sends_the_prompt_runs_system_prompt_and_tools_without_context_sources()
+     {
+        struct Capture(Arc<Mutex<Vec<ModelRequest>>>);
+
+        impl Provider for Capture {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.lock().unwrap().push(request);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "{\"ok\":true}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        struct CountingSource(Arc<AtomicUsize>);
+
+        impl ContextSource for CountingSource {
+            fn name(&self) -> &str {
+                "memory"
+            }
+            fn version(&self) -> &str {
+                "1"
+            }
+            fn cache_key(&self, _request: &context_source::ContextRequest) -> Option<[u8; 32]> {
+                None
+            }
+            fn fetch(
+                &self,
+                _request: context_source::ContextRequest,
+                _cancelled: RunCancellation,
+            ) -> context_source::ContextFetchFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(context_source::ContextBundle {
+                        items: vec![context_source::ContextItem {
+                            provenance: "memory:0".to_owned(),
+                            content: "remembered".to_owned(),
+                        }],
+                    })
+                })
+            }
+            fn fail_policy(&self) -> context_source::FailPolicy {
+                context_source::FailPolicy::Open
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(Capture(Arc::clone(&requests)), "test-model", 256)
+            .unwrap()
+            .with_context_source(Arc::new(CountingSource(Arc::clone(&fetches))));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let contract = output::CompiledOutputSchema::compile(&qq_protocol::OutputContract {
+            schema: serde_json::json!({"type": "object"}),
+            repair_turns: 0,
+        })
+        .unwrap();
+        let user_key = plan::PromptPrefixKey {
+            tools: Some(catalog::StaticFilter {
+                spawn_agent: false,
+                search_history: false,
+                read_tool_result: false,
+                load_skill: true,
+                read_only: false,
+            }),
+            guidance: true,
+            subagent: None,
+        };
+        for capabilities in [
+            RunCapabilities::user(None),
+            RunCapabilities::restricted()
+                .with_output(Some(contract))
+                .summarizer(user_key),
+        ] {
+            let events = plan
+                .execute(
+                    vec![Message::user("hello")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::ReadOnly,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    capabilities,
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+        }
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            1,
+            "only the prompt run fetches context"
+        );
+        let requests = requests.lock().unwrap();
+        let (prompt, summarizer) = (&requests[0], &requests[1]);
+        let prompt_system = prompt.system().unwrap();
+        let summarizer_system = summarizer.system().unwrap();
+        assert!(prompt_system.contains("[memory:0]"));
+        assert!(!summarizer_system.contains("[memory:0]"));
+        assert!(!summarizer_system.contains("## Output contract"));
+        // The plan-constant prefix is shared byte for byte; only the prompt
+        // run's per-run suffix (here, the context block) follows it.
+        assert!(prompt_system.starts_with(summarizer_system));
+        assert_eq!(summarizer.tools(), prompt.tools());
+        assert!(!summarizer.tools().is_empty());
     }
 
     #[tokio::test]

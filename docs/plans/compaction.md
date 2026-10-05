@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | CX0 and CX1 in review as one PR; CX2 next. ADR-0056 Proposed |
+| Now | CX0+CX1 in review (#239); CX2 in review, stacked on it. ADR-0056 Proposed |
 | Decision | [ADR-0056](../adr/0056-compaction-narrative-and-record.md) (amends how ADR-0039 § 3's summarizer request is built) |
 | Ledger | [`progress/compaction.md`](./progress/compaction.md) |
 | Linear | [ENG-992](https://linear.app/retsu-ai/issue/ENG-992) (plan); CX0 [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) … CX5 [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) |
@@ -86,7 +86,7 @@ to move in the same PR.
 
 ### CX2 — Cache-aligned summarizer requests
 **Inputs:** CX1
-**Owned paths:** `crates/qq-core/src/lib.rs` (`Runtime::summarize`), `crates/qq-core/src/sessions/{execution,in_run_compaction,claim}.rs`, `crates/qq-core/src/runtime/compaction.rs`
+**Owned paths:** `crates/qq-core/src/lib.rs` (`RunCapabilities`, `Runtime::summarize`, the in-run call site), `crates/qq-core/src/sessions/{execution,in_run_compaction}.rs`, `crates/qq-core/src/runtime/compaction.rs`, the soak fixture's summarizer detection
 **Gates:** `context_assembly`, `turn_overhead` within noise
 **Acceptance:**
 - Between-run and in-run summarizer requests carry the prompt run's

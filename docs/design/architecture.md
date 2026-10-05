@@ -833,8 +833,9 @@ One durable run follows a guarded loop:
    ratio otherwise — so the loop cannot judge a request as fitting that the
    guard then refuses. If that still does not fit, the run compacts
    *itself* at the boundary — every tool result durable, nothing in flight,
-   steering applied: it hands its prompt and every turn but the last
-   `CONTEXT_PRUNE_KEEP_TURNS` to an in-run compactor
+   steering applied: it hands its live request cut before the last
+   `CONTEXT_PRUNE_KEEP_TURNS` turns (session context, prompt, replaced turns,
+   with the run's system prompt and tools) to an in-run compactor
    (`runtime::InRunCompactor`, installed only on session prompt runs), which
    runs the summarizer as an internal `compaction` run owned by the prompt
    run (no session slot taken, own usage/cost/events) and commits a marker
@@ -969,8 +970,17 @@ remaining cost and token bounds after charging earlier children. A turn containi
 children executes sequentially when the parent has any finite cost or token
 bound; unbounded and duration-only read fanout keep their existing concurrency.
 
-A request that genuinely declares no tools, such as a compaction summary of a
-session that used tools, still carries tool history. Bedrock Converse rejects
+A compaction summarizer request is cache-aligned (ADR-0056 § 5): it carries
+the system prompt and tool list of the session's prompt runs, built from the
+same `PromptPrefixKey` (`execution::session_prompt_prefix_key`), with no
+context sources or output contract, and the session's reasoning effort, so
+it shares the tool block those runs cached, and the system prompt and
+message prefix when no per-run suffix or assembly pruning separates them.
+Its tools are declared, never run: every call is answered with a rejection
+result, everything the summarizer wrote up to that turn is discarded, and a
+summarizer that calls a tool on a second turn fails the step.
+
+A request that genuinely declares no tools still carries tool history. Bedrock Converse rejects
 tool-use and tool-result blocks without a tool configuration, so the Bedrock
 codec renders them as text (`[tool call: name {args}]`, `[tool result from
 name]`); every other codec sends them as tool blocks, which those APIs accept
