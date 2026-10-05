@@ -2515,6 +2515,27 @@ mod reference_assembly {
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
 
+        let watermark: Option<(String, u32)> = transaction.query_row(
+            "SELECT (SELECT r.id FROM messages m JOIN runs r ON r.id = m.run_id
+                     WHERE m.session_id = s.id AND m.ordinal = s.prune_through_ordinal
+                       AND m.role = 'user' AND m.steering = 0),
+                    s.prune_through_turn
+                 FROM sessions s WHERE s.id = ?1",
+            [session_id.to_string()],
+            |row| {
+                Ok(row
+                    .get::<_, Option<String>>(0)?
+                    .zip(row.get::<_, Option<u32>>(1)?))
+            },
+        )?;
+        let watermark_ordinal: Option<u64> = transaction.query_row(
+            "SELECT prune_through_ordinal FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let watermark = watermark.filter(|_| watermark_ordinal.is_some());
+        // Pruning reads only the context through the watermark turn.
+        let mut prune_limit = 0_usize;
         let mut context = Vec::new();
         if let Some(compaction) = compaction {
             context.push(Message::user(format!(
@@ -2524,6 +2545,11 @@ mod reference_assembly {
         }
         for id in message_ids {
             let snapshot = load_message(transaction, parse_id(&id)?)?;
+            let snapshot_ordinal: u64 = transaction.query_row(
+                "SELECT ordinal FROM messages WHERE id = ?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )?;
             if snapshot.role != MessageRole::User {
                 return Err(SessionRuntimeError::CODEC);
             }
@@ -2551,7 +2577,16 @@ mod reference_assembly {
                     |row| row.get(0),
                 )?;
                 if has_turns {
-                    reference_append_run_turns(transaction, snapshot.run_id, &mut context)?;
+                    let through = watermark
+                        .as_ref()
+                        .filter(|(run, _)| *run == snapshot.run_id.to_string())
+                        .map(|(_, turn)| *turn);
+                    reference_append_run_turns(
+                        transaction,
+                        snapshot.run_id,
+                        &mut context,
+                        through.map(|turn| (turn, &mut prune_limit)),
+                    )?;
                 } else {
                     reference_append_legacy_run_messages(
                         transaction,
@@ -2584,10 +2619,14 @@ mod reference_assembly {
                     context.push(Message::user(notice));
                 }
             }
+            if watermark_ordinal.is_some_and(|watermark| snapshot_ordinal < watermark) {
+                prune_limit = context.len();
+            }
         }
         // The reference predates the stored effect column and prunes by
         // name alone; the differential fixtures use built-in tools only.
-        let context_rewritten = prune_stale_tool_results(&mut context, &HashMap::new());
+        let context_rewritten =
+            prune_stale_tool_results(&mut context[..prune_limit], &HashMap::new());
         Ok((context, context_rewritten))
     }
     fn reference_append_legacy_run_messages(
@@ -2682,6 +2721,7 @@ mod reference_assembly {
         transaction: &Connection,
         run_id: RunId,
         context: &mut Vec<Message>,
+        mut watermark: Option<(u32, &mut usize)>,
     ) -> Result<(), SessionRuntimeError> {
         let mut statement = transaction.prepare(
             "SELECT turn_ordinal, assistant_content_json, truncated, notice FROM model_turns
@@ -2778,6 +2818,9 @@ mod reference_assembly {
                 context.push(Message::user(format!(
                     "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
                 )));
+                if let Some((_, limit)) = watermark.as_mut() {
+                    **limit = context.len();
+                }
             }
         }
         for (turn_ordinal, content_json, truncated, notice) in turns {
@@ -2892,6 +2935,11 @@ mod reference_assembly {
             if truncated {
                 context.push(Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
             }
+            if let Some((through, limit)) = watermark.as_mut()
+                && turn_ordinal <= *through
+            {
+                **limit = context.len();
+            }
         }
         // Steering applied for a turn that never committed (the run settled
         // first) still reached the model's request; keep it so the transcript
@@ -2904,6 +2952,24 @@ mod reference_assembly {
         }
         Ok(())
     }
+}
+
+/// Moves the session's prune watermark to its newest committed turn, as a
+/// seam would: assembly then stubs every stale read-only result, which is
+/// what tests of the stubbing itself need.
+fn mark_prune_seam(database: &std::path::Path, session_id: SessionId) {
+    let connection = Connection::open(database).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET (prune_through_ordinal, prune_through_turn) = (
+                 SELECT m.ordinal, t.turn_ordinal
+                 FROM messages m JOIN model_turns t ON t.run_id = m.run_id
+                 WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0
+                 ORDER BY m.ordinal DESC, t.turn_ordinal DESC LIMIT 1)
+             WHERE id = ?1",
+            [session_id.to_string()],
+        )
+        .unwrap();
 }
 
 /// Asserts the joined context loader assembles exactly what the reference

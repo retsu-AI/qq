@@ -9,7 +9,7 @@ newest last.
 | CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
-| CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
+| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | `perf/eng-996-cx3-prune-watermark` | Schema 41 → 42; stacked on #252 |
 | CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
@@ -324,3 +324,61 @@ failure.
   - the rail precedence, with `compacting context` over a stale tail;
   - that compaction draws no transcript row.
   `layout.md`'s rail table points to it.
+
+### 2026-10-05 — CX3 implementation (ENG-996)
+
+CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
+`sessions.prune_through_ordinal` and `prune_through_turn`.
+- **Assembly.** `prune_stale_tool_results` now runs on
+  `context[..prune_limit]`, the assembled length through the watermark
+  turn, so its four-turn window ends at that turn. The work is one row read
+  per assembly. `append_run_turns` returns each turn's end index instead of
+  taking an eighth argument.
+- **Live overflow-prune seam.** The run loop yields
+  `RuntimeEvent::ContextPruned { turn_ordinal }` after it stubs its live
+  messages. The session layer commits the watermark at `turn_ordinal - 1`
+  before the loop is polled again, so the stubbed request is never sent
+  before its replay is durable. The watermark is monotonic.
+- **Proactive-threshold seam.** On `ContextPlan::Compact`, a prompt run
+  first moves the watermark to the newest turn before its prompt and
+  reassembles, at most once per run. If that fits, it sends with no
+  summarizer; if not, it compacts as before. This is new behaviour: a
+  near-full window with re-derivable reads now costs no summarizer call.
+- **Bug found and fixed.** A live run re-stubbed its own stubs on every
+  later overflowing turn, so a stub named the earlier stub's size
+  (178 bytes) instead of the real result's, while replay named the real
+  size. `prunable_stub` now refuses content that is already a stub.
+  `a_live_prune_moves_the_watermark_and_the_next_run_extends_it` caught it.
+- **Upgrade.** A session upgraded to 42 starts with its watermark at its
+  newest committed turn, so it assembles exactly as at 41. Sessions with no
+  turns stay unset.
+- **Tests.** The three new runtime tests fail when their seam is disabled.
+  - `each_run_extends_the_previous_runs_last_request_until_a_seam`: seven
+    runs, each first request extends the previous run's last one, and
+    nothing is stubbed.
+  - `a_live_prune_moves_the_watermark_and_the_next_run_extends_it`.
+  - `the_proactive_threshold_stubs_stale_reads_before_it_compacts`.
+  - `version_forty_one_gains_the_prune_watermark_at_the_newest_turn`:
+    backfill, unset for empty sessions, and a bad shape refused.
+  - The reference assembly oracle applies the same watermark
+    independently.
+- **Adjusted tests.** Tests of stubbing itself now set a seam with
+  `mark_prune_seam`: `assembly_prunes_stale…`, `pruned_history_still…`,
+  `measured_occupancy_survives…`, `repeated_call_ids_keep_pruning…` and
+  `permanent_reserved_reload_failure…` (where the threshold seam would
+  otherwise take the injected reload failure). The `context_assembly`
+  bench seed sets the watermark at its newest turn, so it still measures
+  full stubbing.
+- **Gates.**
+  - `cargo test --workspace`: 2 105 passed, 13 ignored.
+  - Soak: 7 passed.
+  - `fmt` and `clippy -D warnings` are clean.
+  - `context_assembly`, paired against the CX4 tip on the same host:
+
+| archived runs | base assemble | CX3 assemble |
+| ---: | --- | --- |
+| 10 | 60.5 / 52.4 µs | 55.4 / 56.2 µs |
+| 1 000 | 56.8 / 60.8 µs | 57.3 / 92.4 µs (one outlier) |
+| 10 000 | 67.7 / 60.3 µs | 66.0 / 62.2 µs |
+
+  Within noise.

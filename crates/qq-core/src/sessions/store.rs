@@ -1152,6 +1152,34 @@ impl Store {
         .await
     }
 
+    /// Moves the session's prune watermark to `through_turn` of the claimed
+    /// prompt run, the live overflow-prune seam. Never moves it backwards.
+    pub(super) async fn advance_prune_watermark(
+        &self,
+        claimed: &ClaimedRun,
+        through_turn: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            transcript::advance_prune_watermark(connection, identity, through_turn)
+        })
+        .await
+    }
+
+    /// Moves the session's prune watermark to the newest committed turn
+    /// before the reserved prompt, the proactive-threshold seam. Returns
+    /// whether it moved; when it did, the prompt must be reassembled.
+    pub(super) async fn advance_prune_watermark_before_prompt(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<bool, SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::AwaitControl, move |connection| {
+            transcript::advance_prune_watermark_before_prompt(connection, identity)
+        })
+        .await
+    }
+
     pub(super) async fn append_run_activity(
         &self,
         claimed: &ClaimedRun,

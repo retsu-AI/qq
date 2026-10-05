@@ -922,6 +922,9 @@ pub(super) async fn execute_run(
     // prompt because earlier runs overflowed. After the fold is exhausted the
     // run starts from the latest summary alone (RR6).
     let mut summary_only_admission = false;
+    // The proactive-threshold seam runs at most once per run: it moves the
+    // prune watermark to the session's newest turn and reassembles.
+    let mut watermark_advanced = false;
     loop {
         let mut prepared = match prepare_execution(
             &inner,
@@ -1199,6 +1202,58 @@ pub(super) async fn execute_run(
             context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
                 let audit = prepared.audit.clone();
                 drop(prepared);
+                // Stubbing stale reads is cheaper than a summarizer and is
+                // the seam where the watermark may move (ADR-0056 § 6). If
+                // the stubbed context fits, it is sent; otherwise the
+                // reassembled request compacts as before.
+                if !watermark_advanced {
+                    watermark_advanced = true;
+                    match inner
+                        .store
+                        .advance_prune_watermark_before_prompt(&claimed)
+                        .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => match inner.store.reload_reserved_messages(&claimed).await {
+                            Ok(Some((messages, _))) => {
+                                // Occupancy reuse credits the stubbed
+                                // bytes at its ratio, as for any rewrite.
+                                claimed.messages = messages;
+                                continue;
+                            }
+                            Ok(None) => {
+                                clear_run_registration(&inner, claimed.identity.run_id);
+                                return;
+                            }
+                            Err(error) => {
+                                finish_prepared_run(
+                                    &inner,
+                                    &claimed,
+                                    &audit,
+                                    persistence_failure(
+                                        "failed to reload the reserved prompt after pruning",
+                                        &error,
+                                    ),
+                                )
+                                .await;
+                                return;
+                            }
+                        },
+                        Err(error) => {
+                            finish_prepared_run(
+                                &inner,
+                                &claimed,
+                                &audit,
+                                persistence_failure(
+                                    "failed to persist the prune watermark",
+                                    &error,
+                                ),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
                 if !run_auto_compaction(
                     &inner,
                     &mut claimed,
@@ -2977,6 +3032,28 @@ async fn execute_started_run(
                         return;
                     }
                     flush_at = None;
+                }
+            }
+            RunInput::Event(Some(RuntimeEvent::ContextPruned { turn_ordinal })) => {
+                // Durable before the pruned request is sent: the loop is not
+                // polled again until this commits.
+                if let Err(error) = inner
+                    .store
+                    .advance_prune_watermark(&claimed, turn_ordinal.saturating_sub(1))
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the prune watermark", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
                 }
             }
             RunInput::Event(Some(RuntimeEvent::InRunCompacted { .. })) => {

@@ -230,6 +230,8 @@ model turn's runtime notice (`report`, `stall_report`, `continuation`, or
 answers of non-blocking sub-agents, and schema 42 `child_reports`, their
 delivered interim reports (ADR-0054 § 4). No wire shape changed: a delivered
 answer or report reaches clients through the child session's own events.
+Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
+`prune_through_turn`; ADR-0056 § 6); no wire shape changed.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

@@ -297,6 +297,22 @@ pub(super) fn load_model_context_with_units(
     let cutoff_ordinal = compaction
         .as_ref()
         .map_or(0, |compaction| compaction.cutoff_ordinal);
+    // The prune watermark (schema 42, ADR-0056 § 6): stale read-only results
+    // are stubbed as if the context ended at this turn, so a run's first
+    // request extends the previous run's last one until the next seam moves
+    // it. `None` until the session's first seam: nothing is stubbed.
+    let watermark: Option<(u64, u32)> = transaction
+        .query_row(
+            "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| {
+                Ok(row
+                    .get::<_, Option<u64>>(0)?
+                    .zip(row.get::<_, Option<u32>>(1)?))
+            },
+        )
+        .optional()?
+        .flatten();
     // SQLite integers are i64; `u64::MAX` means "everything".
     let through_ordinal = through_ordinal.min(u64::try_from(i64::MAX).unwrap_or(u64::MAX));
     let session = session_id.to_string();
@@ -504,6 +520,9 @@ pub(super) fn load_model_context_with_units(
     let mut context = Vec::new();
     let mut effects = HashMap::new();
     let mut units = Vec::with_capacity(prompts.len());
+    // The assembled length through the watermark turn: pruning reads only
+    // `context[..prune_limit]`.
+    let mut prune_limit = 0_usize;
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
             "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
@@ -547,15 +566,26 @@ pub(super) fn load_model_context_with_units(
                 | "running"
         ) {
             match turns.remove(&prompt.run_id) {
-                Some(run_turns) => append_run_turns(
-                    run_turns,
-                    results.remove(&prompt.run_id).unwrap_or_default(),
-                    steering.remove(&prompt.run_id).unwrap_or_default(),
-                    delivered.remove(&prompt.run_id).unwrap_or_default(),
-                    in_run.remove(&prompt.run_id),
-                    &mut context,
-                    &mut effects,
-                )?,
+                Some(run_turns) => {
+                    let ends = append_run_turns(
+                        run_turns,
+                        results.remove(&prompt.run_id).unwrap_or_default(),
+                        steering.remove(&prompt.run_id).unwrap_or_default(),
+                        delivered.remove(&prompt.run_id).unwrap_or_default(),
+                        in_run.remove(&prompt.run_id),
+                        &mut context,
+                        &mut effects,
+                    )?;
+                    if let Some((_, through)) =
+                        watermark.filter(|(ordinal, _)| *ordinal == prompt_ordinal)
+                    {
+                        prune_limit = ends
+                            .iter()
+                            .rev()
+                            .find(|(turn, _)| *turn <= through)
+                            .map_or(prune_limit, |(_, end)| *end);
+                    }
+                }
                 None => {
                     append_legacy_run_messages(
                         transaction,
@@ -580,6 +610,9 @@ pub(super) fn load_model_context_with_units(
                 context.push(Message::user(notice));
             }
         }
+        if watermark.is_some_and(|(ordinal, _)| prompt_ordinal < ordinal) {
+            prune_limit = context.len();
+        }
         units.push(ContextUnit {
             prompt_ordinal,
             end: context.len(),
@@ -587,11 +620,68 @@ pub(super) fn load_model_context_with_units(
     }
     // Pruning rewrites results in place and never adds or removes messages,
     // so the unit ends computed above still index this context.
-    let context_rewritten = prune_stale_tool_results(&mut context, &effects);
+    let context_rewritten = prune_stale_tool_results(&mut context[..prune_limit], &effects);
     Ok((context, context_rewritten, units))
 }
 
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;
+
+/// The live overflow-prune seam: the run's prompt and `through_turn`, its
+/// newest committed turn. A watermark already at or past it stays.
+pub(super) fn advance_prune_watermark(
+    connection: &mut Connection,
+    identity: RunIdentity,
+    through_turn: u32,
+) -> Result<(), SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    transaction.execute(
+        "UPDATE sessions
+             SET prune_through_ordinal = p.ordinal, prune_through_turn = ?3
+             FROM (SELECT m.ordinal FROM runs r JOIN messages m ON m.id = r.user_message_id
+                   WHERE r.id = ?2) AS p
+             WHERE sessions.id = ?1
+               AND (sessions.prune_through_ordinal IS NULL
+                    OR sessions.prune_through_ordinal < p.ordinal
+                    OR (sessions.prune_through_ordinal = p.ordinal
+                        AND sessions.prune_through_turn < ?3))",
+        params![
+            identity.session_id.to_string(),
+            identity.run_id.to_string(),
+            through_turn
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// The proactive-threshold seam: the newest committed turn of any prompt
+/// before this run's. Returns whether the watermark moved.
+pub(super) fn advance_prune_watermark_before_prompt(
+    connection: &mut Connection,
+    identity: RunIdentity,
+) -> Result<bool, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let moved = transaction.execute(
+        "UPDATE sessions
+             SET prune_through_ordinal = latest.ordinal, prune_through_turn = latest.turn_ordinal
+             FROM (SELECT m.ordinal, t.turn_ordinal
+                   FROM messages m JOIN model_turns t ON t.run_id = m.run_id
+                   WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0
+                     AND m.ordinal < (SELECT p.ordinal FROM runs r
+                                      JOIN messages p ON p.id = r.user_message_id
+                                      WHERE r.id = ?2)
+                   ORDER BY m.ordinal DESC, t.turn_ordinal DESC
+                   LIMIT 1) AS latest
+             WHERE sessions.id = ?1
+               AND (sessions.prune_through_ordinal IS NULL
+                    OR sessions.prune_through_ordinal < latest.ordinal
+                    OR (sessions.prune_through_ordinal = latest.ordinal
+                        AND sessions.prune_through_turn < latest.turn_ordinal))",
+        params![identity.session_id.to_string(), identity.run_id.to_string()],
+    )?;
+    transaction.commit()?;
+    Ok(moved == 1)
+}
 
 /// One stored tool result as context assembly reads it.
 pub(super) struct RecordedResult {
@@ -779,6 +869,17 @@ pub(super) fn prunable_stub(
         Some(effect) => effect == EffectClass::ReadOnly,
         None => PRUNABLE_READ_ONLY_TOOLS.contains(&name.as_str()),
     } {
+        return None;
+    }
+    // A live run prunes again on every overflowing turn. A stub is never
+    // stubbed again: the second stub would name the first stub's size, and
+    // replay, which stubs the stored row once, would disagree with the
+    // request the model saw.
+    if content
+        .rsplit_once('\n')
+        .map_or(content, |(_, last)| last)
+        .starts_with("[pruned: ")
+    {
         return None;
     }
     let mut arguments = arguments.clone();
@@ -1094,7 +1195,10 @@ pub(super) fn append_run_turns(
     compaction: Option<InRunCompaction>,
     context: &mut Vec<Message>,
     effects: &mut HashMap<(usize, usize), EffectClass>,
-) -> Result<(), SessionRuntimeError> {
+) -> Result<Vec<(u32, usize)>, SessionRuntimeError> {
+    // The context length after each replayed turn (and after an in-run
+    // summary, as turn `turn_cutoff`), for the prune watermark.
+    let mut ends = Vec::with_capacity(turns.len() + 1);
     // An in-run marker replaces the run's turns through `turn_cutoff` — and
     // the steering those turns carried — with one summary message where the
     // first replaced turn stood. The model sees prompt, summary, then the
@@ -1138,6 +1242,7 @@ pub(super) fn append_run_turns(
                 "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
                 marker.summary
             )));
+            ends.push((marker.turn_cutoff, context.len()));
         }
     }
     for StoredTurn {
@@ -1253,6 +1358,7 @@ pub(super) fn append_run_turns(
         if truncated {
             context.push(Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
         }
+        ends.push((turn_ordinal, context.len()));
     }
     // Steering applied for a turn that never committed (the run settled
     // first) still reached the model's request; keep it so the transcript
@@ -1265,5 +1371,5 @@ pub(super) fn append_run_turns(
     for (_, text) in delivered {
         context.push(Message::user(text));
     }
-    Ok(())
+    Ok(ends)
 }

@@ -344,14 +344,34 @@ fixed per-session cap (4 MiB), and a persist that would exceed it fails
 the run. That is the backstop against unbounded growth, not window
 management.
 
-Result pruning is the first shedding mechanism: during assembly, read-only
-built-in results older than the last four model turns
-(`CONTEXT_PRUNE_KEEP_TURNS`) are replaced by stubs naming the tool, arguments,
-and size (preceded by the result's header line when it has one), because the
-agent can re-derive them on demand. Mutating, shell, and MCP outputs are never
-pruned — they are not re-derivable. The stored rows are untouched; pruning is
-a property of assembly alone, and a run that would overflow the model window
-mid-run applies the same stubbing to its live transcript before failing.
+Result pruning is the first shedding mechanism: read-only built-in results
+older than the last four model turns (`CONTEXT_PRUNE_KEEP_TURNS`) are
+replaced by stubs naming the tool, arguments, and size (preceded by the
+result's header line when it has one), because the agent can re-derive them
+on demand. Mutating, shell, and MCP outputs are never pruned — they are not
+re-derivable. A stub is never stubbed again. The stored rows are untouched.
+
+Pruning moves only at seams, so between seams each request extends the last
+one byte for byte and the provider prefix cache keeps hitting (ADR-0056 § 6).
+The session stores a durable watermark (`sessions.prune_through_ordinal`,
+`prune_through_turn`: a prompt and one of its run's turns). Assembly stubs
+as if the context ended at that turn: results within the four turns before
+it stay verbatim, as does everything after it. Two seams move the
+watermark, and neither moves it backwards:
+
+- **Live overflow prune.** A run whose next request would overflow the
+  window stubs its live transcript first. It records the watermark at its
+  newest committed turn (`RuntimeEvent::ContextPruned`) before the stubbed
+  request is sent, so the next run assembles the same stubs.
+- **Proactive threshold.** A prompt planned inside the last tenth of the
+  window (`ContextPlan::Compact`) first moves the watermark to the newest
+  turn before it and reassembles, at most once per run. When the stubbed
+  context fits, it is sent without a summarizer; otherwise it compacts as
+  before.
+
+A session upgraded to schema 43 starts with its watermark at its newest
+turn, so it assembles exactly as before. A new session has no watermark
+until its first seam and stubs nothing.
 
 Compaction is the second. The summarizer writes a short narrative in five
 sections (Intent, Decisions and constraints, Work state, Open problems, Next

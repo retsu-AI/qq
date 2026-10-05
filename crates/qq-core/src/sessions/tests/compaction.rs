@@ -1486,6 +1486,12 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     .await;
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
+    // The watermark already covers the history, so the threshold seam has
+    // nothing to move and the injected failure hits the compaction reload.
+    mark_prune_seam(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
 
     let queued = harness
         .runtime
@@ -1685,6 +1691,10 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
         let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
         collect_until(&mut harness.events, finished_for(run)).await;
     }
+    mark_prune_seam(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
     let overflow = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(overflow)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -2411,6 +2421,13 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
     std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
 
     for prompt in ["one", "two", "three", "four", "five"] {
+        if prompt == "five" {
+            // A seam before the last prompt: assembly stubs up to it.
+            mark_prune_seam(
+                &harness.workspace_path.join("sessions.sqlite3"),
+                harness.session_id,
+            );
+        }
         submit_prompt(&harness, prompt).await;
         collect_through_finished(&mut harness.events).await;
     }
@@ -3411,6 +3428,191 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
     assert_eq!(pruned_rows, 0);
 }
 
+/// The previous request's messages are a prefix of the next run's first
+/// request: what the provider cache needs (ADR-0056 § 6).
+fn assert_extends(previous: &ModelRequest, next: &ModelRequest) {
+    assert_eq!(previous.system(), next.system());
+    assert_eq!(previous.tools(), next.tools());
+    let previous = previous.messages();
+    let next = next.messages();
+    assert!(next.len() > previous.len());
+    for (index, (previous, next)) in previous.iter().zip(next).enumerate() {
+        assert_eq!(
+            previous.content(),
+            next.content(),
+            "message {index} was rewritten"
+        );
+    }
+}
+
+#[tokio::test]
+async fn each_run_extends_the_previous_runs_last_request_until_a_seam() {
+    // CX3: between seams assembly stubs nothing new, so every run's first
+    // request is the previous run's last request plus the new turn, even
+    // once old reads fall outside the recency window. Before CX3 the sixth
+    // prompt's request rewrote the first read to a stub.
+    let mut harness = auto_compact_harness(
+        std::iter::repeat_with(|| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+            .take(7)
+            .collect(),
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "n".repeat(600)).unwrap();
+    for index in 0..7 {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let requests = harness.requests.lock().unwrap();
+    // Two requests per run: the read, then the answer after its result.
+    assert_eq!(requests.len(), 14);
+    for run in 1..7 {
+        assert_extends(&requests[2 * run - 1], &requests[2 * run]);
+    }
+    assert!(
+        requests.iter().flat_map(|request| request.messages()).flat_map(Message::content).all(
+            |block| !matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned"))
+        ),
+        "nothing is stubbed without a seam"
+    );
+}
+
+#[tokio::test]
+async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
+    // CX3: the live overflow prune is a seam. The run that stubbed its old
+    // reads records the watermark before it sends the stubbed request, so
+    // the next run assembles the same stubs and extends that request.
+    let turns = 8;
+    let mut harness = auto_compact_harness_with_limits(
+        vec![
+            AutoCompactScript::ReadNoteRepeatedly {
+                turns,
+                text: "done".to_owned(),
+            },
+            AutoCompactScript::Text("again".to_owned()),
+        ],
+        Some(16 * 1024),
+        2_048,
+    )
+    .await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(64),
+    )
+    .unwrap();
+    let run = queue_prompt(&harness.runtime, harness.session_id, "read it".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    let watermark: (Option<u64>, Option<u32>) =
+        Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+                [harness.session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert!(
+        watermark.0.is_some() && watermark.1.is_some_and(|turn| turn >= 1),
+        "{watermark:?}"
+    );
+
+    let next = queue_prompt(&harness.runtime, harness.session_id, "and now".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(next)).await;
+    assert_eq!(
+        finished_outcome(&observed, next),
+        Some(RunOutcome::Completed)
+    );
+    let requests = harness.requests.lock().unwrap();
+    let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
+    assert!(
+        previous
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content.contains("[pruned")
+            ))
+    );
+    assert_extends(previous, first);
+}
+
+#[tokio::test]
+async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
+    // CX3: inside the last tenth of the window the first seam is stubbing,
+    // not a summarizer. Old 12 KiB reads are re-derivable; once they are
+    // stubs the prompt fits and sends without compacting.
+    let turns = CONTEXT_PRUNE_KEEP_TURNS + 3;
+    let mut scripts: Vec<AutoCompactScript> = (0..turns)
+        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .collect();
+    scripts.push(AutoCompactScript::Text("fits now".to_owned()));
+    // Seven ~12.6 KiB reads are ~22k estimated tokens: inside the last
+    // tenth of a 24k window only for the final prompt.
+    let mut harness = auto_compact_harness_with_window(scripts, Some(24 * 1024)).await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(96),
+    )
+    .unwrap();
+    for index in 0..turns {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "run {index}"
+        );
+    }
+    let last = queue_prompt(&harness.runtime, harness.session_id, "last".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(last)).await;
+    assert_eq!(
+        finished_outcome(&observed, last),
+        Some(RunOutcome::Completed)
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "stubbing alone brought the prompt under the threshold"
+    );
+    let requests = harness.requests.lock().unwrap();
+    let sent = requests.last().unwrap();
+    let stubbed = sent
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned")))
+        .count();
+    // Each run is two assistant turns (the read, then the answer); the
+    // last four turns are kept, and the oldest of them is an answer, so the
+    // newest three reads stay verbatim and every older read is a stub.
+    assert_eq!(stubbed, turns - 3);
+    // The stubs are durable: the run after it assembles the same request.
+    let watermark: Option<u64> = Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT prune_through_ordinal FROM sessions WHERE id = ?1",
+            [harness.session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(watermark.is_some());
+}
+
 #[tokio::test]
 async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends() {
     // ~30k estimated tokens of history against a 32k window: the next prompt
@@ -3473,6 +3675,13 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
     )
     .unwrap();
     for index in 0..turns {
+        if index + 1 == turns {
+            // A seam before the last prompt rewrites its history to stubs.
+            mark_prune_seam(
+                &harness.workspace_path.join("sessions.sqlite3"),
+                harness.session_id,
+            );
+        }
         let run = queue_prompt(
             &harness.runtime,
             harness.session_id,

@@ -2256,6 +2256,7 @@ impl plan::CompiledAgentPlan {
                 } {
                     reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                     irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                    yield RuntimeEvent::ContextPruned { turn_ordinal };
                 }
                 // Still over the window after stubbing, or the provider said
                 // so itself: summarize this run's own earlier turns and
@@ -4645,6 +4646,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
                 // Direct runs have no compactor, so these never fire.
                 | RuntimeEvent::InRunCompacted { .. }
+                // Direct runs keep no session history to replay.
+                | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
