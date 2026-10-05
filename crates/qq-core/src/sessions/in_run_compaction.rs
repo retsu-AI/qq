@@ -118,16 +118,26 @@ async fn compact_in_run(
         }
     }
     // Like a between-run step, the compaction run reports one activity for
-    // its life; the prompt run already said `Compacting` before asking.
+    // its life; the prompt run already said `Compacting` before asking. The
+    // feed delivers it; settlement waiters are not woken for an activity.
     match inner
         .store
         .append_run_activity(&compaction, RunActivity::Compacting)
         .await
     {
-        Ok(event) => inner.notify(event.cursor),
+        Ok(_) => {}
         Err(error) => {
             guard.disarm();
-            settle_failed(inner, &compaction, error.to_string()).await;
+            // The provider was never asked: this is the store's failure.
+            settle_failed_with(
+                inner,
+                &compaction,
+                RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: format!("failed to persist run activity: {error}"),
+                },
+            )
+            .await;
             return Err(Error::Unavailable(error.to_string()));
         }
     }
@@ -283,10 +293,26 @@ async fn settle_cancelled(inner: &Arc<SessionRuntimeInner>, compaction: &Claimed
 }
 
 async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun, message: String) {
+    settle_failed_with(
+        inner,
+        compaction,
+        RunFailure {
+            kind: RunFailureKind::ProviderResponse,
+            message,
+        },
+    )
+    .await;
+}
+
+async fn settle_failed_with(
+    inner: &Arc<SessionRuntimeInner>,
+    compaction: &ClaimedRun,
+    failure: RunFailure,
+) {
     let outcome = RunOutcome::Failed {
         failure: RunFailure {
-            kind: RunFailureKind::ProviderResponse,
-            message: truncate_utf8(message, MAX_FAILURE_MESSAGE_BYTES),
+            kind: failure.kind,
+            message: truncate_utf8(failure.message, MAX_FAILURE_MESSAGE_BYTES),
         },
     };
     match inner

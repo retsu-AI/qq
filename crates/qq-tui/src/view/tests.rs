@@ -4682,8 +4682,8 @@ fn the_composer_rule_carries_run_telemetry_notices_and_hints_in_priority_order()
     let rule = rule_at(&mut app, 140);
     assert!(rule.contains("turn 2  $0.10"), "{rule}");
 
-    // CX4: while the run compacts its own context the rule says so, and the
-    // sidebar row names it the same way.
+    // CX4: while the run compacts its own context the rule says so. The
+    // sidebar row is pinned by the `sessions` golden.
     app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
         run_id: Some(run_id),
         occurred_at_ms: started + 5_000,

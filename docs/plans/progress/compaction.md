@@ -246,3 +246,20 @@ failure.
 - **Coordination.** Open drafts #166 (schema 37, protocol 29) and #170
   (protocol 29) have been stale since 2026-09-25 and already conflict with
   main at 30/41. Whoever revives them takes the next numbers.
+
+### 2026-10-05 — CX4 review (Codex, #252)
+
+- **Sidebar.** A running session that had already streamed text kept
+  showing that stale tail instead of "compacting context". `Compacting`
+  now wins over the tail. The `sessions` golden pins it: "Write tests"
+  streams, then compacts. The golden fails with the old ordering, which
+  meets the plan's TUI-snapshot criterion that the rule-only assertion
+  missed.
+- **Failure kind.** An in-run compaction whose `compacting` write failed
+  settled as `ProviderResponse`, though the summarizer was never polled.
+  It now settles as `Server` ("failed to persist run activity").
+  Regression test:
+  `an_in_run_compaction_whose_activity_write_fails_settles_as_a_server_failure`.
+- **Wakeups.** The in-run activity write woke settlement waiters, so a
+  parent awaiting the child made a needless `run_outcome` query. It no
+  longer notifies; the feed delivers activity, as on the normal path.

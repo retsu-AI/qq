@@ -4670,6 +4670,60 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
 }
 
 #[tokio::test]
+async fn an_in_run_compaction_whose_activity_write_fails_settles_as_a_server_failure() {
+    // CX4 review: the compaction run records `compacting` before it asks the
+    // summarizer. When that write fails the provider was never polled, so
+    // the compaction run must not blame it.
+    let mut harness = in_run_compaction_harness(48, 16 * 1024, "work so far").await;
+    Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_compaction_activity BEFORE UPDATE OF activity ON runs
+             WHEN NEW.kind = 'compaction' AND NEW.activity = 'compacting'
+             BEGIN SELECT RAISE(ABORT, 'injected activity failure'); END;",
+        )
+        .unwrap();
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let compaction = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunStarted { run_id, .. } if *run_id != run => Some(*run_id),
+            _ => None,
+        })
+        .expect("the in-run compaction must start");
+    let failure = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::RunFinished {
+                run_id,
+                outcome: RunOutcome::Failed { failure },
+                ..
+            } if *run_id == compaction => Some(failure.clone()),
+            _ => None,
+        })
+        .expect("the compaction run settles failed");
+    assert_eq!(failure.kind, RunFailureKind::Server, "{failure:?}");
+    assert!(
+        failure.message.contains("failed to persist run activity"),
+        "{failure:?}"
+    );
+    // The summarizer was never asked.
+    let requests = harness.requests.lock().unwrap();
+    assert!(
+        !requests.iter().any(|request| request_texts(request)
+            .iter()
+            .any(|text| text.contains("Summarize this conversation"))),
+        "the summarizer must not be polled"
+    );
+}
+
+#[tokio::test]
 async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
     // The summarizer stalls; the user cancels the prompt run. The cascade
     // cancels the compaction (it is owned by the prompt run), both settle
