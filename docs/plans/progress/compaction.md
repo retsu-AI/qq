@@ -122,3 +122,10 @@ tests, 7 of them new.
 ADR is now **0056**: file renamed, reservation moved in `root.md`, next free
 0057. #240 and #244 moved the store schema to 41, so CX3's bump is now
 41 → 42. CX1 still changes no schema or protocol.
+
+### 2026-10-04 — Rebased on `main` after the #246 revert
+
+#246 reverted #231, #227 and #243, so `main` no longer has the
+decision-model ADR-0055. It is reopened as #249 under the same number, so
+this plan keeps **ADR-0056**, and `root.md` holds 0055 reserved for #249.
+None of the reverted content is in this branch.
