@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | CX0 | Plan, ADR-0056, ledger and baseline | In review | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | In review | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
-| CX2 | Cache-aligned summarizer requests | In review | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | `perf/eng-995-cx2-cache-aligned-summarizer` | Stacked on #239 |
+| CX2 | Cache-aligned summarizer requests | In review | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | Stacked on #239 |
 | CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
 | CX4 | `RunActivity::Compacting` | Planned | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
