@@ -871,21 +871,39 @@ pub(super) fn prunable_stub(
     } {
         return None;
     }
-    // A live run prunes again on every overflowing turn. A stub is never
-    // stubbed again: the second stub would name the first stub's size, and
-    // replay, which stubs the stored row once, would disagree with the
-    // request the model saw.
-    if content
-        .rsplit_once('\n')
-        .map_or(content, |(_, last)| last)
-        .starts_with("[pruned: ")
-    {
-        return None;
-    }
     let mut arguments = arguments.clone();
     if arguments.len() > CONTEXT_PRUNE_STUB_ARGUMENT_BYTES {
         arguments = truncate_utf8(arguments, CONTEXT_PRUNE_STUB_ARGUMENT_BYTES);
         arguments.push_str("...");
+    }
+    let hint = if name == "read_file" {
+        PRUNED_READ_REREAD
+    } else {
+        "call it again if needed"
+    };
+    // A live run prunes again on every overflowing turn. A stub is never
+    // stubbed again: the second stub would name the first stub's size, and
+    // replay, which stubs the stored row once, would disagree with the
+    // request the model saw. Only the exact stub this call would produce
+    // counts (at most a header line, then the stub line); a real result
+    // that matched it would be stub-sized, so keeping it costs nothing.
+    let last = match content.split_once('\n') {
+        Some((_, rest)) if rest.contains('\n') => None,
+        Some((_, rest)) => Some(rest),
+        None => Some(content),
+    };
+    if last
+        .and_then(|line| line.strip_prefix("[pruned: "))
+        .and_then(|line| line.strip_prefix(name.as_str()))
+        .and_then(|line| line.strip_prefix(' '))
+        .and_then(|line| line.strip_prefix(arguments.as_str()))
+        .and_then(|line| line.strip_prefix(" returned "))
+        .and_then(|line| line.strip_suffix(']'))
+        .and_then(|line| line.strip_suffix(hint))
+        .and_then(|line| line.strip_suffix(" bytes; "))
+        .is_some_and(|size| !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
     }
     // A result that follows the header convention keeps its header: the
     // counts, window, and cursor it carries let the model continue without
@@ -893,11 +911,11 @@ pub(super) fn prunable_stub(
     // the one tool whose hash would mislead here: `if_changed_since` with
     // that hash returns no body, and the body is what pruning removed.
     let size = content.len();
-    let (header, hint) = if name == "read_file" {
+    let header = if name == "read_file" {
         // The hash is the only ` h:` token after the path, and no later field
         // can contain one; searching from the end leaves a path that happens
         // to contain ` h:` intact.
-        let header = crate::tools::header_line("read", content).map(|header| {
+        crate::tools::header_line("read", content).map(|header| {
             match header.rfind(" h:").map(|at| {
                 let end = header[at + 1..]
                     .find(' ')
@@ -909,13 +927,9 @@ pub(super) fn prunable_stub(
                 }
                 Some(_) | None => header.to_owned(),
             }
-        });
-        (header, PRUNED_READ_REREAD)
+        })
     } else {
-        (
-            crate::tools::header_line(name, content).map(str::to_owned),
-            "call it again if needed",
-        )
+        crate::tools::header_line(name, content).map(str::to_owned)
     };
     let stub = match header {
         Some(header) => {

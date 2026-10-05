@@ -382,3 +382,16 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
 | 10 000 | 67.7 / 60.3 µs | 66.0 / 62.2 µs |
 
   Within noise.
+
+### 2026-10-05 — CX3 review (Codex, #254)
+
+- **Stub detection.** The re-stub guard matched any result whose last line
+  began with `[pruned: `. A large read-only result that happened to end
+  that way was never pruned. `prunable_stub` now treats content as its own
+  stub only when it is exactly the stub this call would produce: an
+  optional header line, then
+  `[pruned: <name> <arguments> returned <digits> bytes; <hint>]`. A real
+  result in that form is stub-sized, so keeping it costs nothing.
+  Regression test:
+  `a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is`.
+  Rebased onto the CX4 review fix.
