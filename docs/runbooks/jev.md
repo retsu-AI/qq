@@ -1,17 +1,10 @@
-# Decision-model operator runbook
+# Jev operator runbook
 
-How to turn QQ's optional decision-model capabilities on, see what they do,
-and turn them off. Today the only shipped decision model is TypeSafe Jev, so
-every section below is about Jev.
-
-OpenAI's Decisions API is not supported yet. The plan adds it as DM5 once
-OpenAI publishes its API reference. Until then, nothing in QQ sends data to
-it.
-
-Design and known limitations:
-[`../design/decision-models.md`](../design/decision-models.md). Planned
-changes: [`../plans/decision-models.md`](../plans/decision-models.md). This
-page describes only what ships today.
+How to turn QQ's optional TypeSafe Jev capabilities on, see what they do,
+and turn them off. Design and known limitations:
+[`../design/jev.md`](../design/jev.md). Planned changes:
+[`../plans/jev.md`](../plans/jev.md). This page describes only what ships
+today.
 
 ## Before you enable anything
 

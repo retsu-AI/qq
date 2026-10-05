@@ -9,8 +9,8 @@ workspace/credential-epoch activation and decisions 6–7's final-only
 approval receipt and accounting. Decision 3 is superseded only when a
 separately qualified question/precision policy ships (JV3, JV8). All approval
 ceilings and independent consent remain.
-**Plan:** [Decision models](../plans/decision-models.md) JV1–JV6, JV9. **Basis:**
-[`design/decision-models.md` § 3](../design/decision-models.md#3-why-jev-mostly-hands-work-back).
+**Plan:** [Jev](../plans/jev.md) JV1–JV6, JV9. **Basis:**
+[`design/jev.md` § 3](../design/jev.md#3-why-jev-mostly-hands-work-back).
 
 ## Context
 
@@ -127,7 +127,7 @@ human consent. Billing, evidence egress and tail latency remain the costs of
 opting in. Masking is not a complete privacy boundary.
 
 Qualification follows the plan's
-[procedure](../plans/decision-models.md#qualification-procedure-jv7-jv13). Success never
+[procedure](../plans/jev.md#qualification-procedure-jv7-jv13). Success never
 turns a default on.
 
 ## Alternatives considered

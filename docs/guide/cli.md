@@ -160,7 +160,7 @@ between global packs and your global config.
 
 Optional TypeSafe Jev. `setup [--allow-file]` stores the API key and enables nothing;
 `observe` assesses completed runs on the running local server without gating
-them. [`../runbooks/jev.md`](../runbooks/decision-models.md) explains what the observer
+them. [`../runbooks/jev.md`](../runbooks/jev.md) explains what the observer
 reads and how its receipts resume.
 
 | Subcommand | Effect |
