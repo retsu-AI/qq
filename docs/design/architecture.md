@@ -1165,9 +1165,11 @@ row records each delivered report by the child's report turn, so a report is
 sent once, an older undelivered one is superseded by the newer, and a child
 that has settled is answered instead. Interim reports share the boundary's
 tool-output budget after the answers, carry no spend, and are never
-progress: only a child's answer restarts the parent's stall count, and only
-an answer (or steering) ends a tool-free wait; a report that arrives during
-the wait joins context for the next turn. Answers and reports share one
+progress: only a child's answer restarts the parent's stall count. The
+turn-top boundary takes reports; the tool-free wait takes them only in the
+same transaction as an answer, which ends the wait. So the wait delivers at
+most once per boundary, with one budget, and nothing it delivers can land
+between the waiting reply and steering that replay places first. Answers and reports share one
 delivery ordinal per parent run, so assembly replays them in the order the
 live run applied them. A child whose answer the store delivered before its
 owner task finished stays in the run's child registry, no longer

@@ -1770,8 +1770,9 @@ impl Store {
     }
 
     /// Delivers up to `limit` settled detached children of the running
-    /// parent into its next request (turn `turn_ordinal`), then the newest
-    /// closed report of each child still running, in one transaction.
+    /// parent into its next request (turn `turn_ordinal`), then, as
+    /// `reports` says, the newest closed report of each child still running,
+    /// in one transaction.
     /// Nothing for a parent that is no longer running: its settlement
     /// delivers the answers instead, and reports from children that are
     /// about to answer are moot.
@@ -1780,6 +1781,7 @@ impl Store {
         claimed: &ClaimedRun,
         turn_ordinal: u32,
         limit: usize,
+        reports: crate::runtime::ReportDelivery,
     ) -> Result<Vec<deliveries::DeliveredAnswer>, SessionRuntimeError> {
         let run_id = claimed.identity.run_id;
         self.call(Priority::Output, move |connection| {
@@ -1803,15 +1805,21 @@ impl Store {
                 limit,
                 now,
             )?;
-            let spent = delivered.iter().map(|answer| answer.notice.len()).sum();
-            delivered.extend(deliveries::deliver_interim_reports(
-                &transaction,
-                run_id,
-                turn_ordinal,
-                spent,
-                limit,
-                now,
-            )?);
+            let with_reports = match reports {
+                crate::runtime::ReportDelivery::Always => true,
+                crate::runtime::ReportDelivery::WithAnswers => !delivered.is_empty(),
+            };
+            if with_reports {
+                let spent = delivered.iter().map(|answer| answer.notice.len()).sum();
+                delivered.extend(deliveries::deliver_interim_reports(
+                    &transaction,
+                    run_id,
+                    turn_ordinal,
+                    spent,
+                    limit,
+                    now,
+                )?);
+            }
             transaction.commit()?;
             Ok(delivered)
         })

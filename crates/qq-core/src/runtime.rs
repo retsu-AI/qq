@@ -68,6 +68,7 @@ pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};
 pub(crate) use subagent::{
     CancelFuture, CancelOutcome, ChildCleanupError, ChildDrainFuture, ChildStatus, ChildWaitFuture,
-    DeliverFuture, DeliveredChild, DeliveryError, SPAWN_UNAVAILABLE_RESULT, SpawnAgentFuture,
-    SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner, WaitFuture, WaitReport,
+    DeliverFuture, DeliveredChild, DeliveryError, ReportDelivery, SPAWN_UNAVAILABLE_RESULT,
+    SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner,
+    WaitFuture, WaitReport,
 };

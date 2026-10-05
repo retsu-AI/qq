@@ -1580,7 +1580,7 @@ async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
     // Nothing reported yet: nothing to deliver.
     assert!(
         store
-            .deliver_children(&parent, 2, 8)
+            .deliver_children(&parent, 2, 8, crate::runtime::ReportDelivery::Always)
             .await
             .unwrap()
             .is_empty()
@@ -1589,14 +1589,17 @@ async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
     report_turn(&store, child_run, 1, "first look: lib.rs", false).await;
     assert!(
         store
-            .deliver_children(&parent, 2, 8)
+            .deliver_children(&parent, 2, 8, crate::runtime::ReportDelivery::Always)
             .await
             .unwrap()
             .is_empty()
     );
     // Two closed reports since the last delivery: only the newer is sent.
     report_turn(&store, child_run, 3, "inventory.rs:4 holds widgets", true).await;
-    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 3, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(interim(&delivered), ["inventory.rs:4 holds widgets"]);
     assert!(delivered[0].notice.starts_with(
         "[QQ runtime notice; not a user instruction]\nA sub-agent you started is still working."
@@ -1604,7 +1607,7 @@ async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
     // Delivered once: the next boundary sends nothing new.
     assert!(
         store
-            .deliver_children(&parent, 4, 8)
+            .deliver_children(&parent, 4, 8, crate::runtime::ReportDelivery::Always)
             .await
             .unwrap()
             .is_empty()
@@ -1619,7 +1622,10 @@ async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
         )
         .await
         .unwrap();
-    let delivered = store.deliver_children(&parent, 5, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 5, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(delivered.len(), 1);
     assert!(!delivered[0].interim);
     assert!(delivered[0].notice.starts_with(
@@ -1627,7 +1633,7 @@ async fn an_interim_report_is_delivered_once_and_never_as_the_answer() {
     ));
     assert!(
         store
-            .deliver_children(&parent, 6, 8)
+            .deliver_children(&parent, 6, 8, crate::runtime::ReportDelivery::Always)
             .await
             .unwrap()
             .is_empty()
@@ -1698,7 +1704,10 @@ async fn an_interim_report_does_not_restart_the_stall_count() {
         .unwrap();
     let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
     report_turn(&store, claimed_child.identity.run_id, 1, "partial", true).await;
-    let delivered = store.deliver_children(&parent, 2, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 2, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(delivered.len(), 1);
     // Not an answer, so the run loop's `deliver_children` leaves the stall
     // count alone; the child's answer is one.
@@ -1713,7 +1722,10 @@ async fn an_interim_report_does_not_restart_the_stall_count() {
         )
         .await
         .unwrap();
-    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 3, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(delivered.len(), 1);
     assert!(delivered[0].answered());
     store.close().await.unwrap();
@@ -2139,7 +2151,7 @@ async fn a_report_closed_by_the_final_answer_notice_is_delivered() {
     report_turn(&store, run_id, 1, "almost there", false).await;
     assert!(
         store
-            .deliver_children(&parent, 2, 8)
+            .deliver_children(&parent, 2, 8, crate::runtime::ReportDelivery::Always)
             .await
             .unwrap()
             .is_empty()
@@ -2155,7 +2167,10 @@ async fn a_report_closed_by_the_final_answer_notice_is_delivered() {
         })
         .await
         .unwrap();
-    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 3, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(delivered.len(), 1);
     assert!(delivered[0].interim);
     assert!(delivered[0].notice.ends_with("almost there"));
@@ -2195,7 +2210,10 @@ async fn a_report_delivered_before_a_crash_replays_once_and_is_not_resent() {
         .unwrap();
     let claimed_child = store.claim_next_run(true).await.unwrap().unwrap();
     report_turn(&store, claimed_child.identity.run_id, 1, "halfway", true).await;
-    let delivered = store.deliver_children(&parent, 2, 8).await.unwrap();
+    let delivered = store
+        .deliver_children(&parent, 2, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(delivered.len(), 1);
     let notice = delivered[0].notice.clone();
     store.close().await.unwrap();
@@ -2235,13 +2253,10 @@ async fn a_report_delivered_before_a_crash_replays_once_and_is_not_resent() {
     store.close().await.unwrap();
 }
 
-/// An interim report that arrives while the parent waits tool-free for
-/// answers does not end the wait: the parent already said nothing is left
-/// until answers arrive (ADR-0054 § 4). The run loop's wait wakes on a
-/// settlement; here child A has settled but its spend is unreadable (its own
-/// child still runs), so the wake delivers only child B's report. The parent
-/// must keep waiting, with the report in context, and start its next turn
-/// once A's answer is delivered.
+/// End to end: a parent waiting tool-free receives a report only together
+/// with an answer (ADR-0054 § 4). Child B has a closed report while child A
+/// is still working; A's answer ends the wait and B's report comes with it,
+/// after the answer, in the same delivery, and replay matches live.
 #[tokio::test]
 async fn an_interim_report_does_not_end_a_tool_free_wait() {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -2332,8 +2347,11 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
     delegation.harness.runtime.shutdown().await.unwrap();
 }
 
-/// The wait's rule in isolation: a delivery that is only interim reports is
-/// not an answer, so the tool-free wait goes on.
+/// The wait's delivery rule at the store: child A has settled with its
+/// spend unreadable (its own child still runs) and child B has a closed
+/// report. The wait's delivery (`WithAnswers`) commits nothing, so nothing
+/// would join context after the waiting reply and before any steering; the
+/// turn-top boundary (`Always`) takes B's report, which is not an answer.
 #[tokio::test]
 async fn a_report_only_delivery_is_not_an_answer() {
     let directory = tempfile::tempdir().unwrap();
@@ -2387,7 +2405,18 @@ async fn a_report_only_delivery_is_not_an_answer() {
         .await
         .unwrap();
     report_turn(&store, b.identity.run_id, 1, "b is halfway", true).await;
-    let delivered = store.deliver_children(&parent, 3, 8).await.unwrap();
+    assert!(
+        store
+            .deliver_children(&parent, 3, 8, crate::runtime::ReportDelivery::WithAnswers)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no answer, so no report either"
+    );
+    let delivered = store
+        .deliver_children(&parent, 3, 8, crate::runtime::ReportDelivery::Always)
+        .await
+        .unwrap();
     assert_eq!(
         delivered.len(),
         1,
@@ -2395,4 +2424,101 @@ async fn a_report_only_delivery_is_not_an_answer() {
     );
     assert!(delivered[0].interim && !delivered[0].answered());
     store.close().await.unwrap();
+}
+
+/// The review's ordering case: while the parent waits tool-free, child B
+/// has a closed report. Steering then arrives. The live request must carry
+/// the reply, then the steer, then the report (delivered at the next turn's
+/// own boundary), since replay places a boundary's steering before its
+/// delivered notices.
+#[tokio::test]
+async fn steering_during_a_wait_with_a_pending_report_replays_as_live() {
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent_turn = Arc::new(tokio::sync::Notify::new());
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedParent {
+        requests: Arc::clone(&parent_requests),
+        script: vec![ParentTurn::Calls(vec![spawn("b")])],
+        turn: AtomicUsize::new(0),
+        turn_started: Arc::clone(&parent_turn),
+    });
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let child: Arc<dyn Provider> = Arc::new(GatedChild {
+        gate: Arc::clone(&gate),
+        answer: "b's answer",
+        started: Arc::clone(&started),
+    });
+    let harness = spawn_harness(
+        vec![("test/child", child)],
+        vec![Arc::clone(&parent), parent],
+        8,
+    )
+    .await;
+    let mut delegation = Delegation {
+        harness,
+        parent_requests: Arc::clone(&parent_requests),
+        gate,
+        children_started: started,
+        parent_turn,
+    };
+    let waiting = subagents::observe_parent_wait(delegation.harness.session_id);
+    let run = submit_prompt_to(
+        &delegation.harness.runtime,
+        delegation.harness.session_id,
+        "survey",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    children_started(&delegation, 1).await;
+    // B has a closed report while the parent waits.
+    let session_id = delegation.harness.session_id;
+    let store = &delegation.harness.runtime.inner.store;
+    let b: String = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT r.id FROM runs r JOIN sessions s ON s.id = r.session_id
+                 WHERE s.parent_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    report_turn(store, b.parse().unwrap(), 90, "b is halfway", true).await;
+    delegation
+        .harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SteerRun {
+                run_id: run,
+                input: vec![InputPart::text("keep going")],
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+    parent_sent(&delegation, 3).await;
+    {
+        let requests = delegation.parent_requests.lock().unwrap();
+        // The steer directly follows the waiting reply: the wait delivered
+        // nothing. The report then arrives at turn 3's own boundary, after
+        // the steer, exactly where replay places a boundary's notices.
+        let texts = request_texts(&requests[2]);
+        let reply = texts.iter().position(|text| text == "all done").unwrap();
+        assert_eq!(texts[reply + 1], "keep going", "{texts:#?}");
+        assert!(texts[reply + 2].ends_with("b is halfway"), "{texts:#?}");
+        assert_eq!(texts.len(), reply + 3, "{texts:#?}");
+    }
+    delegation.gate.add_permits(1);
+    let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
+    assert!(matches!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    ));
+    assert_replay_matches_live(&mut delegation).await;
+    delegation.harness.runtime.shutdown().await.unwrap();
 }

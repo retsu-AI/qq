@@ -302,6 +302,11 @@ delegation: (
 )
 ```
 
+A run that may spawn sub-agents also gets `wait_agents` (wait for its
+background sub-agents) and `cancel_agent` (stop one). They come and go with
+`spawn_agent`: allowing, denying, or exposing `spawn_agent` in policy or a
+pack applies to all three, and the two are not tool names of their own there.
+
 Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
 the reasoning effort its children run at with `effort: low` (any effort value);
 without it, `fast` children run at `low` and `balanced` at `medium`, never above

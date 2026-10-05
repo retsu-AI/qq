@@ -204,6 +204,19 @@ pub(crate) type WaitFuture =
 pub(crate) type CancelFuture =
     Pin<Box<dyn Future<Output = Result<CancelOutcome, DeliveryError>> + Send>>;
 
+/// When a boundary delivery also sends interim reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportDelivery {
+    /// The turn-top boundary: reports from children still working join the
+    /// next request.
+    Always,
+    /// The tool-free wait: reports only together with an answer, in the
+    /// same transaction. Every wait delivery then ends the wait, so one
+    /// boundary is delivered once, with one budget, and its notices precede
+    /// any steering exactly as replay places them (ADR-0054 § 4).
+    WithAnswers,
+}
+
 pub(crate) type DeliverFuture =
     Pin<Box<dyn Future<Output = Result<Vec<DeliveredChild>, DeliveryError>> + Send>>;
 pub(crate) type ChildWaitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -254,7 +267,7 @@ pub(crate) trait SubagentSpawner: Send + Sync {
     /// Commits every settled detached child's answer into the parent's
     /// context for its turn `turn_ordinal`, in one transaction, before that
     /// request is built. Each answer is returned once, with its spend.
-    fn deliver(&self, _turn_ordinal: u32) -> DeliverFuture {
+    fn deliver(&self, _turn_ordinal: u32, _reports: ReportDelivery) -> DeliverFuture {
         Box::pin(std::future::ready(Ok(Vec::new())))
     }
     /// `wait_agents`: resolves when every named background child has

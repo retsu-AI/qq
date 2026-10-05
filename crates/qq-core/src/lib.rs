@@ -312,14 +312,16 @@ async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, hand
 /// and how many interim reports were delivered.
 async fn deliver_children(
     spawner: &Arc<dyn SubagentSpawner>,
-    turn_ordinal: u32,
+    boundary: Boundary,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
     budget: &mut BudgetMeter,
     stall: &mut runtime::StallScope,
     checkpoint: Option<&mut runtime::CheckpointContext>,
 ) -> Result<Delivered, runtime::DeliveryError> {
-    let delivered = spawner.deliver(turn_ordinal).await?;
+    let delivered = spawner
+        .deliver(boundary.turn_ordinal, boundary.reports)
+        .await?;
     let mut checkpoint = checkpoint;
     let mut count = Delivered::default();
     for child in &delivered {
@@ -347,6 +349,14 @@ async fn deliver_children(
         messages.push(notice);
     }
     Ok(count)
+}
+
+/// The boundary a delivery is for: the parent turn whose request carries
+/// it, and whether running children's reports come with it.
+#[derive(Debug, Clone, Copy)]
+struct Boundary {
+    turn_ordinal: u32,
+    reports: runtime::ReportDelivery,
 }
 
 /// What one boundary delivery added to the parent's context.
@@ -1878,7 +1888,7 @@ impl plan::CompiledAgentPlan {
                     && spawner.outstanding_detached() > 0
                     && let Err(error) = deliver_children(
                         spawner,
-                        turn_ordinal,
+                        Boundary { turn_ordinal, reports: runtime::ReportDelivery::Always },
                         Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
                         &mut budget,
@@ -3119,7 +3129,7 @@ impl plan::CompiledAgentPlan {
                             }
                             match deliver_children(
                                 spawner,
-                                turn_ordinal.saturating_add(1),
+                                Boundary { turn_ordinal: turn_ordinal.saturating_add(1), reports: runtime::ReportDelivery::WithAnswers },
                                 Arc::make_mut(&mut messages),
                                 &mut irreducible_message_bytes,
                                 &mut budget,
@@ -3128,19 +3138,19 @@ impl plan::CompiledAgentPlan {
                             )
                             .await
                             {
-                                // Only an answer ends the wait. An interim
-                                // report from another child stays in context
-                                // for the next turn, and the wait goes on: the
+                                // Only an answer ends the wait, and reports
+                                // come only with one (`WithAnswers`): the
                                 // reply already said nothing is left to do
-                                // until answers arrive (ADR-0054 § 4).
+                                // until answers arrive, and the delivery
+                                // that ends the wait is this boundary's
+                                // only one, so it spends one budget and
+                                // precedes any steering, as replay places it.
                                 Ok(delivered) if delivered.answers > 0 => {
                                     wait_delivered_for = Some(turn_ordinal.saturating_add(1));
                                     break;
                                 }
                                 Ok(delivered) => {
-                                    if delivered.reports > 0 {
-                                        wait_delivered_for = Some(turn_ordinal.saturating_add(1));
-                                    }
+                                    debug_assert_eq!(delivered.reports, 0);
                                     // A settled child whose own descendants
                                     // are still settling has no readable spend
                                     // yet; its delivery is retried after they
@@ -11195,7 +11205,7 @@ mod tests {
         fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
             unreachable!("this spawner only delivers")
         }
-        fn deliver(&self, _: u32) -> runtime::DeliverFuture {
+        fn deliver(&self, _: u32, _: runtime::ReportDelivery) -> runtime::DeliverFuture {
             let delivered = std::mem::take(&mut *self.delivered.lock().unwrap());
             Box::pin(std::future::ready(Ok(delivered)))
         }
@@ -11235,7 +11245,10 @@ mod tests {
                 BudgetMeter::new(RunLimits::default(), None, tokio::time::Instant::now());
             let delivered = deliver_children(
                 &spawner,
-                2,
+                Boundary {
+                    turn_ordinal: 2,
+                    reports: runtime::ReportDelivery::Always,
+                },
                 &mut messages,
                 &mut bytes,
                 &mut budget,
@@ -11330,23 +11343,27 @@ mod tests {
         );
     }
 
-    /// The tool-free wait ends on an answer, never on an interim report
-    /// alone (ADR-0054 § 4): a wake that delivers only a report keeps
-    /// waiting, and the next turn's request carries the report, then the
-    /// answer.
+    /// The tool-free wait asks for reports only together with an answer
+    /// (ADR-0054 § 4), so the one delivery that ends the wait is the
+    /// boundary's only one: one budget, before any steering, as replay
+    /// places it. The turn-top boundary takes reports from children still
+    /// working.
     #[tokio::test]
-    async fn a_tool_free_wait_ends_on_an_answer_not_on_a_report() {
+    async fn a_tool_free_wait_takes_reports_only_with_an_answer() {
         struct AllowAllGate;
         impl ToolGate for AllowAllGate {
             fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
                 Box::pin(std::future::ready(GateDecision::Execute))
             }
         }
-        /// One detached child: each wake delivers the next scripted batch.
-        struct ScriptedDeliveries {
-            batches: Mutex<std::collections::VecDeque<Vec<runtime::DeliveredChild>>>,
+        /// One detached child that reports at every boundary that accepts
+        /// reports, and answers on the third wake of the wait.
+        struct Reporter {
+            asked: Mutex<Vec<runtime::ReportDelivery>>,
+            wakes: Mutex<usize>,
+            answered: std::sync::atomic::AtomicBool,
         }
-        impl SubagentSpawner for ScriptedDeliveries {
+        impl SubagentSpawner for Reporter {
             fn acknowledge(&self, _: ToolCallId) {}
             fn drain(&self) -> runtime::ChildDrainFuture {
                 Box::pin(async { Ok(Vec::new()) })
@@ -11361,35 +11378,48 @@ mod tests {
                 }))
             }
             fn outstanding_detached(&self) -> usize {
-                usize::from(!self.batches.lock().unwrap().is_empty())
+                usize::from(!self.answered.load(std::sync::atomic::Ordering::SeqCst))
             }
             fn child_settled(&self) -> runtime::ChildWaitFuture {
                 Box::pin(std::future::ready(()))
             }
-            fn deliver(&self, _: u32) -> runtime::DeliverFuture {
-                let batch = self.batches.lock().unwrap().pop_front().unwrap_or_default();
+            fn deliver(&self, _: u32, reports: runtime::ReportDelivery) -> runtime::DeliverFuture {
+                self.asked.lock().unwrap().push(reports);
+                let report = runtime::DeliveredChild {
+                    notice: "interim report".to_owned(),
+                    answered: false,
+                    interim: true,
+                    spend: SpawnAgentSpend::NONE,
+                };
+                let batch = match reports {
+                    runtime::ReportDelivery::Always => vec![report],
+                    runtime::ReportDelivery::WithAnswers => {
+                        let mut wakes = self.wakes.lock().unwrap();
+                        *wakes += 1;
+                        if *wakes < 3 {
+                            Vec::new()
+                        } else {
+                            self.answered
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            vec![
+                                runtime::DeliveredChild {
+                                    notice: "the answer".to_owned(),
+                                    answered: true,
+                                    interim: false,
+                                    spend: SpawnAgentSpend::NONE,
+                                },
+                                report,
+                            ]
+                        }
+                    }
+                };
                 Box::pin(std::future::ready(Ok(batch)))
             }
         }
-        let notice = |text: &str, answered: bool, interim: bool| runtime::DeliveredChild {
-            notice: text.to_owned(),
-            answered,
-            interim,
-            spend: SpawnAgentSpend::NONE,
-        };
-        // The boundaries of turns 1 and 2 deliver nothing (the child still
-        // runs); the tool-free reply then waits: the first wake brings a
-        // report alone, the second the answer.
-        let spawner = Arc::new(ScriptedDeliveries {
-            batches: Mutex::new(
-                [
-                    Vec::new(),
-                    Vec::new(),
-                    vec![notice("interim report", false, true)],
-                    vec![notice("the answer", true, false)],
-                ]
-                .into(),
-            ),
+        let spawner = Arc::new(Reporter {
+            asked: Mutex::new(Vec::new()),
+            wakes: Mutex::new(0),
+            answered: std::sync::atomic::AtomicBool::new(false),
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         struct Recording {
@@ -11422,7 +11452,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(AllowAllGate),
                 Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(Some(spawner)),
+                RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>)),
             )
             .collect::<Vec<_>>()
             .await;
@@ -11430,11 +11460,19 @@ mod tests {
             events.last(),
             Some(RuntimeEvent::Completed { .. })
         ));
+        // The turn-top boundaries (turns 1 and 2; this stub is outstanding
+        // from the start) take reports; the wait's three wakes do not, and
+        // the third, with the answer, ends it. Turn 3 then needs no boundary
+        // delivery: the wait already delivered for it.
+        use runtime::ReportDelivery::{Always, WithAnswers};
+        assert_eq!(
+            spawner.asked.lock().unwrap().as_slice(),
+            [Always, Always, WithAnswers, WithAnswers, WithAnswers]
+        );
         let requests = requests.lock().unwrap();
-        // spawn turn, the tool-free reply that waits, then one more turn:
-        // a report-only wake did not start a turn of its own.
         assert_eq!(requests.len(), 3);
-        // After the reply that waited: the report, then the answer.
+        // Turn 2 carried the turn-top report; turn 3 the reply, the answer,
+        // then the report that came with it.
         let tail = requests[2]
             .messages()
             .iter()
@@ -11450,8 +11488,8 @@ mod tests {
         assert_eq!(
             tail,
             [
-                (Role::User, text("the answer")),
                 (Role::User, text("interim report")),
+                (Role::User, text("the answer")),
                 (Role::Assistant, text("done")),
             ]
         );

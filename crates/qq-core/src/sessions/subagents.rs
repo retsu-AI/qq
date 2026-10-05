@@ -481,7 +481,11 @@ impl SubagentSpawner for SessionSubagentSpawner {
         })
     }
 
-    fn deliver(&self, turn_ordinal: u32) -> crate::runtime::DeliverFuture {
+    fn deliver(
+        &self,
+        turn_ordinal: u32,
+        reports: crate::runtime::ReportDelivery,
+    ) -> crate::runtime::DeliverFuture {
         let inner = Arc::clone(&self.inner);
         let parent = self.parent.clone();
         let tasks = Arc::clone(&self.tasks);
@@ -497,6 +501,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
                     &parent,
                     turn_ordinal,
                     usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
+                    reports,
                 )
                 .await
                 .map_err(crate::runtime::DeliveryError::Store)?;
@@ -692,6 +697,9 @@ pub(super) async fn spawn_child_run(
             Ok(outcome.spend)
         };
         completed.send_replace(Some(receipt));
+        // Also bumped for a child already delivered (its owner finished
+        // after the store had settled it): waiters re-check and find
+        // nothing new, so the wake is harmless.
         settled.send_modify(|generation| *generation = generation.wrapping_add(1));
         // A detached spawn's caller is gone; nothing waits for this reply.
         let _ = reply.send(outcome);

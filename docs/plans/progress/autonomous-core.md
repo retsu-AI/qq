@@ -996,3 +996,45 @@ The reviewer also checked several suspicions and found them fine:
 fmt and clippy are clean; the soak passes; the nonblocking, delegation and
 progress suites pass 5 of 5.
 
+### 2026-10-05: AP4.2 re-review: findings 1–10 resolved; NEW-1 and NEW-2 fixed
+
+The re-review confirmed every original finding resolved and added one
+blocking finding, NEW-1, plus one should-fix, NEW-2. Both were introduced by
+the finding-3 fix.
+
+- **NEW-1 (blocking): replay order.**
+  - The bug: a report-only wake in the tool-free wait pushed a report, then
+    later steering was applied in the same wait. Live order was reply,
+    report, steer. Replay places a boundary's steering before its delivered
+    notices, so it rebuilt reply, steer, report.
+  - The fix: `SubagentSpawner::deliver` and `Store::deliver_children` take a
+    `ReportDelivery`:
+    - `Always` at the turn top;
+    - `WithAnswers` in the wait, which sends reports only in the same
+      transaction as an answer.
+  - Every wait delivery therefore ends the wait. Nothing the wait delivers
+    can precede a steer, and a pending report reaches the next turn's own
+    boundary, after the steer, where replay puts it.
+- **NEW-2 (should-fix): one budget per boundary.** The wait could stamp
+  several report batches, each with a full budget, for one boundary. With
+  the same fix the wait delivers at most once per boundary: one budget, the
+  invariant at the turn-top comment.
+- **Tests:**
+  - `a_tool_free_wait_takes_reports_only_with_an_answer` (run loop): the
+    turn-top boundaries ask `Always`, the wait's wakes `WithAnswers`, and
+    the answer arrives with its report. It fails if the wait asks `Always`.
+  - `steering_during_a_wait_with_a_pending_report_replays_as_live`: reply,
+    steer, then report, with replay identical.
+  - `a_report_only_delivery_is_not_an_answer`, extended: `WithAnswers`
+    commits nothing when no answer is ready. It fails if `WithAnswers` sends
+    reports anyway.
+  - The earlier `an_interim_report_does_not_end_a_tool_free_wait` now covers
+    a report that arrives with an answer.
+- **Nits:**
+  - **1:** commented the harmless extra `settled` bump.
+  - **2:** the guide's `delegation` section says the two tools follow
+    `spawn_agent` in policy and packs.
+  - **3:** not done. The in-run compaction splice is shared with answers,
+    whose splice is pinned by
+    `replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did`.
+
