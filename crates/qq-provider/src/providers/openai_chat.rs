@@ -304,6 +304,8 @@ pub(crate) struct ChatCompletionsRequest<'a> {
     messages: Vec<ChatMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatTool<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     stream: bool,
     stream_options: ChatStreamOptions,
     max_tokens: u32,
@@ -331,6 +333,7 @@ impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
             model: request.model(),
             messages,
             tools: request.tools().iter().map(ChatTool::from).collect(),
+            tool_choice: request.tools_disabled().then_some("none"),
             stream: true,
             stream_options: ChatStreamOptions {
                 include_usage: true,
@@ -1174,6 +1177,32 @@ mod tests {
             body["messages"],
             json!([{"role": "user", "content": "ping"}])
         );
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_keeps_the_tools_and_sends_none() {
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let request = ModelRequest::new("chat-test", vec![Message::user("ping")], 64)
+            .with_tools(tools.clone())
+            .with_tool_choice(crate::ToolChoice::None);
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&request)).unwrap();
+        assert_eq!(body["tool_choice"], "none");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+
+        // Auto, and None without declared tools, keep today's wire shape.
+        let auto =
+            ModelRequest::new("chat-test", vec![Message::user("ping")], 64).with_tools(tools);
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&auto)).unwrap();
+        assert!(body.get("tool_choice").is_none());
+        let bare = ModelRequest::new("chat-test", vec![Message::user("ping")], 64)
+            .with_tool_choice(crate::ToolChoice::None);
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&bare)).unwrap();
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_none());
     }
 
     #[test]

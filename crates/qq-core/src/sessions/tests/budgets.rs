@@ -23,13 +23,17 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
     assert!(exhaustion.final_response);
     assert!(exhaustion.message.contains("2 model turn"));
 
-    // One working turn, then the last permitted turn is the tool-free final
-    // response whose text is persisted as the run's last assistant message.
+    // One working turn, then the last permitted turn is the final response,
+    // whose text is persisted as the run's last assistant message. It keeps
+    // the tools declared (Bedrock rejects a request whose history holds tool
+    // calls without them) and asks for none.
     {
         let requests = harness.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(!requests[0].tools().is_empty());
-        assert!(requests[1].tools().is_empty());
+        assert_eq!(requests[0].tool_choice(), qq_provider::ToolChoice::Auto);
+        assert_eq!(requests[1].tools(), requests[0].tools());
+        assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
         assert!(
             requests[1]
                 .system()
@@ -94,7 +98,10 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     assert!(exhaustion.final_response);
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), 5);
-    assert!(requests.last().unwrap().tools().is_empty());
+    assert_eq!(
+        requests.last().unwrap().tool_choice(),
+        qq_provider::ToolChoice::None
+    );
 }
 
 #[tokio::test]

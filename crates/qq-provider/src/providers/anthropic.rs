@@ -443,8 +443,15 @@ pub(crate) struct MessagesRequest<'a> {
     messages: Vec<AnthropicMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoice>,
     max_tokens: u32,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicToolChoice {
+    r#type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -487,6 +494,9 @@ impl<'a> MessagesRequest<'a> {
             }),
             messages,
             tools,
+            tool_choice: request
+                .tools_disabled()
+                .then_some(AnthropicToolChoice { r#type: "none" }),
             max_tokens: request.max_output_tokens(),
             stream: true,
         };
@@ -1749,6 +1759,31 @@ mod tests {
             })
         );
         assert!(!body.as_object().unwrap().contains_key("system"));
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_keeps_the_tools_and_their_cache_point() {
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let request = ModelRequest::new("claude-test", vec![Message::user("ping")], 64)
+            .with_tools(tools.clone())
+            .with_tool_choice(crate::ToolChoice::None);
+        let body = serde_json::to_value(MessagesRequest::from(&request)).unwrap();
+        assert_eq!(body["tool_choice"], json!({"type": "none"}));
+        // The tool block, and its cache breakpoint, are byte-identical to an
+        // ordinary turn's, so the cached prefix survives a no-tools turn.
+        let auto =
+            ModelRequest::new("claude-test", vec![Message::user("ping")], 64).with_tools(tools);
+        let auto_body = serde_json::to_value(MessagesRequest::from(&auto)).unwrap();
+        assert_eq!(body["tools"], auto_body["tools"]);
+        assert!(auto_body.get("tool_choice").is_none());
+        let bare = ModelRequest::new("claude-test", vec![Message::user("ping")], 64)
+            .with_tool_choice(crate::ToolChoice::None);
+        let body = serde_json::to_value(MessagesRequest::from(&bare)).unwrap();
+        assert!(body.get("tool_choice").is_none());
     }
 
     #[tokio::test]

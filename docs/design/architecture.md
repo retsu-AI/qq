@@ -389,7 +389,7 @@ rather than discarding the measurement, and a code-heavy transcript that
 tokenizes near three bytes per token is no longer under-charged by a quarter
 on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the budget-final
-turn, which changes the system text and drops the schemas, keeps a
+turn, which changes only the system text, keeps a
 measurement-derived estimate; the slice checkpoint and continuation turns
 change only the messages. Pricing-only refreshes are
 compatible; missing usage, model changes, successful compaction, malformed or
@@ -954,7 +954,12 @@ settlement. The wall-clock bound therefore remains a cancellation request plus
 owned drain, not a promise that an uninterruptible platform operation ends at the
 deadline. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
-spent the last permitted turn becomes a tool-free final status response; an
+spent the last permitted turn becomes a final status response that asks for
+no tool calls. The tools stay declared with `ToolChoice::None` (OpenAI and
+Anthropic `tool_choice: none`, Gemini `mode: NONE`; Bedrock Converse has no
+such choice and rejects a request whose history holds tool calls without
+tools, so it sends them unchanged). A call the model makes anyway settles the
+run as `budget_exhausted` without running; an
 elapsed wall clock or a provider turn that omits usage under a cost cap grants
 no further provider turn. Every bound produces the typed `budget_exhausted` outcome, never a
 provider failure, so the TUI, server, and headless adapter observe one
