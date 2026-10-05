@@ -38,7 +38,6 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9 and T12 shipped (v0.1.0, #45, #49, #50); open: T11 `view_image`, T13 ablations, T14 `select_tools` index; T10 `terminal` gated |
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers. W1, W2, S1, S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
-| [`fleet-clients.md`](./fleet-clients.md) | Proposed: the fleet experience (web + mobile over many machines), stack recommendation, speed budgets; amends multi-surface slices and proposes S7, W4, W5, U8 |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
 | [`decision-models.md`](./decision-models.md) | The only decision-model plan (was `jev.md`). DM1–DM9: decision seam in `qq-provider`, `qq-decision` crate, System One and OpenAI adapters, config, calibration, vendor comparison (ADR-0055). JV1–JV13 carried: repairs, context, hold lifecycle, receipts, shadow, pilot, opt-in UX, speed, qualification. DX1–DX6 differentiation experiments. Proposed |
