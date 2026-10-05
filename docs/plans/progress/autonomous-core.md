@@ -847,3 +847,5 @@ pins the rule, and it fails with Codex's suggested change.
 - Baseline already exceeds 48 MB absolute size budget; AC12 52,133,168 bytes (+4.10% vs AC10, inside 5% relative budget). Absolute budget NOT passed or waived.
 - Raw evidence: .worktrees/ac10/target/qq-perf/ready; baseline .worktrees/ac1 at c37afe25; no generated evidence committed.
 - Ready for Codex review; merge order #253, #256, #258. AC12.2/.3 and full smoke remain future work; AP4.2 untouched.
+
+Final independent source review: Approve (async admission/cancellation, feature gates, cache/MCP extraction and failure classification). All three PR draft flags removed; AC10/AC11 current-head GitHub CI green.
