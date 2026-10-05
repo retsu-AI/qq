@@ -68,9 +68,8 @@ rule and may reach plain-HTTP LAN servers through the host HTTP client.
                                                + `tailscale serve` for TLS
 ```
 
-No new transport protocol: HTTP and SSE only. Each incompatible strict wire
-change bumps the current `PROTOCOL_VERSION`; HTTP/2, TLS, and policy-only
-changes do not force a bump.
+No new wire protocol: HTTP and SSE only. One `PROTOCOL_VERSION` bump (16 → 17)
+carries every additive server change in Phase 2.
 
 ## Task Index
 
@@ -83,29 +82,25 @@ mobile. Phases 1 and 2 are independent and may run in parallel worktrees.
 | W2 | 1 | Extract reducer and client model into `qq-client::state` | W1 | `crates/qq-client/src/state*`, `crates/qq-tui/src/{app,model}.rs` |
 | W3 | 1 | Multi-server client model and overview | W1, W2, S1 | `crates/qq-client/src/servers*` |
 | S1 | 2 | Stable `ServerId` and display name in `ServerInfo`; protocol 17 | — | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-core/src/store*` (metadata), `src/runtime.rs` |
-| S2 | 2 | Client enrollment: scoped credentials, pairing, revocation, CLI | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `src/cli.rs`, `src/main.rs` |
+| S2 | 2 | Client enrollment: pairing codes, credentials, revocation, CLI | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `src/cli.rs`, `src/main.rs` |
 | S3 | 2 | CORS layer, off by default | — | `crates/qq-server/` |
 | S4 | 2 | Explicit non-loopback bind with TLS, gated on enrollment | S2 | `crates/qq-server/`, `crates/qq-protocol/src/local.rs`, `src/main.rs`, `docs/runbooks/remote-server.md` |
 | S5 | 2 | Workspace catalog and bounded browse under configured roots | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `crates/qq-protocol/` |
 | S6 | 2 | `server` configuration section and root translation | S2–S5 | `crates/qq-config/`, `src/` |
 | TB | gate | Tracer bullet: throwaway page streams a transcript from a remote server | W1, W2, S1, S2, S3 | none committed |
-| S7 | 2 | Server stream tiers, transcript paging, approval previews, spill reads | S2, S5 | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-client/` |
-| W4 | 3 | Bounded durable fleet cache and dependent-command outbox | W3, S7 | `apps/fleet/` |
-| W5 | 3 | Incremental render model with document-wide reference correctness | U1 | `apps/render/` |
-| U1 | 3 | ADR-0017 measured spike, then `apps/` workspace, CI, size gate, PWA | W1, W2 | `apps/`, `.github/workflows/` (root request) |
-| U2 | 3 | Servers screen: pair, list, connection state, overview | U1, W3, S2 | `apps/ui/`, `apps/web/` |
-| U3 | 3 | Workspaces and session tree | U2, S5 | `apps/ui/` |
-| U4 | 3 | Transcript: turn-ordered, virtualized, markdown, diffs | U3, W5 | `apps/ui/` |
-| U5 | 3 | Act: composer, steer, approvals, pickers, session commands | U4 | `apps/ui/` |
-| U6 | 3 | Attention view and notifications | U5 | `apps/ui/`, `apps/web/` |
-| U7 | 3 | Web resilience states and measured performance gates; hosting | U5 | `apps/ui/`, `apps/web/` |
+| U1 | 3 | `apps/` workspace, framework per ADR-0017, CI, size gate, PWA | W1, W2 | `apps/`, `.github/workflows/` (root request) |
+| U2 | 3 | Servers screen: pair, list, connection state, overview | U1, W3, S2 | `apps/web/` |
+| U3 | 3 | Workspaces and session tree | U2, S5 | `apps/web/` |
+| U4 | 3 | Transcript: turn-ordered, virtualized, markdown, diffs | U3 | `apps/web/` |
+| U5 | 3 | Act: composer, steer, approvals, pickers, session commands | U4 | `apps/web/` |
+| U6 | 3 | Attention view and notifications | U5 | `apps/web/` |
+| U7 | 3 | Resilience states and measured performance gates; hosting | U5 | `apps/web/` |
 | D1 | 4 | Tauri shell, keychain credentials, deep-link pairing | U5 | `apps/shell/` |
 | D2 | 4 | Bundled `qq` sidecar local server | D1 | `apps/shell/`, `xtask/` |
 | D3 | 4 | Host-side HTTP for plain-HTTP LAN servers; installers | D1 | `apps/shell/`, `xtask/` |
-| M1 | 5 | Inbox-first mobile layout and measured mobile startup/frame gates | U5 | `apps/ui/`, `apps/mobile/` |
+| M1 | 5 | Responsive pass | U5 | `apps/web/` |
 | M2 | 5 | Keystore credentials and QR pairing | D1 | `apps/shell/` |
 | M3 | 5 | Foreground notifications | M1 | `apps/shell/` |
-| FG | gate | Five-server browser/phone fleet acceptance | S7, W4, W5, U6, U7, M2, M3 | `docs/plans/progress/g-fleet-clients.md` (evidence only) |
 
 ## Phase 1 — Client Core
 
@@ -153,28 +148,17 @@ Shipped in #14: `ServerInfo.server_id` is a stable per-store identity. See `prot
 hash lookup per request; measure).
 **Acceptance:**
 
-- Store table `client_credentials { client_id, name, credential_hash, scope_bits,
+- Store table `client_credentials { client_id, name, credential_hash,
   created_at, last_seen_at, revoked_at }`.
 - `POST /v1/enroll { pairing_code, client_name }` → `{ client_id, credential,
   server_info }`, unauthenticated, rate-limited (5 attempts per minute per
   peer; a code is invalidated after 3 failures; codes expire after 5 minutes
-  and are single-use).
-- The loopback credential has all scopes. Enrolled credentials carry only the
-  server-confirmed `read`, `run`, `approve`, `session_admin`, and
-  `client_admin` bits; the complete route/command matrix is in
-  `fleet-clients.md` §5 and is tested fail-closed, including authenticated
-  health/capabilities/models reads and explicit prune, compact, compaction
-  rollback, and approval-delegate command assignments.
-- `GET /v1/clients`, pairing-code minting, and
-  `POST /v1/clients/revoke` require loopback or `client_admin`.
+  and are single-use). `GET /v1/clients`, `POST /v1/clients/revoke`
+  authenticated.
 - Auth middleware accepts the loopback token or an enrolled credential in
   constant time; revoked credentials fail immediately.
-- CLI: `qq pair` prints a code and a
-  `qq://pair?base_url=…&server_id=…&code=…` URL. The base URL is the
-  validated `--advertised-url` override or `server.advertised_url`; it is
-  never inferred from a listener bind. Without one, QR/deep-link minting fails
-  with an actionable error. Until S6 persists the value, the S2 override is
-  required. `qq clients list|revoke` manages credentials.
+- CLI: `qq pair` prints a code and a `qq://pair?host=…&code=…` URL;
+  `qq clients list|revoke`.
 - Independent second review (auth surface). Security review on the PR.
 
 **Docs:** ADR-0015; `docs/design/protocol.md` auth section.
@@ -197,8 +181,7 @@ Shipped in #16: configurable CORS allowlist in `qq-server`. See `architecture.md
   refused with an actionable error. Plain HTTP off loopback is impossible.
 - TLS via `rustls` (root request for the dependency; one bump).
 - Runbook: `tailscale serve` recipe (preferred), native TLS recipe, firewall
-  notes. The Tailscale recipe records its HTTPS proxy URL in
-  `server.advertised_url`; the server continues listening on loopback.
+  notes.
 - Tests: refusal matrix; TLS smoke test with a self-signed certificate.
 
 **Docs:** ADR-0016; `docs/design/architecture.md` § Local And Remote
@@ -226,11 +209,9 @@ Networking (root request); runbook.
 
 **Inputs:** S2–S5.
 **Owned paths:** `crates/qq-config/`, `src/`.
-**Acceptance:** `server: ( display_name, bind, advertised_url,
-tls: (cert, key), allowed_origins, workspace_roots )` in `config.ron`; the
-root validates `advertised_url` with the same base-URL grammar as
-`ServerConnection`, translates the section into `ServerOptions`, and
-`qq config explain` covers every key.
+**Acceptance:** `server: ( display_name, bind, tls: (cert, key),
+allowed_origins, workspace_roots )` in `config.ron`; the root translates it
+into `ServerOptions`; `qq config explain` covers every key.
 
 ### TB — Tracer bullet (phase gate)
 
@@ -263,13 +244,12 @@ IDLE / DONE with the shared `Group` logic; snapshot → subscribe;
 
 ### U4 — Transcript
 
-**Inputs:** U3, W5. **Owned paths:** `apps/ui/`.
-
 Turn-ordered message/tool interleaving per `docs/design/transcript.md`;
 virtualized list (bounded DOM; only the open block re-renders while
-streaming); render `qq-render`'s incremental markdown, highlight-span, and
-diff models rather than introducing a second parser in `qq-ui`; reasoning
-fold; 4 KiB tool-output tails.
+streaming); markdown via `pulldown-cmark`; highlighting deferred or via a
+light JS highlighter through `wasm-bindgen` (tree-sitter does not target
+`wasm32-unknown-unknown` cleanly); diff rendering; reasoning fold; 4 KiB
+tool-output tails.
 
 ### U5 — Act
 
@@ -301,8 +281,8 @@ Static hosting on Cloudflare Pages.
 
 ## Phase 5 — Mobile
 
-- **M1** Inbox-first mobile layout in the shared UI plus the `< 300 ms` warm
-  startup and mobile frame gates, measured through the Tauri mobile shell.
+- **M1** Responsive pass (mobile-first layout is done during Phase 3, so this
+  is small).
 - **M2** Keychain/Keystore credentials; QR pairing.
 - **M3** Foreground notifications only. Push requires a relay and is out of
   scope.

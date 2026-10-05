@@ -38,10 +38,9 @@ in [`progress/root.md`](./progress/root.md) as before.
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9 and T12 shipped (v0.1.0, #45, #49, #50); open: T11 `view_image`, T13 ablations, T14 `select_tools` index; T10 `terminal` gated |
 | [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit; D6b open |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop, and mobile clients over many headless servers. W1, W2, S1, S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
-| [`fleet-clients.md`](./fleet-clients.md) | Proposed: the fleet experience (web + mobile over many machines), stack recommendation, speed budgets; amends multi-surface slices and proposes S7, W4, W5, U8 |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration |
-| [`decision-models.md`](./decision-models.md) | The only decision-model plan (was `jev.md`). DM1–DM9: decision seam in `qq-provider`, `qq-decision` crate, System One and OpenAI adapters, config, calibration, vendor comparison (ADR-0055). JV1–JV13 carried: repairs, context, hold lifecycle, receipts, shadow, pilot, opt-in UX, speed, qualification. DX1–DX6 differentiation experiments. Proposed |
+| [`jev.md`](./jev.md) | The only Jev plan: JV1–JV3 defect repairs (activation, headless, precision), JV4–JV6 context, hold lifecycle and receipts, JV7–JV8 shadow then pilot, JV9 opt-in UX, JV10–JV12 speed, JV13 qualification. Proposed |
 | [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
 | [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
 
@@ -64,7 +63,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | `speed-first-…` | Implemented; tails not repeatable on the shared host; retained, not waived |
 | — | Seven H22 deferrals (`StaticHttpAuth`, headless writer, config parse-once, reviewer via `PlanCache`, run-loop enums, args-parse-once, `Arc` calls) | `speed-first-…` § Bundled Fixes | Each is its own slice when that code is next opened |
 | — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
-| — | JV1 remainder, JV4 and DM1 (parallel), then DM2–DM4, JV5–JV6 | [`decision-models.md`](./decision-models.md) | Opted-in users are prompted for most held calls, and a second vendor (OpenAI Decisions) needs one decision seam instead of a fourth copy of the Jev code. Awaiting plan acceptance; ADR-0055 is accepted |
+| — | JV1–JV3 Jev defect repairs (parallel), then JV4–JV6 | [`jev.md`](./jev.md) | Opted-in users are prompted for most held calls; the design doc's findings 3–6 are defects, not policy. Awaiting plan acceptance |
 | — | TE1 offline efficiency baseline, then TE2/TE4 | [`token-efficiency.md`](token-efficiency.md) | Measurement first; paid runs remain with ENG-809 and existing reliability priorities are unchanged |
 
 ## Ownership
@@ -81,7 +80,7 @@ in [`progress/root.md`](./progress/root.md) as before.
 | Goals (`/goal`): the session goal, goal driver, `update_goal`, completion check, goal budgets, waits, `qq run --goal` | `goals.md` |
 | Mid-run compaction | shipped (ADR-0039); remaining surfaces and live evidence are `autonomous-core.md` AC14 and Goal 5 |
 | Diagnostics integration | `lsp-diagnostics.md` |
-| Decision models (Jev, OpenAI Decisions, future vendors): the provider seam, `qq-decision`, review, routing, approval delegate, observer, calibration and qualification | [`decision-models.md`](./decision-models.md); design [`../design/decision-models.md`](../design/decision-models.md) |
+| Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md); design [`../design/jev.md`](../design/jev.md) |
 | First-run and configuration UX, install paths, community files | shipped (onboarding UX, ENG-875); receipt in `progress/onboarding-ux.md` |
 | User guide pages and the docs site's content | `guide-expansion.md` |
 | Run outcome policy: turn recovery, `Paused`, checkpoint, admission validation, tool-argument leniency, approval deadline | `run-reliability.md` |

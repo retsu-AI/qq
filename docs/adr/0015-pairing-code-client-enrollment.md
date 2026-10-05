@@ -35,35 +35,20 @@ individually; the loopback token continues to work unchanged.
 Concrete shape:
 
 - **Store table** `client_credentials { client_id BLOB PK, name TEXT,
-  credential_hash BLOB, scope_bits INTEGER, created_at_ms, last_seen_at_ms,
-  revoked_at_ms NULL }`
+  credential_hash BLOB, created_at_ms, last_seen_at_ms, revoked_at_ms NULL }`
   in the session store (schema bump; the store id is the server id, so
   credentials are scoped to the server that issued them). `credential_hash`
   is `SHA-256(credential_bytes)`: the credential is 32 random bytes, so a fast
   hash is sufficient and a KDF would only add latency to every request.
-- **Pairing code**: `qq pair [--name <hint>] [--ttl 5m]
-  [--advertised-url <https://host[:port]>]` (running against the local server)
-  asks the server to mint a code: 8 characters from a 32-symbol
+- **Pairing code**: `qq pair [--name <hint>] [--ttl 5m]` (running against the
+  local server) asks the server to mint a code: 8 characters from a 32-symbol
   alphabet (no `0/O/1/I`), ~40 bits, single-use, expires after 5 minutes,
   invalidated after 3 wrong attempts. The server holds pending codes in
   memory only (bounded: 8 outstanding; minting a ninth fails). The CLI prints
-  the code and a
-  `qq://pair?base_url=<base_url>&server_id=<server_id>&code=<code>` URL / QR
-  for the shells' deep-link handler. `base_url` is selected from the validated
-  one-shot override or S6's `server.advertised_url`, in that order. It uses the
-  same grammar as `ServerConnection`; the CLI never derives it from
-  `listener.local_addr()`. If neither source exists, QR/deep-link minting
-  fails and tells the operator to set `server.advertised_url` (the persistent
-  path for loopback + `tailscale serve`) or pass the override. Until S6 lands,
-  the override is required. Before minting, the server-side
-  prompt confirms the selected URL and the exact independent scopes granted:
-  `read`, `run`, `approve`, `session_admin`, and `client_admin`. No scope is
-  implied by another except where a route explicitly also requires `read` to
-  return state.
+  the code and a `qq://pair?host=<base_url>&code=<code>` URL / QR for the
+  shells' deep-link handler.
 - **Enrollment**: `POST /v1/enroll { pairing_code, client_name }` is the only
-  unauthenticated data route; CORS preflight carries no application data.
-  `/v1/health` remains authenticated by the loopback token or an enrolled
-  credential with `read`. Success returns `{ client_id,
+  unauthenticated route besides `/v1/health`. Success returns `{ client_id,
   credential, server_info }` exactly once; the code is consumed. Rate limit:
   5 attempts per minute per peer address; a code with 3 failures is
   invalidated regardless. Responses for wrong/expired/unknown code are the
@@ -77,29 +62,17 @@ Concrete shape:
   `qqc1_` → look up `client_id`, reject if `revoked_at_ms` is set or hash
   mismatches; on success stamp `last_seen_at_ms` at most once per minute per
   client (write coalesced through the store worker so the hot path is a read).
-  Verified credentials are cached in memory as `(client_id → {
-  credential_hash, immutable_scope_bits, revoked })`. Authentication and
-  authorization use that one cache lookup plus SHA-256 of 32 bytes and a
-  bitset check. Scope bits are immutable for the credential: changing a grant
-  revokes it and issues a new credential. Revocation invalidates the cache
-  entry before it is acknowledged; the next request reloads the hash, scope
-  bitset, and revocation state together.
-- **Authorization**: every route and session command checks the complete
-  matrix in `docs/plans/fleet-clients.md` §5 after authentication. Observation
-  requires `read`; run creation/control requires `run`; approval decisions
-  require `approve`; archive/delete/rename requires `session_admin`; client
-  enumeration, revocation, pairing-code minting, and server/CORS/root changes
-  require `client_admin`. Missing scopes fail before dispatch with a typed
-  forbidden response. The loopback token carries all scopes.
+  Verified credentials are cached in memory `(client_id → hash, revoked)` and
+  invalidated by the revoke command, so the per-request cost is a map lookup
+  plus SHA-256 of 32 bytes.
 - **Management**: `GET /v1/clients` and `POST /v1/clients/revoke { client_id }`
-  require the loopback token or `client_admin`. CLI: `qq clients
+  (authenticated; loopback token or any enrolled client). CLI: `qq clients
   list`, `qq clients revoke <id|name>`. Revocation is immediate: the cache
   entry flips and the next request gets `401`. A client cannot revoke
   itself into a state that leaves zero admins: the loopback token is always
   valid, so there is no lock-out.
-- **`qq_protocol`**: new scoped `EnrollRequest`, `EnrollResponse`,
-  `ClientSummary`, `RevokeClientRequest`, forbidden-response fixtures, and a
-  `PROTOCOL_VERSION` bump for the strict wire changes. `ServerInfo`
+- **`qq_protocol`**: new `EnrollRequest`, `EnrollResponse`, `ClientSummary`,
+  `RevokeClientRequest`, wire fixtures, `PROTOCOL_VERSION` 18. `ServerInfo`
   gains `enrollment: bool` so a UI knows whether the server accepts pairing.
 - **Where the credential lives on the client**: decision #6 in
   `decisions-needed.md` (IndexedDB for the hosted web app, OS keychain in the
@@ -110,9 +83,8 @@ Concrete shape:
 
 - Positive: one person, one action, one client admitted; a lost phone is one
   `qq clients revoke`; the operator's loopback token never leaves the host;
-  a read-only kiosk cannot manage clients or mutate sessions; the local TUI is
-  untouched; hot path cost is one hash-map lookup, one 32-byte SHA-256, and a
-  bitset scope check (measure: command-acknowledgement latency gate in S2).
+  the local TUI is untouched; hot path cost is one hash-map lookup and one
+  32-byte SHA-256 (measure: command-acknowledgement latency gate in S2).
 - Negative / risks: pairing codes are low-entropy by design (40 bits) and rely
   on the 5-minute TTL, single use, 3-strike invalidation, and per-peer rate
   limit; anyone who can reach the enroll route and read the code within the
