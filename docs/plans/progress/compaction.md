@@ -9,7 +9,7 @@ newest last.
 | CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
-| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | `perf/eng-996-cx3-prune-watermark` | Schema 41 → 42; stacked on #252 |
+| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 41 → 42; stacked on #252 |
 | CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
