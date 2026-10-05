@@ -4062,6 +4062,124 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
 }
 
 #[test]
+fn project_packs_are_their_own_trust_subject() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    // A repository that ships only a pack, with no project configuration.
+    let manifest = tree.write(
+        "work/.qq/packs/evil/pack.ron",
+        r#"(schema: 1, id: "evil", version: "1.0.0", mcp: {
+            "x": Stdio(command: "sh", args: ["-c", "true"], eager: true),
+        })"#,
+    );
+    let request = tree.request();
+    let canonical = fs::canonicalize(&manifest).unwrap();
+
+    let untrusted = tree.loader().load(&request);
+    let Err(ConfigError::TrustRequired { pending, .. }) = untrusted else {
+        panic!("a pack-only repository must require trust: {untrusted:?}");
+    };
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source().path(), Some(canonical.as_path()));
+    assert!(
+        pending[0]
+            .declarations()
+            .contains(&TrustDeclaration::McpStdio {
+                name: "x".to_owned(),
+                command: "sh".to_owned(),
+            })
+    );
+    let scanned = tree.loader().pending_trust(&request).unwrap();
+    assert_eq!(scanned.len(), 1, "`qq trust` sees the pack: {scanned:?}");
+    assert_eq!(scanned[0].digest(), pending[0].digest());
+
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.packs()["evil"].version(), "1.0.0");
+    assert!(snapshot.mcp_servers().contains_key("x"));
+
+    // Changing the trusted manifest asks again.
+    tree.write(
+        "work/.qq/packs/evil/pack.ron",
+        r#"(schema: 1, id: "evil", version: "1.0.1", mcp: {
+            "x": Stdio(command: "sh", args: ["-c", "false"]),
+        })"#,
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+
+    // A pack added after the project's configuration was trusted asks too.
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, mcp: { "notes": Stdio(command: "notes-mcp") })"#,
+    );
+    tree.loader().grant_pending_trust(&request).unwrap();
+    assert!(tree.loader().load(&request).unwrap().packs().is_empty());
+    tree.write(
+        "work/.qq/packs/late/pack.ron",
+        r#"(schema: 1, id: "late", version: "1.0.0", mcp: { "y": Stdio(command: "y") })"#,
+    );
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("a pack added after trust must require trust");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].source().label().ends_with("late/pack.ron"));
+}
+
+#[test]
+fn explicit_project_pack_manifests_are_trust_gated_by_content() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write(
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, packs: { "kit": Pack(path: "../vendor/kit") })"#,
+    );
+    let request = tree.request();
+
+    // One review covers the declaring file and the manifest it names.
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("an untrusted project file requires trust");
+    };
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    let reviewed: Vec<ProcessTrust> = pending.iter().filter_map(PendingTrust::reviewed).collect();
+    tree.loader()
+        .grant_reviewed_trust(&request, &reviewed)
+        .unwrap();
+    assert_eq!(
+        tree.loader().load(&request).unwrap().packs()["kit"].version(),
+        "1.0.0"
+    );
+
+    // The declaring file is unchanged, but the pack it names changed.
+    tree.write(
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "2.0.0", mcp: { "x": Stdio(command: "sh") })"#,
+    );
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("a changed explicit pack manifest must require trust");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].source().label().ends_with("vendor/kit/pack.ron"));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.packs()["kit"].version(), "2.0.0");
+    assert!(snapshot.mcp_servers().contains_key("x"));
+}
+
+#[test]
 fn agent_pack_manifests_fail_fast_on_every_documented_error() {
     let tree = TempTree::new();
     tree.write(

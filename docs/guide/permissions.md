@@ -15,7 +15,10 @@ A repository can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
 `.qq/packs/`. Those files can declare providers, MCP servers that run
 commands, sub-agent rosters, and grants that let tools run without asking.
 QQ therefore refuses to load a project file that declares anything sensitive
-until you have accepted that exact content.
+until you have accepted that exact content. Every project `pack.ron` (under
+`.qq/packs/` or named by a project `packs` entry) is sensitive on its own,
+even in a repository with no other configuration, and changing one asks
+again.
 
 Bare `qq` opens the TUI and asks, listing each pending file and what it
 declares:

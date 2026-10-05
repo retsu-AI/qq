@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ConfigError, MAX_PROFILE_NAME_BYTES, ProfileApprovalMode, SourceIdentity, SourceKind,
+    TrustDeclaration,
     document::{McpServerPatch, UniqueMap},
     loader::Probes,
 };
@@ -253,6 +254,35 @@ impl AgentPack {
 
     pub(crate) const fn mcp(&self) -> &BTreeMap<String, McpServerPatch> {
         &self.mcp
+    }
+
+    /// The sections and declarations a trust prompt lists for this
+    /// manifest: the pack id, its profiles, and each MCP server with its
+    /// command or URL.
+    pub(crate) fn trust_summary(&self) -> (Vec<&'static str>, Vec<TrustDeclaration>) {
+        let mut sections = vec!["packs"];
+        let mut declarations = vec![TrustDeclaration::Packs(vec![self.id.clone()])];
+        if !self.profiles.is_empty() {
+            sections.push("profiles");
+            declarations.push(TrustDeclaration::Other("profiles"));
+        }
+        if !self.mcp.is_empty() {
+            sections.push("mcp");
+        }
+        for (name, patch) in &self.mcp {
+            declarations.push(match patch {
+                McpServerPatch::Stdio { command, .. } => TrustDeclaration::McpStdio {
+                    name: name.clone(),
+                    command: command.clone(),
+                },
+                McpServerPatch::Http { url, .. } => TrustDeclaration::McpHttp {
+                    name: name.clone(),
+                    url: url.clone(),
+                },
+                McpServerPatch::Remove => TrustDeclaration::McpRemoved { name: name.clone() },
+            });
+        }
+        (sections, declarations)
     }
 }
 
