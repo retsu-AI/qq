@@ -1,5 +1,19 @@
 # Ledger — Autonomous core
 
+## 2026-10-05 — AC12.1 extraction (ENG-1009)
+
+Stacked on AC11 #256 and AC10 #253. Concrete qq-harness library now owns the
+unchanged PlanCache/LiveBindings and configured MCP bridge. Binary re-export shims
+preserve call sites. Endpoint redaction moved; typed McpBuildError isolates cache
+and MCP configuration failures without moving binary-only model discovery.
+Repository layout and root manifests/maps updated. No default/wire/schema change.
+22 moved cache/MCP tests pass. Workspace tests and all-target/all-feature Clippy
+passed before the final review fix. Independent review caught cache poison changing
+Server to Configuration; restored classification with a focused passing regression.
+Startup/plan-compile A/B+A/A evidence still pending; no performance acceptance claimed.
+One-dependency smoke belongs after AC12.3, not this support-module extraction.
+
+
 ## 2026-10-05 — AC10 implementation (ENG-1006)
 
 Based on c37afe25 (CX0–CX2 merged); AP4.2 remains owned by a separate active agent.
@@ -83,7 +97,7 @@ appended below, newest last.
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | In review | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; measured default size +128 bytes; receipt below |
-| AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
+| AC12 | `qq-harness` crate (three mechanical moves) | AC12.1 In review; .2/.3 Planned | [ENG-1009](https://linear.app/retsu-ai/issue/ENG-1009) | `refactor/eng-1009-ac12-1-harness-mcp` stacked on #256 | Plan cache/MCP bridge moved; measured relative budgets pass; pressured-host caveat |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
@@ -829,6 +843,23 @@ answer is a progress event" without the qualifier. Both now say "an answer
 from a child that answered". `only_a_delivered_answer_restarts_the_stall_count`
 pins the rule, and it fails with Codex's suggested change.
 
+
+### 2026-10-05 — review readiness qualification (#253 → #256 → #258)
+
+- Added queued cancellation/concurrency/permit-recovery test; passes on current-thread Tokio.
+- Each branch tip passes fmt, workspace all-target/all-feature Clippy, workspace tests, build.
+- First AC10 workspace run hit existing headless rollover timeout; entire rerun passed.
+- AC11 minimal tests/Clippy pass; normal tree excludes htmd. Default size 50,081,072 → 50,081,200 (+128 bytes).
+- 30 alternating A/B pairs plus A/A: AC10 plan median 26,288 → 26,149 ns (A/A 25,994/26,112).
+- AC12 vs AC10 plan median 25,330 → 25,096 ns; p95 26,230 → 25,754 (A/A 25,826/25,881).
+- Fresh-process version p95 1,964,613 → 2,185,879 ns (+11.3%, 15% budget; A/A 1,937,833/2,026,190).
+- Isolated server readiness p95 190,611,340 → 215,522,868 ns (+13.1%, 20% budget; A/A 186,967,424/215,898,318).
+- I/O pressure some avg10 18–41%; measured relative gates pass but quiet-host qualification remains; no speedup claim.
+- Baseline already exceeds 48 MB absolute size budget; AC12 52,133,168 bytes (+4.10% vs AC10, inside 5% relative budget). Absolute budget NOT passed or waived.
+- Raw evidence: .worktrees/ac10/target/qq-perf/ready; baseline .worktrees/ac1 at c37afe25; no generated evidence committed.
+- Ready for Codex review; merge order #253, #256, #258. AC12.2/.3 and full smoke remain future work; AP4.2 untouched.
+
+Final independent source review: Approve (async admission/cancellation, feature gates, cache/MCP extraction and failure classification). All three PR draft flags removed; AC10/AC11 current-head GitHub CI green.
 ### 2026-10-04: Stack merged; AP4.2 (ENG-1005) implemented
 
 #238, #240, #242 and #244 merged to `main` on 2026-10-05 (UTC). ENG-1000 to
@@ -1141,3 +1172,7 @@ The finding is right; fixed.
 
 - Updated AC11 fmt/workspace Clippy/tests/build, minimal Clippy/tests, and plan_compile bench pass. First minimal suite wall-clock test failed (provider calls 0); full rerun passed. Evidence `target/qq-perf/codex/ac11-*.log`.
 - Updated-main AC11 default release bytes: 50144560; original same-host +128-byte receipt retained above. No unchanged-absolute-budget claim.
+
+### 2026-10-06 — AC12.1 stack conflict resolution
+
+Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only autonomous-core ledger conflict, preserving both AP4.2 and embedding receipts. AC10/AC11 Codex corrections now present on their own branches and inherited here.

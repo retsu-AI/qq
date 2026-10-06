@@ -2817,6 +2817,7 @@ dependencies = [
  "qq-client",
  "qq-config",
  "qq-core",
+ "qq-harness",
  "qq-mcp",
  "qq-protocol",
  "qq-provider",
@@ -2924,6 +2925,26 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "url",
+]
+
+[[package]]
+name = "qq-harness"
+version = "0.1.5"
+dependencies = [
+ "axum",
+ "futures-util",
+ "qq-auth",
+ "qq-config",
+ "qq-core",
+ "qq-mcp",
+ "qq-protocol",
+ "qq-provider",
+ "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

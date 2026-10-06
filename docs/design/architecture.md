@@ -83,6 +83,9 @@ leaves no metadata behind.
 
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
+`qq-harness` owns the bounded plan cache and configured MCP bridge; the binary
+re-exports them while runtime/model loading and headless outcome driving are
+still being extracted. Core does not depend on harness or application configuration.
 
 The workspace is:
 
@@ -110,6 +113,11 @@ crates/
   qq-core/
     Cargo.toml
     src/lib.rs
+  qq-harness/
+    Cargo.toml
+    src/lib.rs
+    src/plan.rs
+    src/mcp.rs
   qq-mcp/
     Cargo.toml
     src/lib.rs

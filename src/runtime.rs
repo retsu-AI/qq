@@ -2988,26 +2988,7 @@ fn credential_reference(reference: &SecretRef) -> CredentialReference {
 /// An endpoint reduced to scheme, host, port, and path. Userinfo, query, and
 /// fragment can carry credentials and are dropped; an unparseable endpoint is
 /// described only by its scheme so no raw bytes leak into a descriptor.
-pub(crate) fn describe_endpoint(endpoint: &str) -> String {
-    match reqwest::Url::parse(endpoint) {
-        Ok(url) => {
-            let mut described = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                described.push_str(host);
-            }
-            if let Some(port) = url.port() {
-                described.push(':');
-                described.push_str(&port.to_string());
-            }
-            described.push_str(url.path());
-            described
-        }
-        Err(_) => endpoint.split_once("://").map_or_else(
-            || "unparseable".to_owned(),
-            |(scheme, _)| format!("{scheme}://<unparseable>"),
-        ),
-    }
-}
+pub(crate) use qq_harness::describe_endpoint;
 
 impl ResolvedAuth {
     fn into_http(self) -> Result<HttpAuth, AuthError> {
@@ -3902,6 +3883,8 @@ pub enum RuntimeBuildError {
         limit: u32,
     },
     #[error(transparent)]
+    McpBridge(#[from] qq_harness::McpBuildError),
+    #[error(transparent)]
     Mcp(#[from] qq_mcp::McpConfigError),
     #[error("runtime cache is unavailable")]
     CacheUnavailable,
@@ -3982,6 +3965,7 @@ impl RuntimeBuildError {
                 qq_provider::ProviderErrorKind::Protocol => RunFailureKind::ProviderProtocol,
             },
             Self::Mcp(_)
+            | Self::McpBridge(qq_harness::McpBuildError::Configuration(_))
             | Self::UnknownModel { .. }
             | Self::UnknownProfile(_)
             | Self::PackRequiresNewerProtocol { .. }
@@ -4001,7 +3985,8 @@ impl RuntimeBuildError {
             | Self::UnsupportedApi { .. }
             | Self::UnrepresentableOutputLimit { .. } => RunFailureKind::ProviderConfiguration,
             Self::Plan(_) => RunFailureKind::Configuration,
-            Self::CacheUnavailable
+            Self::McpBridge(qq_harness::McpBuildError::CacheUnavailable)
+            | Self::CacheUnavailable
             | Self::PlanCacheFull
             | Self::PlanCacheShutDown
             | Self::CatalogClientUnavailable(_) => RunFailureKind::Server,
@@ -4011,6 +3996,13 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extracted_mcp_cache_failure_keeps_its_server_classification() {
+        let error = super::RuntimeBuildError::from(qq_harness::McpBuildError::CacheUnavailable);
+        assert_eq!(error.failure_kind(), qq_protocol::RunFailureKind::Server);
+        assert_eq!(error.to_string(), "runtime cache is unavailable");
+    }
+
     use std::{
         collections::BTreeMap,
         fs,

@@ -26,6 +26,8 @@ reserve ADR numbers in `docs/plans/progress/root.md`.
   shared session state/reducer (`state`).
 - `crates/qq-config/`: layered configuration, policy, and provider presets.
 - `crates/qq-core/`: agent runtime, sessions, tools, and persistence behavior.
+- `crates/qq-harness/`: shared configuration-driven hosting composition, plan cache,
+  and MCP bridge (runtime loading/outcome driving extraction in progress).
 - `crates/qq-mcp/`: MCP client transport and tool discovery.
 - `crates/qq-provider/`: provider-neutral model API and provider adapters.
 - `crates/qq-protocol/`: shared commands, events, identifiers, and wire types.
