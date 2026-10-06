@@ -21,6 +21,9 @@ newest last.
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
+| T15 | Default-shaped arguments read as absent | Planned | | D9 audit; coordinate with RR10 (ENG-872) |
+| T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
+| T17 | `ToolErrorKind` severity in clients | Planned | | D9 audit; after T15 |
 
 ## Entries
 
@@ -252,3 +255,20 @@ placeholders, the digest fixture, this entry, and the `tools.md` update;
 declined checking the cursor length before trimming — tool arguments are
 already capped at 64 KiB in dispatch and a whitespace cursor costs exactly
 what omitting it costs. The general lenient decode stays RR10 (ENG-872).
+
+
+### 2026-10-06 — tool-failure audit (plan § D9)
+
+Read-only `sqlite3` over `~/.local/share/qq/sessions.sqlite3` (store schema
+42, 605 MiB): `tool_calls` (`name`, `is_error`, `result`, `arguments_json`)
+joined to `runs.resolved_model_json` `$.route`. Lifetime 30,326 calls, 3,654
+errors. The largest classes were `search cursor_invalid` 1,637 (939 in one
+run; fixed by T2.1), `read_file invalid_ranges` 447, `read_file` `{}` 162,
+and `search` stringified `include` 104 (RR10). Since 2026-09-26: 9,940 calls,
+926 errors. Read/search/tree/edit/spill errors were 753, broken down as
+ranges+offset 252, empty `{}` 234 (Codex routes only; 60 turns, 286 empty vs
+18 non-empty siblings), `edit_file` empty-string forms 63, `path_not_found`
+42, `context`>5 36, `not executed` 26, empty glob 16, empty spill `query` 11.
+After a contract error, the next call to the same tool failed 434 times and
+succeeded 127 times. `if_changed_since: "h:000000000000"` appeared on 6,293
+reads (harmless). No code change; T15–T17 opened.
