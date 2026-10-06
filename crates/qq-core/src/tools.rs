@@ -1,6 +1,7 @@
 pub(crate) mod ask;
 mod dispatch;
 mod edit;
+#[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
 mod lang;
 mod matching;
@@ -1302,6 +1303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tool-fetch")]
     fn built_in_tool_declarations_keep_their_order_and_schema_identity() {
         let specs = specs();
         assert_eq!(
@@ -1326,6 +1328,13 @@ mod tests {
                 .to_string(),
             "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
         );
+    }
+
+    #[test]
+    fn fetch_catalog_presence_matches_the_build_feature() {
+        let present = specs().iter().any(|spec| spec.name() == "fetch");
+        assert_eq!(present, cfg!(feature = "tool-fetch"));
+        assert_eq!(specs::BuiltInTool::from_name("fetch").is_some(), present);
     }
 
     #[test]

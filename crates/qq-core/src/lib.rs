@@ -6754,7 +6754,10 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 9);
+        assert_eq!(
+            requests[0].tools().len(),
+            8 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -11426,7 +11429,10 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 10);
+        assert_eq!(
+            requests[0].tools().len(),
+            9 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -12427,6 +12433,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tool-fetch")]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
         // Golden against prompt version 14: a root's system
         // prompt gains only the delegation bullet, and its tools block only
@@ -12556,6 +12563,43 @@ mod tests {
         );
         assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
         assert!(!prompt.contains("Sub-agent:"));
+    }
+
+    #[test]
+    fn agent_prompt_advertises_fetch_only_when_declared() {
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let specs = tools::specs();
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &specs,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert_eq!(
+            prompt.contains("fetch reads one public"),
+            cfg!(feature = "tool-fetch")
+        );
+        assert_eq!(
+            prompt.contains("Prefer fetch over shell"),
+            cfg!(feature = "tool-fetch")
+        );
+        let without: Vec<_> = specs
+            .into_iter()
+            .filter(|spec| spec.name() != "fetch")
+            .collect();
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &without,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(!prompt.contains("fetch reads one public"));
+        assert!(!prompt.contains("Prefer fetch over shell"));
     }
 
     #[test]

@@ -24,6 +24,27 @@ and wider gates were pending at this initial recording (superseded by the
 turn_budget_cancels_before_a_silent_over_budget_turn_can_hang; isolated rerun passed.
 No seven-day/live-soak acceptance claimed.
 
+## 2026-10-05 — AC11 minimal profile (ENG-1008), stacked on AC10 #253
+
+Default tool-fetch preserves the existing catalog/prompt golden hashes. Feature-off
+compiles no fetch implementation and advertises no fetch tool; htmd is optional.
+Kept approval wire/state and host grants available, gated the implementation and
+fetch-only tests; shell nudges no longer recommend a missing fetch tool. CI runs
+minimal tests/Clippy and checks the normal dependency tree for htmd absence.
+Independent read-only review found no blockers; release-size comparison remains
+unmeasured and not claimed. No protocol/schema/descriptor bump.
+
+Commands passed on the combined stack: cargo test --workspace;
+cargo clippy --workspace --all-targets --all-features -- -D warnings;
+cargo build --workspace; cargo test -p qq-core --no-default-features;
+cargo clippy -p qq-core --no-default-features --all-targets -- -D warnings.
+Normal minimal cargo tree contains no htmd. Full core default tests pass.
+AC10 candidate plan_compile 25,389 ns, digest 2,462 ns; different host load from
+baseline, without A/A control, so no speed improvement or within-noise claim.
+Example runs successfully and is 99 formatted lines; embedding four tests pass.
+Compilation concurrency/cancellation fixture and default release-size measurement
+were qualification work at this initial receipt; superseded by AC10/AC11 review receipts.
+
 ### 2026-10-06 — AC10 review receipt (supersedes initial pending gates)
 
 - Codex finding: AC10's own branch lacked final evidence/status; corrected here, not only in AC12.
@@ -61,7 +82,7 @@ appended below, newest last.
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
 | AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
-| AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
+| AC11 | `tool-fetch` feature; minimal profile CI | In review | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; measured default size +128 bytes; receipt below |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
@@ -1109,3 +1130,14 @@ The finding is right; fixed.
 
 2104 workspace tests pass; fmt and clippy are clean.
 
+
+### 2026-10-06 — AC11 Codex feedback and release-size receipt
+
+- Codex findings: prompts and @web advertised disabled fetch; use declared catalog for prompt instructions, leave unsupported @web literal with a client note. Feature-on/off regressions added; default prompt bytes preserved.
+- Required same-host default release comparison at 73241984 (AC10) / 0647ce54 (AC11): 50,081,072 → 50,081,200 bytes (+128 / 0.000256%, below 5% relative budget); no budget file changed. Baseline already exceeds 48,000,000 absolute cap; not waived or claimed green.
+- Commands: `cargo build --release --bin qq` on each branch. Evidence `.worktrees/ac10/target/qq-perf/ready/ac11-{release.log,size.json}` and `ac10-{release.log,measurements.json}`. This receipt qualifies the pre-feedback binary, not the later prompt fix.
+- AC10 updated-main workspace fmt/Clippy/tests/build passed; logs `.worktrees/ac10/target/qq-perf/codex/ac10-*.log`.
+- Merged AC10 with main f15a4d24; reconciled ledger preserving AP4.2 entries and AC10 receipt. New-head tests/size follow below after execution.
+
+- Updated AC11 fmt/workspace Clippy/tests/build, minimal Clippy/tests, and plan_compile bench pass. First minimal suite wall-clock test failed (provider calls 0); full rerun passed. Evidence `target/qq-perf/codex/ac11-*.log`.
+- Updated-main AC11 default release bytes: 50144560; original same-host +128-byte receipt retained above. No unchanged-absolute-budget claim.

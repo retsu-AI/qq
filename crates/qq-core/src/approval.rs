@@ -254,7 +254,14 @@ pub(crate) fn classify(
     arguments: &str,
     network: &crate::tools::network::NetworkPolicy,
 ) -> ToolClass {
+    #[cfg(not(feature = "tool-fetch"))]
+    let _ = network;
     match effect {
+        #[cfg(not(feature = "tool-fetch"))]
+        EffectClass::Network => ToolClass::Network {
+            host: None,
+            refusal: None,
+        },
         EffectClass::ReadOnly if name == crate::tools::SPAWN_AGENT_TOOL => spawn_class(arguments),
         EffectClass::ReadOnly => ToolClass::ReadOnly,
         EffectClass::Mutating => ToolClass::Mutating,
@@ -263,6 +270,7 @@ pub(crate) fn classify(
         EffectClass::Interactive => ToolClass::Interactive {
             question: crate::tools::ask::parse(arguments).ok(),
         },
+        #[cfg(feature = "tool-fetch")]
         EffectClass::Network => match crate::tools::fetch::target_host(arguments, network) {
             Ok(host) => ToolClass::Network {
                 host: Some(host),
@@ -626,6 +634,7 @@ pub(crate) fn evaluate(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tool-fetch")]
     use std::sync::Arc;
 
     use super::*;
@@ -744,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tool-fetch")]
     fn network_calls_follow_the_decision_table_and_blocked_hosts_are_denied_under_every_mode() {
         let open = NetworkPolicy::default();
         let public = classify(

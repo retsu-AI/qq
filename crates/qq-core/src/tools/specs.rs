@@ -1,3 +1,5 @@
+#[cfg(feature = "tool-fetch")]
+use super::fetch::MAX_URL_BYTES;
 use std::sync::OnceLock;
 
 use qq_protocol::{ChildAuthority, DelegationRole, DelegationRoster};
@@ -8,7 +10,6 @@ use serde_json::json;
 use super::{
     ask::{MAX_OPTION_BYTES, MAX_OPTIONS, MAX_QUESTION_BYTES, MAX_QUESTIONS, MIN_OPTIONS},
     edit::MAX_EDITS,
-    fetch::MAX_URL_BYTES,
     read::MAX_READ_LINES,
     search::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
@@ -48,6 +49,7 @@ pub(super) enum BuiltInTool {
     Shell,
     Exec,
     AskUser,
+    #[cfg(feature = "tool-fetch")]
     Fetch,
     #[cfg(test)]
     TestDelay,
@@ -58,7 +60,7 @@ pub(super) enum BuiltInTool {
 }
 
 impl BuiltInTool {
-    const ALL: [Self; 9] = [
+    const ALL: &'static [Self] = &[
         Self::ReadFile,
         Self::Tree,
         Self::Search,
@@ -67,6 +69,7 @@ impl BuiltInTool {
         Self::Shell,
         Self::Exec,
         Self::AskUser,
+        #[cfg(feature = "tool-fetch")]
         Self::Fetch,
     ];
 
@@ -80,6 +83,7 @@ impl BuiltInTool {
             "shell" => Some(Self::Shell),
             "exec" => Some(Self::Exec),
             "ask_user" => Some(Self::AskUser),
+            #[cfg(feature = "tool-fetch")]
             "fetch" => Some(Self::Fetch),
             #[cfg(test)]
             "__test_delay" => Some(Self::TestDelay),
@@ -97,6 +101,7 @@ impl BuiltInTool {
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell | Self::Exec => EffectClass::Shell,
             Self::AskUser => EffectClass::Interactive,
+            #[cfg(feature = "tool-fetch")]
             Self::Fetch => EffectClass::Network,
             #[cfg(test)]
             Self::TestDelay => EffectClass::ReadOnly,
@@ -295,6 +300,7 @@ impl BuiltInTool {
                     "additionalProperties": false
                 }),
             ),
+            #[cfg(feature = "tool-fetch")]
             Self::Fetch => ToolSpec::new(
                 "fetch",
                 "Fetch a public http(s) URL (GET, or method=HEAD for headers only). HTML is converted to markdown, JSON is formatted; the body is bounded and spills when long. Private, link-local, and managed-denied hosts are refused.",
@@ -510,7 +516,8 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
     SPECS
         .get_or_init(|| {
             BuiltInTool::ALL
-                .into_iter()
+                .iter()
+                .copied()
                 .map(BuiltInTool::spec)
                 .collect()
         })

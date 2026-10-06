@@ -4,12 +4,12 @@
 //! resolution and before connecting, and the connection is pinned to the
 //! judged addresses so a second lookup cannot rebind to a private one.
 
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::Arc,
-};
-
+#[cfg(any(feature = "tool-fetch", test))]
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use std::net::IpAddr;
+#[cfg(any(feature = "tool-fetch", test))]
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
 /// The workspace's managed host denies, translated from configuration and
 /// carried on the compiled plan. Exact lowercase names or `*.suffix`.
@@ -25,6 +25,8 @@ pub struct NetworkPolicy {
 
 /// Why a host or address may not be reached. Rendered to the model verbatim
 /// so it stops trying rather than retrying with variations.
+// Approval state retains this type even when the fetch implementation is absent.
+#[cfg_attr(not(feature = "tool-fetch"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum HostRefusal {
     #[error("url must be http or https")]
@@ -39,6 +41,7 @@ pub(crate) enum HostRefusal {
     Metadata { host: String },
     #[error("host {host} resolves to a private, loopback, or link-local address ({address})")]
     PrivateAddress { host: String, address: IpAddr },
+    #[cfg(feature = "tool-fetch")]
     #[error("host {host} did not resolve to any address")]
     Unresolved { host: String },
 }
@@ -56,10 +59,12 @@ pub fn host_grant_matches(grant: &str, host: &str) -> bool {
 }
 
 /// Name suffixes that never leave the local network.
+#[cfg(any(feature = "tool-fetch", test))]
 const PRIVATE_SUFFIXES: &[&str] = &[".local", ".internal", ".localhost", ".home.arpa", ".lan"];
 
 /// Cloud instance-metadata names; their addresses are in the private ranges
 /// too, but the name check refuses before any lookup.
+#[cfg(any(feature = "tool-fetch", test))]
 const METADATA_HOSTS: &[&str] = &[
     "metadata.google.internal",
     "metadata",
@@ -69,6 +74,7 @@ const METADATA_HOSTS: &[&str] = &[
 
 /// Judges the host name before resolution: scheme, presence, managed deny,
 /// private suffixes, metadata names, and IP literals in private ranges.
+#[cfg(any(feature = "tool-fetch", test))]
 pub(crate) fn check_host_name(
     url: &url::Url,
     policy: &NetworkPolicy,
@@ -124,6 +130,7 @@ pub(crate) fn check_host_name(
 /// 169.254.169.254 metadata address), ULA, IPv6 link-local, multicast,
 /// documentation and benchmark ranges, and IPv4-mapped IPv6 forms of any of
 /// those.
+#[cfg(any(feature = "tool-fetch", test))]
 pub(crate) fn check_address(
     host: &str,
     address: IpAddr,
@@ -145,6 +152,7 @@ pub(crate) fn check_address(
     Ok(())
 }
 
+#[cfg(any(feature = "tool-fetch", test))]
 fn is_loopback_or_private_for_tests(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
@@ -152,6 +160,7 @@ fn is_loopback_or_private_for_tests(address: IpAddr) -> bool {
     }
 }
 
+#[cfg(any(feature = "tool-fetch", test))]
 fn is_private_v4(address: Ipv4Addr) -> bool {
     const REFUSED: &[Ipv4Net] = &[
         // 0.0.0.0/8 "this" network
@@ -185,6 +194,7 @@ fn is_private_v4(address: Ipv4Addr) -> bool {
     REFUSED.iter().any(|net| net.contains(&address))
 }
 
+#[cfg(any(feature = "tool-fetch", test))]
 fn is_private_v6(address: Ipv6Addr) -> bool {
     const REFUSED: &[Ipv6Net] = &[
         // ::/128 unspecified and ::1/128 loopback
@@ -216,6 +226,7 @@ fn is_private_v6(address: Ipv6Addr) -> bool {
 
 /// Keeps `IpNet` referenced so the dependency is exercised by one type in
 /// both families (the constant tables above are typed per family).
+#[cfg(any(feature = "tool-fetch", test))]
 #[allow(dead_code)]
 const fn _uses_ipnet(_: IpNet) {}
 
