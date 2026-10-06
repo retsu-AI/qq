@@ -84,9 +84,9 @@ appended below, newest last.
 | AP3b | Stall report and child answer | Shipped | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | #240 (`594b29c`) | With ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
 | AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | Shipped | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | #244 (`fc97fab`) | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16 |
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
-| AP5 | Evidence after AP3b and AP4 | In progress | | `docs/eng-978-ap5-window` | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
+| AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
-| AC1 | `RunState` extraction by reset scope | In progress | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | `refactor/eng-1007-ac1-1-run-loop-module` on #261 | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; parent acceptance pending |
+| AC1 | `RunState` extraction by reset scope | In progress | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) (draft, on #261) | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; parent acceptance pending |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
@@ -1193,3 +1193,10 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Baseline → candidate: context assembly 76.600/61.420/66.221 → 72.643/57.868/60.213 µs (10/1k/10k); dispatch 54,606 → 103,772 ns (single diagnostic); turn 10/100/1k 18.133/15.606/15.188 → 16.588/15.443/15.278 ms.
 - Dispatch candidate same-binary A/A, 30 pairs: medians 56,488.5 / 59,885.5 ns; IO some avg10 37.45%. Initial dispatch sample not repeatable; no within-noise acceptance claimed. Full alternating A/B+A/A for all three gates remains AC1 qualification work; no performance waiver.
 - Raw evidence `target/qq-perf/ac1-2026-10-06/`; baseline captured before code change. Existing clean `.worktrees/ac1` and all unrelated worktrees preserved.
+
+
+### 2026-10-06 — AC1.2 partial implementation (ENG-1007)
+
+- Reset-scope grouping implemented; independent static review approved. Zero test edits. AC1.3 remains unimplemented and parent acceptance pending.
+- Check, formatting and workspace Clippy passed. Shared-target tests are insufficient due to cached foreign-worktree fixtures. Isolated workspace rerun: 850 core tests passed, five slice/report tests failed, three ignored; diagnosis pending. No full verification or performance acceptance claimed.
+- Evidence: `target/qq-perf/ac1-state-and-steps/`. User requests commit and continuation in dedicated worktree, returning shared checkout to main without changing local configuration.

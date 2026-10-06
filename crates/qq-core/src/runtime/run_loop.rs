@@ -1,6 +1,61 @@
 // Execution stays pull-driven: dropping the stream drops its in-flight work.
 use crate::*;
 
+/// Run-lifetime state. No slice, successful turn, steering, or compaction resets
+/// these counters. In particular text bytes and empty-output retries remain
+/// run-wide until AC2; stall and checkpoint state retain their own reset seams.
+struct RunScope {
+    handled_interrupt: u64,
+    max_output_tokens: u32,
+    empty_output_retries: u16,
+    budget: BudgetMeter,
+    audit_triggers: runtime::AuditTriggers,
+    audit_actions: Vec<runtime::AuditedAction>,
+    audit_revisions: u16,
+    checkpoint_context: Option<runtime::CheckpointContext>,
+    output_repairs: u8,
+    model_text_bytes: usize,
+    compacted_turns: u32,
+    summarizer_rejected_turns: u8,
+    stall: runtime::StallScope,
+    pins: catalog::PinSet,
+    tool_specs: Arc<[ToolSpec]>,
+    tool_schema: runtime::ToolSchemaMeasurement,
+    prompt_identity: Option<Arc<RunPromptIdentity>>,
+    call_effects: HashMap<String, catalog::EffectClass>,
+}
+
+/// Live context accounting. Stubbing remeasures both partitions; successful
+/// in-run compaction invalidates the measured chain and remeasures only the
+/// irreducible partition. Provider usage replaces the chain after each attempt.
+struct WindowScope {
+    reducible_message_bytes: u64,
+    irreducible_message_bytes: u64,
+    compatible_request: Option<(u64, u64, u64, u64)>,
+}
+
+/// Report-boundary state. Only a completed slice report clears the call count.
+/// Report notices survive retries and interrupts; completion clears the placed
+/// report, the next boundary consumes continuation, and persistence consumes notice.
+struct SliceScope {
+    slice_tool_calls: usize,
+    continuing_slice: bool,
+    placed_report: Option<runtime::TurnNotice>,
+    pending_notice: Option<runtime::TurnNotice>,
+}
+
+/// Cross-attempt turn recovery. Fault-free attempts clear retries; non-truncated
+/// attempts clear continuation and reasoning streaks. Overflow and child delivery
+/// markers are consumed independently at boundaries, never by an ordinal reset.
+struct TurnScope {
+    turn_retries: u16,
+    output_continuations: u16,
+    reasoning_only_truncations: u16,
+    provider_overflowed: bool,
+    reactive_compaction_turn: Option<u32>,
+    wait_delivered_for: Option<u32>,
+}
+
 impl plan::CompiledAgentPlan {
     /// Executes one run from this plan. No filesystem discovery happens
     /// before the first provider request unless the prompt invokes a command
@@ -86,21 +141,21 @@ impl plan::CompiledAgentPlan {
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
-            let mut handled_interrupt = steering
+            let handled_interrupt = steering
                 .as_ref()
                 .map_or(0, |steering| *steering.interrupts.borrow());
-            let mut max_output_tokens = max_output_tokens
+            let max_output_tokens = max_output_tokens
                 .unwrap_or(model_max_output_tokens)
                 .min(model_max_output_tokens);
             // Empty truncations raise the cap toward `output_ceiling` once
             // per run: the catalog limit (policy-bounded), which is above the
             // configured cap whenever the catalog knows one.
-            let mut empty_output_retries = 0_u16;
+            let empty_output_retries = 0_u16;
             // Consecutive truncated turns that produced nothing at all (not
             // even a complete tool call). Only these are "spent on
             // reasoning" in the terminal diagnostic; a raise taken for a
             // call-then-cut turn consumes the allowance but not this count.
-            let mut reasoning_only_truncations = 0_u16;
+            let reasoning_only_truncations = 0_u16;
             // The session owner supplies the original execution admission,
             // including time spent loading or automatically compacting.
             let mut budget = BudgetMeter::new(limits, pricing, started);
@@ -257,7 +312,7 @@ impl plan::CompiledAgentPlan {
             if allow_tools && catalog.exposure() == catalog::Exposure::Progressive {
                 recover_pins(&messages, &catalog, &mut pins);
             }
-            let mut tool_specs: Arc<[ToolSpec]> = if pins.is_empty() {
+            let tool_specs: Arc<[ToolSpec]> = if pins.is_empty() {
                 Arc::clone(&base_specs)
             } else {
                 catalog.specs_with_pins(&base_specs, &pins)
@@ -280,8 +335,8 @@ impl plan::CompiledAgentPlan {
                 }
                 prompt_prefix.complete(&suffix)
             };
-            let mut tool_schema = catalog.schema_measurement(&tool_specs);
-            let mut prompt_identity = Some(Arc::new(RunPromptIdentity {
+            let tool_schema = catalog.schema_measurement(&tool_specs);
+            let prompt_identity = Some(Arc::new(RunPromptIdentity {
                     version: AGENT_PROMPT_VERSION,
                     instruction_hash: workspace_instructions.hash(),
                     system_prompt_hash: Some(system_prompt_hash),
@@ -300,8 +355,8 @@ impl plan::CompiledAgentPlan {
             // replaced by a between-run compaction. Everything appended by
             // this run is irreducible until the run settles.
             let reducible_messages = messages.len().saturating_sub(1);
-            let mut reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
-            let mut irreducible_message_bytes =
+            let reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
+            let irreducible_message_bytes =
                 measure_messages(&messages[reducible_messages..]);
             // The last provider-measured request as (system bytes, tool
             // schema bytes, message bytes, measured input tokens). The next
@@ -309,36 +364,36 @@ impl plan::CompiledAgentPlan {
             // component's byte delta, so a checkpoint notice, a budget-final
             // turn, or an in-run prune adjusts the chain instead of dropping
             // it back to the raw byte estimate.
-            let mut compatible_request: Option<(u64, u64, u64, u64)> = None;
+            let compatible_request: Option<(u64, u64, u64, u64)> = None;
             // Effects of this run's admitted calls by provider call id, so a
             // turn that would overflow the window can stub the stale
             // read-only results in memory before failing. Results the run
             // inherited carry their stored effects (`inherited_effects`).
-            let mut call_effects = HashMap::<String, catalog::EffectClass>::new();
+            let call_effects = HashMap::<String, catalog::EffectClass>::new();
 
-            let mut slice_tool_calls = 0_usize;
+            let slice_tool_calls = 0_usize;
             // Calls since the run last produced output (ADR-0054 § 1). Only
             // a run that can call tools has anything to report.
-            let mut stall = runtime::StallScope::new(if stall_exempt || !allow_tools || summarizer.is_some() {
+            let stall = runtime::StallScope::new(if stall_exempt || !allow_tools || summarizer.is_some() {
                 runtime::StallPolicy::Exempt
             } else if subagent.is_some() {
                 runtime::StallPolicy::Subagent
             } else {
                 runtime::StallPolicy::Root
             });
-            let mut output_continuations = 0_u16;
+            let output_continuations = 0_u16;
             // Retries spent on the current turn's transient provider faults;
             // a completed turn resets it.
-            let mut turn_retries = 0_u16;
+            let turn_retries = 0_u16;
             // What this run did, for the heuristic audit trigger and the
             // auditor's action summary. Only roots with a hook keep actions.
-            let mut audit_triggers = runtime::AuditTriggers::default();
-            let mut audit_actions: Vec<runtime::AuditedAction> = Vec::new();
-            let mut audit_revisions = 0_u16;
-            let mut checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
+            let audit_triggers = runtime::AuditTriggers::default();
+            let audit_actions: Vec<runtime::AuditedAction> = Vec::new();
+            let audit_revisions = 0_u16;
+            let checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
             // Repair turns spent against the output contract, for the whole
             // run: neither an audit revision nor steering resets them.
-            let mut output_repairs = 0_u8;
+            let output_repairs = 0_u8;
             let audit_prompt = messages
                 .iter()
                 .rev()
@@ -350,33 +405,72 @@ impl plan::CompiledAgentPlan {
                     })
                 })
                 .unwrap_or_default();
-            let mut model_text_bytes = 0_usize;
-            let mut continuing_slice = false;
+            let model_text_bytes = 0_usize;
+            let continuing_slice = false;
             // The report or final-answer notice already in the conversation
             // and not yet answered. It pins the turn's kind: a retried,
             // truncated, or interrupted attempt is the same report under the
             // same notice, even when an applied steer has since reset the
             // stall count, and a final-answer turn stays final.
-            let mut placed_report: Option<runtime::TurnNotice> = None;
+            let placed_report: Option<runtime::TurnNotice> = None;
             // The notice placed before the next turn's request, persisted with
             // the first turn row that request produces.
-            let mut pending_notice: Option<runtime::TurnNotice> = None;
+            let pending_notice: Option<runtime::TurnNotice> = None;
             // Durable turns already replaced by in-run compaction: the live
             // transcript's assistant messages after the summary are turns
             // `compacted_turns + 1..`, and the next cutoff is durable too.
-            let mut compacted_turns: u32 = 0;
+            let compacted_turns: u32 = 0;
             // The provider rejected the previous request for its window even
             // though the estimate said it fit. The provider's verdict is
             // authoritative: the next attempt compacts before sending
             // regardless of the estimate. Granted once per turn ordinal; a
             // second rejection of the same turn fails the run as before.
-            let mut provider_overflowed = false;
-            let mut reactive_compaction_turn: Option<u32> = None;
+            let provider_overflowed = false;
+            let reactive_compaction_turn: Option<u32> = None;
             // A summarizer gets one turn of rejected calls to recover with a
             // summary; a second fails closed.
-            let mut summarizer_rejected_turns = 0_u8;
+            let summarizer_rejected_turns = 0_u8;
             // The turn a wait for sub-agent answers already delivered for.
-            let mut wait_delivered_for: Option<u32> = None;
+            let wait_delivered_for: Option<u32> = None;
+            let mut run = RunScope {
+                handled_interrupt,
+                max_output_tokens,
+                empty_output_retries,
+                budget,
+                audit_triggers,
+                audit_actions,
+                audit_revisions,
+                checkpoint_context,
+                output_repairs,
+                model_text_bytes,
+                compacted_turns,
+                summarizer_rejected_turns,
+                stall,
+                pins,
+                tool_specs,
+                tool_schema,
+                prompt_identity,
+                call_effects,
+            };
+            let mut window = WindowScope {
+                reducible_message_bytes,
+                irreducible_message_bytes,
+                compatible_request,
+            };
+            let mut slice = SliceScope {
+                slice_tool_calls,
+                continuing_slice,
+                placed_report,
+                pending_notice,
+            };
+            let mut recovery = TurnScope {
+                turn_retries,
+                output_continuations,
+                reasoning_only_truncations,
+                provider_overflowed,
+                reactive_compaction_turn,
+                wait_delivered_for,
+            };
             'turns: for turn_ordinal in 1..=u32::MAX {
                 // Settled detached children answer here, at the one boundary
                 // every turn passes: after the previous turn's results and
@@ -387,7 +481,7 @@ impl plan::CompiledAgentPlan {
                 // A wait that just delivered for this turn used its boundary;
                 // anything settling since waits for the next one, so one
                 // boundary spends one turn's tool-output budget.
-                let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
+                let delivered_by_wait = std::mem::take(&mut recovery.wait_delivered_for) == Some(turn_ordinal);
                 if let Some(spawner) = &spawner
                     && !delivered_by_wait
                     && spawner.outstanding_detached() > 0
@@ -395,10 +489,10 @@ impl plan::CompiledAgentPlan {
                         spawner,
                         Boundary { turn_ordinal, reports: runtime::ReportDelivery::Always },
                         Arc::make_mut(&mut messages),
-                        &mut irreducible_message_bytes,
-                        &mut budget,
-                        &mut stall,
-                        checkpoint_context.as_mut(),
+                        &mut window.irreducible_message_bytes,
+                        &mut run.budget,
+                        &mut run.stall,
+                        run.checkpoint_context.as_mut(),
                     )
                     .await
                 {
@@ -409,7 +503,7 @@ impl plan::CompiledAgentPlan {
                 // provider request. A spent work budget grants one final
                 // response that asks for no tool calls; a second spent check, an elapsed wall
                 // clock, or unmeasurable cost settles the run here.
-                let budget_final_turn = match budget.before_turn(
+                let budget_final_turn = match run.budget.before_turn(
                     tokio::time::Instant::now(),
                     if allow_tools { MAX_TOOL_CALLS_PER_TURN } else { 0 },
                 ) {
@@ -429,21 +523,21 @@ impl plan::CompiledAgentPlan {
                 // stay declared so a model that calls one anyway gets a
                 // rejection result rather than a protocol failure.
                 let slice_checkpoint = !budget_final_turn
-                    && slice_tool_calls
+                    && slice.slice_tool_calls
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                         > MAX_TOOL_CALLS_PER_SLICE;
                 // A report turn is due at the slice boundary, or after
                 // `STALL_REPORT_CALLS` calls that produced nothing. A
                 // sub-agent's report turn after enough of them without work
                 // is its final answer. The budget-final turn outranks both.
-                let report_due = match (budget_final_turn, placed_report) {
+                let report_due = match (budget_final_turn, slice.placed_report) {
                     (true, _) => runtime::ReportDue::None,
                     (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
                     (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport)) => {
                         runtime::ReportDue::Report
                     }
                     (false, Some(runtime::TurnNotice::Continuation) | None) => {
-                        stall.due(slice_checkpoint)
+                        run.stall.due(slice_checkpoint)
                     }
                 };
                 let final_answer_turn = report_due == runtime::ReportDue::FinalAnswer;
@@ -451,11 +545,11 @@ impl plan::CompiledAgentPlan {
                 // Which report this is: a pinned one keeps the kind it was
                 // asked as; a new one is the slice checkpoint when the slice
                 // is full, else a stall report.
-                let slice_report = match placed_report {
+                let slice_report = match slice.placed_report {
                     Some(placed) => placed == runtime::TurnNotice::Report,
                     None => slice_checkpoint,
                 };
-                let continuation_turn = std::mem::take(&mut continuing_slice);
+                let continuation_turn = std::mem::take(&mut slice.continuing_slice);
                 // The checkpoint and continuation notices join the
                 // conversation as runtime messages, so the system prompt and
                 // its cached prefix stay the run's own (ADR-0054 § 2).
@@ -463,7 +557,7 @@ impl plan::CompiledAgentPlan {
                 // checkpoint too; a budget-final turn asks for no tool calls,
                 // so it is not told that tools are available again.
                 debug_assert!(!(checkpoint_turn && continuation_turn));
-                let notice = if (checkpoint_turn || final_answer_turn) && placed_report.is_none() {
+                let notice = if (checkpoint_turn || final_answer_turn) && slice.placed_report.is_none() {
                     let notice = if final_answer_turn {
                         runtime::TurnNotice::FinalAnswer
                     } else if slice_report {
@@ -471,7 +565,7 @@ impl plan::CompiledAgentPlan {
                     } else {
                         runtime::TurnNotice::StallReport
                     };
-                    placed_report = Some(notice);
+                    slice.placed_report = Some(notice);
                     Some(notice)
                 } else if continuation_turn && !budget_final_turn && !final_answer_turn {
                     Some(runtime::TurnNotice::Continuation)
@@ -480,10 +574,10 @@ impl plan::CompiledAgentPlan {
                 };
                 if let Some(notice) = notice {
                     let message = Message::user(notice.text());
-                    irreducible_message_bytes =
-                        irreducible_message_bytes.saturating_add(measure_message(&message));
+                    window.irreducible_message_bytes =
+                        window.irreducible_message_bytes.saturating_add(measure_message(&message));
                     Arc::make_mut(&mut messages).push(message);
-                    pending_notice = Some(notice);
+                    slice.pending_notice = Some(notice);
                 }
                 let request_system: Arc<str> = if budget_final_turn {
                     Arc::from(format!("{system}\n\n{BUDGET_FINAL_RESPONSE_NOTICE}"))
@@ -505,7 +599,7 @@ impl plan::CompiledAgentPlan {
                     .unwrap_or(u64::MAX)
                     .saturating_add(CONTEXT_BLOCK_FRAMING_BYTES);
                 let tool_schema_bytes = if request_has_tools {
-                    tool_schema.bytes
+                    run.tool_schema.bytes
                 } else {
                     0
                 };
@@ -560,7 +654,7 @@ impl plan::CompiledAgentPlan {
                     turn_ordinal > 1
                         && plan.runtime.context_window.is_some_and(|window| {
                             estimated_input_tokens
-                                .saturating_add(u64::from(max_output_tokens))
+                                .saturating_add(u64::from(run.max_output_tokens))
                                 > u64::from(window)
                         })
                 };
@@ -571,11 +665,11 @@ impl plan::CompiledAgentPlan {
                 // between runs, applied to the live messages. The measured
                 // chain credits the removed bytes; it runs only when the
                 // estimate says the request would not fit.
-                let would_overflow = provider_overflowed
+                let would_overflow = recovery.provider_overflowed
                     || over_window(estimate_input_tokens(
-                        compatible_request,
-                        reducible_message_bytes,
-                        irreducible_message_bytes,
+                        window.compatible_request,
+                        window.reducible_message_bytes,
+                        window.irreducible_message_bytes,
                     ));
                 if would_overflow && {
                     // Results the run inherited are classified by their
@@ -596,9 +690,9 @@ impl plan::CompiledAgentPlan {
                                 inherited_effects
                                     .get(inherited - 1)
                                     .copied()
-                                    .unwrap_or_else(|| call_effects.get(call_id).copied())
+                                    .unwrap_or_else(|| run.call_effects.get(call_id).copied())
                             } else {
-                                call_effects.get(call_id).copied()
+                                run.call_effects.get(call_id).copied()
                             };
                             if let Some(effect) = effect {
                                 effects.insert((message_index, block_index), effect);
@@ -610,8 +704,8 @@ impl plan::CompiledAgentPlan {
                         &effects,
                     )
                 } {
-                    reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
-                    irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                    window.reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
+                    window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
                     yield RuntimeEvent::ContextPruned { turn_ordinal };
                 }
                 // Still over the window after stubbing, or the provider said
@@ -624,12 +718,12 @@ impl plan::CompiledAgentPlan {
                 // the prompt and the session context before it stay. A
                 // failure here is the same context failure the session layer
                 // would have raised, with the compactor's reason attached.
-                let provider_rejected_window = provider_overflowed;
-                let still_overflows = std::mem::take(&mut provider_overflowed)
+                let provider_rejected_window = recovery.provider_overflowed;
+                let still_overflows = std::mem::take(&mut recovery.provider_overflowed)
                     || over_window(estimate_input_tokens(
-                        compatible_request,
-                        reducible_message_bytes,
-                        irreducible_message_bytes,
+                        window.compatible_request,
+                        window.reducible_message_bytes,
+                        window.irreducible_message_bytes,
                     ));
                 if still_overflows && let Some(compactor) = compactor.as_ref() {
                     let run_start = reducible_messages.saturating_add(1);
@@ -638,7 +732,7 @@ impl plan::CompiledAgentPlan {
                         sessions::CONTEXT_PRUNE_KEEP_TURNS,
                     );
                     if let Some((replace_through, replaced_turns)) = boundary {
-                        let turn_cutoff = compacted_turns.saturating_add(replaced_turns);
+                        let turn_cutoff = run.compacted_turns.saturating_add(replaced_turns);
                         // The summarizer sends the request this turn would
                         // have sent, cut at the boundary: the same system
                         // prompt, tools, and message prefix, so it reads the
@@ -651,19 +745,19 @@ impl plan::CompiledAgentPlan {
                         // over the window.
                         let cut = run_start + replace_through;
                         let summarizer_fits = !provider_rejected_window
-                            && plan.runtime.context_window.is_none_or(|window| {
+                            && plan.runtime.context_window.is_none_or(|context_window| {
                                 estimate_input_tokens(
-                                    compatible_request,
-                                    reducible_message_bytes,
+                                    window.compatible_request,
+                                    window.reducible_message_bytes,
                                     measure_messages(&messages[reducible_messages..cut]),
                                 )
                                 .saturating_add(u64::from(
                                     sessions::context::summarizer_output_tokens(
                                         model_max_output_tokens,
-                                        Some(window),
+                                        Some(context_window),
                                     ),
                                 ))
-                                    <= u64::from(window)
+                                    <= u64::from(context_window)
                             });
                         let transcript = if summarizer_fits {
                             messages[..cut].to_vec()
@@ -680,7 +774,7 @@ impl plan::CompiledAgentPlan {
                                 transcript,
                                 turn_cutoff,
                                 system: Arc::clone(&system),
-                                tools: Arc::clone(&tool_specs),
+                                tools: Arc::clone(&run.tool_specs),
                             })
                             .await
                         {
@@ -691,11 +785,11 @@ impl plan::CompiledAgentPlan {
                                 ));
                                 let live = Arc::make_mut(&mut messages);
                                 live.splice(run_start..run_start + replace_through, [summary]);
-                                compacted_turns = turn_cutoff;
+                                run.compacted_turns = turn_cutoff;
                                 // The measured chain covered the replaced
                                 // turns; the next provider usage re-seeds it.
-                                compatible_request = None;
-                                irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                                window.compatible_request = None;
+                                window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
                                 yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
                             }
                             Err(error) => {
@@ -717,28 +811,28 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                 }
-                let message_bytes = reducible_message_bytes.saturating_add(irreducible_message_bytes);
+                let message_bytes = window.reducible_message_bytes.saturating_add(window.irreducible_message_bytes);
                 // The weight the session layer admits carries the same
                 // measured figure the recovery decisions above used, so the
                 // guard cannot disagree with the loop about whether this
                 // request fits. `None` after an in-run compaction: the chain
                 // covered replaced turns and the next usage re-seeds it.
-                let compatible_input_tokens = compatible_request.map(|chain| {
-                    estimate_input_tokens(Some(chain), reducible_message_bytes, irreducible_message_bytes)
+                let compatible_input_tokens = window.compatible_request.map(|chain| {
+                    estimate_input_tokens(Some(chain), window.reducible_message_bytes, window.irreducible_message_bytes)
                 });
                 yield RuntimeEvent::Prepared {
                     turn_ordinal,
-                    identity: prompt_identity.take(),
+                    identity: run.prompt_identity.take(),
                     static_prefix: PreparedStaticPrefix::new(
                         request_system_hash,
-                        request_has_tools.then_some(tool_schema.hash),
+                        request_has_tools.then_some(run.tool_schema.hash),
                     ),
                     weight: PreparedRequestWeight {
-                        max_output_tokens,
+                        max_output_tokens: run.max_output_tokens,
                         system_bytes,
                         tool_schema_bytes,
-                        reducible_message_bytes,
-                        irreducible_message_bytes,
+                        reducible_message_bytes: window.reducible_message_bytes,
+                        irreducible_message_bytes: window.irreducible_message_bytes,
                         compatible_input_tokens,
                     },
                 };
@@ -748,7 +842,7 @@ impl plan::CompiledAgentPlan {
                 let request = ModelRequest::new(
                     Arc::clone(&model),
                     Arc::clone(&messages),
-                    max_output_tokens,
+                    run.max_output_tokens,
                 );
                 let request = match reasoning_effort {
                     Some(effort) => request.with_reasoning_effort(effort),
@@ -756,7 +850,7 @@ impl plan::CompiledAgentPlan {
                 };
                 let request = if request_has_tools {
                     let request = request
-                        .with_tools(Arc::clone(&tool_specs))
+                        .with_tools(Arc::clone(&run.tool_specs))
                         .with_system(Arc::clone(&request_system));
                     if budget_final_turn || final_answer_turn {
                         request.with_tool_choice(qq_provider::ToolChoice::None)
@@ -798,7 +892,7 @@ impl plan::CompiledAgentPlan {
                     let interrupt = async {
                         match &mut steering {
                             Some(steering) => loop {
-                                if *steering.interrupts.borrow() > handled_interrupt {
+                                if *steering.interrupts.borrow() > run.handled_interrupt {
                                     break;
                                 }
                                 if steering.interrupts.changed().await.is_err() {
@@ -881,14 +975,14 @@ impl plan::CompiledAgentPlan {
                                 activity = RunActivity::GeneratingResponse;
                                 yield RuntimeEvent::ActivityChanged { activity };
                             }
-                            if model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
+                            if run.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::Policy,
                                     message: "model text exceeded the 16 MiB per-run limit".to_owned(),
                                 };
                                 return;
                             }
-                            model_text_bytes += text.len();
+                            run.model_text_bytes += text.len();
                             append_turn_text(&mut blocks, &text);
                             yield RuntimeEvent::OutputTextDelta { text };
                         }
@@ -897,14 +991,14 @@ impl plan::CompiledAgentPlan {
                                 activity = RunActivity::GeneratingResponse;
                                 yield RuntimeEvent::ActivityChanged { activity };
                             }
-                            if model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
+                            if run.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::Policy,
                                     message: "model text exceeded the 16 MiB per-run limit".to_owned(),
                                 };
                                 return;
                             }
-                            model_text_bytes += text.len();
+                            run.model_text_bytes += text.len();
                             append_turn_text(&mut blocks, &text);
                             yield RuntimeEvent::RefusalDelta { text };
                         }
@@ -915,7 +1009,7 @@ impl plan::CompiledAgentPlan {
                                 // ask for none). The budget still settles
                                 // the run: exhaustion is never a provider
                                 // failure, and no more work may be spent.
-                                let BudgetDecision::Exhausted(mut exhaustion) = budget
+                                let BudgetDecision::Exhausted(mut exhaustion) = run.budget
                                     .before_turn(tokio::time::Instant::now(), 0)
                                 else {
                                     unreachable!("a requested final response always settles the run")
@@ -998,7 +1092,7 @@ impl plan::CompiledAgentPlan {
                                 rejection,
                             });
                             if !over_cap && !checkpoint_turn && !final_answer_turn {
-                                slice_tool_calls += 1;
+                                slice.slice_tool_calls += 1;
                             }
                             blocks.push(TurnBlock::ToolCall(index));
                         }
@@ -1115,7 +1209,7 @@ impl plan::CompiledAgentPlan {
                             let reactive_compaction = kind
                                 == RunFailureKind::ProviderContextExceeded
                                 && compactor.is_some()
-                                && reactive_compaction_turn != Some(turn_ordinal)
+                                && recovery.reactive_compaction_turn != Some(turn_ordinal)
                                 && blocks.is_empty()
                                 && pending_calls.is_empty()
                                 && sessions::in_run_compaction_boundary(
@@ -1124,8 +1218,8 @@ impl plan::CompiledAgentPlan {
                                 )
                                 .is_some();
                             if reactive_compaction {
-                                reactive_compaction_turn = Some(turn_ordinal);
-                                provider_overflowed = true;
+                                recovery.reactive_compaction_turn = Some(turn_ordinal);
+                                recovery.provider_overflowed = true;
                                 yield RuntimeEvent::ProviderOverflow {
                                     turn_ordinal,
                                     message: error.to_string(),
@@ -1203,9 +1297,9 @@ impl plan::CompiledAgentPlan {
 
                 if interrupted_turn || truncated_turn || turn_fault.is_some() {
                     if interrupted_turn {
-                        handled_interrupt = steering
+                        run.handled_interrupt = steering
                             .as_ref()
-                            .map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
+                            .map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
                     }
                     // Only fully streamed calls could be executed; an interrupt
                     // or truncation executes none, so the partial turn carries
@@ -1218,7 +1312,7 @@ impl plan::CompiledAgentPlan {
                     pending_calls.clear();
                 }
 
-                compatible_request = terminal_usage.map(|usage| {
+                window.compatible_request = terminal_usage.map(|usage| {
                     (
                         system_bytes,
                         tool_schema_bytes,
@@ -1281,7 +1375,7 @@ impl plan::CompiledAgentPlan {
                         ),
                     };
                     if rejection.is_none() {
-                        call_effects.insert(pending.provider_call_id.clone(), effect);
+                        run.call_effects.insert(pending.provider_call_id.clone(), effect);
                     }
                     calls.push(RuntimeToolCall {
                         id,
@@ -1322,13 +1416,13 @@ impl plan::CompiledAgentPlan {
                     usage: terminal_usage,
                     calls: calls.clone(),
                     truncated: truncated_turn,
-                    notice: pending_notice.take(),
+                    notice: slice.pending_notice.take(),
                 };
-                budget.charge_turn(terminal_usage);
-                budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
+                run.budget.charge_turn(terminal_usage);
+                run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
                 if summarizer.is_some() && !calls.is_empty() {
-                    summarizer_rejected_turns += 1;
-                    if summarizer_rejected_turns > 1 {
+                    run.summarizer_rejected_turns += 1;
+                    if run.summarizer_rejected_turns > 1 {
                         yield RuntimeEvent::Failed {
                             kind: RunFailureKind::ProviderProtocol,
                             message: "the compaction summarizer called a tool on two turns; tools are unavailable during compaction".to_owned(),
@@ -1342,34 +1436,34 @@ impl plan::CompiledAgentPlan {
                     // bounded backoff, or pause the run once the allowance
                     // for this turn is spent. Cancellation and the run
                     // deadline both cut the sleep short.
-                    if turn_retries >= MAX_TURN_RETRIES {
+                    if recovery.turn_retries >= MAX_TURN_RETRIES {
                         yield RuntimeEvent::Paused {
                             pause: Box::new(qq_protocol::RunPause {
                                 kind,
                                 message,
                                 turn_ordinal,
-                                attempts: turn_retries,
+                                attempts: recovery.turn_retries,
                             }),
                         };
                         return;
                     }
-                    turn_retries += 1;
-                    let delay = turn_recovery.delay(turn_retries);
+                    recovery.turn_retries += 1;
+                    let delay = turn_recovery.delay(recovery.turn_retries);
                     yield RuntimeEvent::TurnRetrying {
                         turn_ordinal,
-                        attempt: turn_retries,
+                        attempt: recovery.turn_retries,
                         delay,
                         kind,
                         message,
                     };
                     if assistant.has_content() {
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
                     }
                     if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
                         Arc::make_mut(&mut messages).push(Message::user(TURN_RETRY_CONTINUE_NOTICE));
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(messages.last().expect("just pushed")));
                     }
                     let sleep = tokio::time::sleep(delay);
@@ -1387,7 +1481,7 @@ impl plan::CompiledAgentPlan {
                     }
                     continue;
                 }
-                turn_retries = 0;
+                recovery.turn_retries = 0;
                 if truncated_turn {
                     // A reserved final response that ran out of room cannot be
                     // continued: the budget already settles the run below.
@@ -1409,13 +1503,13 @@ impl plan::CompiledAgentPlan {
                             // like any visible truncation (a fresh sample may
                             // fit). A provider pause with no text is not this
                             // case: it must be resent.
-                            let can_raise = empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
-                                && max_output_tokens < output_ceiling;
+                            let can_raise = run.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
+                                && run.max_output_tokens < output_ceiling;
                             if streamed_visible_output {
-                                reasoning_only_truncations = 0;
+                                recovery.reasoning_only_truncations = 0;
                             } else {
-                                reasoning_only_truncations =
-                                    reasoning_only_truncations.saturating_add(1);
+                                recovery.reasoning_only_truncations =
+                                    recovery.reasoning_only_truncations.saturating_add(1);
                             }
                             if !can_raise && !streamed_visible_output {
                                 yield RuntimeEvent::Failed {
@@ -1424,8 +1518,8 @@ impl plan::CompiledAgentPlan {
                                         "the provider stopped at its output token limit ({max_output_tokens} tokens) \
                                          without producing any visible output on {} consecutive turn{}; the \
                                          limit was spent on reasoning. {}",
-                                        reasoning_only_truncations,
-                                        if reasoning_only_truncations == 1 { "" } else { "s" },
+                                        recovery.reasoning_only_truncations,
+                                        if recovery.reasoning_only_truncations == 1 { "" } else { "s" },
                                         if ceiling_by_policy {
                                             format!(
                                                 "Managed policy caps output at {output_ceiling} tokens, so raising \
@@ -1437,7 +1531,8 @@ impl plan::CompiledAgentPlan {
                                                 "Raise `max_output_tokens` (model ceiling {output_ceiling}) or lower \
                                                  `reasoning_effort`"
                                             )
-                                        }
+                                        },
+                                        max_output_tokens = run.max_output_tokens
                                     ),
                                 };
                                 return;
@@ -1445,84 +1540,86 @@ impl plan::CompiledAgentPlan {
                         }
                         if !assistant.has_content()
                             && truncation_reason == qq_provider::IncompleteReason::OutputTokens
-                            && empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
-                            && max_output_tokens < output_ceiling
+                            && run.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
+                            && run.max_output_tokens < output_ceiling
                         {
                             // The retry counts against the run's shared
                             // continuation cap, which the client renders
                             // against `max_output_continuations`.
-                            if output_continuations >= MAX_OUTPUT_CONTINUATIONS {
+                            if recovery.output_continuations >= MAX_OUTPUT_CONTINUATIONS {
                                 yield RuntimeEvent::Failed {
                                     kind: RunFailureKind::ProviderOutputTruncated,
                                     message: format!(
                                         "the provider stopped at its output token limit ({max_output_tokens} tokens) on \
                                          {} consecutive turns; the partial answer is in the transcript",
-                                        u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
+                                        u32::from(MAX_OUTPUT_CONTINUATIONS) + 1,
+                                        max_output_tokens = run.max_output_tokens
                                     ),
                                 };
                                 return;
                             }
-                            empty_output_retries += 1;
-                            max_output_tokens = max_output_tokens
+                            run.empty_output_retries += 1;
+                            run.max_output_tokens = run.max_output_tokens
                                 .saturating_mul(2)
                                 .min(output_ceiling);
                             // The retry is a continuation of the same answer
                             // (1-based, bounded by MAX_EMPTY_OUTPUT_RETRIES
                             // plus MAX_OUTPUT_CONTINUATIONS across the run).
-                            output_continuations += 1;
+                            recovery.output_continuations += 1;
                             yield RuntimeEvent::OutputTruncated {
                                 turn_ordinal,
-                                continuation: output_continuations,
+                                continuation: recovery.output_continuations,
                             };
                             continue;
                         }
-                        if output_continuations >= MAX_OUTPUT_CONTINUATIONS {
+                        if recovery.output_continuations >= MAX_OUTPUT_CONTINUATIONS {
                             yield RuntimeEvent::Failed {
                                 kind: RunFailureKind::ProviderOutputTruncated,
                                 message: format!(
                                     "the provider stopped at its output token limit ({max_output_tokens} tokens) on \
                                      {} consecutive turns; the partial answer is in the transcript",
-                                    u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
+                                    u32::from(MAX_OUTPUT_CONTINUATIONS) + 1,
+                                        max_output_tokens = run.max_output_tokens
                                 ),
                             };
                             return;
                         }
-                        output_continuations += 1;
+                        recovery.output_continuations += 1;
                         yield RuntimeEvent::OutputTruncated {
                             turn_ordinal,
-                            continuation: output_continuations,
+                            continuation: recovery.output_continuations,
                         };
                         if assistant.has_content() {
-                            reasoning_only_truncations = 0;
-                            irreducible_message_bytes = irreducible_message_bytes
+                            recovery.reasoning_only_truncations = 0;
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                         }
                         if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
                             Arc::make_mut(&mut messages).push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
-                            irreducible_message_bytes = irreducible_message_bytes
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                         }
                         continue;
                     }
                 } else {
-                    output_continuations = 0;
+                    recovery.output_continuations = 0;
                     // A turn that completed (text or tool calls) ends any run
                     // of reasoning-only truncations the diagnostic counts.
-                    reasoning_only_truncations = 0;
+                    recovery.reasoning_only_truncations = 0;
                 }
 
                 if interrupted_turn {
                     yield RuntimeEvent::Interrupted { turn_ordinal };
                     if assistant.has_content() {
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
                     }
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
-                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                         for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
                                 message_id: steer.message_id,
@@ -1535,7 +1632,7 @@ impl plan::CompiledAgentPlan {
                         // Providers require alternation; an interrupted turn
                         // with no steering to inject cannot be resent as-is.
                         Arc::make_mut(&mut messages).push(Message::user(INTERRUPT_CONTINUE_NOTICE));
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(messages.last().expect("just pushed")));
                     }
                     continue;
@@ -1544,7 +1641,7 @@ impl plan::CompiledAgentPlan {
                 if budget_final_turn {
                     // The reserved final response has been persisted; the
                     // run settles with the limit that spent its budget.
-                    let BudgetDecision::Exhausted(exhaustion) = budget.before_turn(
+                    let BudgetDecision::Exhausted(exhaustion) = run.budget.before_turn(
                         tokio::time::Instant::now(),
                         0,
                     ) else {
@@ -1557,7 +1654,7 @@ impl plan::CompiledAgentPlan {
                 // completed run that overran them settles as exhausted, not
                 // completed, so no client can mistake the overrun for success.
                 if calls.is_empty()
-                    && let Some(kind) = budget.exceeded(tokio::time::Instant::now())
+                    && let Some(kind) = run.budget.exceeded(tokio::time::Instant::now())
                     && matches!(
                         kind,
                         BudgetLimitKind::Cost
@@ -1565,7 +1662,7 @@ impl plan::CompiledAgentPlan {
                             | BudgetLimitKind::TotalTokens
                     )
                 {
-                    let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                    let exhaustion = run.budget.exhaustion(kind, false, tokio::time::Instant::now());
                     yield RuntimeEvent::BudgetExhausted { exhaustion };
                     return;
                 }
@@ -1592,11 +1689,11 @@ impl plan::CompiledAgentPlan {
                     // report is the same kind of turn; it leaves the slice
                     // count alone, since its calls still ran in this slice.
                     if slice_report {
-                        slice_tool_calls = 0;
+                        slice.slice_tool_calls = 0;
                     }
-                    stall.reported();
-                    placed_report = None;
-                    continuing_slice = true;
+                    run.stall.reported();
+                    slice.placed_report = None;
+                    slice.continuing_slice = true;
                     if calls.is_empty() {
                         // Assembly drops an empty turn and fills the gap
                         // between the two runtime notices with this same
@@ -1606,13 +1703,13 @@ impl plan::CompiledAgentPlan {
                         } else {
                             Message::assistant(EMPTY_TURN_PLACEHOLDER)
                         };
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
                         // Steering that arrived during the report is applied
                         // here, before the continuation notice, exactly as at
                         // any other turn boundary.
-                        if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                             for steer in applied {
                                 yield RuntimeEvent::SteeringApplied {
                                     message_id: steer.message_id,
@@ -1628,7 +1725,7 @@ impl plan::CompiledAgentPlan {
                     // Steering that arrived during the final turn is not
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
-                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                         // A reply the run continues past stays in context, so
                         // it must be provider-valid: an empty one takes the
                         // placeholder assembly fills the gap with on replay.
@@ -1637,7 +1734,7 @@ impl plan::CompiledAgentPlan {
                         } else {
                             Message::assistant(EMPTY_TURN_PLACEHOLDER)
                         };
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let steering_messages = Arc::make_mut(&mut messages).split_off(keep);
@@ -1670,7 +1767,7 @@ impl plan::CompiledAgentPlan {
                         } else {
                             Message::assistant(EMPTY_TURN_PLACEHOLDER)
                         };
-                        irreducible_message_bytes = irreducible_message_bytes
+                        window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(&mut messages).push(assistant);
                         // A "waiting for sub-agents" activity is client work
@@ -1684,13 +1781,13 @@ impl plan::CompiledAgentPlan {
                         loop {
                             tokio::select! {
                                 biased;
-                                () = steering_arrived(&mut steering, handled_interrupt) => {}
+                                () = steering_arrived(&mut steering, run.handled_interrupt) => {}
                                 () = spawner.child_settled() => {}
                             }
-                            handled_interrupt = steering
+                            run.handled_interrupt = steering
                                 .as_ref()
-                                .map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
-                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                .map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
+                            if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                                 for steer in applied {
                                     yield RuntimeEvent::SteeringApplied {
                                         message_id: steer.message_id,
@@ -1704,10 +1801,10 @@ impl plan::CompiledAgentPlan {
                                 spawner,
                                 Boundary { turn_ordinal: turn_ordinal.saturating_add(1), reports: runtime::ReportDelivery::WithAnswers },
                                 Arc::make_mut(&mut messages),
-                                &mut irreducible_message_bytes,
-                                &mut budget,
-                                &mut stall,
-                                checkpoint_context.as_mut(),
+                                &mut window.irreducible_message_bytes,
+                                &mut run.budget,
+                                &mut run.stall,
+                                run.checkpoint_context.as_mut(),
                             )
                             .await
                             {
@@ -1719,7 +1816,7 @@ impl plan::CompiledAgentPlan {
                                 // only one, so it spends one budget and
                                 // precedes any steering, as replay places it.
                                 Ok(delivered) if delivered.answers > 0 => {
-                                    wait_delivered_for = Some(turn_ordinal.saturating_add(1));
+                                    recovery.wait_delivered_for = Some(turn_ordinal.saturating_add(1));
                                     break;
                                 }
                                 Ok(delivered) => {
@@ -1751,10 +1848,10 @@ impl plan::CompiledAgentPlan {
                     // only while another revision could follow, so the answer
                     // at the cap stands as given.
                     if let Some(hook) = &audit_hook
-                        && (audit_revisions == 0
-                            || audit_revisions < plan.runtime.audit.max_revisions)
-                        && audit_triggers.fires(plan.runtime.audit.mode)
-                        && let Ok(mut child_limits) = budget.child_budget(tokio::time::Instant::now())
+                        && (run.audit_revisions == 0
+                            || run.audit_revisions < plan.runtime.audit.max_revisions)
+                        && run.audit_triggers.fires(plan.runtime.audit.mode)
+                        && let Ok(mut child_limits) = run.budget.child_budget(tokio::time::Instant::now())
                     {
                         // The auditor inherits the parent's remainder but is
                         // also bounded on its own: a verdict is a few reads,
@@ -1787,13 +1884,13 @@ impl plan::CompiledAgentPlan {
                             .audit(runtime::AuditRequest {
                                 prompt: audit_prompt.clone(),
                                 answer: bounded_text(&answer, runtime::MAX_AUDIT_ANSWER_BYTES),
-                                actions: audit_actions.clone(),
+                                actions: run.audit_actions.clone(),
                                 role: plan.runtime.audit.role,
-                                revision: audit_revisions,
+                                revision: run.audit_revisions,
                             }, child_limits);
                         let verdict = tokio::select! {
                             biased;
-                            () = interrupt_requested(&mut steering, handled_interrupt) => None,
+                            () = interrupt_requested(&mut steering, run.handled_interrupt) => None,
                             verdict = &mut auditing => Some(verdict),
                         };
                         drop(auditing);
@@ -1822,24 +1919,24 @@ impl plan::CompiledAgentPlan {
                                 }
                             }
                         };
-                        budget.charge_child(verdict.usage, verdict.cost_usd_nanos);
+                        run.budget.charge_child(verdict.usage, verdict.cost_usd_nanos);
                         hook.acknowledge();
                         let revise = verdict.outcome == qq_protocol::AuditOutcome::Revised
-                            && audit_revisions < plan.runtime.audit.max_revisions;
+                            && run.audit_revisions < plan.runtime.audit.max_revisions;
                         yield RuntimeEvent::Audited {
                             outcome: verdict.outcome,
                             findings: verdict.findings.clone(),
-                            revisions: audit_revisions,
+                            revisions: run.audit_revisions,
                             usage: verdict.usage,
                             cost_usd_nanos: verdict.cost_usd_nanos,
                             audit_session: verdict.audit_session,
                         };
                         if audit_interrupted {
-                            handled_interrupt = steering.as_ref().map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
-                            irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                            run.handled_interrupt = steering.as_ref().map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
+                            window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                            if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                                 for steer in applied {
                                     yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                 }
@@ -1847,8 +1944,8 @@ impl plan::CompiledAgentPlan {
                             continue;
                         }
                         if revise {
-                            audit_revisions += 1;
-                            irreducible_message_bytes = irreducible_message_bytes
+                            run.audit_revisions += 1;
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             let mut notice = String::from(runtime::AUDIT_REVISION_NOTICE);
@@ -1857,14 +1954,14 @@ impl plan::CompiledAgentPlan {
                                 notice.push_str(finding);
                             }
                             Arc::make_mut(&mut messages).push(Message::user(notice));
-                            irreducible_message_bytes = irreducible_message_bytes
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
-                        irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                    if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
@@ -1872,8 +1969,8 @@ impl plan::CompiledAgentPlan {
                         for steer in applied { yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }; }
                         continue;
                     }
-                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
-                        yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                    if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now()) {
+                        yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                         return;
                     }
                     // The answer that survived audit and steering is the one
@@ -1895,23 +1992,23 @@ impl plan::CompiledAgentPlan {
                                 .join("\n");
                             let validation = schema.validate(&answer);
                             if let Err(errors) = &validation
-                                && output_repairs < schema.repair_turns()
+                                && run.output_repairs < schema.repair_turns()
                             {
-                                output_repairs += 1;
+                                run.output_repairs += 1;
                                 yield RuntimeEvent::OutputRepairRequested {
                                     turn_ordinal,
-                                    repair: output_repairs,
+                                    repair: run.output_repairs,
                                     errors: output::bounded_errors(errors.clone()),
                                 };
-                                irreducible_message_bytes = irreducible_message_bytes
+                                window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(&mut messages).push(assistant);
                                 Arc::make_mut(&mut messages).push(Message::user(output::repair_notice(errors)));
-                                irreducible_message_bytes = irreducible_message_bytes
+                                window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(messages.last().expect("just pushed")));
                                 continue;
                             }
-                            Some(Box::new(output::final_output(validation, output_repairs)))
+                            Some(Box::new(output::final_output(validation, run.output_repairs)))
                         }
                     };
                     if let Some(reviewer) = &checkpoint {
@@ -1924,7 +2021,7 @@ impl plan::CompiledAgentPlan {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let context = checkpoint_context.as_mut().expect("enabled review context");
+                        let context = run.checkpoint_context.as_mut().expect("enabled review context");
                         let correlation = format!("final:{turn_ordinal}");
                         // A review the harness could not run is recorded as
                         // `Unavailable` and the candidate completes: the
@@ -1951,16 +2048,16 @@ impl plan::CompiledAgentPlan {
                                 };
                             }
                             Ok(final_evidence) => {
-                        let remaining = match budget.remaining(tokio::time::Instant::now()) {
+                        let remaining = match run.budget.remaining(tokio::time::Instant::now()) {
                             Ok(remaining) => remaining,
                             Err(kind) => {
-                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                                 return;
                             }
                         };
                         if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
                             if let Some(kind) = error.budget_kind() {
-                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             } else {
                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() };
                             }
@@ -1980,11 +2077,11 @@ impl plan::CompiledAgentPlan {
                         };
                         let verdict = tokio::select! {
                                     biased;
-                                    () = interrupt_requested(&mut steering, handled_interrupt) => None,
+                                    () = interrupt_requested(&mut steering, run.handled_interrupt) => None,
                                     verdict = runtime::assess_checkpoint(reviewer.as_ref(), request) => Some(verdict),
                                 };
                                 let Some(verdict) = verdict else {
-                                    budget.charge_child(None, None);
+                                    run.budget.charge_child(None, None);
                                     yield RuntimeEvent::CheckpointReviewed {
                                         spend: Some(qq_protocol::CheckpointSpend::default()),
                                         correlation,
@@ -1994,18 +2091,18 @@ impl plan::CompiledAgentPlan {
                                         confidence: None,
                                         feedback: "Final review interrupted by new user input; no assessment was recorded".to_owned(),
                                     };
-                                    handled_interrupt = steering.as_ref().map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
-                                    irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                                    run.handled_interrupt = steering.as_ref().map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
+                                    window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                    if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                                         for steer in applied {
                                             yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                         }
                                     }
                                     continue;
                                 };
-                        budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
+                        run.budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
                         yield RuntimeEvent::CheckpointReviewed {
                                 spend: Some(verdict.spend),
                             correlation,
@@ -2015,8 +2112,8 @@ impl plan::CompiledAgentPlan {
                             confidence: verdict.confidence,
                             feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
                         };
-                        if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
-                            yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                        if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now()) {
+                            yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             return;
                         }
                         // `Unavailable` (timeout, malformed reply, outage) is
@@ -2026,9 +2123,9 @@ impl plan::CompiledAgentPlan {
                         // the verdict on record rather than failing.
                         if !verdict.outcome.allows_progress()
                             && verdict.outcome != runtime::CheckpointOutcome::Unavailable
-                            && checkpoint_context.as_mut().expect("enabled review context").repair()
+                            && run.checkpoint_context.as_mut().expect("enabled review context").repair()
                         {
-                            irreducible_message_bytes = irreducible_message_bytes
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             let notice = format!(
@@ -2036,7 +2133,7 @@ impl plan::CompiledAgentPlan {
                                 verdict.outcome.label(), verdict.feedback
                             );
                             Arc::make_mut(&mut messages).push(Message::user(notice));
-                            irreducible_message_bytes = irreducible_message_bytes
+                            window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
                             continue;
                         }
@@ -2045,8 +2142,8 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
-                        irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
+                    if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
                         Arc::make_mut(&mut messages).push(assistant);
@@ -2057,7 +2154,7 @@ impl plan::CompiledAgentPlan {
                     yield RuntimeEvent::Completed { final_output };
                     return;
                 }
-                irreducible_message_bytes = irreducible_message_bytes
+                window.irreducible_message_bytes = window.irreducible_message_bytes
                     .saturating_add(measure_message(&assistant));
                 Arc::make_mut(&mut messages).push(assistant);
 
@@ -2082,7 +2179,7 @@ impl plan::CompiledAgentPlan {
                     // steer withdraws the pending request instead of leaving
                     // the user to answer a question the steer made moot.
                     let decision = {
-                        let interrupt = interrupt_requested(&mut steering, handled_interrupt);
+                        let interrupt = interrupt_requested(&mut steering, run.handled_interrupt);
                         tokio::select! {
                             biased;
                             () = interrupt => None,
@@ -2098,7 +2195,7 @@ impl plan::CompiledAgentPlan {
                     // wrapped decision is then applied like any other.
                     let decision = match decision {
                         GateDecision::Reviewed { decision, spend } => {
-                            budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                            run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
                             yield RuntimeEvent::ReviewCharged {
                                 usage: spend.usage,
                                 cost_usd_nanos: spend.cost_usd_nanos,
@@ -2113,7 +2210,7 @@ impl plan::CompiledAgentPlan {
                             // A denied call counts toward the stall report:
                             // a run that keeps asking for denied calls is
                             // not producing anything either.
-                            stall.settled(false);
+                            run.stall.settled(false);
                             results[index] = Some(RetainedResult::error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
@@ -2121,7 +2218,7 @@ impl plan::CompiledAgentPlan {
                         // the answer is the result and nothing executes.
                         GateDecision::Answered { result } => {
                             // The human answered: new input, like a steer.
-                            stall.progress();
+                            run.stall.progress();
                             results[index] = Some(RetainedResult::answered(result.clone()));
                             yield RuntimeEvent::ToolCallAnswered { id: call.id, result };
                         }
@@ -2158,8 +2255,8 @@ impl plan::CompiledAgentPlan {
                     ) {
                         continue;
                     }
-                    let (result, changed) = select_tools(&catalog, &mut pins, &call.arguments);
-                    stall.settled(false);
+                    let (result, changed) = select_tools(&catalog, &mut run.pins, &call.arguments);
+                    run.stall.settled(false);
                     pins_changed |= changed;
                     results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                     yield RuntimeEvent::ToolCallFinished {
@@ -2172,8 +2269,8 @@ impl plan::CompiledAgentPlan {
                     };
                 }
                 if pins_changed {
-                    tool_specs = catalog.specs_with_pins(&base_specs, &pins);
-                    tool_schema = catalog.schema_measurement(&tool_specs);
+                    run.tool_specs = catalog.specs_with_pins(&base_specs, &run.pins);
+                    run.tool_schema = catalog.schema_measurement(&run.tool_specs);
                 }
                 let approved = approved
                     .into_iter()
@@ -2211,7 +2308,7 @@ impl plan::CompiledAgentPlan {
                     // offered; a call to one that was not is refused with the
                     // way to make it available.
                     let offered = catalog.exposure() == catalog::Exposure::Full
-                        || pins.names().contains(&call.name);
+                        || run.pins.names().contains(&call.name);
                     async move {
                         // `Some` when a sub-agent ran: its spend (or unknown
                         // spend) is charged to the parent's budgets.
@@ -2541,13 +2638,13 @@ impl plan::CompiledAgentPlan {
                 let mut ordered = approved;
                 let overlapped: Vec<RuntimeToolCall> = ordered.drain(..leading_reads).collect();
                 if !overlapped.is_empty() {
-                    let child_limits = budget.child_budget(tokio::time::Instant::now());
+                    let child_limits = run.budget.child_budget(tokio::time::Instant::now());
                     let mut executions = futures_stream::iter(
                         overlapped.into_iter().map(|call| execute_one(call, None, child_limits)),
                     )
                         .buffer_unordered(MAX_PARALLEL_READS);
                     loop {
-                        let interrupt = interrupt_requested(&mut steering, handled_interrupt);
+                        let interrupt = interrupt_requested(&mut steering, run.handled_interrupt);
                         let next = tokio::select! {
                             biased;
                             () = interrupt => {
@@ -2564,12 +2661,12 @@ impl plan::CompiledAgentPlan {
                             return;
                         }
                         if let Some(spend) = child_spend {
-                            budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                            run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
                             if let Some(spawner) = &spawner { spawner.acknowledge(call.id); }
                         }
                         note_audited_action(
-                            &mut audit_triggers,
-                            &mut audit_actions,
+                            &mut run.audit_triggers,
+                            &mut run.audit_actions,
                             audit_hook.is_some(),
                             &call,
                             &result,
@@ -2583,7 +2680,7 @@ impl plan::CompiledAgentPlan {
                             let entry = catalog.lookup(&call.name);
                             let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
                                 && child_spend.is_none();
-                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
+                            run.stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                         }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
@@ -2607,10 +2704,10 @@ impl plan::CompiledAgentPlan {
                         let mut call_id_holder = Some(call.clone());
                         let (delta_sender, mut deltas) =
                             tokio::sync::mpsc::channel::<String>(SHELL_OUTPUT_QUEUE_CAPACITY);
-                        let mut execution = Box::pin(execute_one(call, Some(delta_sender), budget.child_budget(tokio::time::Instant::now())));
+                        let mut execution = Box::pin(execute_one(call, Some(delta_sender), run.budget.child_budget(tokio::time::Instant::now())));
                         let mut output_closed = false;
                         let (call, result, child_spend) = loop {
-                            let interrupt = interrupt_requested(&mut steering, handled_interrupt);
+                            let interrupt = interrupt_requested(&mut steering, run.handled_interrupt);
                             tokio::select! {
                                 biased;
                                 () = interrupt => {
@@ -2623,7 +2720,7 @@ impl plan::CompiledAgentPlan {
                                     }
                                     if let Some(spawner) = &spawner {
                                         match spawner.drain_attached().await {
-                                            Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
+                                            Ok(spends) => for spend in spends { run.budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                                             Err(error) => {
                                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                                                 return;
@@ -2646,19 +2743,19 @@ impl plan::CompiledAgentPlan {
                             yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                             return;
                         }
-                        let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_states.is_empty() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > handled_interrupt);
+                        let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_states.is_empty() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > run.handled_interrupt);
                         // Chunks sent in the execution's final poll may still
                         // be buffered; drain them before the terminal event.
                         while let Ok(chunk) = deltas.try_recv() {
                             yield RuntimeEvent::ToolCallOutputDelta { id: call_id, chunk };
                         }
                         if let Some(spend) = child_spend {
-                            budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                            run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
                             if let Some(spawner) = &spawner { spawner.acknowledge(call.id); }
                         }
                         note_audited_action(
-                            &mut audit_triggers,
-                            &mut audit_actions,
+                            &mut run.audit_triggers,
+                            &mut run.audit_actions,
                             audit_hook.is_some(),
                             &call,
                             &result,
@@ -2672,7 +2769,7 @@ impl plan::CompiledAgentPlan {
                             let entry = catalog.lookup(&call.name);
                             let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
                                 && child_spend.is_none();
-                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
+                            run.stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                         }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
@@ -2698,16 +2795,16 @@ impl plan::CompiledAgentPlan {
                                     }
                     if let Some(spawner) = &spawner {
                         match spawner.drain_attached().await {
-                            Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
+                            Ok(spends) => for spend in spends { run.budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                             Err(error) => {
                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
                                 return;
                             }
                         }
                     }
-                    handled_interrupt = steering
+                    run.handled_interrupt = steering
                         .as_ref()
-                        .map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
+                        .map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
                     // Calls that never finished settle as interrupted so the
                     // transcript stays provider-valid: one result per call.
                     for (index, call) in calls.iter().enumerate() {
@@ -2733,7 +2830,7 @@ impl plan::CompiledAgentPlan {
                 // so this cannot recursively checkpoint itself.
                 let mut checkpoint_correction_notice = None;
                 if let Some(reviewer) = &checkpoint {
-                    let context = checkpoint_context.as_mut().expect("enabled review context");
+                    let context = run.checkpoint_context.as_mut().expect("enabled review context");
                     let mut correction = Vec::new();
                     for (call, retained) in calls.iter().zip(results.iter_mut()) {
                         let retained = retained.as_mut().expect("every tool outcome is retained before checkpointing");
@@ -2774,16 +2871,16 @@ impl plan::CompiledAgentPlan {
                             };
                             continue;
                         }
-                        let remaining = match budget.remaining(tokio::time::Instant::now()) {
+                        let remaining = match run.budget.remaining(tokio::time::Instant::now()) {
                             Ok(remaining) => remaining,
                             Err(kind) => {
-                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                                 return;
                             }
                         };
                         if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
                             if let Some(kind) = error.budget_kind() {
-                                yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                                yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             } else {
                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() };
                             }
@@ -2802,7 +2899,7 @@ impl plan::CompiledAgentPlan {
                             correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::ToolResult, tool_call_id: Some(call.id),
                         };
                         let verdict = runtime::assess_checkpoint(reviewer.as_ref(), request).await;
-                        budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
+                        run.budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
                         yield RuntimeEvent::CheckpointReviewed {
                                 spend: Some(verdict.spend),
                             correlation,
@@ -2818,8 +2915,8 @@ impl plan::CompiledAgentPlan {
                             verdict.outcome.label(),
                             runtime::bounded_checkpoint_text(&verdict.feedback)
                         ));
-                        if let Some(kind) = budget.exceeded(tokio::time::Instant::now()) {
-                            yield RuntimeEvent::BudgetExhausted { exhaustion: budget.exhaustion(kind, false, tokio::time::Instant::now()) };
+                        if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now()) {
+                            yield RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) };
                             return;
                         }
                         // An unavailable reviewer leaves its marker on the
@@ -2866,7 +2963,7 @@ impl plan::CompiledAgentPlan {
                             (None, false) => tools::ResultRecall::None,
                         };
                         turn_output.admit(&mut content, recall);
-                        budget.charge_tool_output(content.len());
+                        run.budget.charge_tool_output(content.len());
                         ContentBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
                             content,
@@ -2875,12 +2972,12 @@ impl plan::CompiledAgentPlan {
                     })
                     .collect();
                 let tool_results = Message::tool_results(result_blocks);
-                irreducible_message_bytes = irreducible_message_bytes
+                window.irreducible_message_bytes = window.irreducible_message_bytes
                     .saturating_add(measure_message(&tool_results));
                 Arc::make_mut(&mut messages).push(tool_results);
                 if let Some(notice) = checkpoint_correction_notice.take() {
                     let notice = Message::user(notice);
-                    irreducible_message_bytes = irreducible_message_bytes
+                    window.irreducible_message_bytes = window.irreducible_message_bytes
                         .saturating_add(measure_message(&notice));
                     Arc::make_mut(&mut messages).push(notice);
                 }
@@ -2890,7 +2987,7 @@ impl plan::CompiledAgentPlan {
                 if final_answer_turn {
                     // As at any completion: a run that overran its cost or
                     // token bound settles as exhausted, never completed.
-                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now())
+                    if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now())
                         && matches!(
                             kind,
                             BudgetLimitKind::Cost
@@ -2898,7 +2995,7 @@ impl plan::CompiledAgentPlan {
                                 | BudgetLimitKind::TotalTokens
                         )
                     {
-                        let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                        let exhaustion = run.budget.exhaustion(kind, false, tokio::time::Instant::now());
                         yield RuntimeEvent::BudgetExhausted { exhaustion };
                         return;
                     }
@@ -2908,7 +3005,7 @@ impl plan::CompiledAgentPlan {
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
-                if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                if let Some(applied) = apply_steering(&mut run.stall, &mut steering, Arc::make_mut(&mut messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), &workspace, &file_state).await {
                     for steer in applied {
                         yield RuntimeEvent::SteeringApplied {
                             message_id: steer.message_id,
