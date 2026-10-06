@@ -1422,6 +1422,35 @@ mod tests {
     }
 
     #[test]
+    fn spawn_agent_authority_guidance_matches_write_capability() {
+        for mut delegation in [qq_protocol::DelegationRoster::default(), roster()] {
+            for write_children in [false, true] {
+                delegation.write_children = write_children;
+                let spec = spawn_agent_spec(&[], &delegation);
+                let schema: serde_json::Value =
+                    serde_json::from_str(spec.input_schema().get()).unwrap();
+                assert_eq!(
+                    schema["properties"].get("authority").is_some(),
+                    write_children
+                );
+                if write_children {
+                    assert!(!spec.description().contains("to a read-only sub-agent"));
+                    assert!(spec.description().contains("authority"));
+                    assert!(spec.description().contains("reviewer_model"));
+                    assert!(spec.description().contains("one write sub-agent"));
+                    assert_eq!(
+                        schema["properties"]["authority"]["enum"],
+                        json!(["read", "write"])
+                    );
+                } else {
+                    assert!(spec.description().contains("to a read-only sub-agent"));
+                    assert!(!spec.description().contains("authority"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn spawn_agent_hides_model_override_without_authenticated_routes() {
         let spec = spawn_agent_spec(&[], &qq_protocol::DelegationRoster::default());
         let schema: serde_json::Value = serde_json::from_str(spec.input_schema().get()).unwrap();

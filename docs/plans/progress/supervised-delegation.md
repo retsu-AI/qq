@@ -10,6 +10,7 @@ dated entries appended below, newest last.
 | D2 | Child accounting and authority repair | Shipped (`7a0a1e5`; H24 refresh in `893e582`) | | Per-admission remaining budgets, deadline carry, descendant spend |
 | D3 | Delegation roster | Shipped (`c8bf342`) | | Descriptor 4, prompt 10 |
 | D4a | Supervised write children at depth one | Shipped (`9ddbbb8`; H23 ownership in `1e6a901`, `f482b37`) | | |
+| D4a.1 / ENG-1010 | Capability-aware spawn authority guidance | In progress | `fix/eng-1010-subagent-authority-guidance` | Prompt/tool descriptions reflect read default and opt-in supervised writes; enforcement unchanged |
 | D4b | Configurable depth to three | Shipped (`9aa30e8`) | | Schema 23 |
 | D5 | Heuristic final-answer audit | Shipped (`a1939d2`) | | Schema 24 |
 | D6a | Compare command, arm stamping, reasoning tokens | Shipped (`428af0a`, `66f3aba`) | | Runbook `benchmarks/arms/README.md` |
@@ -41,3 +42,11 @@ Shipped: none new. In progress: none. Blocked: D6b (spend).
 - Pinned Rust 1.97.1; canonical TMPDIR, inherited credentials removed, NO_COLOR unset, TERM=xterm-256color and COLORTERM=truecolor. No tests or Rust code changed to obtain this result.
 - Full command ran 07:30:16–07:33:55 UTC; raw output `local-test-workspace-clean.log` and result JSON retained beside the manager handoff. Prior failed runs remain retained.
 - Earlier fmt, strict all-feature Clippy and build passes apply to identical source; subsequent changes are ledger-only. Independent source and ledger reviews retained. No PR, merge or paid trials; Manager owns integration and publication-cost resolution.
+
+### 2026-10-06 — D4a.1 spawn authority guidance (ENG-1010)
+
+- Two new regression tests failed on the original implementation: enabled write authority was still described as read-only by both prompt and tool.
+- Prompt version 18 follows the exposed spawn schema; write-enabled descriptions teach explicit authority, reviewer requirements and serialized supervised writes. Disabled descriptions stay byte-identical.
+- Focused regressions pass (2 tests); configuration guide explains enabling writes. No authority, approval, scheduling, protocol or persistence behavior changed.
+- Final `cargo test --workspace`, fmt check, strict all-feature workspace Clippy and workspace build pass. Earlier runs exposed prompt-version goldens and the 2 KiB spawn schema cap (fixed without increasing bounds); subsequent timing flakes in MCP cancellation and slice-report steering passed in the complete final rerun.
+- `cargo bench -p qq-core --bench plan_compile`: compile 27,565 ns/iteration, descriptor digest 2,420 ns/iteration, estimated plan 34,481 bytes. No paired baseline; no performance improvement claimed. Independent review attempts unavailable (provider rejected the configured routes).

@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(17) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(18) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 17. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 18. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -26,7 +26,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// line for read children, and asks parents for a question-shaped brief;
 /// 15 → 16 says a read sub-agent runs in the background and its answer
 /// arrives later as a runtime notice; 16 → 17 adds interim reports,
-/// wait_agents, and cancel_agent.
+/// wait_agents, and cancel_agent; 17 → 18 makes delegation guidance reflect
+/// the spawn schema's write authority.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -145,6 +146,7 @@ fn agent_prompt_prefix(
     let mut tool_names = String::new();
     let mut has_external = tool_index.is_some();
     let mut has_spawn = false;
+    let mut write_children = false;
     for spec in specs {
         if !tool_names.is_empty() {
             tool_names.push_str(", ");
@@ -152,7 +154,15 @@ fn agent_prompt_prefix(
         tool_names.push_str(spec.name());
         has_external |= spec.name().starts_with(MCP_TOOL_PREFIX)
             || spec.name().starts_with(EMBEDDED_TOOL_PREFIX);
-        has_spawn |= spec.name() == SPAWN_AGENT_TOOL;
+        if spec.name() == SPAWN_AGENT_TOOL {
+            has_spawn = true;
+            if let Ok(schema) = serde_json::from_str::<serde_json::Value>(spec.input_schema().get())
+            {
+                write_children = schema["properties"]["authority"]["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == "write"));
+            }
+        }
     }
     let has_fetch = specs.iter().any(|spec| spec.name() == "fetch");
     let fetch_description = if has_fetch {
@@ -189,10 +199,23 @@ fn agent_prompt_prefix(
         }
         (false, _) => String::new(),
     };
+    let spawn_authority = if write_children {
+        "sub-agent"
+    } else {
+        "read-only sub-agent"
+    };
+    let authority_guidance = if write_children {
+        "- Sub-agents read by default. Choose authority: write for an implementation task that \
+         requires editing files or running commands. Write sub-agents require a configured \
+         reviewer_model and run under supervised approval; only one write sub-agent runs at a \
+         time. Keep their work separate from your own edits.\n"
+    } else {
+        ""
+    };
     let spawn_section = if has_spawn {
         format!(
             "\n\nDelegation:\n\
-         - spawn_agent starts a one-shot read-only sub-agent in this workspace from a \
+         - spawn_agent starts a one-shot {spawn_authority} in this workspace from a \
          self-contained task brief. It usually runs in the background: the call returns \
          at once, and the sub-agent's final answer arrives at a later turn as a runtime \
          notice. Keep working on what does not depend on it; a reply without tool calls \
@@ -204,7 +227,7 @@ fn agent_prompt_prefix(
          you want back (a list of path:line findings, a yes or no with evidence, a short \
          plan). A sub-agent stops when it can answer, so an open-ended brief gets a long \
          search and a late answer. Prefer several narrow briefs over one broad one.\n\
-{model_guidance}\
+{authority_guidance}{model_guidance}\
          - Delegate when all three hold: the raw evidence would dwarf the distilled answer, \
          you will not need that evidence verbatim later, and the task needs no mid-flight \
          steering.\n\

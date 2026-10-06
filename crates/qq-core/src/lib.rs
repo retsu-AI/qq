@@ -12406,6 +12406,37 @@ mod tests {
     }
 
     #[test]
+    fn delegation_authority_guidance_matches_the_spawn_schema() {
+        let instructions = workspace::WorkspaceInstructions::empty();
+        for write_children in [false, true] {
+            let delegation = DelegationRoster {
+                write_children,
+                ..DelegationRoster::default()
+            };
+            let specs = [tools::spawn_agent_spec(&[], &delegation)];
+            let prompt = runtime::agent_system_prompt(
+                std::path::Path::new("/tmp/qq-prompt-test"),
+                &specs,
+                runtime::PromptSections::default(),
+                &instructions,
+                None,
+                None,
+            );
+            assert_eq!(prompt.contains("authority: write"), write_children);
+            assert_eq!(
+                prompt.contains("one-shot read-only sub-agent"),
+                !write_children
+            );
+            if write_children {
+                assert!(prompt.contains("read by default"));
+                assert!(prompt.contains("reviewer_model"));
+                assert!(prompt.contains("one write sub-agent"));
+                assert!(prompt.contains("implementation task"));
+            }
+        }
+    }
+
+    #[test]
     fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
