@@ -55,11 +55,17 @@ pub(crate) const SELECT_TOOLS_TOOL: &str = "select_tools";
 pub(crate) enum ToolHost {
     BuiltIn,
     SpawnAgent,
+    /// `wait_agents` and `cancel_agent`: offered exactly when `spawn_agent`
+    /// is, and dispatched to the same spawner.
+    WaitAgents,
+    CancelAgent,
     SearchHistory,
     ReadToolResult,
     SelectTools,
     LoadSkill,
-    External { host: usize },
+    External {
+        host: usize,
+    },
 }
 
 /// How a call to this tool relates to the workspace. This is the single
@@ -586,7 +592,9 @@ impl ToolCatalog {
                     return false;
                 }
                 match entry.host {
-                    ToolHost::SpawnAgent => include.spawn_agent,
+                    ToolHost::SpawnAgent | ToolHost::WaitAgents | ToolHost::CancelAgent => {
+                        include.spawn_agent
+                    }
                     ToolHost::SearchHistory => include.search_history,
                     ToolHost::ReadToolResult => include.read_tool_result,
                     ToolHost::LoadSkill => include.load_skill,

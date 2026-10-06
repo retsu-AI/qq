@@ -330,19 +330,28 @@ async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, hand
 /// context; each answer is charged once here. Only a child that answered is
 /// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
 /// for the parent, not output, exactly as a blocking spawn's error result is
-/// not progress. Returns how many were delivered.
+/// not progress, and neither is an interim report. Returns how many answers
+/// and how many interim reports were delivered.
 async fn deliver_children(
     spawner: &Arc<dyn SubagentSpawner>,
-    turn_ordinal: u32,
+    boundary: Boundary,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
     budget: &mut BudgetMeter,
     stall: &mut runtime::StallScope,
     checkpoint: Option<&mut runtime::CheckpointContext>,
-) -> Result<usize, runtime::DeliveryError> {
-    let delivered = spawner.deliver(turn_ordinal).await?;
+) -> Result<Delivered, runtime::DeliveryError> {
+    let delivered = spawner
+        .deliver(boundary.turn_ordinal, boundary.reports)
+        .await?;
     let mut checkpoint = checkpoint;
+    let mut count = Delivered::default();
     for child in &delivered {
+        if child.interim {
+            count.reports += 1;
+        } else {
+            count.answers += 1;
+        }
         budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
         // Answers are output the parent asked for, like tool results: they
         // count against its tool-output bound. The store bounded each
@@ -361,7 +370,22 @@ async fn deliver_children(
             irreducible_message_bytes.saturating_add(measure_message(&notice));
         messages.push(notice);
     }
-    Ok(delivered.len())
+    Ok(count)
+}
+
+/// The boundary a delivery is for: the parent turn whose request carries
+/// it, and whether running children's reports come with it.
+#[derive(Debug, Clone, Copy)]
+struct Boundary {
+    turn_ordinal: u32,
+    reports: runtime::ReportDelivery,
+}
+
+/// What one boundary delivery added to the parent's context.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Delivered {
+    answers: usize,
+    reports: usize,
 }
 
 /// One steering message the loop has injected: its id and the files it read.
@@ -2007,18 +2031,20 @@ impl plan::CompiledAgentPlan {
             'turns: for turn_ordinal in 1..=u32::MAX {
                 // Settled detached children answer here, at the one boundary
                 // every turn passes: after the previous turn's results and
-                // steering, before this request is built (ADR-0054 § 4). The
-                // store commits the delivery before the notice joins context.
+                // steering, before this request is built (ADR-0054 § 4); a
+                // child still working may send its newest report. The store
+                // commits the delivery before the notice joins context. A run
+                // with no background child makes no store call.
                 // A wait that just delivered for this turn used its boundary;
                 // anything settling since waits for the next one, so one
                 // boundary spends one turn's tool-output budget.
                 let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
                 if let Some(spawner) = &spawner
                     && !delivered_by_wait
-                    && spawner.settled_detached()
+                    && spawner.outstanding_detached() > 0
                     && let Err(error) = deliver_children(
                         spawner,
-                        turn_ordinal,
+                        Boundary { turn_ordinal, reports: runtime::ReportDelivery::Always },
                         Arc::make_mut(&mut messages),
                         &mut irreducible_message_bytes,
                         &mut budget,
@@ -3307,7 +3333,7 @@ impl plan::CompiledAgentPlan {
                             }
                             match deliver_children(
                                 spawner,
-                                turn_ordinal.saturating_add(1),
+                                Boundary { turn_ordinal: turn_ordinal.saturating_add(1), reports: runtime::ReportDelivery::WithAnswers },
                                 Arc::make_mut(&mut messages),
                                 &mut irreducible_message_bytes,
                                 &mut budget,
@@ -3316,18 +3342,28 @@ impl plan::CompiledAgentPlan {
                             )
                             .await
                             {
-                                // A settled child whose own descendants are
-                                // still settling has no readable spend yet;
-                                // its delivery is retried after they settle.
-                                // Pause briefly so the wake does not spin.
-                                Ok(0) if spawner.settled_detached() => {
-                                    tokio::time::sleep(delivery_retry).await;
-                                    delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
-                                }
-                                Ok(0) => {}
-                                Ok(_) => {
+                                // Only an answer ends the wait, and reports
+                                // come only with one (`WithAnswers`): the
+                                // reply already said nothing is left to do
+                                // until answers arrive, and the delivery
+                                // that ends the wait is this boundary's
+                                // only one, so it spends one budget and
+                                // precedes any steering, as replay places it.
+                                Ok(delivered) if delivered.answers > 0 => {
                                     wait_delivered_for = Some(turn_ordinal.saturating_add(1));
                                     break;
+                                }
+                                Ok(delivered) => {
+                                    debug_assert_eq!(delivered.reports, 0);
+                                    // A settled child whose own descendants
+                                    // are still settling has no readable spend
+                                    // yet; its delivery is retried after they
+                                    // settle. Pause briefly so the wake does
+                                    // not spin.
+                                    if spawner.settled_detached() {
+                                        tokio::time::sleep(delivery_retry).await;
+                                        delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
+                                    }
                                 }
                                 Err(error) => {
                                     yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -3913,6 +3949,64 @@ impl plan::CompiledAgentPlan {
                                     tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true)
                                 }
                             },
+                            // Waiting and cancelling act on this run's own
+                            // background children; their answers arrive as
+                            // delivered notices at the next boundary, never
+                            // in these results (ADR-0054 § 4).
+                            None if host == Some(catalog::ToolHost::WaitAgents) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::WaitAgentsArgs>(&call.arguments) {
+                                    Ok(arguments) if !(1..=tools::MAX_WAIT_AGENTS_SECS).contains(&arguments.timeout_seconds) => {
+                                        tools::bounded_result(
+                                            format!("timeout_seconds must be between 1 and {}", tools::MAX_WAIT_AGENTS_SECS),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) if arguments.ids.as_ref().is_some_and(|ids| ids.len() > usize::from(sessions::MAX_SPAWNED_CHILDREN_PER_RUN)) => {
+                                        tools::bounded_result(
+                                            format!("ids may name at most {} sub-agents", sessions::MAX_SPAWNED_CHILDREN_PER_RUN),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) => match arguments
+                                        .ids
+                                        .map(|ids| ids.iter().map(|id| id.trim().parse::<qq_protocol::SessionId>()).collect::<Result<Vec<_>, _>>())
+                                        .transpose()
+                                    {
+                                        Err(_) => tools::bounded_result(
+                                            "ids must be sub-agent ids from spawn_agent results".to_owned(),
+                                            true,
+                                        ),
+                                        Ok(ids) => match spawner
+                                            .wait_children(ids, Duration::from_secs(arguments.timeout_seconds))
+                                            .await
+                                        {
+                                            Ok(report) => tools::bounded_result(report.render(arguments.timeout_seconds), false),
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                            },
+                            None if host == Some(catalog::ToolHost::CancelAgent) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::CancelAgentArgs>(&call.arguments) {
+                                    Ok(arguments) => match arguments.id.trim().parse::<qq_protocol::SessionId>() {
+                                        Ok(id) => match spawner.cancel_child(id).await {
+                                            Ok(outcome) => {
+                                                let (text, is_error) = outcome.render(id);
+                                                tools::bounded_result(text, is_error)
+                                            }
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                        Err(_) => tools::bounded_result(
+                                            "id must be a sub-agent id from a spawn_agent result".to_owned(),
+                                            true,
+                                        ),
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                            },
                             // Full-transcript recall dispatches to the session
                             // layer; the tool is declared only when a searcher
                             // exists, so a guessed call is simply unknown here.
@@ -4053,8 +4147,13 @@ impl plan::CompiledAgentPlan {
                 // read child may overlap: a write child is a mutation.
                 // Finite spend cannot be granted independently to overlapping children.
                 // Unbounded and duration-only read fanout retains its concurrency.
+                // A wait or cancel runs in request order, after the spawns
+                // before it in the turn, so it sees the children they started.
                 let overlaps = |call: &RuntimeToolCall| {
                     !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                    && !catalog.lookup(&call.name).is_some_and(|entry| {
+                        matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent)
+                    })
                     && matches!(
                         approval::classify(call.effect, &call.name, &call.arguments, &network_policy),
                         approval::ToolClass::ReadOnly
@@ -11583,7 +11682,7 @@ mod tests {
         fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
             unreachable!("this spawner only delivers")
         }
-        fn deliver(&self, _: u32) -> runtime::DeliverFuture {
+        fn deliver(&self, _: u32, _: runtime::ReportDelivery) -> runtime::DeliverFuture {
             let delivered = std::mem::take(&mut *self.delivered.lock().unwrap());
             Box::pin(std::future::ready(Ok(delivered)))
         }
@@ -11594,16 +11693,23 @@ mod tests {
     /// notice that the child failed or was cancelled is still context the
     /// parent sees and spend it pays, but it does not hold off the parent's
     /// stall report: a parent spawning children that fail must still report.
+    /// An interim report from a child still working is neither progress nor
+    /// an answer.
     #[tokio::test]
     async fn only_a_delivered_answer_restarts_the_stall_count() {
-        let child = |answered: bool| runtime::DeliveredChild {
+        let child = |answered: bool, interim: bool| runtime::DeliveredChild {
             notice: format!("child answered: {answered}"),
             answered,
+            interim,
             spend: SpawnAgentSpend::NONE,
         };
-        for (answered, restarts) in [(false, false), (true, true)] {
+        for (answered, interim, restarts) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, false),
+        ] {
             let spawner: Arc<dyn SubagentSpawner> = Arc::new(DeliveringSpawner {
-                delivered: Mutex::new(vec![child(answered)]),
+                delivered: Mutex::new(vec![child(answered, interim)]),
             });
             let mut stall = runtime::StallScope::new(runtime::StallPolicy::Root);
             for _ in 0..runtime::STALL_REPORT_CALLS {
@@ -11616,7 +11722,10 @@ mod tests {
                 BudgetMeter::new(RunLimits::default(), None, tokio::time::Instant::now());
             let delivered = deliver_children(
                 &spawner,
-                2,
+                Boundary {
+                    turn_ordinal: 2,
+                    reports: runtime::ReportDelivery::Always,
+                },
                 &mut messages,
                 &mut bytes,
                 &mut budget,
@@ -11625,7 +11734,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(delivered, 1);
+            assert_eq!(
+                delivered,
+                Delivered {
+                    answers: usize::from(!interim),
+                    reports: usize::from(interim),
+                }
+            );
             // Either way the notice is in context.
             assert_eq!(
                 messages.last().unwrap(),
@@ -11685,12 +11800,14 @@ mod tests {
             Some(RuntimeEvent::Completed { .. })
         ));
         let requests = requests.lock().unwrap();
-        assert!(
-            !requests[0]
-                .tools()
-                .iter()
-                .any(|spec| spec.name() == tools::SPAWN_AGENT_TOOL)
-        );
+        // The delegation tools come and go together: a run that cannot
+        // spawn has no background children to wait for or cancel.
+        for tool in [tools::SPAWN_AGENT_TOOL, "wait_agents", "cancel_agent"] {
+            assert!(
+                !requests[0].tools().iter().any(|spec| spec.name() == tool),
+                "{tool}"
+            );
+        }
         let system = requests[0].system().unwrap();
         assert!(!system.contains("Delegation:"));
         // Direct runs have no durable transcript, so history recall is
@@ -11700,6 +11817,158 @@ mod tests {
                 .tools()
                 .iter()
                 .any(|spec| spec.name() == runtime::SEARCH_HISTORY_TOOL)
+        );
+    }
+
+    /// The tool-free wait asks for reports only together with an answer
+    /// (ADR-0054 § 4), so the one delivery that ends the wait is the
+    /// boundary's only one: one budget, before any steering, as replay
+    /// places it. The turn-top boundary takes reports from children still
+    /// working.
+    #[tokio::test]
+    async fn a_tool_free_wait_takes_reports_only_with_an_answer() {
+        struct AllowAllGate;
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+        /// One detached child that reports at every boundary that accepts
+        /// reports, and answers on the third wake of the wait.
+        struct Reporter {
+            asked: Mutex<Vec<runtime::ReportDelivery>>,
+            wakes: Mutex<usize>,
+            answered: std::sync::atomic::AtomicBool,
+        }
+        impl SubagentSpawner for Reporter {
+            fn acknowledge(&self, _: ToolCallId) {}
+            fn drain(&self) -> runtime::ChildDrainFuture {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+                Box::pin(std::future::ready(SpawnAgentOutcome {
+                    content: "started".to_owned(),
+                    is_error: false,
+                    spend: SpawnAgentSpend::NONE,
+                    session_id: None,
+                    detached: true,
+                }))
+            }
+            fn outstanding_detached(&self) -> usize {
+                usize::from(!self.answered.load(std::sync::atomic::Ordering::SeqCst))
+            }
+            fn child_settled(&self) -> runtime::ChildWaitFuture {
+                Box::pin(std::future::ready(()))
+            }
+            fn deliver(&self, _: u32, reports: runtime::ReportDelivery) -> runtime::DeliverFuture {
+                self.asked.lock().unwrap().push(reports);
+                let report = runtime::DeliveredChild {
+                    notice: "interim report".to_owned(),
+                    answered: false,
+                    interim: true,
+                    spend: SpawnAgentSpend::NONE,
+                };
+                let batch = match reports {
+                    runtime::ReportDelivery::Always => vec![report],
+                    runtime::ReportDelivery::WithAnswers => {
+                        let mut wakes = self.wakes.lock().unwrap();
+                        *wakes += 1;
+                        if *wakes < 3 {
+                            Vec::new()
+                        } else {
+                            self.answered
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            vec![
+                                runtime::DeliveredChild {
+                                    notice: "the answer".to_owned(),
+                                    answered: true,
+                                    interim: false,
+                                    spend: SpawnAgentSpend::NONE,
+                                },
+                                report,
+                            ]
+                        }
+                    }
+                };
+                Box::pin(std::future::ready(Ok(batch)))
+            }
+        }
+        let spawner = Arc::new(Reporter {
+            asked: Mutex::new(Vec::new()),
+            wakes: Mutex::new(0),
+            answered: std::sync::atomic::AtomicBool::new(false),
+        });
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        struct Recording {
+            inner: SpawnCallProvider,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+        impl Provider for Recording {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                self.inner.stream(request)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            Recording {
+                inner: SpawnCallProvider {
+                    turn: Mutex::new(0),
+                    model: None,
+                },
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("go")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>)),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        // The turn-top boundaries (turns 1 and 2; this stub is outstanding
+        // from the start) take reports; the wait's three wakes do not, and
+        // the third, with the answer, ends it. Turn 3 then needs no boundary
+        // delivery: the wait already delivered for it.
+        use runtime::ReportDelivery::{Always, WithAnswers};
+        assert_eq!(
+            spawner.asked.lock().unwrap().as_slice(),
+            [Always, Always, WithAnswers, WithAnswers, WithAnswers]
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        // Turn 2 carried the turn-top report; turn 3 the reply, the answer,
+        // then the report that came with it.
+        let tail = requests[2]
+            .messages()
+            .iter()
+            .rev()
+            .take(3)
+            .map(|message| (message.role(), message.content().to_vec()))
+            .collect::<Vec<_>>();
+        let text = |text: &str| {
+            vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }]
+        };
+        assert_eq!(
+            tail,
+            [
+                (Role::User, text("interim report")),
+                (Role::User, text("the answer")),
+                (Role::Assistant, text("done")),
+            ]
         );
     }
 
@@ -12177,6 +12446,9 @@ mod tests {
             the call returns at once, and the sub-agent's final answer arrives at a later turn as \
             a runtime notice. Keep working on what does not depend on it; a reply without tool \
             calls while sub-agents are working waits for their answers.\n";
+        const CONTROL_BULLET: &str = "- A sub-agent still working may also send its latest \
+            progress report as a notice. Call wait_agents when your next step needs specific \
+            answers, and cancel_agent for a sub-agent whose answer you no longer need.\n";
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
@@ -12209,13 +12481,18 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 16 (ADR-0054 § 4) rewords only the first and last
-        // delegation bullets; undo them, then the brief bullet.
-        assert!(prompt.contains(BACKGROUND_SPAWN), "{prompt}");
-        assert!(prompt.contains(CONCURRENT_WITH_YOU), "{prompt}");
-        let v15 = prompt
-            .replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1)
-            .replacen(CONCURRENT_WITH_YOU, CONCURRENT, 1);
+        // Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control bullet, and
+        // prompt 16 rewords only the first and last delegation bullets; undo
+        // them, then the brief bullet.
+        assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
+        let v16 = prompt.replacen(CONTROL_BULLET, "", 1);
+        assert!(v16.contains(BACKGROUND_SPAWN), "{v16}");
+        assert!(v16.contains(CONCURRENT_WITH_YOU), "{v16}");
+        let v15 = v16.replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1).replacen(
+            CONCURRENT_WITH_YOU,
+            CONCURRENT,
+            1,
+        );
         let v14 = v15.replacen(NEW_BULLET, "", 1);
         assert_ne!(v14, v15);
         assert_eq!(

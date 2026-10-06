@@ -29,6 +29,14 @@ use crate::{
 /// that may spawn (never for child sessions), and it dispatches to the
 /// session layer rather than to a workspace execution.
 pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
+/// Waits for background sub-agents (ADR-0054 § 4). Declared with
+/// [`SPAWN_AGENT_TOOL`] and dispatched to the same spawner.
+const WAIT_AGENTS_TOOL: &str = "wait_agents";
+/// Cancels one background sub-agent (ADR-0054 § 4).
+const CANCEL_AGENT_TOOL: &str = "cancel_agent";
+/// The longest one `wait_agents` call blocks its turn: a shell command's
+/// own ceiling, so a wait is never the longest thing a turn can do.
+pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = MAX_SHELL_TIMEOUT_SECS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuiltInTool {
@@ -419,6 +427,70 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             ("additionalProperties".to_owned(), json!(false)),
         ])),
     )
+}
+
+/// The declaration for [`WAIT_AGENTS_TOOL`].
+pub(crate) fn wait_agents_spec() -> ToolSpec {
+    ToolSpec::new(
+        WAIT_AGENTS_TOOL,
+        "Wait for background sub-agents you started with spawn_agent, when your next step needs \
+         their answers. Returns when every named sub-agent has finished (or, with no ids, when any \
+         one has), or when the timeout passes; the ones still working keep working. Each \
+         finished sub-agent's answer arrives as a runtime notice.",
+        json!({
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": crate::sessions::MAX_SPAWNED_CHILDREN_PER_RUN,
+                    "description": "Sub-agent ids from spawn_agent results. Omit to wait for any outstanding sub-agent."
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_WAIT_AGENTS_SECS,
+                    "description": "How long to wait at most."
+                }
+            },
+            "required": ["timeout_seconds"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+/// The declaration for [`CANCEL_AGENT_TOOL`].
+pub(crate) fn cancel_agent_spec() -> ToolSpec {
+    ToolSpec::new(
+        CANCEL_AGENT_TOOL,
+        "Cancel one background sub-agent whose answer you no longer need. What it reported so far \
+         arrives as a runtime notice.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The sub-agent id from its spawn_agent result."
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitAgentsArgs {
+    #[serde(default)]
+    pub(crate) ids: Option<Vec<String>>,
+    pub(crate) timeout_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelAgentArgs {
+    pub(crate) id: String,
 }
 
 #[derive(Deserialize)]
