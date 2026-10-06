@@ -1856,6 +1856,7 @@ pub(super) fn delete_idle_session(
         "DELETE FROM tool_calls WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM model_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM child_deliveries WHERE parent_session_id = ?1",
+        "DELETE FROM child_reports WHERE parent_session_id = ?1",
         "DELETE FROM messages WHERE session_id = ?1",
         "DELETE FROM runs WHERE session_id = ?1",
         "DELETE FROM session_grants WHERE session_id = ?1",

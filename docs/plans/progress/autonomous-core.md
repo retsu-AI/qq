@@ -33,7 +33,8 @@ adds finite ScriptedProvider. No wire, schema, descriptor or default behavior bu
 Verification so far: embedding 3/3 and MCP 1/1 passed; core library 831 passed,
 3 ignored. Initial new-public-API fixture failed on baseline as expected.
 Baseline plan_compile 49,877 ns/iteration, digest 4,701 ns/iteration; candidate
-and wider gates pending. Full baseline workspace hit headless timing test
+and wider gates were pending at this initial recording (superseded by the
+2026-10-06 AC10 review receipt below). Full baseline workspace hit headless timing test
 turn_budget_cancels_before_a_silent_over_budget_turn_can_hang; isolated rerun passed.
 No seven-day/live-soak acceptance claimed.
 
@@ -56,8 +57,18 @@ AC10 candidate plan_compile 25,389 ns, digest 2,462 ns; different host load from
 baseline, without A/A control, so no speed improvement or within-noise claim.
 Example runs successfully and is 99 formatted lines; embedding four tests pass.
 Compilation concurrency/cancellation fixture and default release-size measurement
-remain qualification work. Draft stack until these gates are resolved.
+were qualification work at this initial receipt; superseded by AC10/AC11 review receipts.
 
+### 2026-10-06 — AC10 review receipt (supersedes initial pending gates)
+
+- Codex finding: AC10's own branch lacked final evidence/status; corrected here, not only in AC12.
+- Final AC10 at 73241984: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`, `cargo build --workspace` passed.
+- Initial workspace headless rollover timeout; full workspace rerun passed. Embedding 4, MCP 1, queued compilation cancellation/concurrency/permit recovery 1 passed.
+- `cargo run -p qq-core --example embed` and `cargo doc -p qq-core --no-deps` passed; three existing doc warnings.
+- Same-host release c37afe25 vs AC10, 30 alternating A/B + A/A: plan median 26,288 → 26,149 ns; p95 36,260 → 37,701; A/A median 25,994/26,112, p95 49,688/50,685.
+- Binary 50,080,176 → 50,081,072 bytes (+896); inherited 48 MB absolute budget failure explicitly not waived.
+- Evidence `.worktrees/ac10/target/qq-perf/ready/ac10-{measurements.json,clippy.log,tests-rerun.log,build.log}`; baseline `.worktrees/ac1` at c37afe25. High I/O pressure; no speedup claim.
+- Merge current main f15a4d24 (shipped AP4.2) to fix stack's effective-main ledger conflict; retain all AP4.2 work unchanged. Updated-head gates recorded after execution.
 
 
 Plan: [`../autonomous-core.md`](../autonomous-core.md). Only the agent
@@ -70,9 +81,9 @@ appended below, newest last.
 | AP1 | Sub-agent brief and delegation guidance | Shipped | [ENG-989](https://linear.app/retsu-ai/issue/ENG-989) | #235 (`7870b20`) | Prompt 14 → 15 |
 | AP2 | Pruned `read_file` stubs keep their header | Shipped | [ENG-988](https://linear.app/retsu-ai/issue/ENG-988) | #233 (`fc88136`) | |
 | AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
-| AP3b | Stall report and child answer | In review | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | `feat/eng-1000-ap3b-stall-report` | Stacked on ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
-| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | In review | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | `feat/eng-1004-ap4-nonblocking-delegation` | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; stacked on #242 |
-| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Planned | | | `DESCRIPTOR_VERSION` 12 → 13 (two built-in tools); independent review |
+| AP3b | Stall report and child answer | Shipped | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | #240 (`594b29c`) | With ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
+| AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | Shipped | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | #244 (`fc97fab`) | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16 |
+| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | In review | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
@@ -84,8 +95,8 @@ appended below, newest last.
 | AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
-| AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | `feat/eng-1006-ac10-core-embedding` | Public async constructors; credential-free runnable example; ADR-0050 § 1 |
-| AC11 | `tool-fetch` feature; minimal profile CI | In review | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests/Clippy pass; htmd absent; default size +128 bytes |
+| AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
+| AC11 | `tool-fetch` feature; minimal profile CI | In review | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; measured default size +128 bytes; receipt below |
 | AC12 | `qq-harness` crate (three mechanical moves) | AC12.1 In review; .2/.3 Planned | [ENG-1009](https://linear.app/retsu-ai/issue/ENG-1009) | `refactor/eng-1009-ac12-1-harness-mcp` stacked on #256 | Plan cache/MCP bridge moved; measured relative budgets pass; pressured-host caveat |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
@@ -849,3 +860,319 @@ pins the rule, and it fails with Codex's suggested change.
 - Ready for Codex review; merge order #253, #256, #258. AC12.2/.3 and full smoke remain future work; AP4.2 untouched.
 
 Final independent source review: Approve (async admission/cancellation, feature gates, cache/MCP extraction and failure classification). All three PR draft flags removed; AC10/AC11 current-head GitHub CI green.
+### 2026-10-04: Stack merged; AP4.2 (ENG-1005) implemented
+
+#238, #240, #242 and #244 merged to `main` on 2026-10-05 (UTC). ENG-1000 to
+ENG-1004 are Done. AP4.2 branches from `main` (`bfbe814`), not from a stack.
+
+**What it adds** (ADR-0054 § 4, the rest of decision 4):
+
+- **`wait_agents { ids?, timeout_seconds }`.** It blocks its call until every
+  named child settles (with no ids, until any outstanding child does), or
+  until the timeout passes. The timeout is 1 to 600 s (`MAX_WAIT_AGENTS_SECS`,
+  a shell command's ceiling), and at most 8 ids are accepted. The result says
+  of each child: finished, still working, or unknown.
+- **`cancel_agent { id }`.** It sends the child's cancel signal and returns
+  once the child has settled.
+- **Interim reports.** A running child's newest closed report reaches the
+  parent at a boundary as a labelled notice: "is still working. This is its
+  latest progress report, not its answer…".
+- **Shared rules for both tools:**
+  - they are declared exactly when `spawn_agent` is (same `StaticFilter`
+    flag), are `EffectClass::ReadOnly`, and are never overlapped with the
+    turn's read batch, so they run after the spawns before them;
+  - they name a child by the session id its receipt gave.
+
+**Design decisions:**
+
+- **No answer in the tool result.** The ADR says `wait_agents` "returns their
+  answers" and `cancel_agent` returns "whatever report the child had". In
+  both cases the answer arrives at the very next boundary, as the delivered
+  notice right after the tool result, instead of inside the result.
+  - Every answer then goes through the one stamped delivery row, so
+    exactly-once holds across tool result, boundary, settlement and recovery
+    without a second path.
+  - A crash between the tool result and the delivery cannot show the answer
+    twice or lose it.
+  - The model sees the same text it would have seen in the result, one
+    message later, and the next request carries both.
+  - This is a refinement of the ADR's wording, not a change of decision.
+- **Interim reports are closed reports only.** A report span is delivered
+  once a later turn of the child's run has opened another notice. Before
+  that, a continuation of the same reply (an output cut, a fault, an
+  interrupt) could still extend the text, and the parent would get a report
+  that later changes.
+  - One report per child per boundary: the newest closed one. Older
+    undelivered reports are superseded.
+  - A child that has settled is answered instead.
+  - Store schema 42 adds `child_reports(child_run_id, child_turn_ordinal)`
+    as the primary key, one row per delivered report. The highest delivered
+    turn is the child's "seen through" mark.
+  - Answers and reports share one delivery ordinal per parent run, so
+    assembly (`retained_deliveries`, `UNION ALL` ordered by run and ordinal)
+    replays them in live order.
+  - Reports take the boundary's tool-output budget after the answers, carry
+    no spend, and leave the child outstanding (`forget_delivered` skips
+    them).
+  - `DeliveredAnswer::answered()` is false for them, so the stall count is
+    not restarted.
+- **The turn-top delivery now runs while any detached child is
+  outstanding**, not only once one has settled, because reports come from
+  running children.
+  - This costs one store transaction per parent turn while children run.
+  - A run with no background child still makes no store call.
+- **`report_spans` replaces the body of `run_latest_report_text`** with one
+  walk that also reports whether each span is closed, so the blocking
+  answer, the delivered answer and the interim report read reports the same
+  way. It only reads turns after the seen-through mark.
+  - It also fixes a latent quirk: a turn with several assistant messages
+    repeated its notice on each row, and the old walk re-opened the span on
+    each row, so it kept only the last message's text. Only a turn's first
+    row opens a span now.
+- **Prompt 16 → 17** adds one bullet. The golden test undoes exactly that
+  bullet, then the 16 and 15 changes, and still matches the v14 hash.
+- **`DESCRIPTOR_VERSION` 12 → 13.** The golden digest is updated.
+- **Other changes:**
+  - `qq-config`'s fixed `exposed_tools` vocabulary gains the two names (the
+    root contract test binds it to the catalog);
+  - deleting a session also deletes its `child_reports` rows.
+
+**Tests** (`sessions/tests/nonblocking.rs`, plus one migration test):
+
+- `wait_agents_returns_when_the_named_children_settle`: both answers follow
+  the wait result once, and replay matches live.
+- `wait_agents_with_a_timeout_returns_what_settled`: the wait reports
+  "Waited 1s; … still working.", then the boundary wait gets the late answer
+  once.
+- `cancel_agent_stops_the_child_and_delivers_what_it_had`: the child settles
+  cancelled and the cancellation answer is delivered once, not as progress.
+- `wait_and_cancel_report_unknown_children`: no children, an unknown id, a
+  malformed id, a timeout out of range, and more than 8 ids.
+- `an_interim_report_is_delivered_once_and_never_as_the_answer`: an open
+  report waits, the newer closed report supersedes the older, a delivered
+  report is not sent again, the answer still arrives, and assembly orders
+  the report before the answer.
+- `an_interim_report_does_not_restart_the_stall_count`.
+- `version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape`.
+- Declaration: `spawner_less_runs_…` asserts all three tools are absent, and
+  the plan test asserts both new names are in the descriptor.
+
+Mutation checks, each restored afterwards (every one makes its test fail):
+
+- named waits return on any child;
+- open reports are delivered;
+- already-seen reports are re-sent;
+- cancel never signals;
+- an interim report counts as progress.
+
+**Measured** on a loaded machine, base `main` against the branch,
+alternating:
+
+- `turn_overhead` 10/100/1000: round 2 was 40.4/39.8/41.0 ms against
+  42.1/39.6/40.8 ms; round 1 was noise-bound (37–85 ms on both).
+- `child_admission` medians, round 1 then round 2 (peaks and spend are
+  identical):
+
+  | Case | Base | Branch |
+  | --- | --- | --- |
+  | `unbounded_read` | 127.9 / 119.7 ms | 128.1 / 122.9 ms |
+  | `finite_read` | 151.0 / 149.6 ms | 152.3 / 152.8 ms |
+  | `depth_two` | 100.1 / 101.3 ms | 103.2 / 99.8 ms |
+  | `unbounded_read_overlap` | 124.2 / 132.2 ms | 124.1 / 122.2 ms |
+
+  All within noise.
+
+**Flaky tests under I/O load are not from this branch.**
+`child_mutation_drains_before_steering_or_a_replacement_run_can_write` failed
+2 of 5 runs on the branch at load 17. The runs were then compared against
+`main` under the same conditions:
+
+| Condition | `main` | Branch |
+| --- | --- | --- |
+| Quiet machine | 10 of 10 pass | 10 of 10 pass |
+| 32 CPU burners | 4 of 4 pass (3.6–3.8 s) | 4 of 4 pass (3.8–4.5 s) |
+| 6 `dd … conv=fsync` writers | 0 of 4 pass | 0 of 4 pass |
+
+The failures follow store fsync latency against the tests' 2-second waits,
+not anything this branch changes. The test also spawns a write child, which
+never detaches, so none of the new delivery code runs in it. The same holds
+for the `sessions::tests::deadlines` timeouts in one loaded full run: they
+pass 13 of 13, three times each, on both `main` and the branch. AC0's soak
+work owns fsync-heavy timing; this is not fixed here.
+
+### 2026-10-05: AP4.2 independent review: changes requested, all fixed
+
+The reviewer requested changes: 1 blocking, 5 should-fix, 4 nits.
+
+1. **(Blocking) Interim reports were not tested end to end.** Both report
+   tests called the store directly, so no live parent turn, turn-notice
+   placement or replay check covered them.
+   - `a_working_parent_receives_interim_reports_and_replays_them` runs a
+     parent that keeps reading while a real child answers stall reports and
+     then its final-answer turn. It checks:
+     - each report reaches the parent once, in order, as the newest message
+       of the first request that carries it;
+     - the answer arrives once, after the reports;
+     - `assert_replay_matches_live` holds, with the reference loader reading
+       `child_reports`.
+   - It fails when reports are disabled, and when their replay order is
+     shifted.
+2. **Policy could split the three delegation tools.** Pack policy or
+   `exposed_tools` could keep `spawn_agent` but drop the other two, and the
+   prompt then named tools the run lacked.
+   - `wait_agents` and `cancel_agent` now follow `spawn_agent` through both
+     filters and are dropped whenever it is.
+   - They are not policy names: the config vocabulary is reverted, and the
+     plan's `known` set excludes them.
+   - Tests: `the_delegation_tools_follow_spawn_agent_through_every_filter`
+     and the root `configured_static_exposure_…`.
+3. **A report could end the tool-free wait.** A wake that delivered only a
+   report (child A settled with its spend unreadable while B reported) ended
+   the wait and spent a turn.
+   - `deliver_children` now returns `Delivered { answers, reports }`. The
+     wait ends only on an answer or steering. A report-only wake keeps
+     waiting, and the report stays in context for the next turn
+     (`wait_delivered_for` is set, so that boundary is not delivered twice).
+   - Tests: `a_tool_free_wait_ends_on_an_answer_not_on_a_report` (run loop,
+     deterministic; fails if reports end the wait),
+     `an_interim_report_does_not_end_a_tool_free_wait` and
+     `a_report_only_delivery_is_not_an_answer`.
+4. **Teardown could miss an owner task.** Turn-top delivery now runs while
+   children are working, so the store can deliver a child before its owner
+   task finishes, and `forget_delivered` would drop it from the registry.
+   Teardown's drain would then not wait for it.
+   - `ChildTask.delivered` keeps the entry, no longer outstanding, until the
+     task completes.
+   - Test: `a_child_delivered_before_its_owner_finishes_is_still_drained`.
+     It fails if delivered tasks are dropped at once.
+5. **`report_spans` loaded every span's text.**
+   - It now collects message ids per span. `newest_report` loads text newest
+     first and stops at the first eligible span with text, so a boundary
+     reads one report in the usual case.
+   - The doc comment is corrected.
+6. **Test gaps, now covered:**
+   - `wait_with_no_ids_returns_on_the_first_finished_child`: with no ids,
+     the wait returns on the first finished child; a cancel of it reports
+     `AlreadyFinished`.
+   - `a_report_closed_by_the_final_answer_notice_is_delivered`.
+   - `a_report_delivered_before_a_crash_replays_once_and_is_not_resent`:
+     recovery never re-sends a report, it replays once after the run, and
+     the answer follows it.
+
+**Nits:**
+
+- the `NamedChild` struct replaces the `type_complexity` allow;
+- "follows" is now "arrives", since an answer can be several boundaries
+  late while a grandchild settles;
+- `write!` replaces `push_str(&format!(..))`;
+- the prompt version note reads as a history.
+
+The reviewer also checked several suspicions and found them fine:
+
+- the `after` filter in `report_spans`;
+- the AP3b effect of the first-row-per-turn change (only one complete
+  assistant message per turn exists live);
+- exactly-once for reports;
+- the shared ordinal;
+- `delivered_by_wait`;
+- budget;
+- migration lists;
+- request-order dispatch;
+- interrupt handling.
+
+**Verification:** 2102 workspace tests pass on a quiet machine (load 1.4);
+fmt and clippy are clean; the soak passes; the nonblocking, delegation and
+progress suites pass 5 of 5.
+
+### 2026-10-05: AP4.2 re-review: findings 1–10 resolved; NEW-1 and NEW-2 fixed
+
+The re-review confirmed every original finding resolved and added one
+blocking finding, NEW-1, plus one should-fix, NEW-2. Both were introduced by
+the finding-3 fix.
+
+- **NEW-1 (blocking): replay order.**
+  - The bug: a report-only wake in the tool-free wait pushed a report, then
+    later steering was applied in the same wait. Live order was reply,
+    report, steer. Replay places a boundary's steering before its delivered
+    notices, so it rebuilt reply, steer, report.
+  - The fix: `SubagentSpawner::deliver` and `Store::deliver_children` take a
+    `ReportDelivery`:
+    - `Always` at the turn top;
+    - `WithAnswers` in the wait, which sends reports only in the same
+      transaction as an answer.
+  - Every wait delivery therefore ends the wait. Nothing the wait delivers
+    can precede a steer, and a pending report reaches the next turn's own
+    boundary, after the steer, where replay puts it.
+- **NEW-2 (should-fix): one budget per boundary.** The wait could stamp
+  several report batches, each with a full budget, for one boundary. With
+  the same fix the wait delivers at most once per boundary: one budget, the
+  invariant at the turn-top comment.
+- **Tests:**
+  - `a_tool_free_wait_takes_reports_only_with_an_answer` (run loop): the
+    turn-top boundaries ask `Always`, the wait's wakes `WithAnswers`, and
+    the answer arrives with its report. It fails if the wait asks `Always`.
+  - `steering_during_a_wait_with_a_pending_report_replays_as_live`: reply,
+    steer, then report, with replay identical.
+  - `a_report_only_delivery_is_not_an_answer`, extended: `WithAnswers`
+    commits nothing when no answer is ready. It fails if `WithAnswers` sends
+    reports anyway.
+  - The earlier `an_interim_report_does_not_end_a_tool_free_wait` now covers
+    a report that arrives with an answer.
+- **Nits:**
+  - **1:** commented the harmless extra `settled` bump.
+  - **2:** the guide's `delegation` section says the two tools follow
+    `spawn_agent` in policy and packs.
+  - **3:** not done. The in-run compaction splice is shared with answers,
+    whose splice is pinned by
+    `replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did`.
+
+### 2026-10-05: AP4.2 third review: approved
+
+NEW-1, NEW-2, NIT 1 and NIT 2 are resolved, and the reviewer accepted the
+reason for skipping NIT 3. The one new nit, an over-long line in
+`architecture.md`, is re-wrapped. The reviewer confirmed:
+
+- the store's `WithAnswers` rule guarantees the wait loop's
+  `debug_assert_eq!(delivered.reports, 0)` on every path, including the
+  poisoned registry, the default trait method and the test stubs;
+- a pending report reaches the next turn-top boundary after any steer, in
+  replay order.
+
+Verification: 2103 workspace tests pass; fmt and clippy are clean; the soak
+passes.
+
+### 2026-10-05: Codex review on #257: cancel reports the child's real outcome
+
+Codex (P2) found a race. A child's run can settle durably while its owner
+task is still reading the answer, before the task publishes completion. A
+`cancel_agent` in that window saw the child as still running, sent cancel,
+waited, and returned "was cancelled". The owner task does not check the
+cancel signal again after the outcome is durable, so the parent then got the
+child's normal answer after being told it was cancelled.
+
+The finding is right; fixed.
+- After the owner task finishes, `cancel_detached` reads the run's durable
+  outcome: `Cancelled` stays `Cancelled`, and any other outcome is
+  `AlreadyFinished`.
+- Test: `cancelling_a_child_that_just_finished_reports_it_finished` holds
+  the owner task's outcome reads until the run is settled, lands the cancel
+  in that window, and asserts "had already finished" plus the child's real
+  answer. It fails if the post-wait result is always `Cancelled`.
+
+2104 workspace tests pass; fmt and clippy are clean.
+
+
+### 2026-10-06 — AC11 Codex feedback and release-size receipt
+
+- Codex findings: prompts and @web advertised disabled fetch; use declared catalog for prompt instructions, leave unsupported @web literal with a client note. Feature-on/off regressions added; default prompt bytes preserved.
+- Required same-host default release comparison at 73241984 (AC10) / 0647ce54 (AC11): 50,081,072 → 50,081,200 bytes (+128 / 0.000256%, below 5% relative budget); no budget file changed. Baseline already exceeds 48,000,000 absolute cap; not waived or claimed green.
+- Commands: `cargo build --release --bin qq` on each branch. Evidence `.worktrees/ac10/target/qq-perf/ready/ac11-{release.log,size.json}` and `ac10-{release.log,measurements.json}`. This receipt qualifies the pre-feedback binary, not the later prompt fix.
+- AC10 updated-main workspace fmt/Clippy/tests/build passed; logs `.worktrees/ac10/target/qq-perf/codex/ac10-*.log`.
+- Merged AC10 with main f15a4d24; reconciled ledger preserving AP4.2 entries and AC10 receipt. New-head tests/size follow below after execution.
+
+- Updated AC11 fmt/workspace Clippy/tests/build, minimal Clippy/tests, and plan_compile bench pass. First minimal suite wall-clock test failed (provider calls 0); full rerun passed. Evidence `target/qq-perf/codex/ac11-*.log`.
+- Updated-main AC11 default release bytes: 50144560; original same-host +128-byte receipt retained above. No unchanged-absolute-budget claim.
+
+### 2026-10-06 — AC12.1 stack conflict resolution
+
+Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only autonomous-core ledger conflict, preserving both AP4.2 and embedding receipts. AC10/AC11 Codex corrections now present on their own branches and inherited here.
