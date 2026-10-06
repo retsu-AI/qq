@@ -28,6 +28,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Public core embedding lifecycle
+        run: cargo run --locked -p qq-core --example embed
 
   client-wasm:
     name: qq-client on wasm32

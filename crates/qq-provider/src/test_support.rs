@@ -1,7 +1,60 @@
-//! Shared loopback HTTP fixtures for provider interface tests.
+//! Deterministic provider fixtures for tests and embedding examples.
 //!
-//! Compiled for unit tests and, behind the `test-support` feature, for this
-//! package's own integration tests. Not part of the crate's public API.
+//! Available behind the `test-support` feature; never uses credentials or a live service.
+
+/// A finite script of provider turns. Exhaustion is an error, never an implicit answer.
+pub struct ScriptedProvider {
+    turns: std::sync::Mutex<std::collections::VecDeque<Vec<crate::ProviderEvent>>>,
+}
+
+impl ScriptedProvider {
+    /// One tool call followed by a text answer, for approval/dispatch examples.
+    pub fn tool_then_text(name: &str, arguments: &str, answer: &str) -> Self {
+        use crate::ProviderEvent;
+        Self::new(vec![
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: name.into(),
+                },
+                ProviderEvent::ToolCallArgumentsDelta {
+                    id: "call_1".into(),
+                    json: arguments.into(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    id: "call_1".into(),
+                },
+                ProviderEvent::Completed { usage: None },
+            ],
+            vec![
+                ProviderEvent::OutputTextDelta {
+                    text: answer.into(),
+                },
+                ProviderEvent::Completed { usage: None },
+            ],
+        ])
+    }
+
+    pub fn new(turns: Vec<Vec<crate::ProviderEvent>>) -> Self {
+        Self {
+            turns: std::sync::Mutex::new(turns.into()),
+        }
+    }
+}
+
+impl crate::Provider for ScriptedProvider {
+    fn stream(&self, _request: crate::ModelRequest) -> crate::ProviderStream {
+        let turn = self.turns.lock().expect("script lock poisoned").pop_front();
+        match turn {
+            Some(events) => Box::pin(futures_util::stream::iter(events.into_iter().map(Ok))),
+            None => Box::pin(futures_util::stream::once(async {
+                Err(crate::ProviderError::Protocol(
+                    "provider script exhausted".to_owned(),
+                ))
+            })),
+        }
+    }
+}
 
 use std::{
     io::{ErrorKind, Read, Write},

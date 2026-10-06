@@ -33,6 +33,30 @@ pub trait TaskRouter: Send + Sync + 'static {
 }
 
 impl LoadedRuntime {
+    /// Builds an embedded plan from the runtime's own model metadata.
+    /// Catalog capture and filesystem compilation run off the async executor,
+    /// sharing the compiler's four-task concurrency bound.
+    pub async fn from_runtime(
+        runtime: Runtime,
+        profile: qq_protocol::AgentProfileId,
+        workspace: PathBuf,
+    ) -> Result<Self, PlanCompileError> {
+        let permit = crate::plan::COMPILE_SLOTS
+            .acquire()
+            .await
+            .expect("compile semaphore stays open");
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let model = runtime.resolved_model();
+            Self::compile_blocking_for_profile(&runtime, model, workspace, profile)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(source) => Err(PlanCompileError::CompilationTask { source }),
+        }
+    }
+
     #[must_use]
     pub fn new(plan: Arc<CompiledAgentPlan>) -> Self {
         Self {
@@ -90,6 +114,8 @@ impl LoadedRuntime {
         .with_spawn_model_routes(runtime.spawn_model_routes.to_vec())
         .with_delegation(runtime.delegation.as_ref().clone())
         .with_audit(runtime.audit)
+        .with_shell_policy(runtime.shell.as_ref().clone())
+        .with_network_policy(runtime.network.as_ref().clone())
         .with_profile_id(profile_id);
         for host in runtime.hosts.iter() {
             profile = profile.with_host(HostSnapshot::capture_blocking(Arc::clone(host)));

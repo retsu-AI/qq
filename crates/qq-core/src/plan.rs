@@ -402,9 +402,17 @@ impl AgentProfile {
     }
 }
 
+// Bound filesystem/catalog compilation independently of Tokio's blocking pool.
+pub(crate) static COMPILE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// Why a profile could not be compiled into a plan.
 #[derive(Debug, Error)]
 pub enum PlanCompileError {
+    #[error("plan compilation task did not finish: {source}")]
+    CompilationTask {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error(
         "exposed tool {name:?} is not a known static tool or a member of the discovered catalog"
     )]
@@ -560,6 +568,24 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    /// Compiles off the async executor, with at most four concurrent compiler tasks.
+    /// Dropping this future does not interrupt filesystem work already started.
+    pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
+        let permit = COMPILE_SLOTS
+            .acquire()
+            .await
+            .expect("compile semaphore stays open");
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Self::compile_blocking(profile)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(source) => Err(PlanCompileError::CompilationTask { source }),
+        }
+    }
+
     /// Compiles a profile. This opens the workspace, reads its instruction
     /// file, indexes its skill roots, builds the tool catalog from the static
     /// declarations and the host snapshots, and encodes the descriptor. It
@@ -1228,6 +1254,28 @@ mod tests {
     use qq_protocol::PromptVersion;
 
     use super::{tests_support::*, *};
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_compilation_bounds_waiters_and_releases_cancelled_requests() {
+        use std::task::Poll;
+        let workspace = canonical_temp();
+        let permits = COMPILE_SLOTS.acquire_many(4).await.unwrap();
+        let mut cancelled = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut cancelled), Poll::Pending));
+        drop(cancelled);
+        let mut queued = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut queued), Poll::Pending));
+        tokio::task::yield_now().await;
+        drop(permits);
+        let expected = queued.await.unwrap().digest();
+        let results = futures_util::future::join_all(
+            (0..12).map(|_| CompiledAgentPlan::compile(profile(workspace.path()))),
+        )
+        .await;
+        for result in results {
+            assert_eq!(result.unwrap().digest(), expected);
+        }
+        assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
 
     #[test]
     fn explicit_exposure_narrows_the_catalog_and_empty_exposes_nothing() {

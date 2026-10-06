@@ -1,4 +1,22 @@
 //! Agent runtime, session behavior, tools, and persistence.
+//!
+//! # Embedding lifecycle
+//!
+//! Construct a [`Runtime`] from a [`qq_provider::Provider`], attach external
+//! tools with [`Runtime::with_tool_host`], then asynchronously compile it with
+//! [`LoadedRuntime::from_runtime`]. A [`RuntimeLoader`] supplies this immutable
+//! plan to [`SessionRuntime::open`]. The host need not depend on a configuration
+//! crate; [`Runtime::resolved_model`] records only capabilities it can establish.
+//!
+//! Resolve the workspace and create a session with [`qq_protocol::SessionCommand`],
+//! subscribe before submitting a prompt, and consume committed [`qq_protocol::SessionEvent`]
+//! values. In ask mode, respond to tool approvals through the same command lane.
+//! A `RunFinished` event records the typed outcome; silence is not completion.
+//! Call [`SessionRuntime::shutdown`] to cancel and drain owned work before closing
+//! the store. The credential-free `examples/embed.rs` runs this entire lifecycle.
+//! Compilation performs blocking filesystem/catalog work on bounded Tokio
+//! blocking tasks. Cancellation of a compilation future does not stop work that
+//! has already started; compilation is not a run and produces no tool side effects.
 
 #![forbid(unsafe_code)]
 
@@ -1309,6 +1327,11 @@ impl Runtime {
     /// configuration: identity comes from the runtime itself, and every
     /// capability the embedder did not declare is recorded as unsupported or
     /// unknown rather than guessed.
+    #[must_use]
+    pub fn resolved_model(&self) -> qq_protocol::ResolvedModel {
+        self.embedded_resolved_model()
+    }
+
     pub(crate) fn embedded_resolved_model(&self) -> qq_protocol::ResolvedModel {
         qq_protocol::ResolvedModel {
             version: qq_protocol::ResolvedModelVersion::new(1)
