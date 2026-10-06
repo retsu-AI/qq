@@ -86,7 +86,7 @@ appended below, newest last.
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | In progress | | `docs/eng-978-ap5-window` | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
-| AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
+| AC1 | `RunState` extraction by reset scope | In progress | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | `refactor/eng-1007-ac1-1-run-loop-module` on #261 | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; parent acceptance pending |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
@@ -1184,3 +1184,12 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Read-only lead store: schema **42**, **480 runs**, **14,608 model turns**, **29,630 tool calls**. Baseline: 2026-09-30 AP0 in `root.md`; no session content committed.
 - Close with progress-report §§ 1–4, replacing its default 30-day lower bound with the exact opening timestamp. Record total/window counts, all four Goal 6 results, and deployed revisions. Confirm normal-use binaries include AP3b/AP4; extend if older or insufficient usage. Merged source is not deployment evidence.
 - No seven-day acceptance or tuning claimed. AC1 → AC2/AC3 → AC5/AC6 stack proceeds during observation per lead instruction; record runtime revisions as confounders. AC4 stays paired with goals G0.
+
+### 2026-10-06 — AC1.1 mechanical module extraction (ENG-1007)
+
+- Stack base #261 (`88398d1`). AC1 split: .1 relocates execute byte-for-byte; .2 groups reset scopes without changing seams; .3 extracts typed steps and a <300-line driver. AC2/AC3 wait for parent AC1 acceptance.
+- `execute` moved into private `runtime/run_loop.rs`; automated comparison with parent proves method bytes identical. Zero test edits, no wire/schema/prompt or execution semantics change; pull-driven drop/deadline wrapping unchanged. Independent read-only review found no functional blocker.
+- fmt and all-target/all-feature workspace Clippy pass. Default workspace attempt hit four delegation timeouts on a loaded host; full `cargo test --workspace -- --test-threads=4` and workspace build pass. No timeout tests changed.
+- Baseline → candidate: context assembly 76.600/61.420/66.221 → 72.643/57.868/60.213 µs (10/1k/10k); dispatch 54,606 → 103,772 ns (single diagnostic); turn 10/100/1k 18.133/15.606/15.188 → 16.588/15.443/15.278 ms.
+- Dispatch candidate same-binary A/A, 30 pairs: medians 56,488.5 / 59,885.5 ns; IO some avg10 37.45%. Initial dispatch sample not repeatable; no within-noise acceptance claimed. Full alternating A/B+A/A for all three gates remains AC1 qualification work; no performance waiver.
+- Raw evidence `target/qq-perf/ac1-2026-10-06/`; baseline captured before code change. Existing clean `.worktrees/ac1` and all unrelated worktrees preserved.
