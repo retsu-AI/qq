@@ -19,9 +19,21 @@ adds finite ScriptedProvider. No wire, schema, descriptor or default behavior bu
 Verification so far: embedding 3/3 and MCP 1/1 passed; core library 831 passed,
 3 ignored. Initial new-public-API fixture failed on baseline as expected.
 Baseline plan_compile 49,877 ns/iteration, digest 4,701 ns/iteration; candidate
-and wider gates pending. Full baseline workspace hit headless timing test
+and wider gates were pending at this initial recording (superseded by the
+2026-10-06 AC10 review receipt below). Full baseline workspace hit headless timing test
 turn_budget_cancels_before_a_silent_over_budget_turn_can_hang; isolated rerun passed.
 No seven-day/live-soak acceptance claimed.
+
+### 2026-10-06 — AC10 review receipt (supersedes initial pending gates)
+
+- Codex finding: AC10's own branch lacked final evidence/status; corrected here, not only in AC12.
+- Final AC10 at 73241984: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`, `cargo build --workspace` passed.
+- Initial workspace headless rollover timeout; full workspace rerun passed. Embedding 4, MCP 1, queued compilation cancellation/concurrency/permit recovery 1 passed.
+- `cargo run -p qq-core --example embed` and `cargo doc -p qq-core --no-deps` passed; three existing doc warnings.
+- Same-host release c37afe25 vs AC10, 30 alternating A/B + A/A: plan median 26,288 → 26,149 ns; p95 36,260 → 37,701; A/A median 25,994/26,112, p95 49,688/50,685.
+- Binary 50,080,176 → 50,081,072 bytes (+896); inherited 48 MB absolute budget failure explicitly not waived.
+- Evidence `.worktrees/ac10/target/qq-perf/ready/ac10-{measurements.json,clippy.log,tests-rerun.log,build.log}`; baseline `.worktrees/ac1` at c37afe25. High I/O pressure; no speedup claim.
+- Merge current main f15a4d24 (shipped AP4.2) to fix stack's effective-main ledger conflict; retain all AP4.2 work unchanged. Updated-head gates recorded after execution.
 
 
 Plan: [`../autonomous-core.md`](../autonomous-core.md). Only the agent
@@ -48,7 +60,7 @@ appended below, newest last.
 | AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
-| AC10 | `qq-core` embedding surface + example | In progress | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | `feat/eng-1006-ac10-core-embedding` | Public async constructors; credential-free runnable example; ADR-0050 § 1 |
+| AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
 | AC11 | `tool-fetch` feature; minimal profile CI | Planned | | | ADR-0050 § 3 |
 | AC12 | `qq-harness` crate (three mechanical moves) | Planned | | | ADR-0050 § 2 |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
