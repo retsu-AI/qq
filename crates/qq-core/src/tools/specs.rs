@@ -372,7 +372,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             json!({
                 "type": "string",
                 "enum": ["read", "write"],
-                "description": "read (default): the sub-agent may only read the workspace. write: it may edit files and run commands, but every such action is held and adjudicated by the reviewer model before it runs, and only one write sub-agent runs at a time. Request write only when the task itself requires changing the workspace."
+                "description": "read (default): read-only workspace access. write: edit files and run commands under supervised approval. Requires reviewer_model; only one write sub-agent runs at a time. Choose write only for implementation."
             }),
         );
     }
@@ -419,6 +419,15 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
          default so QQ uses its configured worker model or the current session's \
          selected model. Set model only when the user explicitly requests an exact provider/model \
          route listed by this tool; never guess, translate, or invent a route."
+    };
+    let description = if delegation.write_children {
+        format!(
+            "{} Read by default; authority: write enables edits and commands with reviewer_model, \
+             supervised approval and one write sub-agent at a time.",
+            description.replacen("to a read-only sub-agent", "to a sub-agent", 1)
+        )
+    } else {
+        description.to_owned()
     };
     ToolSpec::new(
         SPAWN_AGENT_TOOL,

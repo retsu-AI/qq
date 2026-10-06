@@ -302,6 +302,14 @@ delegation: (
 )
 ```
 
+Sub-agents are read-only by default. To let the spawning agent choose write
+access, set `delegation.write_children: true` and configure `reviewer_model`.
+The `spawn_agent` tool then offers `authority: "read" | "write"`; omitting it
+still chooses read-only. Write children can edit files and run commands under
+supervised approval, with each such action reviewed before execution. Only a
+top-level run may spawn a write child, and only one write child runs at a time.
+The parent's approval policy still gates the write spawn.
+
 A run that may spawn sub-agents also gets `wait_agents` (wait for its
 background sub-agents) and `cancel_agent` (stop one). They come and go with
 `spawn_agent`: allowing, denying, or exposing `spawn_agent` in policy or a
