@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 41;
+pub const STORE_SCHEMA_VERSION: u16 = 42;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -382,7 +382,7 @@ pub(in crate::sessions) fn open_database(
         Some(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
             | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33"
-            | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41",
+            | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -419,6 +419,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -461,6 +462,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -502,6 +504,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -542,6 +545,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -582,6 +586,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -631,6 +636,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -671,6 +677,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -709,6 +716,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -746,6 +754,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -782,6 +791,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -815,6 +825,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -847,6 +858,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -879,6 +891,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -910,6 +923,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -940,6 +954,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -969,6 +984,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -997,6 +1013,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1024,6 +1041,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1050,6 +1068,7 @@ pub(in crate::sessions) fn open_database(
                 | "39"
                 | "40"
                 | "41"
+                | "42"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1063,7 +1082,20 @@ pub(in crate::sessions) fn open_database(
     validate_attachment_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("30" | "31" | "32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some(
+            "30" | "31"
+                | "32"
+                | "33"
+                | "34"
+                | "35"
+                | "36"
+                | "37"
+                | "38"
+                | "39"
+                | "40"
+                | "41"
+                | "42"
+        )
     ) {
         let transaction = connection.transaction()?;
         create_messages_run_index(&transaction)?;
@@ -1076,7 +1108,7 @@ pub(in crate::sessions) fn open_database(
     validate_messages_run_index(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("31" | "32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some("31" | "32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "routing_json")? {
@@ -1098,7 +1130,7 @@ pub(in crate::sessions) fn open_database(
 
     if !matches!(
         schema_version.as_deref(),
-        Some("32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some("32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "sessions", "model_is_fallback")? {
@@ -1126,7 +1158,7 @@ pub(in crate::sessions) fn open_database(
     // markers leave both NULL and keep their prompt-ordinal semantics.
     if !matches!(
         schema_version.as_deref(),
-        Some("33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some("33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         // Test fixtures for very old versions never created the table; the
@@ -1163,7 +1195,7 @@ pub(in crate::sessions) fn open_database(
     // plan's configured or profile choice; a stored value is applied at claim.
     if !matches!(
         schema_version.as_deref(),
-        Some("34" | "35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some("34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "sessions", "reasoning_effort")? {
@@ -1188,7 +1220,7 @@ pub(in crate::sessions) fn open_database(
     // run by `run_id`, and is never promoted to workspace config.
     if !matches!(
         schema_version.as_deref(),
-        Some("35" | "36" | "37" | "38" | "39" | "40" | "41")
+        Some("35" | "36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         if !has_table(&transaction, "session_grants")? {
@@ -1222,7 +1254,7 @@ pub(in crate::sessions) fn open_database(
     // each held call and inherited by spawned children.
     if !matches!(
         schema_version.as_deref(),
-        Some("36" | "37" | "38" | "39" | "40" | "41")
+        Some("36" | "37" | "38" | "39" | "40" | "41" | "42")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "sessions", "approval_delegate")? {
@@ -1242,7 +1274,7 @@ pub(in crate::sessions) fn open_database(
     // 37: persisted `max` effort requires a reader that understands it.
     if !matches!(
         schema_version.as_deref(),
-        Some("37" | "38" | "39" | "40" | "41")
+        Some("37" | "38" | "39" | "40" | "41" | "42")
     ) {
         connection.execute(
             "UPDATE metadata SET value = '37' WHERE key = 'schema_version'",
@@ -1250,14 +1282,17 @@ pub(in crate::sessions) fn open_database(
         )?;
     }
     // 38: model turns may contain a provider continuation envelope.
-    if !matches!(schema_version.as_deref(), Some("38" | "39" | "40" | "41")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("38" | "39" | "40" | "41" | "42")
+    ) {
         connection.execute(
             "UPDATE metadata SET value = '38' WHERE key = 'schema_version'",
             [],
         )?;
     }
     // 39: explicit provider-default effort is distinct from inheritance.
-    if !matches!(schema_version.as_deref(), Some("39" | "40" | "41")) {
+    if !matches!(schema_version.as_deref(), Some("39" | "40" | "41" | "42")) {
         connection.execute(
             "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
             [],
@@ -1266,7 +1301,7 @@ pub(in crate::sessions) fn open_database(
     // 40: a model turn records the runtime notice its request first carried
     // (ADR-0054 § 2): `report` or `continuation`, NULL for none. Assembly
     // replays it before the turn.
-    if !matches!(schema_version.as_deref(), Some("40" | "41")) {
+    if !matches!(schema_version.as_deref(), Some("40" | "41" | "42")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "notice")? {
             transaction.execute("ALTER TABLE model_turns ADD COLUMN notice TEXT", [])?;
@@ -1283,7 +1318,7 @@ pub(in crate::sessions) fn open_database(
     // 41: a non-blocking child's answer is delivered into its parent's
     // context once (ADR-0054 § 4). One row per delivery, keyed by the child
     // run, so a second delivery of the same answer is a constraint failure.
-    if schema_version.as_deref() != Some("41") {
+    if !matches!(schema_version.as_deref(), Some("41" | "42")) {
         let transaction = connection.transaction()?;
         create_child_deliveries_table(&transaction)?;
         transaction.execute(
@@ -1293,6 +1328,19 @@ pub(in crate::sessions) fn open_database(
         transaction.commit()?;
     }
     validate_child_deliveries_table(&connection)?;
+    // 42: a running child's interim reports reach its parent, each once
+    // (ADR-0054 § 4). A row is written only when a report is delivered, keyed
+    // by the child's report turn.
+    if schema_version.as_deref() != Some("42") {
+        let transaction = connection.transaction()?;
+        create_child_reports_table(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value = '42' WHERE key = 'schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
+    }
+    validate_child_reports_table(&connection)?;
     debug_assert_eq!(
         connection
             .query_row(
@@ -2331,6 +2379,54 @@ fn validate_child_deliveries_table(connection: &Connection) -> Result<(), Sessio
     let indexed: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master
                        WHERE type = 'index' AND name = 'child_deliveries_parent_run')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !indexed {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    Ok(())
+}
+
+fn create_child_reports_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS child_reports (
+                 child_run_id TEXT NOT NULL,
+                 child_turn_ordinal INTEGER NOT NULL,
+                 parent_session_id TEXT NOT NULL REFERENCES sessions(id),
+                 parent_run_id TEXT NOT NULL REFERENCES runs(id),
+                 delivered_at_ms INTEGER NOT NULL,
+                 delivery_ordinal INTEGER NOT NULL,
+                 turn_ordinal INTEGER NOT NULL,
+                 text TEXT NOT NULL,
+                 PRIMARY KEY(child_run_id, child_turn_ordinal)
+             );
+             CREATE INDEX IF NOT EXISTS child_reports_parent_run
+                 ON child_reports(parent_run_id, delivery_ordinal);",
+        )
+        .map_err(|_| SessionRuntimeError::CONSTRAINT)
+}
+
+fn validate_child_reports_table(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    let expected = [
+        ("child_run_id", ("TEXT".to_owned(), true, None, 1)),
+        ("child_turn_ordinal", ("INTEGER".to_owned(), true, None, 2)),
+        ("parent_session_id", ("TEXT".to_owned(), true, None, 0)),
+        ("parent_run_id", ("TEXT".to_owned(), true, None, 0)),
+        ("delivered_at_ms", ("INTEGER".to_owned(), true, None, 0)),
+        ("delivery_ordinal", ("INTEGER".to_owned(), true, None, 0)),
+        ("turn_ordinal", ("INTEGER".to_owned(), true, None, 0)),
+        ("text", ("TEXT".to_owned(), true, None, 0)),
+    ];
+    for (column, shape) in expected {
+        if column_shape(connection, "child_reports", column)? != shape {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
+    let indexed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                       WHERE type = 'index' AND name = 'child_reports_parent_run')",
         [],
         |row| row.get(0),
     )?;

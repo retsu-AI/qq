@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use qq_protocol::{ChildAuthority, SessionPurpose, TokenUsage, ToolCallId};
+use qq_protocol::{ChildAuthority, SessionId, SessionPurpose, TokenUsage, ToolCallId};
 
 /// The spend one spawned sub-agent reports back to its parent. Every field is
 /// `None` when unknown, never zero: the parent's meter turns an unknown into
@@ -85,8 +85,11 @@ pub(crate) type SpawnAgentFuture =
 pub(crate) struct DeliveredChild {
     /// The notice message the next request carries, already durable.
     pub(crate) notice: String,
-    /// Whether the child answered (a failed or cancelled child did not).
+    /// Whether the child answered (a failed or cancelled child did not, and
+    /// an interim report from a child still working is not an answer).
     pub(crate) answered: bool,
+    /// A running child's interim report: the child stays outstanding.
+    pub(crate) interim: bool,
     pub(crate) spend: SpawnAgentSpend,
 }
 
@@ -99,6 +102,119 @@ pub(crate) enum DeliveryError {
     Store(#[source] crate::sessions::SessionRuntimeError),
     #[error("the sub-agent owner registry is unavailable")]
     Registry,
+}
+
+/// Where one background child stands, as `wait_agents` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildStatus {
+    /// Settled; its answer enters the parent's context at the next boundary.
+    Finished,
+    Working,
+    /// Not an outstanding background child of this run: never one, or its
+    /// answer was already delivered.
+    Unknown,
+}
+
+/// What one `wait_agents` call saw when it returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitReport {
+    /// The children waited for, in request order (every outstanding child
+    /// when no ids were named).
+    pub(crate) children: Vec<(SessionId, ChildStatus)>,
+    pub(crate) timed_out: bool,
+}
+
+impl WaitReport {
+    /// The tool result text. Answers are not repeated here: each finished
+    /// child's answer arrives as a delivered notice, normally right after
+    /// this result (later only while a grandchild's spend is still settling),
+    /// through the one delivery path that keeps it exactly-once (ADR-0054
+    /// § 4).
+    pub(crate) fn render(&self, timeout_seconds: u64) -> String {
+        use std::fmt::Write as _;
+        if self.children.is_empty() {
+            return "No background sub-agents are outstanding; there is nothing to wait for."
+                .to_owned();
+        }
+        let mut text = String::new();
+        // Writing into a `String` cannot fail.
+        if self.timed_out {
+            let _ = writeln!(
+                text,
+                "Waited {timeout_seconds}s; the sub-agents still working keep working."
+            );
+        }
+        for (id, status) in &self.children {
+            let _ = write!(text, "Sub-agent {id}: ");
+            text.push_str(match status {
+                ChildStatus::Finished => "finished; its answer arrives as a runtime notice.",
+                ChildStatus::Working => "still working.",
+                ChildStatus::Unknown => {
+                    "not a background sub-agent of this run that is still outstanding (its \
+                     answer may already have reached you)."
+                }
+            });
+            text.push('\n');
+        }
+        text.pop();
+        text
+    }
+}
+
+/// What `cancel_agent` did to one background child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelOutcome {
+    /// Stopped and settled; its answer (the reason and its latest report)
+    /// enters the parent's context at the next boundary.
+    Cancelled,
+    /// It had already finished; its answer is on its way.
+    AlreadyFinished,
+    Unknown,
+}
+
+impl CancelOutcome {
+    pub(crate) fn render(self, id: SessionId) -> (String, bool) {
+        match self {
+            Self::Cancelled => (
+                format!(
+                    "Sub-agent {id} was cancelled. What it reported so far arrives as a runtime \
+                     notice."
+                ),
+                false,
+            ),
+            Self::AlreadyFinished => (
+                format!(
+                    "Sub-agent {id} had already finished; its answer arrives as a runtime notice."
+                ),
+                false,
+            ),
+            Self::Unknown => (
+                format!(
+                    "Sub-agent {id} is not a background sub-agent of this run that is still \
+                     outstanding (its answer may already have reached you)."
+                ),
+                true,
+            ),
+        }
+    }
+}
+
+pub(crate) type WaitFuture =
+    Pin<Box<dyn Future<Output = Result<WaitReport, DeliveryError>> + Send>>;
+pub(crate) type CancelFuture =
+    Pin<Box<dyn Future<Output = Result<CancelOutcome, DeliveryError>> + Send>>;
+
+/// When a boundary delivery also sends interim reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportDelivery {
+    /// The turn-top boundary: reports from children still working join the
+    /// next request.
+    Always,
+    /// The tool-free wait: reports only together with an answer, in the
+    /// same transaction. Every wait delivery then ends the wait, so one
+    /// boundary is delivered once, with one budget, and its notices precede
+    /// any steering exactly as replay places them (ADR-0054 § 4).
+    WithAnswers,
 }
 
 pub(crate) type DeliverFuture =
@@ -151,8 +267,32 @@ pub(crate) trait SubagentSpawner: Send + Sync {
     /// Commits every settled detached child's answer into the parent's
     /// context for its turn `turn_ordinal`, in one transaction, before that
     /// request is built. Each answer is returned once, with its spend.
-    fn deliver(&self, _turn_ordinal: u32) -> DeliverFuture {
+    fn deliver(&self, _turn_ordinal: u32, _reports: ReportDelivery) -> DeliverFuture {
         Box::pin(std::future::ready(Ok(Vec::new())))
+    }
+    /// `wait_agents`: resolves when every named background child has
+    /// settled (or, with no ids, when any outstanding one has, or none is
+    /// outstanding), or when `timeout` passes. Settled answers are delivered
+    /// at the next boundary, not here.
+    fn wait_children(
+        &self,
+        ids: Option<Vec<SessionId>>,
+        _timeout: std::time::Duration,
+    ) -> WaitFuture {
+        let children = ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| (id, ChildStatus::Unknown))
+            .collect();
+        Box::pin(std::future::ready(Ok(WaitReport {
+            children,
+            timed_out: false,
+        })))
+    }
+    /// `cancel_agent`: stops one background child and resolves once it has
+    /// settled, so its answer is delivered at the next boundary.
+    fn cancel_child(&self, _id: SessionId) -> CancelFuture {
+        Box::pin(std::future::ready(Ok(CancelOutcome::Unknown)))
     }
     /// Test hook: the parent entered its wait for answers.
     #[cfg(test)]

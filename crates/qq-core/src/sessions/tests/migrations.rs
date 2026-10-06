@@ -3248,3 +3248,49 @@ fn version_forty_gains_the_child_delivery_table_and_rejects_a_bad_shape() {
         Err(SessionRuntimeError::CONSTRAINT)
     ));
 }
+
+/// Schema 42 adds the interim-report table (ADR-0054 § 4). A schema-41 store
+/// gains it empty, reopening does not rerun the step, and a table with the
+/// wrong shape is refused.
+#[test]
+fn version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    for statement in [
+        "DROP TABLE child_reports",
+        "UPDATE metadata SET value = '41' WHERE key = 'schema_version'",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        STORE_SCHEMA_VERSION.to_string()
+    );
+    let rows: u32 = connection
+        .query_row("SELECT COUNT(*) FROM child_reports", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    for statement in [
+        "DROP TABLE child_reports",
+        "CREATE TABLE child_reports (child_run_id TEXT PRIMARY KEY, text INTEGER)",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+}

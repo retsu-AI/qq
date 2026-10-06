@@ -79,7 +79,9 @@ pub(crate) use edit::hold_tool_apply;
 pub(crate) use output::MAX_MODEL_TEXT_BYTES;
 pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, header_line};
 pub(crate) use specs::{
-    MAX_SPAWN_AGENT_SCHEMA_BYTES, SPAWN_AGENT_TOOL, SpawnAgentArgs, spawn_agent_spec, static_tools,
+    CancelAgentArgs, MAX_SPAWN_AGENT_SCHEMA_BYTES, MAX_WAIT_AGENTS_SECS, SPAWN_AGENT_TOOL,
+    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, static_tools,
+    wait_agents_spec,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
