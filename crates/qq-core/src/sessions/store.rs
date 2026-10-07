@@ -972,77 +972,21 @@ impl Store {
         question: String,
         new_thread: bool,
     ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
-        self.call(Priority::AwaitControl, move |connection| {
-            let transaction = connection.transaction()?;
-            let row = transaction.query_row(
-                "SELECT w.path, s.model, s.model_is_fallback, s.max_output_tokens,
-                        s.organization, s.profile, s.reasoning_effort
-                 FROM sessions s JOIN workspaces w ON w.id = s.workspace_id WHERE s.id = ?1",
-                [session_id.to_string()], |row| Ok((
-                    row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
-                    row.get::<_, bool>(2)?, row.get::<_, Option<u32>>(3)?,
-                    row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                )),
-            ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
-            let request = RuntimeLoadRequest {
-                workspace: row.0,
-                model: ModelSelection { model: row.1, model_is_fallback: row.2,
-                    max_output_tokens: row.3, organization: row.4 },
-                profile: parse_profile(row.5.as_deref())?,
-                reasoning_effort: parse_reasoning_effort(row.6.as_deref())?,
-                checkpoint: None, routing: None, approval_delegate: None,
-            };
-            let mut messages = transcript::capture_side_context(&transaction, session_id)?;
-            let thread: Option<String> = if new_thread { None } else {
-                transaction.query_row(
-                    "SELECT thread_id FROM side_questions WHERE session_id = ?1 ORDER BY rowid DESC LIMIT 1",
-                    [session_id.to_string()], |row| row.get(0),
-                ).optional()?
-            };
-            let thread = thread.unwrap_or_else(|| question_id.to_string());
-            let mut statement = transaction.prepare_cached(
-                "SELECT CASE WHEN length(CAST(question AS BLOB)) + length(CAST(answer AS BLOB)) <= 32768
-                    THEN question ELSE NULL END,
-                    CASE WHEN length(CAST(question AS BLOB)) + length(CAST(answer AS BLOB)) <= 32768
-                    THEN answer ELSE NULL END
-                 FROM side_questions WHERE session_id = ?1 AND thread_id = ?2 AND state = 'completed'
-                 ORDER BY rowid DESC LIMIT 65",
-            )?;
-            let history = statement.query_map(params![session_id.to_string(), thread], |row| {
-                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
-            })?.collect::<Result<Vec<_>, _>>()?;
-            drop(statement);
-            let mut retained = Vec::new();
-            let mut bytes = 0_usize;
-            let mut omitted = history.len() > 64;
-            for (question, answer) in history.into_iter().take(64) {
-                let (Some(question), Some(answer)) = (question, answer) else { omitted = true; break; };
-                if question.len() + answer.len() > (32 * 1024_usize - 128).saturating_sub(bytes) {
-                    omitted = true; break;
-                }
-                bytes += question.len() + answer.len();
-                retained.push((question, answer));
-            }
-            if omitted { messages.push(Message::user("[Older side-thread exchanges omitted.]")); }
-            for (question, answer) in retained.into_iter().rev() {
-                messages.push(Message::user(question));
-                messages.push(Message::assistant(answer));
-            }
-            let stored: Vec<_> = messages.iter().map(|message| {
-                (format!("{:?}", message.role()), message.content().iter()
-                    .map(PersistedContentBlock::from).collect::<Vec<_>>(), message.replay())
-            }).collect();
-            let context = serde_json::to_string(&stored)?;
-            if context.len() > 262144 { return Err(SessionRuntimeError::CONSTRAINT); }
-            transaction.execute(
-                "INSERT INTO side_questions(id, session_id, question, captured_context_json, state, created_at_ms, thread_id)
-                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6)",
-                params![question_id.to_string(), session_id.to_string(), question, context, now_ms(), thread],
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let source = side_questions::admit_side_question(
+                &transaction,
+                store_id,
+                session_id,
+                question_id,
+                question,
+                new_thread,
             )?;
             transaction.commit()?;
-            Ok((request, messages))
-        }).await
+            Ok(source)
+        })
+        .await
     }
 
     pub(super) async fn record_side_turn(
@@ -1053,12 +997,16 @@ impl Store {
         cost: Option<u64>,
         turns: u32,
     ) -> Result<(), SessionRuntimeError> {
-        self.call(Priority::AwaitControl, move |connection| {
-            connection.execute(
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let transaction = begin_unit(connection)?;
+            transaction.execute(
                 "UPDATE side_questions SET answer = ?2, usage_json = ?3,
                     estimated_cost_usd_nanos = ?4, model_turns = ?5 WHERE id = ?1 AND state = 'running'",
                 params![id.to_string(), text, serde_json::to_string(&usage)?, cost, turns],
             )?;
+            side_questions::append_side_event(&transaction, store_id, id)?;
+            transaction.commit()?;
             Ok(())
         }).await
     }
@@ -1066,19 +1014,28 @@ impl Store {
     pub(super) async fn finish_side_question(
         &self,
         id: RunId,
-        answer: Option<(String, Option<TokenUsage>)>,
+        state: qq_protocol::SideQuestionState,
     ) -> Result<(), SessionRuntimeError> {
-        self.call(Priority::AwaitControl, move |connection| {
-            let state = if answer.is_some() {
-                "completed"
-            } else {
-                "failed"
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let state = match state {
+                qq_protocol::SideQuestionState::Completed => "completed",
+                qq_protocol::SideQuestionState::Cancelled => "cancelled",
+                qq_protocol::SideQuestionState::TimedOut => "timed_out",
+                qq_protocol::SideQuestionState::Interrupted => "interrupted",
+                qq_protocol::SideQuestionState::Failed => "failed",
+                qq_protocol::SideQuestionState::Running => {
+                    return Err(SessionRuntimeError::CONSTRAINT);
+                }
             };
-            connection.execute(
+            let transaction = begin_unit(connection)?;
+            transaction.execute(
                 "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
                  WHERE id = ?1 AND state = 'running'",
                 params![id.to_string(), state, now_ms()],
             )?;
+            side_questions::append_side_event(&transaction, store_id, id)?;
+            transaction.commit()?;
             Ok(())
         })
         .await

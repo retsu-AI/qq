@@ -6219,7 +6219,7 @@ async fn side_answer_cancellation_while_waiting_releases_only_side_admission() {
         })
         .await
         .unwrap();
-    assert_eq!(states, "failed");
+    assert_eq!(states, "cancelled");
     drop(permit);
 }
 
@@ -6552,4 +6552,272 @@ async fn side_capture_latency_diagnostic() {
         "side capture: 256 archived/64 retained runs, 100 samples; p50={}us p95={}us p99={}us",
         samples[49], samples[94], samples[98]
     );
+}
+
+#[tokio::test]
+async fn side_command_replay_launches_once_and_snapshot_matches_terminal_event() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let harness = spawn_harness_with_loader(
+        Arc::new(CountingTextLoader {
+            provider_calls: Arc::clone(&calls),
+        }),
+        1,
+    )
+    .await;
+    let command_id = CommandId::generate().unwrap();
+    let command = SessionCommand::SubmitSideQuestion {
+        session_id: harness.session_id,
+        question: "side".to_owned(),
+        new_thread: false,
+    };
+    let first = harness
+        .runtime
+        .command(command_id, command.clone())
+        .await
+        .unwrap();
+    let replay = harness.runtime.command(command_id, command).await.unwrap();
+    assert_eq!(first, replay);
+    let CommandOutcome::SideQuestionSubmitted {
+        side_question_id, ..
+    } = first.outcome
+    else {
+        panic!("side receipt")
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    side_questions::load_side_snapshot(connection, side_question_id)
+                })
+                .await
+                .unwrap();
+            if item.state != qq_protocol::SideQuestionState::Running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let snapshot = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, side_question_id)
+        })
+        .await
+        .unwrap();
+    let events = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            let json: String = connection.query_row(
+                "SELECT envelope_json FROM events ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(serde_json::from_str::<SessionEventEnvelope>(&json)?)
+        })
+        .await
+        .unwrap();
+    let SessionEvent::SideQuestionUpdated { side_question } = events.event else {
+        panic!("side event")
+    };
+    assert_eq!(snapshot, *side_question);
+}
+
+#[tokio::test]
+async fn side_wire_cancel_does_not_cancel_main_and_replays_same_receipt() {
+    let harness = spawn_harness_with_loader(Arc::new(PricedHangingLoader), 1).await;
+    let submitted = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitSideQuestion {
+                session_id: harness.session_id,
+                question: "wait".to_owned(),
+                new_thread: false,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SideQuestionSubmitted {
+        side_question_id, ..
+    } = submitted.outcome
+    else {
+        panic!("side receipt")
+    };
+    let id = CommandId::generate().unwrap();
+    let command = SessionCommand::CancelSideQuestion { side_question_id };
+    let first = harness.runtime.command(id, command.clone()).await.unwrap();
+    assert_eq!(first, harness.runtime.command(id, command).await.unwrap());
+    let state = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, side_question_id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.state, qq_protocol::SideQuestionState::Cancelled);
+    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_submit_then_immediate_shutdown_settles_accepted_work() {
+    let harness = spawn_harness_with_loader(Arc::new(PricedHangingLoader), 1).await;
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitSideQuestion {
+                session_id: harness.session_id,
+                question: "wait".to_owned(),
+                new_thread: false,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SideQuestionSubmitted {
+        side_question_id, ..
+    } = receipt.outcome
+    else {
+        panic!("receipt")
+    };
+    harness.runtime.shutdown().await.unwrap();
+    let item = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, side_question_id)
+        })
+        .await
+        .unwrap();
+    assert_ne!(item.state, qq_protocol::SideQuestionState::Running);
+    assert_eq!(harness.runtime.inner.side_tasks.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn side_capture_latency_relative_to_full_context_diagnostic() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("capture.sqlite"),
+        256,
+        64,
+        1,
+        1024,
+    );
+    let mut full = Vec::new();
+    let mut bounded = Vec::new();
+    for _ in 0..100 {
+        let start = std::time::Instant::now();
+        transcript::load_model_context(&connection, session, u64::MAX).unwrap();
+        full.push(start.elapsed().as_micros());
+        let start = std::time::Instant::now();
+        transcript::capture_side_context(&connection, session).unwrap();
+        bounded.push(start.elapsed().as_micros());
+    }
+    full.sort_unstable();
+    bounded.sort_unstable();
+    eprintln!(
+        "capture comparison debug 100 samples: full p50={}us p95={}us; bounded p50={}us p95={}us",
+        full[49], full[94], bounded[49], bounded[94]
+    );
+}
+
+#[tokio::test]
+async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it() {
+    struct PartialLoader;
+    impl RuntimeLoader for PartialLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            Box::pin(async move {
+                struct PartialProvider;
+                impl Provider for PartialProvider {
+                    fn stream(&self, _: ModelRequest) -> ProviderStream {
+                        Box::pin(
+                            stream::once(async {
+                                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                                    text: "partial evidence".to_owned(),
+                                })
+                            })
+                            .chain(stream::pending()),
+                        )
+                    }
+                }
+                Ok(loaded_runtime(
+                    Runtime::new(PartialProvider, "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    let harness = spawn_harness_with_loader(Arc::new(PartialLoader), 1).await;
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitSideQuestion {
+                session_id: harness.session_id,
+                question: "inspect".to_owned(),
+                new_thread: false,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SideQuestionSubmitted {
+        side_question_id, ..
+    } = receipt.outcome
+    else {
+        panic!("receipt")
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    side_questions::load_side_snapshot(connection, side_question_id)
+                })
+                .await
+                .unwrap();
+            if item.answer == "partial evidence" {
+                assert_eq!(item.state, qq_protocol::SideQuestionState::Running);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelSideQuestion { side_question_id },
+        )
+        .await
+        .unwrap();
+    harness.runtime.shutdown().await.unwrap();
+    let item = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, side_question_id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(item.answer, "partial evidence");
+    assert_eq!(item.state, qq_protocol::SideQuestionState::Cancelled);
 }

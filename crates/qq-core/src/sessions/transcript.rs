@@ -695,6 +695,21 @@ pub(super) fn capture_side_context(
         newest.push(unit);
     }
     let mut context = Vec::new();
+    // Include the current prompt even when its run is unfinished, but never
+    // manufacture results for in-flight tools. Completed units above remain
+    // provider-valid; current partial output is explicitly omitted.
+    let active_prompt: Option<String> = connection.query_row(
+        "SELECT CASE WHEN length(CAST(m.output AS BLOB)) <= ?2 THEN m.output ELSE NULL END
+         FROM messages m JOIN sessions s ON s.active_run_id = m.run_id
+         WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0 ORDER BY m.ordinal DESC LIMIT 1",
+        params![session_id.to_string(), remaining.saturating_sub(128)], |row| row.get(0),
+    ).optional()?.flatten();
+    if let Some(prompt) = active_prompt {
+        let prompt =
+            format!("[Current main task; unfinished output and tool exchanges omitted]\n{prompt}");
+        remaining = remaining.saturating_sub(prompt.len());
+        context.push(Message::user(prompt));
+    }
     if let Some((_, summary)) = summary {
         match summary {
             Some(summary) if COMPACTION_SUMMARY_PREAMBLE.len() + 2 + summary.len() <= remaining => {

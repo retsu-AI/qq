@@ -94,3 +94,31 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 - Debug diagnostic, 100 captures with 256 archived / 64 retained runs and
   1 KiB results: p50 5,108 µs; p95 5,606 µs; p99 6,019 µs. Informational only,
   not a baseline comparison or concurrent main-stream latency acceptance.
+
+
+### 2026-10-07 — wire projection, replay and review corrections
+
+- Protocol 31 adds submit/cancel side commands and separate snapshot/update
+  projection; side command receipt/admission/capture/event commit atomically.
+  Replays do not launch provider work twice. Shared client reducer updates only
+  side state; main messages, prompt history, runs and accounting remain untouched.
+- Partial output commits before update publication; updates are coalesced to
+  1 KiB after first text to bound event amplification. Recovery appends durable
+  interrupted events and never auto-restarts side work.
+- Side cancellation has its own token map and typed terminal state. Shutdown
+  registers accepted tasks before releasing lifecycle admission, waits for them,
+  and catches task panics for interrupted settlement. Pending durable admissions
+  are capped at 64; side execution concurrency remains independently bounded.
+- Review found source exposure/managed-deny restoration. Added explicit denied
+  tools to profile compilation and root policy translation; side derivation
+  intersects the source catalog. Regression tests preserve exclusions/denies.
+- Current main prompt is captured with an explicit omission notice for unfinished
+  output/tool exchanges, avoiding fabricated tool results. This is a conservative
+  committed-context subset, not yet full current-turn fidelity acceptance.
+- Full workspace tests passed (241 s) before latest deny/stream-coalescing edits.
+  Focused partial-output/cancel and side tests pass. Protocol goldens v31 preserve
+  historical v30. Workspace formatting/lint/build and re-review still required.
+- Debug capture comparison (100 samples): full loader p50 1,511 µs / p95 1,692 µs;
+  bounded capture p50 5,161 µs / p95 5,286 µs. Bounds cost extra SQLite queries;
+  concurrent main-stream latency acceptance is still outstanding. SQ1 remains
+  draft pending that evidence and complete review of final state.

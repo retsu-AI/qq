@@ -649,7 +649,9 @@ pub(super) struct SessionRuntimeInner {
     pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
+    pub(super) side_tasks: AtomicUsize,
     pub(super) side_sessions: Mutex<std::collections::HashSet<SessionId>>,
+    pub(super) side_cancellations: Mutex<HashMap<RunId, RunCancellation>>,
     /// Run permits for child (sub-agent) sessions, one pool per depth
     /// (`child_permits[d - 1]` serves depth `d`), each separate from
     /// `permits`: a parent run holds its permit for its whole lifetime,
@@ -787,8 +789,15 @@ impl SessionRuntime {
         }
         let store = Store::open(options.database_path).await?;
         let recovered = store.recover_interrupted_runs().await?;
-        store.call(store::Priority::AwaitControl, |connection| {
-            connection.execute("UPDATE side_questions SET state = 'interrupted', finished_at_ms = ?1 WHERE state = 'running'", [now_ms()])?;
+        let store_id = store.store_id();
+        store.call_write(store::Priority::AwaitControl, move |connection| {
+            let transaction = store::begin_unit(connection)?;
+            let mut statement = transaction.prepare("SELECT id FROM side_questions WHERE state = 'running'")?;
+            let ids = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            transaction.execute("UPDATE side_questions SET state = 'interrupted', finished_at_ms = ?1 WHERE state = 'running'", [now_ms()])?;
+            for id in ids { side_questions::append_side_event(&transaction, store_id, parse_id(&id)?)?; }
+            transaction.commit()?;
             Ok(())
         }).await?;
         let (schedule, receiver) = mpsc::channel(1);
@@ -805,7 +814,9 @@ impl SessionRuntime {
             approval_reviewer: options.approval_reviewer,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
+            side_tasks: AtomicUsize::new(0),
             side_sessions: Mutex::new(std::collections::HashSet::new()),
+            side_cancellations: Mutex::new(HashMap::new()),
             child_permits: (0..MAX_CHILD_DEPTH)
                 .map(|_| Arc::new(Semaphore::new(options.max_active_runs)))
                 .collect(),
@@ -861,6 +872,10 @@ impl SessionRuntime {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
         }
+        let signal_side = match &command {
+            SessionCommand::CancelSideQuestion { side_question_id } => Some(*side_question_id),
+            _ => None,
+        };
         let signal_run = match command {
             SessionCommand::CancelRun { run_id } => Some(run_id),
             _ => None,
@@ -908,6 +923,16 @@ impl SessionRuntime {
             .await?;
         self.inner.notify(applied.receipt.committed_through);
 
+        if let Some(id) = signal_side
+            && let Some(token) = self
+                .inner
+                .side_cancellations
+                .lock()
+                .expect("side cancellation lock")
+                .get(&id)
+        {
+            token.cancel();
+        }
         if let Some(run_id) = signal_run {
             self.inner.cancel(run_id);
         }
@@ -935,6 +960,9 @@ impl SessionRuntime {
         }
         if applied.grant_promotion_pending {
             self.request_grant_promotions();
+        }
+        if let Some(source) = applied.side_launch {
+            self.launch_side_question(source);
         }
         drop(lifecycle);
         if should_schedule || applied.schedule {
@@ -1136,7 +1164,8 @@ impl SessionRuntime {
                     .child_permits
                     .iter()
                     .all(|pool| pool.available_permits() == self.inner.max_active_runs);
-            if unfinished.is_empty()
+            if self.inner.side_tasks.load(Ordering::Acquire) == 0
+                && unfinished.is_empty()
                 && preparation_quiescent
                 && *grant_promotion_stopped.borrow()
                 && self

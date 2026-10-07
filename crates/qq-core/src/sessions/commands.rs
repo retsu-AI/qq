@@ -5,6 +5,7 @@
 use super::*;
 
 pub(super) struct AppliedCommand {
+    pub(super) side_launch: Option<(SessionId, RunId, String, RuntimeLoadRequest, Vec<Message>)>,
     pub(super) receipt: CommandReceipt,
     pub(super) schedule: bool,
     /// Other runs whose in-memory cancellation must be signalled with this
@@ -341,6 +342,7 @@ pub(super) fn execute_command(
             receipt,
             schedule: false,
             replayed: true,
+            side_launch: None,
             cascade_cancels: match &command {
                 SessionCommand::CancelRun { run_id } => {
                     cancellation_signal_run_ids(connection, *run_id)?
@@ -382,7 +384,62 @@ pub(super) fn execute_command(
     let now = now_ms();
     let mut grant_promotion_pending = false;
     let mut cascade_cancels = Vec::new();
+    let mut side_launch = None;
     let (receipt, schedule) = match command {
+        SessionCommand::CancelSideQuestion { side_question_id } => {
+            let item = side_questions::load_side_snapshot(&transaction, side_question_id)?;
+            if item.state == qq_protocol::SideQuestionState::Running {
+                transaction.execute("UPDATE side_questions SET state = 'cancelled', finished_at_ms = ?2 WHERE id = ?1", params![side_question_id.to_string(), now])?;
+            }
+            let event =
+                side_questions::append_side_event(&transaction, store_id, side_question_id)?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::SideQuestionCancelled { side_question_id },
+                },
+                false,
+            )
+        }
+        SessionCommand::SubmitSideQuestion {
+            session_id,
+            question,
+            new_thread,
+        } => {
+            let id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+            let (request, messages) = side_questions::admit_side_question(
+                &transaction,
+                store_id,
+                session_id,
+                id,
+                question.clone(),
+                new_thread,
+            )?;
+            let snapshot = side_questions::load_side_snapshot(&transaction, id)?;
+            let workspace = session_workspace(&transaction, session_id)?;
+            let sequence = transaction.query_row(
+                "SELECT next_sequence FROM workspaces WHERE id = ?1",
+                [workspace.to_string()],
+                |row| row.get(0),
+            )?;
+            side_launch = Some((session_id, id, question, request, messages));
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: EventCursor {
+                        store_id,
+                        workspace_id: workspace,
+                        sequence,
+                    },
+                    outcome: CommandOutcome::SideQuestionSubmitted {
+                        side_question_id: id,
+                        thread_id: snapshot.thread_id,
+                    },
+                },
+                false,
+            )
+        }
         SessionCommand::ResolveWorkspace { .. } => {
             let canonical = canonical_workspace.ok_or(SessionRuntimeError::InvalidWorkspace)??;
             let path = canonical.as_str();
@@ -1622,6 +1679,7 @@ pub(super) fn execute_command(
         cascade_cancels,
         grant_promotion_pending,
         replayed: false,
+        side_launch,
     })
 }
 

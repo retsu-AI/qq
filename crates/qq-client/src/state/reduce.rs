@@ -115,6 +115,22 @@ impl SessionStore {
         let mut effects = StateEffects::new();
         let session_id = envelope.session_id;
         match &envelope.event {
+            SessionEvent::SideQuestionUpdated { side_question } => {
+                if let Some(view) = self.get_mut(&session_id) {
+                    if let Some(existing) = view
+                        .side_questions
+                        .iter_mut()
+                        .find(|item| item.id == side_question.id)
+                    {
+                        *existing = side_question.as_ref().clone();
+                    } else {
+                        view.side_questions.push(side_question.as_ref().clone());
+                        if view.side_questions.len() > 64 {
+                            view.side_questions.remove(0);
+                        }
+                    }
+                }
+            }
             SessionEvent::SessionCreated { session } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if context.caused_by_me {

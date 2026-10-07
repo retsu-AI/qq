@@ -763,3 +763,39 @@ fn streaming_deltas_keep_the_tree_index() {
     );
     assert_eq!(store.thread_order(), &[child, parent]);
 }
+
+#[test]
+fn side_projection_is_separate_and_repeated_updates_replace_by_id() {
+    let session = SessionId::from_bytes([3; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session), &[], 0);
+    store.warm_empty(session);
+    let item = qq_protocol::SideQuestionSnapshot {
+        id: RunId::from_bytes([8; 16]),
+        thread_id: RunId::from_bytes([9; 16]),
+        session_id: session,
+        question: "side only".to_owned(),
+        answer: "answer".to_owned(),
+        state: qq_protocol::SideQuestionState::Completed,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 1,
+        created_at_ms: 1,
+        finished_at_ms: Some(2),
+    };
+    let event = envelope(
+        1,
+        session,
+        SessionEvent::SideQuestionUpdated {
+            side_question: Box::new(item.clone()),
+        },
+    );
+    store.reduce_event(&event, context(&[]));
+    store.reduce_event(&event, context(&[]));
+    let view = store.get(&session).unwrap();
+    assert_eq!(view.side_questions, vec![item]);
+    assert!(view.messages.as_ref().unwrap().is_empty());
+    assert!(view.runs.is_empty());
+    assert!(view.prompt_history.is_empty());
+    assert_eq!(view.summary, summary(session));
+}

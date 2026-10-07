@@ -547,6 +547,15 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
+    CancelSideQuestion {
+        side_question_id: RunId,
+    },
+    SubmitSideQuestion {
+        session_id: SessionId,
+        question: String,
+        #[serde(default)]
+        new_thread: bool,
+    },
     ResolveWorkspace {
         path: String,
     },
@@ -674,6 +683,8 @@ impl SessionCommand {
     #[must_use]
     pub const fn kind(&self) -> SessionCommandKind {
         match self {
+            Self::CancelSideQuestion { .. } => SessionCommandKind::CancelSideQuestion,
+            Self::SubmitSideQuestion { .. } => SessionCommandKind::SubmitSideQuestion,
             Self::ResolveWorkspace { .. } => SessionCommandKind::ResolveWorkspace,
             Self::CreateSession { .. } => SessionCommandKind::CreateSession,
             Self::SubmitPrompt { .. } => SessionCommandKind::SubmitPrompt,
@@ -698,6 +709,8 @@ impl SessionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCommandKind {
+    CancelSideQuestion,
+    SubmitSideQuestion,
     ResolveWorkspace,
     CreateSession,
     SubmitPrompt,
@@ -717,7 +730,9 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
+        Self::CancelSideQuestion,
+        Self::SubmitSideQuestion,
         Self::ResolveWorkspace,
         Self::CreateSession,
         Self::SubmitPrompt,
@@ -743,7 +758,8 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn creates_work(self) -> bool {
         match self {
-            Self::ResolveWorkspace
+            Self::SubmitSideQuestion
+            | Self::ResolveWorkspace
             | Self::CreateSession
             | Self::SubmitPrompt
             | Self::SteerRun
@@ -753,7 +769,8 @@ impl SessionCommandKind {
             | Self::SetSessionProfile
             | Self::SetSessionEffort
             | Self::CompactSession => true,
-            Self::CancelRun
+            Self::CancelSideQuestion
+            | Self::CancelRun
             | Self::RespondToolApproval
             | Self::DeleteSession
             | Self::PruneSessions
@@ -767,6 +784,8 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
+            Self::CancelSideQuestion => "/v1/sessions/side-questions/cancel",
+            Self::SubmitSideQuestion => "/v1/sessions/side-questions",
             Self::ResolveWorkspace => "/v1/workspaces/resolve",
             Self::CreateSession => "/v1/sessions",
             Self::SubmitPrompt => "/v1/sessions/prompts",
@@ -788,8 +807,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 15] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 15];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 17] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 17];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -817,6 +836,13 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
+    SideQuestionCancelled {
+        side_question_id: RunId,
+    },
+    SideQuestionSubmitted {
+        side_question_id: RunId,
+        thread_id: RunId,
+    },
     WorkspaceResolved {
         workspace_id: WorkspaceId,
     },
@@ -1661,9 +1687,38 @@ pub struct ToolCallSnapshot {
     pub display: Option<ToolCallDisplay>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideQuestionState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SideQuestionSnapshot {
+    pub id: RunId,
+    pub thread_id: RunId,
+    pub session_id: SessionId,
+    pub question: String,
+    pub answer: String,
+    pub state: SideQuestionState,
+    pub usage: Option<TokenUsage>,
+    pub estimated_cost_usd_nanos: Option<u64>,
+    pub model_turns: u32,
+    pub created_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side_questions: Vec<SideQuestionSnapshot>,
     pub summary: SessionSummary,
     pub messages: Vec<MessageSnapshot>,
     pub runs: Vec<RunSnapshot>,
@@ -1751,6 +1806,9 @@ pub struct SessionEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    SideQuestionUpdated {
+        side_question: Box<SideQuestionSnapshot>,
+    },
     SessionCreated {
         session: Box<SessionSummary>,
     },
@@ -2139,6 +2197,7 @@ mod tests {
         assert_eq!(
             creating,
             [
+                SessionCommandKind::SubmitSideQuestion,
                 SessionCommandKind::ResolveWorkspace,
                 SessionCommandKind::CreateSession,
                 SessionCommandKind::SubmitPrompt,
@@ -2154,6 +2213,7 @@ mod tests {
         assert_eq!(
             control,
             [
+                SessionCommandKind::CancelSideQuestion,
                 SessionCommandKind::CancelRun,
                 SessionCommandKind::RespondToolApproval,
                 SessionCommandKind::DeleteSession,
@@ -3515,7 +3575,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 30);
+        assert_eq!(crate::PROTOCOL_VERSION, 31);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -3623,7 +3683,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 15);
+        assert_eq!(SessionCommandKind::ALL.len(), 17);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),

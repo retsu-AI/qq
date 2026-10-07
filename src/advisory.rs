@@ -834,6 +834,7 @@ mod tests {
             created_at_ms: u64::from(id),
         };
         SessionSnapshot {
+            side_questions: Vec::new(),
             summary,
             messages: vec![
                 message(1, MessageRole::User, "inspect PASSWORD=secret-value"),

@@ -1386,7 +1386,7 @@ pub(in crate::sessions) fn open_database(
                 thread_id TEXT NOT NULL,
                 question TEXT NOT NULL CHECK(length(CAST(question AS BLOB)) <= 8192),
                 captured_context_json TEXT NOT NULL CHECK(length(CAST(captured_context_json AS BLOB)) <= 262144),
-                state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'failed', 'interrupted')),
+                state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'failed', 'interrupted', 'cancelled', 'timed_out')),
                 answer TEXT NOT NULL DEFAULT '' CHECK(length(CAST(answer AS BLOB)) <= 131072),
                 usage_json TEXT,
                 estimated_cost_usd_nanos INTEGER,

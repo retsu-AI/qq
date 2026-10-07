@@ -131,6 +131,7 @@ pub struct AgentProfile {
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
     exposed_tools: Option<Vec<String>>,
+    denied_tools: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
 }
@@ -176,6 +177,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            denied_tools: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
         }
@@ -278,6 +280,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            denied_tools: Vec::new(),
             context_sources: runtime
                 .context_sources
                 .iter()
@@ -323,6 +326,11 @@ impl AgentProfile {
     /// Narrows a side question to built-in workspace inspection. Runtime
     /// admission must also supply isolated context, capabilities and limits.
     #[must_use]
+    pub fn with_denied_tools(mut self, names: Vec<String>) -> Self {
+        self.denied_tools = names;
+        self
+    }
+
     pub fn for_side_question(mut self) -> Self {
         self.exposed_tools = Some(["read_file", "search", "tree"].map(str::to_owned).to_vec());
         self.hosts.clear();
@@ -602,7 +610,17 @@ impl CompiledAgentPlan {
         profile.provenance = self.descriptor.provenance.clone();
         profile.credential_epoch = self.credential_epoch;
         profile.profile_id = self.descriptor.profile.clone();
-        Self::compile(profile.for_side_question()).await
+        let mut profile = profile.for_side_question();
+        // Side authority is an intersection with the effective source catalog,
+        // never a way to restore a built-in removed by managed/profile policy.
+        profile.exposed_tools = Some(
+            ["read_file", "search", "tree"]
+                .into_iter()
+                .filter(|name| self.catalog.lookup(name).is_some())
+                .map(str::to_owned)
+                .collect(),
+        );
+        Self::compile(profile).await
     }
 
     /// Compiles off the async executor, with at most four concurrent compiler tasks.
@@ -654,6 +672,7 @@ impl CompiledAgentPlan {
             profile_id,
             pack,
             exposed_tools,
+            denied_tools,
             context_sources,
             context_cache,
         } = profile;
@@ -890,6 +909,13 @@ impl CompiledAgentPlan {
             .any(|tool| tool.host == ToolHost::SpawnAgent)
         {
             static_tools.retain(|tool| !follows_spawn(tool));
+        }
+        static_tools.retain(|tool| !denied_tools.iter().any(|name| name == tool.spec.name()));
+        for contribution in &mut contributions {
+            contribution
+                .catalog
+                .tools
+                .retain(|tool| !denied_tools.iter().any(|name| name == tool.spec.name()));
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
@@ -1312,6 +1338,34 @@ mod tests {
             assert_eq!(result.unwrap().digest(), expected);
         }
         assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_preserves_source_tool_exclusions() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["search".to_owned(), "tree".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        let mut names = side.catalog().names().collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["search", "tree"]);
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_cannot_restore_managed_denied_tools() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_denied_tools(vec!["read_file".to_owned(), "search".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        assert_eq!(side.catalog().names().collect::<Vec<_>>(), ["tree"]);
     }
 
     #[test]

@@ -208,13 +208,69 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 31);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
         command_id: CommandId::from_bytes([byte; 16]),
         command,
     };
+
+    check(
+        "command_submit_side_question",
+        &command(
+            0x7a,
+            SessionCommand::SubmitSideQuestion {
+                session_id,
+                question: "What does this mean?".to_owned(),
+                new_thread: false,
+            },
+        ),
+    );
+    check(
+        "receipt_side_question",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7a; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            outcome: CommandOutcome::SideQuestionSubmitted {
+                side_question_id: run_id,
+                thread_id: run_id,
+            },
+        },
+    );
+    check(
+        "event_side_question_updated",
+        &SessionEventEnvelope {
+            cursor: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            session_id,
+            run_id: None,
+            caused_by: None,
+            occurred_at_ms: 2,
+            event: SessionEvent::SideQuestionUpdated {
+                side_question: Box::new(qq_protocol::SideQuestionSnapshot {
+                    id: run_id,
+                    thread_id: run_id,
+                    session_id,
+                    question: "What does this mean?".to_owned(),
+                    answer: "An isolated answer.".to_owned(),
+                    state: qq_protocol::SideQuestionState::Completed,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    model_turns: 1,
+                    created_at_ms: 1,
+                    finished_at_ms: Some(2),
+                }),
+            },
+        },
+    );
 
     check(
         "command_create_session",

@@ -400,6 +400,7 @@ impl SessionStore {
             });
             view.approval_previews = previous.approval_previews;
         }
+        view.side_questions = snapshot.side_questions;
         view.messages = Some(messages);
         view.tool_calls = Some(tool_calls);
         self.insert(session_id, view);
@@ -787,6 +788,7 @@ pub struct ApprovalEscalation {
 /// the warm body, live status, and per-run detail a transcript shows.
 #[derive(Debug, Clone)]
 pub struct SessionView {
+    pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
     /// `Some` only while the body is warm; `None` means summary-only.
     pub messages: Option<Vec<MessageSnapshot>>,
@@ -867,6 +869,7 @@ impl SessionView {
     ) -> Self {
         let activity = summary.active_run_id.zip(summary.activity);
         Self {
+            side_questions: Vec::new(),
             summary,
             messages: None,
             tool_calls: None,

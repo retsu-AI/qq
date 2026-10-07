@@ -114,7 +114,7 @@ impl SnapshotBudget {
 
     /// Charges one row whose variable text totals `text_bytes` (escaped) and
     /// says whether it fits. The check never reserves a partial row.
-    fn admit(&mut self, text_bytes: usize) -> bool {
+    pub(super) fn admit(&mut self, text_bytes: usize) -> bool {
         let cost = text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES);
         if cost > self.remaining {
             return false;
@@ -219,6 +219,7 @@ pub(super) fn load_session_snapshot(
     }
     tool_calls.reverse();
     Ok(SessionSnapshot {
+        side_questions: side_questions::load_side_snapshots(transaction, session_id, budget)?,
         summary,
         messages,
         runs,

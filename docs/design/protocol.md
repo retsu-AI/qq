@@ -55,8 +55,12 @@ evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 30
+PROTOCOL_VERSION = 31
 ```
+
+Version 31 adds isolated side-question submission and cancellation commands,
+separate durable side-question snapshots, and replayable side projection updates.
+These do not alter the main session transcript or accounting.
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
 values (1–12) belonged to pre-release iterations and no released build
