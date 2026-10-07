@@ -53,6 +53,7 @@ impl SessionRuntime {
     ) {
         let runtime = self.clone();
         self.inner.side_tasks.fetch_add(1, Ordering::AcqRel);
+        let started = tokio::time::Instant::now();
         tokio::spawn(async move {
             struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
             impl Drop for TaskGuard {
@@ -68,6 +69,7 @@ impl SessionRuntime {
                 RunCancellation::new(),
                 false,
                 Some((id, request, messages)),
+                started,
             ))
             .catch_unwind()
             .await;
@@ -87,8 +89,8 @@ impl SessionRuntime {
             }
         });
     }
-    /// Runs without claiming the main session slot. This foundation returns
-    /// only a completed answer; durable side-thread/event admission follows.
+    /// Runs without claiming the main session slot. Captures and updates are
+    /// persisted separately; success returns only after durable settlement.
     pub async fn answer_side_question(
         &self,
         session: SessionId,
@@ -111,9 +113,18 @@ impl SessionRuntime {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
         }
-        self.inner.side_tasks.fetch_add(1, Ordering::AcqRel);
+        if self
+            .inner
+            .side_tasks
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 64).then_some(count + 1)
+            })
+            .is_err()
+        {
+            return Err(SessionRuntimeError::Overloaded);
+        }
         let runtime = self.clone();
-        let caller_cancellation = cancellation.clone();
+        let started = tokio::time::Instant::now();
         let task = tokio::spawn(async move {
             struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
             impl Drop for TaskGuard {
@@ -134,6 +145,7 @@ impl SessionRuntime {
                 cancellation,
                 new_thread,
                 Some((id, request, messages)),
+                started,
             ))
             .catch_unwind()
             .await
@@ -159,13 +171,9 @@ impl SessionRuntime {
             }
         });
         drop(lifecycle);
-        match tokio::time::timeout(Duration::from_secs(120), task).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(SessionRuntimeError::Unavailable),
-            Err(_) => {
-                caller_cancellation.cancel();
-                Err(SessionRuntimeError::SideQuestionTimedOut)
-            }
+        match task.await {
+            Ok(result) => result,
+            Err(_) => Err(SessionRuntimeError::Unavailable),
         }
     }
 
@@ -176,6 +184,7 @@ impl SessionRuntime {
         cancellation: RunCancellation,
         new_thread: bool,
         admitted: Option<(RunId, RuntimeLoadRequest, Vec<Message>)>,
+        started: tokio::time::Instant,
     ) -> Result<SideAnswer, SessionRuntimeError> {
         if question.trim().is_empty() || question.len() > 8192 {
             return Err(SessionRuntimeError::InvalidSideQuestion);
@@ -207,7 +216,6 @@ impl SessionRuntime {
             session,
             id,
         };
-        let started = tokio::time::Instant::now();
         // Admission must finish before cancellation can settle it: a queued
         // SQLite job may commit even if its receiving future is dropped.
         let (request, mut messages) = match admitted {
@@ -231,74 +239,119 @@ impl SessionRuntime {
             if stored.state != qq_protocol::SideQuestionState::Running {
                 return Err(SessionRuntimeError::SideQuestionCancelled);
             }
-            let _permit = self
-                .inner
-                .side_permits
-                .acquire()
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
-            if *self.inner.shutdown.borrow() {
-                return Err(SessionRuntimeError::SideQuestionCancelled);
+            let remaining =
+                120_000_u64.saturating_sub(now_ms().saturating_sub(stored.created_at_ms));
+            if remaining == 0 {
+                return Err(SessionRuntimeError::SideQuestionTimedOut);
             }
-            let workspace = request.workspace.clone();
-            let loaded = self
-                .inner
-                .loader
-                .load_with_progress(request, RuntimeLoadProgress::default())
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
-            if loaded.plan.workspace_path() != Path::new(&workspace) {
-                return Err(SessionRuntimeError::CONSTRAINT);
-            }
-            let plan = loaded
-                .plan
-                .side_question_plan()
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
-            messages.push(Message::user("This is an isolated side question. The preceding context was captured from committed session history; live file inspection is not a filesystem snapshot. Do not steer or modify the main task."));
-            messages.push(Message::user(question));
-            let capabilities = RunCapabilities::restricted()
-                .with_limits(
-                    RunLimits {
-                        max_duration_ms: Some(120_000),
-                        max_model_turns: Some(8),
-                        max_output_tokens: Some(16_384),
-                        max_tool_output_bytes: Some(96 * 1024),
-                        max_children: Some(0),
-                        max_concurrent_children: Some(0),
-                        ..RunLimits::default()
-                    },
-                    plan.resolved_model().pricing.clone(),
-                )
-                .with_execution_started(started);
-            let mut events = plan.execute(
-                messages,
-                cancellation.clone(),
-                Arc::new(InspectionGate),
-                Arc::new(FileState::default()),
-                capabilities,
-            );
-            let mut answer = SideAnswer {
-                id,
-                text: String::new(),
-                usage: Some(TokenUsage::default()),
-                estimated_cost_usd_nanos: plan.resolved_model().pricing.as_ref().map(|_| 0),
-                model_turns: 0,
-            };
-            let mut published_bytes = 0_usize;
-            while let Some(event) = events.next().await {
-                match event {
-                    RuntimeEvent::OutputTextDelta { text } => {
-                        if text.is_empty() {
-                            continue;
+            let durable_deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
+            let execution = async {
+                let _permit = self
+                    .inner
+                    .side_permits
+                    .acquire()
+                    .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?;
+                if *self.inner.shutdown.borrow() {
+                    return Err(SessionRuntimeError::SideQuestionCancelled);
+                }
+                let workspace = request.workspace.clone();
+                let loaded = self
+                    .inner
+                    .loader
+                    .load_with_progress(request, RuntimeLoadProgress::default())
+                    .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?;
+                if loaded.plan.workspace_path() != Path::new(&workspace) {
+                    return Err(SessionRuntimeError::CONSTRAINT);
+                }
+                let plan = loaded
+                    .plan
+                    .side_question_plan()
+                    .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?;
+                messages.push(Message::user("This is an isolated side question. The preceding context was captured from committed session history; live file inspection is not a filesystem snapshot. Do not steer or modify the main task."));
+                messages.push(Message::user(question));
+                let capabilities = RunCapabilities::restricted()
+                    .with_limits(
+                        RunLimits {
+                            max_duration_ms: Some(120_000),
+                            max_model_turns: Some(8),
+                            max_output_tokens: Some(16_384),
+                            max_tool_output_bytes: Some(96 * 1024),
+                            max_children: Some(0),
+                            max_concurrent_children: Some(0),
+                            ..RunLimits::default()
+                        },
+                        plan.resolved_model().pricing.clone(),
+                    )
+                    .with_execution_started(started);
+                let mut events = plan.execute(
+                    messages,
+                    cancellation.clone(),
+                    Arc::new(InspectionGate),
+                    Arc::new(FileState::default()),
+                    capabilities,
+                );
+                let mut answer = SideAnswer {
+                    id,
+                    text: String::new(),
+                    usage: Some(TokenUsage::default()),
+                    estimated_cost_usd_nanos: plan.resolved_model().pricing.as_ref().map(|_| 0),
+                    model_turns: 0,
+                };
+                let mut published_bytes = 0_usize;
+                while let Some(event) = events.next().await {
+                    match event {
+                        RuntimeEvent::OutputTextDelta { text } => {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
+                                return Err(SessionRuntimeError::CONSTRAINT);
+                            }
+                            answer.text.push_str(&text);
+                            if answer.text.len().saturating_sub(published_bytes) >= 1024
+                                || published_bytes == 0
+                            {
+                                self.inner
+                                    .store
+                                    .record_side_turn(
+                                        id,
+                                        answer.text.clone(),
+                                        answer.usage,
+                                        answer.estimated_cost_usd_nanos,
+                                        answer.model_turns,
+                                    )
+                                    .await?;
+                                published_bytes = answer.text.len();
+                            }
                         }
-                        if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
-                            return Err(SessionRuntimeError::CONSTRAINT);
-                        }
-                        answer.text.push_str(&text);
-                        if answer.text.len().saturating_sub(published_bytes) >= 1024
-                            || published_bytes == 0
-                        {
+                        RuntimeEvent::AssistantTurnCompleted { message, usage, .. } => {
+                            answer.model_turns += 1;
+                            answer.text.clear();
+                            for block in message.content() {
+                                if let ContentBlock::Text { text } = block {
+                                    if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
+                                        return Err(SessionRuntimeError::CONSTRAINT);
+                                    }
+                                    answer.text.push_str(text);
+                                }
+                            }
+                            answer.usage = match (answer.usage, usage) {
+                                (Some(total), Some(usage)) => execution::add_usage(total, usage),
+                                _ => None,
+                            };
+                            answer.estimated_cost_usd_nanos =
+                                match (answer.estimated_cost_usd_nanos, usage) {
+                                    (Some(total), Some(usage)) => plan
+                                        .resolved_model()
+                                        .pricing
+                                        .as_ref()
+                                        .and_then(|pricing| run_cost(usage, pricing))
+                                        .and_then(|cost| total.checked_add(cost)),
+                                    _ => None,
+                                };
                             self.inner
                                 .store
                                 .record_side_turn(
@@ -309,53 +362,23 @@ impl SessionRuntime {
                                     answer.model_turns,
                                 )
                                 .await?;
-                            published_bytes = answer.text.len();
                         }
-                    }
-                    RuntimeEvent::AssistantTurnCompleted { message, usage, .. } => {
-                        answer.model_turns += 1;
-                        answer.text.clear();
-                        for block in message.content() {
-                            if let ContentBlock::Text { text } = block {
-                                if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
-                                    return Err(SessionRuntimeError::CONSTRAINT);
-                                }
-                                answer.text.push_str(text);
-                            }
+                        RuntimeEvent::Completed { .. } => return Ok(answer),
+                        RuntimeEvent::Failed { .. } | RuntimeEvent::BudgetExhausted { .. } => {
+                            return Err(SessionRuntimeError::Unavailable);
                         }
-                        answer.usage = match (answer.usage, usage) {
-                            (Some(total), Some(usage)) => execution::add_usage(total, usage),
-                            _ => None,
-                        };
-                        answer.estimated_cost_usd_nanos =
-                            match (answer.estimated_cost_usd_nanos, usage) {
-                                (Some(total), Some(usage)) => plan
-                                    .resolved_model()
-                                    .pricing
-                                    .as_ref()
-                                    .and_then(|pricing| run_cost(usage, pricing))
-                                    .and_then(|cost| total.checked_add(cost)),
-                                _ => None,
-                            };
-                        self.inner
-                            .store
-                            .record_side_turn(
-                                id,
-                                answer.text.clone(),
-                                answer.usage,
-                                answer.estimated_cost_usd_nanos,
-                                answer.model_turns,
-                            )
-                            .await?;
+                        _ => {}
                     }
-                    RuntimeEvent::Completed { .. } => return Ok(answer),
-                    RuntimeEvent::Failed { .. } | RuntimeEvent::BudgetExhausted { .. } => {
-                        return Err(SessionRuntimeError::Unavailable);
-                    }
-                    _ => {}
+                }
+                Err(SessionRuntimeError::Unavailable)
+            };
+            match tokio::time::timeout_at(durable_deadline, execution).await {
+                Ok(result) => result,
+                Err(_) => {
+                    cancellation.cancel();
+                    Err(SessionRuntimeError::SideQuestionTimedOut)
                 }
             }
-            Err(SessionRuntimeError::Unavailable)
         });
         tokio::pin!(work);
         let mut shutdown = self.inner.shutdown.subscribe();

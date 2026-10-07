@@ -139,3 +139,9 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   admission/settlement waits; durable cleanup continues independently after
   timeout. Panic/shutdown regression passed. Latest full workspace run passed
   (290 s, four threads). Final independent correctness review is in progress.
+
+- Final review caught competing outer/inner timeout states. Removed the outer
+  timeout so returned and persisted outcomes agree; execution deadlines now
+  include pre-spawn elapsed time and the durable admission timestamp. Durable
+  admission/finalization waits remain an explicitly open bound, so SQ1 is not
+  marked ready. Public pending tasks are capped before spawning.
