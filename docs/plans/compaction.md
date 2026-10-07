@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | CX0–CX2 merged (#239, #250). CX4 in review; CX3 stacked on it. ADR-0056 Proposed |
+| Now | CX0–CX2 merged (#239, #250). CX4 in review (#252); CX3 in review, stacked on it. CX5 waits 7 days after CX3 merges. ADR-0056 Proposed |
 | Decision | [ADR-0056](../adr/0056-compaction-narrative-and-record.md) (amends how ADR-0039 § 3's summarizer request is built) |
 | Ledger | [`progress/compaction.md`](./progress/compaction.md) |
 | Linear | [ENG-992](https://linear.app/retsu-ai/issue/ENG-992) (plan); CX0 [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) … CX5 [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) |
@@ -100,7 +100,7 @@ to move in the same PR.
 
 ### CX3 — Durable prune watermark
 **Inputs:** CX2
-**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (41 → 42), `crates/qq-core/src/lib.rs` (live overflow prune)
+**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (42 → 43; main took 42 for AP4.2), `crates/qq-core/src/lib.rs` (live overflow prune)
 **Gates:** `context_assembly` within noise
 **Acceptance:**
 - Assembly stubs stale read-only results only up to a durable watermark.

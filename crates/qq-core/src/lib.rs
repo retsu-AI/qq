@@ -768,6 +768,12 @@ pub(crate) struct RunCapabilities {
     /// prompt, so it reads the provider cache those runs wrote; every call is
     /// rejected unexecuted (ADR-0056 § 5).
     summarizer: Option<plan::PromptPrefixKey>,
+    /// The stored effect of each tool result in the messages the run starts
+    /// with, in block order (`None` for rows that predate the effect
+    /// column). The live overflow prune classifies inherited results by
+    /// these, exactly as assembly does, so a prune seam replays byte for
+    /// byte. Direct runs have none and fall back to the built-in names.
+    inherited_effects: Vec<Option<catalog::EffectClass>>,
 }
 
 impl RunCapabilities {
@@ -793,6 +799,7 @@ impl RunCapabilities {
             subagent: None,
             stall_exempt: false,
             summarizer: None,
+            inherited_effects: Vec::new(),
         }
     }
 
@@ -885,6 +892,14 @@ impl RunCapabilities {
     /// session's prompt runs. Context sources and an output contract are
     /// never applied to it, it keeps no stall count, and every call it makes
     /// is rejected unexecuted; a second turn that calls a tool fails the run.
+    pub(crate) fn with_inherited_effects(
+        mut self,
+        effects: Vec<Option<catalog::EffectClass>>,
+    ) -> Self {
+        self.inherited_effects = effects;
+        self
+    }
+
     pub(crate) fn summarizer(mut self, key: plan::PromptPrefixKey) -> Self {
         self.summarizer = Some(key);
         self.output = None;
@@ -931,6 +946,7 @@ impl RunCapabilities {
             subagent: None,
             stall_exempt: false,
             summarizer: None,
+            inherited_effects: Vec::new(),
         }
     }
 }
@@ -1733,6 +1749,7 @@ impl plan::CompiledAgentPlan {
                 subagent,
                 stall_exempt,
                 summarizer,
+                inherited_effects,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1962,9 +1979,8 @@ impl plan::CompiledAgentPlan {
             let mut compatible_request: Option<(u64, u64, u64, u64)> = None;
             // Effects of this run's admitted calls by provider call id, so a
             // turn that would overflow the window can stub the stale
-            // read-only results in memory before failing. Between runs
-            // assembly does the same from the stored effect column; within a
-            // run this is the only record.
+            // read-only results in memory before failing. Results the run
+            // inherited carry their stored effects (`inherited_effects`).
             let mut call_effects = HashMap::<String, catalog::EffectClass>::new();
 
             let mut slice_tool_calls = 0_usize;
@@ -2229,26 +2245,33 @@ impl plan::CompiledAgentPlan {
                         irreducible_message_bytes,
                     ));
                 if would_overflow && {
-                    // Results loaded from the store carry no effect here and
-                    // fall back to the built-in read-only names, exactly as
-                    // assembly treats rows that predate the effect column.
-                    let call_effects = &call_effects;
-                    let effects = messages
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(message_index, message)| {
-                            message.content().iter().enumerate().filter_map(
-                                move |(block_index, block)| match block {
-                                    ContentBlock::ToolResult { call_id, .. } => call_effects
-                                        .get(call_id)
-                                        .map(|effect| ((message_index, block_index), *effect)),
-                                    ContentBlock::Text { .. } | ContentBlock::ToolCall { .. } => {
-                                        None
-                                    }
-                                },
-                            )
-                        })
-                        .collect::<HashMap<_, _>>();
+                    // Results the run inherited are classified by their
+                    // stored effects, in block order, exactly as assembly
+                    // classifies them, so this prune seam replays byte for
+                    // byte; a row without one falls back to the built-in
+                    // read-only names in both. The run's own results use
+                    // the effect each call was admitted under.
+                    let mut effects = HashMap::new();
+                    let mut inherited = 0_usize;
+                    for (message_index, message) in messages.iter().enumerate() {
+                        for (block_index, block) in message.content().iter().enumerate() {
+                            let ContentBlock::ToolResult { call_id, .. } = block else {
+                                continue;
+                            };
+                            let effect = if message_index < reducible_messages {
+                                inherited += 1;
+                                inherited_effects
+                                    .get(inherited - 1)
+                                    .copied()
+                                    .unwrap_or_else(|| call_effects.get(call_id).copied())
+                            } else {
+                                call_effects.get(call_id).copied()
+                            };
+                            if let Some(effect) = effect {
+                                effects.insert((message_index, block_index), effect);
+                            }
+                        }
+                    }
                     sessions::prune_stale_tool_results(
                         Arc::make_mut(&mut messages).as_mut_slice(),
                         &effects,
@@ -2256,6 +2279,7 @@ impl plan::CompiledAgentPlan {
                 } {
                     reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                     irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                    yield RuntimeEvent::ContextPruned { turn_ordinal };
                 }
                 // Still over the window after stubbing, or the provider said
                 // so itself: summarize this run's own earlier turns and
@@ -4645,6 +4669,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
                 // Direct runs have no compactor, so these never fire.
                 | RuntimeEvent::InRunCompacted { .. }
+                // Direct runs keep no session history to replay.
+                | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }

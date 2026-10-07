@@ -237,6 +237,7 @@ async fn prepare_execution(
     // spawners. ClaimedRun clones after this point stay scalar/empty instead
     // of duplicating up to 4 MiB per tool call.
     let mut messages = std::mem::take(&mut claimed.messages);
+    let inherited_effects = std::mem::take(&mut claimed.message_effects);
     let input = std::mem::take(&mut claimed.input);
     let gate: Arc<dyn ToolGate> = if internal {
         Arc::new(CompactionRunGate)
@@ -487,7 +488,8 @@ async fn prepare_execution(
     .with_literal_slash(claimed.literal_slash)
     .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
-    .with_output(claimed.output.clone());
+    .with_output(claimed.output.clone())
+    .with_inherited_effects(inherited_effects);
     if !internal {
         capabilities.routing_spend = loaded.routing_spend;
     }
@@ -922,6 +924,9 @@ pub(super) async fn execute_run(
     // prompt because earlier runs overflowed. After the fold is exhausted the
     // run starts from the latest summary alone (RR6).
     let mut summary_only_admission = false;
+    // The proactive-threshold seam runs at most once per run: it moves the
+    // prune watermark to the session's newest turn and reassembles.
+    let mut watermark_advanced = false;
     loop {
         let mut prepared = match prepare_execution(
             &inner,
@@ -1052,6 +1057,9 @@ pub(super) async fn execute_run(
                 Ok(summarizer) => {
                     bounded_manual_compaction = true;
                     claimed.messages = summarizer.messages;
+                    // A summarizer request is one turn with every call
+                    // rejected; nothing is live-pruned, so no effects.
+                    claimed.message_effects = Vec::new();
                     claimed.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
                 }
                 Err(error) => {
@@ -1199,6 +1207,59 @@ pub(super) async fn execute_run(
             context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
                 let audit = prepared.audit.clone();
                 drop(prepared);
+                // Stubbing stale reads is cheaper than a summarizer and is
+                // the seam where the watermark may move (ADR-0056 § 6). If
+                // the stubbed context fits, it is sent; otherwise the
+                // reassembled request compacts as before.
+                if !watermark_advanced {
+                    watermark_advanced = true;
+                    match inner
+                        .store
+                        .advance_prune_watermark_before_prompt(&claimed)
+                        .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => match inner.store.reload_reserved_messages(&claimed).await {
+                            Ok(Some((messages, effects, _))) => {
+                                // Occupancy reuse credits the stubbed
+                                // bytes at its ratio, as for any rewrite.
+                                claimed.messages = messages;
+                                claimed.message_effects = effects;
+                                continue;
+                            }
+                            Ok(None) => {
+                                clear_run_registration(&inner, claimed.identity.run_id);
+                                return;
+                            }
+                            Err(error) => {
+                                finish_prepared_run(
+                                    &inner,
+                                    &claimed,
+                                    &audit,
+                                    persistence_failure(
+                                        "failed to reload the reserved prompt after pruning",
+                                        &error,
+                                    ),
+                                )
+                                .await;
+                                return;
+                            }
+                        },
+                        Err(error) => {
+                            finish_prepared_run(
+                                &inner,
+                                &claimed,
+                                &audit,
+                                persistence_failure(
+                                    "failed to persist the prune watermark",
+                                    &error,
+                                ),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
                 if !run_auto_compaction(
                     &inner,
                     &mut claimed,
@@ -1271,7 +1332,7 @@ async fn admit_with_summary_only_history(
             return false;
         }
     };
-    let Ok(Some((messages, _))) = inner.store.reload_reserved_messages(claimed).await else {
+    let Ok(Some((messages, _, _))) = inner.store.reload_reserved_messages(claimed).await else {
         finish_reserved_run(
             inner,
             claimed,
@@ -1296,6 +1357,7 @@ async fn admit_with_summary_only_history(
         None => SUMMARY_ONLY_NOTICE.to_owned(),
     };
     claimed.messages = vec![Message::user(opening), prompt];
+    claimed.message_effects = Vec::new();
     true
 }
 
@@ -1407,6 +1469,7 @@ async fn run_auto_compaction(
     candidate.user_initiated = false;
     candidate.literal_slash = false;
     candidate.messages = summarizer.messages;
+    candidate.message_effects = Vec::new();
     candidate.context_compaction_attempted =
         original.context_compaction_attempted.saturating_add(1);
     candidate.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
@@ -1580,8 +1643,9 @@ async fn run_auto_compaction(
         }
     };
     match inner.store.reload_reserved_messages(original).await {
-        Ok(Some((messages, progress))) => {
+        Ok(Some((messages, effects, progress))) => {
             original.messages = messages;
+            original.message_effects = effects;
             original.context_compaction_attempted = progress.steps;
             original.context_compaction_failed = progress.failed;
             original.context_compaction_remaining = progress.remaining;
@@ -2977,6 +3041,34 @@ async fn execute_started_run(
                         return;
                     }
                     flush_at = None;
+                }
+            }
+            RunInput::Event(Some(RuntimeEvent::ContextPruned { turn_ordinal })) => {
+                // A summarizer's request is not a transcript: no prompt run
+                // replays or extends it, and it has no prompt row to anchor
+                // a watermark. Its live prune is not a seam.
+                if internal {
+                    continue;
+                }
+                // Durable before the pruned request is sent: the loop is not
+                // polled again until this commits.
+                if let Err(error) = inner
+                    .store
+                    .advance_prune_watermark(&claimed, turn_ordinal.saturating_sub(1))
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the prune watermark", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
                 }
             }
             RunInput::Event(Some(RuntimeEvent::InRunCompacted { .. })) => {

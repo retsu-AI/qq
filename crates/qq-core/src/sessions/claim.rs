@@ -86,6 +86,9 @@ pub(super) struct ClaimedRun {
     pub(super) session_model: ModelSelection,
     pub(super) model: ModelSelection,
     pub(super) messages: Vec<Message>,
+    /// The stored effect of each tool result in `messages`, in block order,
+    /// so the run's live prune classifies them as assembly did.
+    pub(super) message_effects: ResultEffects,
     /// Summarizer steps already spent admitting this prompt. Zero until the
     /// first automatic compaction starts.
     pub(super) context_compaction_attempted: u32,
@@ -160,6 +163,7 @@ impl ClaimedRun {
             session_model: self.session_model.clone(),
             model: self.model.clone(),
             messages: Vec::new(),
+            message_effects: Vec::new(),
             context_compaction_attempted: self.context_compaction_attempted,
             context_compaction_failed: self.context_compaction_failed,
             context_compaction_remaining: self.context_compaction_remaining,
@@ -640,7 +644,7 @@ pub(super) fn reserve_next_run_recoverable(
     if reserved != 1 {
         return Ok(None);
     }
-    let messages = match kind {
+    let (messages, message_effects) = match kind {
         RunKind::Prompt => {
             let user_ordinal: u64 = transaction.query_row(
                 "SELECT ordinal FROM messages WHERE id = ?1",
@@ -652,19 +656,23 @@ pub(super) fn reserve_next_run_recoverable(
                 [user_message_id.to_string()],
                 |row| row.get(0),
             )?;
-            let mut context =
-                load_model_context(&transaction, session_id, user_ordinal.saturating_sub(1))?;
+            let (mut context, effects) = load_model_context_with_effects(
+                &transaction,
+                session_id,
+                user_ordinal.saturating_sub(1),
+            )?;
             context.push(Message::user(prompt));
-            context
+            (context, effects)
         }
         RunKind::Compaction => {
             // The summarization request is the session's assembled context —
             // latest summary plus verbatim span, with result pruning — and
             // the fixed instruction as the final user message. A prior
             // summary therefore folds into the next one naturally.
-            let mut context = load_model_context(&transaction, session_id, u64::MAX)?;
+            let (mut context, effects) =
+                load_model_context_with_effects(&transaction, session_id, u64::MAX)?;
             context.push(Message::user(COMPACTION_INSTRUCTION.to_owned()));
-            context
+            (context, effects)
         }
     };
     // Malformed or foreign-version state is treated as absent and cleared
@@ -743,6 +751,7 @@ pub(super) fn reserve_next_run_recoverable(
         session_model: model.clone(),
         model,
         messages,
+        message_effects,
         context_compaction_attempted,
         context_compaction_failed,
         context_compaction_remaining,
@@ -899,7 +908,7 @@ pub(super) struct CompactionProgress {
 pub(super) fn reload_reserved_messages(
     connection: &mut Connection,
     identity: RunIdentity,
-) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
+) -> Result<Option<(Vec<Message>, ResultEffects, CompactionProgress)>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let row = transaction
         .query_row(
@@ -958,14 +967,14 @@ pub(super) fn reload_reserved_messages(
         [user_message_id.as_str()],
         |row| row.get(0),
     )?;
-    let mut messages = load_model_context(
+    let (mut messages, effects) = load_model_context_with_effects(
         &transaction,
         identity.session_id,
         user_ordinal.saturating_sub(1),
     )?;
     messages.push(Message::user(prompt));
     transaction.commit()?;
-    Ok(Some((messages, progress)))
+    Ok(Some((messages, effects, progress)))
 }
 
 pub(super) fn reserve_context_capacity(

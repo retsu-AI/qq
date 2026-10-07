@@ -9,7 +9,7 @@ newest last.
 | CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
-| CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
+| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 42 → 43; stacked on #252 |
 | CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
@@ -324,3 +324,153 @@ failure.
   - the rail precedence, with `compacting context` over a stale tail;
   - that compaction draws no transcript row.
   `layout.md`'s rail table points to it.
+
+### 2026-10-05 — CX3 implementation (ENG-996)
+
+CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
+`sessions.prune_through_ordinal` and `prune_through_turn`.
+- **Assembly.** `prune_stale_tool_results` now runs on
+  `context[..prune_limit]`, the assembled length through the watermark
+  turn, so its four-turn window ends at that turn. The work is one row read
+  per assembly. `append_run_turns` returns each turn's end index instead of
+  taking an eighth argument.
+- **Live overflow-prune seam.** The run loop yields
+  `RuntimeEvent::ContextPruned { turn_ordinal }` after it stubs its live
+  messages. The session layer commits the watermark at `turn_ordinal - 1`
+  before the loop is polled again, so the stubbed request is never sent
+  before its replay is durable. The watermark is monotonic.
+- **Proactive-threshold seam.** On `ContextPlan::Compact`, a prompt run
+  first moves the watermark to the newest turn before its prompt and
+  reassembles, at most once per run. If that fits, it sends with no
+  summarizer; if not, it compacts as before. This is new behaviour: a
+  near-full window with re-derivable reads now costs no summarizer call.
+- **Bug found and fixed.** A live run re-stubbed its own stubs on every
+  later overflowing turn, so a stub named the earlier stub's size
+  (178 bytes) instead of the real result's, while replay named the real
+  size. `prunable_stub` now refuses content that is already a stub.
+  `a_live_prune_moves_the_watermark_and_the_next_run_extends_it` caught it.
+- **Upgrade.** A session upgraded to 42 starts with its watermark at its
+  newest committed turn, so it assembles exactly as at 41. Sessions with no
+  turns stay unset.
+- **Tests.** The three new runtime tests fail when their seam is disabled.
+  - `each_run_extends_the_previous_runs_last_request_until_a_seam`: seven
+    runs, each first request extends the previous run's last one, and
+    nothing is stubbed.
+  - `a_live_prune_moves_the_watermark_and_the_next_run_extends_it`.
+  - `the_proactive_threshold_stubs_stale_reads_before_it_compacts`.
+  - `version_forty_one_gains_the_prune_watermark_at_the_newest_turn`:
+    backfill, unset for empty sessions, and a bad shape refused.
+  - The reference assembly oracle applies the same watermark
+    independently.
+- **Adjusted tests.** Tests of stubbing itself now set a seam with
+  `mark_prune_seam`: `assembly_prunes_stale…`, `pruned_history_still…`,
+  `measured_occupancy_survives…`, `repeated_call_ids_keep_pruning…` and
+  `permanent_reserved_reload_failure…` (where the threshold seam would
+  otherwise take the injected reload failure). The `context_assembly`
+  bench seed sets the watermark at its newest turn, so it still measures
+  full stubbing.
+- **Gates.**
+  - `cargo test --workspace`: 2 105 passed, 13 ignored.
+  - Soak: 7 passed.
+  - `fmt` and `clippy -D warnings` are clean.
+  - `context_assembly`, paired against the CX4 tip on the same host:
+
+| archived runs | base assemble | CX3 assemble |
+| ---: | --- | --- |
+| 10 | 60.5 / 52.4 µs | 55.4 / 56.2 µs |
+| 1 000 | 56.8 / 60.8 µs | 57.3 / 92.4 µs (one outlier) |
+| 10 000 | 67.7 / 60.3 µs | 66.0 / 62.2 µs |
+
+  Within noise.
+
+### 2026-10-05 — CX3 review (Codex, #254)
+
+- **Stub detection.** The re-stub guard matched any result whose last line
+  began with `[pruned: `. A large read-only result that happened to end
+  that way was never pruned. `prunable_stub` now treats content as its own
+  stub only when it is exactly the stub this call would produce: an
+  optional header line, then
+  `[pruned: <name> <arguments> returned <digits> bytes; <hint>]`. A real
+  result in that form is stub-sized, so keeping it costs nothing.
+  Regression test:
+  `a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is`.
+  Rebased onto the CX4 review fix.
+
+### 2026-10-05 — CX3 review, second pass (Codex, #254)
+
+- **Claim (P1).** A new session's watermark is unset, so a model with no
+  declared window would reach the 4 MiB storage backstop unstubbed and be
+  refused. That does not happen: the backstop plans `Compact` (the
+  planner's `exceeds_storage`), and the threshold seam runs on every
+  `Compact` plan, window or not. It stubs, reassembles, and sends.
+  New end-to-end test:
+  `a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop`
+  (no window, 16k output cap, ~140 read runs). It sends at 4.1 MiB, then
+  0.1 MiB with 153 stubs and no summarizer. With the seam disabled, run
+  156 fails at the backstop.
+- **Fixture.** The cited fixture,
+  `capacity_accounting_measures_the_pruned_assembly_not_raw_rows`, does
+  not demonstrate the claim. Its 3 MiB rows replay at about 2 KiB each,
+  because assembly projects them through the per-turn output budget
+  before pruning, so it measures 4 KiB with the watermark unset. It still
+  passes, unchanged.
+- **Docs.** `tools.md` now says the threshold seam includes the storage
+  backstop.
+
+### 2026-10-05 — CX3 review, third pass (Codex, #254)
+
+- **Effects across the live seam.** The live overflow prune only knew
+  effects for calls made in the current run. Earlier runs' results fell
+  back to the six built-in names, while assembly uses the stored effect.
+  So a stale read-only result from an earlier run that is not one of
+  those names (`load_skill`, `spawn_agent`, `select_tools`) stayed
+  verbatim live but was stubbed on replay, and the next request did not
+  extend the last.
+- **Fix.** Assembly now also returns the stored effect of each result in
+  block order (`load_model_context_with_effects`). The claim and every
+  reload carry it as `ClaimedRun::message_effects`, the run gets it as
+  `RunCapabilities::inherited_effects`, and the live prune classifies
+  inherited results by it. Block order is stable in that prefix: nothing
+  is inserted or removed before the prompt, and provider call ids are not
+  unique.
+- **Test.** `a_live_prune_classifies_earlier_runs_results_by_their_stored_effect`
+  uses an earlier `__test_delay` result, stored `ReadOnly` and not on the
+  list. It fails with the effects dropped.
+
+### 2026-10-05 — CX3 review, fourth pass (Codex, #254)
+
+- **Stub detection, again.** The two-line form accepted any first line, so
+  a large first line followed by a valid stub line read as a stub and was
+  never pruned. The optional header must now pass the same bounded
+  `header_line` check the stub is built with (≤ 512 bytes, `<tool> …`, or
+  `read …` for `read_file`). The size must be a `u64`. The regression
+  test adds both lookalikes (a 4 KiB first line, a 2 KiB digit run) and
+  fails without the header check.
+- **Watermark without a prompt row.** A compaction run has a placeholder
+  `user_message_id` and no `messages` row, so its watermark update matched
+  nothing and still returned success. The session layer now ignores
+  `ContextPruned` from internal runs: a summarizer request is not a
+  transcript, and nothing replays or extends it. `advance_prune_watermark`
+  returns `Unavailable` for a run with no prompt row instead of a silent
+  no-op. Regression test:
+  `the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row`.
+
+### 2026-10-05 — Stack rebased onto main (AP4.2 took schema 42)
+
+`main` advanced to `a0caa722`. AP4.2 (#257) took store schema 42
+(`child_reports`) and `DESCRIPTOR_VERSION` 13. Main is still at protocol 30.
+- **CX4** rebases cleanly. It keeps protocol 31, and the guide mentions now
+  read descriptor 13 and schema 42.
+- **CX3** moves to schema 42 → 43. Main's step 42 stays as written, and its
+  guard now accepts 43. The watermark step is 43, and every version list
+  gains `"43"`. The migration test becomes
+  `version_forty_two_gains_the_prune_watermark_at_the_newest_turn`. The
+  ADR, plan, `tools.md`, `protocol.md`, guide and root coordination rows
+  now say 43.
+- After the rebase, `a_live_prune_moves_the_watermark_and_the_next_run_extends_it`
+  failed, but correctly. Main's larger system prompt and tool block
+  (AP4.2's `wait_agents` and `cancel_agent`) put the second run past the
+  90 % threshold of the test's 16k window, which made it a legitimate
+  seam. The test now uses ten reads in a 24k window, so the second prompt
+  sits below the threshold. It also asserts the watermark did not move
+  between the runs, and it still fails if the seam records the wrong turn.

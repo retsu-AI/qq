@@ -1486,6 +1486,12 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
     .await;
     let first = queue_prompt(&harness.runtime, harness.session_id, "grow".to_owned()).await;
     collect_until(&mut harness.events, finished_for(first)).await;
+    // The watermark already covers the history, so the threshold seam has
+    // nothing to move and the injected failure hits the compaction reload.
+    mark_prune_seam(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
 
     let queued = harness
         .runtime
@@ -1685,6 +1691,10 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
         let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
         collect_until(&mut harness.events, finished_for(run)).await;
     }
+    mark_prune_seam(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
     let overflow = queue_prompt(&harness.runtime, harness.session_id, "big ask".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(overflow)).await;
     assert!(observed.iter().any(|event| matches!(
@@ -2411,6 +2421,13 @@ async fn assembly_prunes_stale_read_only_results_but_never_mutating_ones() {
     std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
 
     for prompt in ["one", "two", "three", "four", "five"] {
+        if prompt == "five" {
+            // A seam before the last prompt: assembly stubs up to it.
+            mark_prune_seam(
+                &harness.workspace_path.join("sessions.sqlite3"),
+                harness.session_id,
+            );
+        }
         submit_prompt(&harness, prompt).await;
         collect_through_finished(&mut harness.events).await;
     }
@@ -3411,6 +3428,347 @@ async fn a_run_that_outgrows_the_window_stubs_its_stale_reads_instead_of_failing
     assert_eq!(pruned_rows, 0);
 }
 
+/// The previous request's messages are a prefix of the next run's first
+/// request: what the provider cache needs (ADR-0056 § 6).
+fn assert_extends(previous: &ModelRequest, next: &ModelRequest) {
+    assert_eq!(previous.system(), next.system());
+    assert_eq!(previous.tools(), next.tools());
+    let previous = previous.messages();
+    let next = next.messages();
+    assert!(next.len() > previous.len());
+    for (index, (previous, next)) in previous.iter().zip(next).enumerate() {
+        assert_eq!(
+            previous.content(),
+            next.content(),
+            "message {index} was rewritten"
+        );
+    }
+}
+
+#[tokio::test]
+async fn each_run_extends_the_previous_runs_last_request_until_a_seam() {
+    // CX3: between seams assembly stubs nothing new, so every run's first
+    // request is the previous run's last request plus the new turn, even
+    // once old reads fall outside the recency window. Before CX3 the sixth
+    // prompt's request rewrote the first read to a stub.
+    let mut harness = auto_compact_harness(
+        std::iter::repeat_with(|| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+            .take(7)
+            .collect(),
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "n".repeat(600)).unwrap();
+    for index in 0..7 {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+    }
+    let requests = harness.requests.lock().unwrap();
+    // Two requests per run: the read, then the answer after its result.
+    assert_eq!(requests.len(), 14);
+    for run in 1..7 {
+        assert_extends(&requests[2 * run - 1], &requests[2 * run]);
+    }
+    assert!(
+        requests.iter().flat_map(|request| request.messages()).flat_map(Message::content).all(
+            |block| !matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned"))
+        ),
+        "nothing is stubbed without a seam"
+    );
+}
+
+#[tokio::test]
+async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
+    // CX3: the live overflow prune is a seam. The run that stubbed its old
+    // reads records the watermark before it sends the stubbed request, so
+    // the next run assembles the same stubs and extends that request.
+    // Ten 8 KiB reads overflow a 24k window mid-run, so the run stubs and
+    // records the seam; the next prompt then sits below the proactive
+    // threshold, so it is not a seam itself and must extend.
+    let turns = 10;
+    let mut harness = auto_compact_harness_with_limits(
+        vec![
+            AutoCompactScript::ReadNoteRepeatedly {
+                turns,
+                text: "done".to_owned(),
+            },
+            AutoCompactScript::Text("again".to_owned()),
+        ],
+        Some(24 * 1024),
+        2_048,
+    )
+    .await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(64),
+    )
+    .unwrap();
+    let run = queue_prompt(&harness.runtime, harness.session_id, "read it".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    let watermark: (Option<u64>, Option<u32>) =
+        Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+                [harness.session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert!(
+        watermark.0.is_some() && watermark.1.is_some_and(|turn| turn >= 1),
+        "{watermark:?}"
+    );
+
+    let next = queue_prompt(&harness.runtime, harness.session_id, "and now".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(next)).await;
+    assert_eq!(
+        finished_outcome(&observed, next),
+        Some(RunOutcome::Completed)
+    );
+    // No seam in between: the watermark the first run left still stands.
+    let after: (Option<u64>, Option<u32>) =
+        Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+                [harness.session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(after, watermark);
+    let requests = harness.requests.lock().unwrap();
+    let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
+    assert!(
+        previous
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content.contains("[pruned")
+            ))
+    );
+    assert_extends(previous, first);
+}
+
+#[tokio::test]
+async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
+    // CX3 review: an earlier run's read-only result whose tool is not one of
+    // the built-in prunable names (`__test_delay`, like `load_skill`) is
+    // stubbed by assembly from its stored effect. The live overflow prune
+    // must classify it the same way, or the next run's first request no
+    // longer extends the stubbed one.
+    let mut harness = auto_compact_harness_with_limits(
+        vec![
+            AutoCompactScript::CallThenText {
+                tool: "__test_delay".to_owned(),
+                arguments: serde_json::json!({
+                    "delay_ms": 0,
+                    "result": "d".repeat(1_800),
+                })
+                .to_string(),
+                text: "noted".to_owned(),
+            },
+            AutoCompactScript::ReadNoteRepeatedly {
+                turns: 8,
+                text: "done".to_owned(),
+            },
+            AutoCompactScript::Text("again".to_owned()),
+        ],
+        Some(20 * 1024),
+        2_048,
+    )
+    .await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(64),
+    )
+    .unwrap();
+    for prompt in ["remember", "read it", "and now"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "{prompt}"
+        );
+    }
+    let requests = harness.requests.lock().unwrap();
+    let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
+    // The live prune stubbed the earlier run's result, as replay does.
+    assert!(
+        previous
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned: __test_delay")
+            ))
+    );
+    assert_extends(previous, first);
+}
+
+#[tokio::test]
+async fn the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row() {
+    // CX3 review: a compaction run has no prompt row, so the watermark
+    // update would match nothing. Reporting success there would let the
+    // next assembly contradict a request already sent; it must fail, and
+    // the session layer does not treat a summarizer's prune as a seam.
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    store.advance_prune_watermark(&prompt, 0).await.unwrap();
+    let mut compaction = prompt.panic_settlement_claim();
+    compaction.identity.run_id = RunId::generate().unwrap();
+    compaction.identity.kind = RunKind::Compaction;
+    let session = prompt.identity.session_id.to_string();
+    let run = compaction.identity.run_id.to_string();
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, kind, created_at_ms)
+                 VALUES (?1, ?2, ?1, ?1, ?1, 'running', 'compaction', 1)",
+                params![run, session],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.advance_prune_watermark(&compaction, 3).await,
+        Err(SessionRuntimeError::Unavailable)
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
+    // CX3: inside the last tenth of the window the first seam is stubbing,
+    // not a summarizer. Old 12 KiB reads are re-derivable; once they are
+    // stubs the prompt fits and sends without compacting.
+    let turns = CONTEXT_PRUNE_KEEP_TURNS + 3;
+    let mut scripts: Vec<AutoCompactScript> = (0..turns)
+        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .collect();
+    scripts.push(AutoCompactScript::Text("fits now".to_owned()));
+    // Seven ~12.6 KiB reads are ~22k estimated tokens: inside the last
+    // tenth of a 24k window only for the final prompt.
+    let mut harness = auto_compact_harness_with_window(scripts, Some(24 * 1024)).await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(96),
+    )
+    .unwrap();
+    for index in 0..turns {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "run {index}"
+        );
+    }
+    let last = queue_prompt(&harness.runtime, harness.session_id, "last".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(last)).await;
+    assert_eq!(
+        finished_outcome(&observed, last),
+        Some(RunOutcome::Completed)
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "stubbing alone brought the prompt under the threshold"
+    );
+    let requests = harness.requests.lock().unwrap();
+    let sent = requests.last().unwrap();
+    let stubbed = sent
+        .messages()
+        .iter()
+        .flat_map(Message::content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned")))
+        .count();
+    // Each run is two assistant turns (the read, then the answer); the
+    // last four turns are kept, and the oldest of them is an answer, so the
+    // newest three reads stay verbatim and every older read is a stub.
+    assert_eq!(stubbed, turns - 3);
+    // The stubs are durable: the run after it assembles the same request.
+    let watermark: Option<u64> = Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT prune_through_ordinal FROM sessions WHERE id = ?1",
+            [harness.session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(watermark.is_some());
+}
+
+#[tokio::test]
+async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop() {
+    // CX3 review: with no declared window neither the live overflow prune
+    // nor the window threshold ever runs, so the watermark stays unset. The
+    // storage backstop is then the only seam. Stale reads must still be
+    // stubbed before it refuses the session.
+    // `read_file` returns about 26 KiB of a large file per call. A 16k
+    // output cap reserves 512 KiB of storage, so ~140 runs of history cross
+    // the backstop unstubbed.
+    let note = format!("{}\n", "n".repeat(127)).repeat(720);
+    let runs = (4 * 1024 * 1024 - 512 * 1024) / (26 * 1024) + 4;
+    let mut scripts: Vec<AutoCompactScript> = (0..runs)
+        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .collect();
+    scripts.push(AutoCompactScript::Text("still fits".to_owned()));
+    let mut harness = auto_compact_harness_with_limits(scripts, None, 16_384).await;
+    std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
+    for index in 0..=runs {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "run {index}"
+        );
+    }
+    let requests = harness.requests.lock().unwrap();
+    let last = requests.last().unwrap();
+    assert!(
+        crate::measure_messages(last.messages()) < 4 * 1024 * 1024,
+        "the last request stays under the storage backstop"
+    );
+    assert!(
+        last.messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned"))),
+        "stale reads were stubbed at a seam"
+    );
+    // Stubbing alone brought it back under; no summarizer ran.
+    assert!(!requests.iter().any(|request| {
+        request_texts(request)
+            .iter()
+            .any(|text| text.contains("Summarize this conversation"))
+    }));
+}
+
 #[tokio::test]
 async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends() {
     // ~30k estimated tokens of history against a 32k window: the next prompt
@@ -3473,6 +3831,13 @@ async fn measured_occupancy_survives_assembly_pruning_and_admits_the_next_prompt
     )
     .unwrap();
     for index in 0..turns {
+        if index + 1 == turns {
+            // A seam before the last prompt rewrites its history to stubs.
+            mark_prune_seam(
+                &harness.workspace_path.join("sessions.sqlite3"),
+                harness.session_id,
+            );
+        }
         let run = queue_prompt(
             &harness.runtime,
             harness.session_id,
