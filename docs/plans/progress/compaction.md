@@ -301,3 +301,26 @@ failure.
   `RunFinished`, under its run id. The runtime test pins that order.
 - **Ledger.** CX0–CX2 rows now read `Shipped (sha)`, per the workflow's
   status vocabulary.
+
+### 2026-10-05 — CX4 review, fourth pass (Codex, #252)
+
+- **Harbor trace.** `compaction.trace.jsonl` still modelled mid-run
+  compaction as unobservable: an unowned `session_compacted` straight
+  after a model turn. `make_fixtures.py` now emits the v31 sequence:
+  - the prompt's `compacting`;
+  - the compaction run's `run_started` and its `compacting` (summaries
+    report `compacting`), then its `run_finished` with usage;
+  - `session_compacted` under the compaction run's id;
+  - the prompt's `waiting_for_provider`.
+  The converter treats the compaction step as a system step, leaves the
+  trajectory's `run_id` as the prompt run, and still reports four steps.
+  The wire-shape test `tests/harbor_atif_fixtures.rs` passes. The four
+  harbor-dependent Python tests error locally as before, because the
+  `harbor` module is not installed.
+- **Design doc.** The CX4 slice lists `design/transcript.md`. A new
+  § Run Activity says:
+  - which run owns the activity, and that an inner compaction does not
+    replace or end it;
+  - the rail precedence, with `compacting context` over a stale tail;
+  - that compaction draws no transcript row.
+  `layout.md`'s rail table points to it.
