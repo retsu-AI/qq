@@ -6,7 +6,7 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 | --- | --- | --- | --- | --- |
 | SQ0 | Agree behavior and delivery stack | In review | [#262](https://github.com/retsu-AI/qq/pull/262) | Isolated worktree `.worktrees/btw-goals` |
 | SQ1 | Isolated read-only runtime | In review | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
-| SQ2 | Aliases and side pane | In review | `feat/eng-1011-sq2-side-surfaces` | Depends on SQ1 |
+| SQ2 | Aliases and side pane | In review | [#270](https://github.com/retsu-AI/qq/pull/270) | Depends on SQ1 |
 
 ## Entries
 
