@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | T15 in review (stacked on #265); T17 in review (stacked on T15). 2026-10-06 failure audit (§ D9) opened T15–T17 |
+| Now | T15, T16, T17 in review (stacked: #265 ← T15 ← T17 ← T16). 2026-10-06 failure audit (§ D9) opened T15–T17 |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
 | Open | T15 default-shaped arguments, T16 Responses empty arguments, T17 error severity in clients (from the D9 audit); T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
@@ -208,7 +208,7 @@ The read-side and edit errors in that window (753) break down by cause:
 | class | n | example | routes | cause |
 | --- | --- | --- | --- | --- |
 | ranges + offset/limit | 252 | `{"ranges":["230-320"],"offset":230,"limit":220}` | Codex (`gpt-5.5`, `5.6-*`, `6.1-sol`) | Model fills every optional field. 307 of 445 lifetime cases set `offset` equal to the first range's start |
-| empty `{}` arguments | 234 | whole parallel batches of `read_file`/`search` with `{}` | Codex only (all routes) | Not a model mistake. 286 empty calls across 60 turns had only 18 non-empty siblings; see T16 |
+| empty `{}` arguments | 234 | whole parallel batches of `read_file`/`search` with `{}` | Codex only (all routes) | Not a model mistake: an adapter gap, confirmed by capture. 286 empty calls across 60 turns had only 18 non-empty siblings; see T16 |
 | `edit_file` empty strings | 63 | `"old":"","insert_before":"","insert_after":"…"` | `gpt-6.1-sol`, `gpt-6-astra` | Fill-every-field again: `""` for the unused forms reads as "given" |
 | `path_not_found` | 42 | guessed paths | all | Real outcome; the model should see it. It is not a failure of the run |
 | `context` > 5 | 36 | `context: 10` | Claude | Bound refusal where a clamp with a note would do (RR10) |
@@ -231,13 +231,14 @@ Three observations drive the slices:
    succeeded 127 times. RR10 (ENG-872) owns type coercion (stringified
    arrays, clamped integers, unknown fields such as `search.offset`). T15
    owns the *semantic* defaults below, which RR10's list does not cover.
-2. **Empty arguments on Responses look like an adapter gap, not a model
-   mistake.** `openai.rs` builds arguments only from
-   `response.function_call_arguments.delta`. It ignores the complete
-   `arguments` on `response.function_call_arguments.done` and on
-   `response.output_item.done`, and an empty buffer becomes `"{}"` in
-   `run_loop.rs`. A batch whose deltas never arrive therefore runs as `{}`.
-   This is a hypothesis until a captured stream confirms it (T16).
+2. **Empty arguments on Responses were an adapter gap, not a model
+   mistake** (confirmed by capture, T16). `openai.rs` built arguments only
+   from `response.function_call_arguments.delta` and ignored the complete
+   `arguments` on `response.function_call_arguments.done` and
+   `response.output_item.done`; an empty buffer became `"{}"` in the run
+   loop. Codex `gpt-6-astra` and `gpt-6-sol` stream deltas only for the
+   first call of a parallel batch (15 of 16 calls in each capture had no
+   delta), so every later call in the batch ran as `{}`.
 3. **Severity is a client bug of its own.** `ToolOutput` and the protocol
    carry one bit, `is_error`. The TUI maps it to `✕` in the failure color
    plus an error panel (`view/tools.rs` `tool_state_glyph`,
@@ -266,11 +267,18 @@ errors; they are real.
 **T16 — Responses arguments from the done events.** In `qq-provider`
 (`providers/openai.rs`), keep the delta path, and when a function call
 completes with no deltas, take `arguments` from
-`function_call_arguments.done` or `output_item.done`. If both deltas and a
-done payload exist and they disagree, fail as a provider protocol error
-rather than guess. First capture a redacted Codex stream for a batch that
-produced `{}`, then make it the fixture. If the capture shows the server
-really sent `{}`, drop the adapter change and record that instead.
+`function_call_arguments.done` or `output_item.done`, emitted once as a
+single delta. As built, a call that streamed deltas ignores its done
+payloads instead of comparing them: in every captured call with deltas
+(`gpt-5.5`, `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`; 34 calls) the done
+payloads matched the deltas byte for byte, and a comparison would buffer
+every call's arguments a second time in the adapter.
+
+Capture (2026-10-06, a throwaway build that appended each SSE `data:` line
+to a file; never committed): `gpt-5.5` and `gpt-6.1-sol` streamed deltas
+for every call; `gpt-6-astra` and `gpt-6-sol` streamed deltas for 1 of 16
+parallel calls, and the other 15 carried their arguments only on the two
+done events, identically. The regression test reproduces that shape.
 
 **T17 — error severity in clients.** Add `ToolErrorKind { Correction,
 Outcome, Failure }`, derived in `qq-protocol` from the result's leading
@@ -330,7 +338,7 @@ table is `tools.md` § Approval Policy.
 | T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7 | `benchmarks/tools/` | Phase 6 acceptance |
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
-| T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
+| T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
