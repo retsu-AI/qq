@@ -159,3 +159,10 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   latched terminal outcome across admission/commit waits. Review established
   that simply timing out a JoinHandle gives inconsistent returned/durable states;
   that workaround was removed. No ready-for-review claim until this is tested.
+
+- Began owned-receipt deadline correction: side admission enqueue returns an
+  owned oneshot receipt with no await after accepted send. The public task can
+  release its caller at deadline while retaining/draining that receipt and
+  settling a late admission timed_out. Success settlement checks durable
+  admission age and returned state. Focused side tests pass; deterministic
+  delayed-commit/race tests and independent review remain required before ready.

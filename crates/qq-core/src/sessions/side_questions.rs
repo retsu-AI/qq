@@ -125,7 +125,8 @@ impl SessionRuntime {
         }
         let runtime = self.clone();
         let started = tokio::time::Instant::now();
-        let task = tokio::spawn(async move {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
             struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
             impl Drop for TaskGuard {
                 fn drop(&mut self) {
@@ -133,13 +134,56 @@ impl SessionRuntime {
                 }
             }
             let _task = TaskGuard(Arc::clone(&runtime.inner));
-            let id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
-            let (request, messages) = runtime
-                .inner
-                .store
-                .side_source(session, id, question.clone(), new_thread)
-                .await?;
-            match AssertUnwindSafe(runtime.execute_side_question(
+            let id = match RunId::generate() {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = reply.send(Err(SessionRuntimeError::Unavailable));
+                    return;
+                }
+            };
+            let deadline = started + Duration::from_secs(120);
+            let mut pending = match tokio::time::timeout_at(
+                deadline,
+                runtime.inner.store.enqueue_side_admission(
+                    session,
+                    id,
+                    question.clone(),
+                    new_thread,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(pending)) => pending,
+                Ok(Err(error)) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                Err(_) => {
+                    let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
+                    return;
+                }
+            };
+            let admitted = tokio::select! {
+                result = &mut pending => result,
+                () = tokio::time::sleep_until(deadline) => {
+                    cancellation.cancel();
+                    let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
+                    if matches!(pending.await, Ok(Ok(_))) && runtime.inner.store.finish_side_question(id, qq_protocol::SideQuestionState::TimedOut).await.is_err() { runtime.inner.failed.send_replace(true); }
+                    return;
+                }
+            };
+            let (request, messages) = match admitted {
+                Ok(Ok(source)) => source,
+                Ok(Err(error)) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                Err(_) => {
+                    let _ = reply.send(Err(SessionRuntimeError::Unavailable));
+                    return;
+                }
+            };
+            let execution = AssertUnwindSafe(runtime.execute_side_question(
                 session,
                 question,
                 cancellation,
@@ -147,34 +191,50 @@ impl SessionRuntime {
                 Some((id, request, messages)),
                 started,
             ))
-            .catch_unwind()
-            .await
-            {
+            .catch_unwind();
+            tokio::pin!(execution);
+            let outcome = tokio::select! {
+                outcome = &mut execution => outcome,
+                () = tokio::time::sleep_until(deadline) => {
+                    let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
+                    let _ = execution.await;
+                    if runtime.inner.store.finish_side_question(id, qq_protocol::SideQuestionState::TimedOut).await.is_err() { runtime.inner.failed.send_replace(true); }
+                    return;
+                }
+            };
+            let result = match outcome {
                 Ok(result) => {
-                    if result.is_err() {
-                        runtime
+                    if result.is_err()
+                        && runtime
                             .inner
                             .store
                             .finish_side_question(id, qq_protocol::SideQuestionState::Failed)
-                            .await?;
+                            .await
+                            .is_err()
+                    {
+                        runtime.inner.failed.send_replace(true);
                     }
                     result
                 }
                 Err(_) => {
-                    runtime
+                    if runtime
                         .inner
                         .store
                         .finish_side_question(id, qq_protocol::SideQuestionState::Interrupted)
-                        .await?;
+                        .await
+                        .is_err()
+                    {
+                        runtime.inner.failed.send_replace(true);
+                    }
                     Err(SessionRuntimeError::Unavailable)
                 }
-            }
+            };
+            let _ = reply.send(result);
         });
         drop(lifecycle);
-        match task.await {
-            Ok(result) => result,
-            Err(_) => Err(SessionRuntimeError::Unavailable),
-        }
+        response
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
     }
 
     async fn execute_side_question(
@@ -404,6 +464,16 @@ impl SessionRuntime {
             Err(_) => qq_protocol::SideQuestionState::Failed,
         };
         self.inner.store.finish_side_question(id, state).await?;
+        let effective = self
+            .inner
+            .store
+            .call(store::Priority::AwaitControl, move |connection| {
+                load_side_snapshot(connection, id)
+            })
+            .await?;
+        if effective.state == qq_protocol::SideQuestionState::TimedOut {
+            return Err(SessionRuntimeError::SideQuestionTimedOut);
+        }
         result
     }
 }

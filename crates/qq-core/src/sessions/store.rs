@@ -445,6 +445,30 @@ impl Store {
             .await
     }
 
+    /// Accepted work stays owned even when a side caller's deadline expires.
+    pub(super) async fn enqueue_side_write<T, F>(
+        &self,
+        operation: F,
+    ) -> Result<oneshot::Receiver<Result<T, SessionRuntimeError>>, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        let job: worker::DatabaseJob = Box::new(move |connection| {
+            let result = operation(connection);
+            worker::JobOutcome {
+                ok: result.is_ok(),
+                settle: Box::new(move |commit| {
+                    let _ = reply.send(commit.and(result));
+                }),
+            }
+        });
+        self.enqueue(Priority::AwaitControl, worker::Joins::OutputGroup, job)
+            .await?;
+        Ok(response)
+    }
+
     async fn call_with<T, F>(
         &self,
         priority: Priority,
@@ -972,8 +996,26 @@ impl Store {
         question: String,
         new_thread: bool,
     ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
+        let response = self
+            .enqueue_side_admission(session_id, question_id, question, new_thread)
+            .await?;
+        response
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+    }
+
+    pub(super) async fn enqueue_side_admission(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+    ) -> Result<
+        oneshot::Receiver<Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError>>,
+        SessionRuntimeError,
+    > {
         let store_id = self.store_id;
-        self.call_write(Priority::AwaitControl, move |connection| {
+        self.enqueue_side_write(move |connection| {
             let transaction = begin_unit(connection)?;
             let source = side_questions::admit_side_question(
                 &transaction,
@@ -1029,6 +1071,16 @@ impl Store {
                 }
             };
             let transaction = begin_unit(connection)?;
+            let created: u64 = transaction.query_row(
+                "SELECT created_at_ms FROM side_questions WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            let state = if state == "completed" && now_ms().saturating_sub(created) >= 120_000 {
+                "timed_out"
+            } else {
+                state
+            };
             let changed = transaction.execute(
                 "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
                  WHERE id = ?1 AND state = 'running'",
