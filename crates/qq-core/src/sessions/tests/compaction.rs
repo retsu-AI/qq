@@ -3604,6 +3604,38 @@ async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
 }
 
 #[tokio::test]
+async fn the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row() {
+    // CX3 review: a compaction run has no prompt row, so the watermark
+    // update would match nothing. Reporting success there would let the
+    // next assembly contradict a request already sent; it must fail, and
+    // the session layer does not treat a summarizer's prune as a seam.
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    store.advance_prune_watermark(&prompt, 0).await.unwrap();
+    let mut compaction = prompt.panic_settlement_claim();
+    compaction.identity.run_id = RunId::generate().unwrap();
+    compaction.identity.kind = RunKind::Compaction;
+    let session = prompt.identity.session_id.to_string();
+    let run = compaction.identity.run_id.to_string();
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, kind, created_at_ms)
+                 VALUES (?1, ?2, ?1, ?1, ?1, 'running', 'compaction', 1)",
+                params![run, session],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.advance_prune_watermark(&compaction, 3).await,
+        Err(SessionRuntimeError::Unavailable)
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
     // CX3: inside the last tenth of the window the first seam is stubbing,
     // not a summarizer. Old 12 KiB reads are re-derivable; once they are

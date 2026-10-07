@@ -436,3 +436,21 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
 - **Test.** `a_live_prune_classifies_earlier_runs_results_by_their_stored_effect`
   uses an earlier `__test_delay` result, stored `ReadOnly` and not on the
   list. It fails with the effects dropped.
+
+### 2026-10-05 — CX3 review, fourth pass (Codex, #254)
+
+- **Stub detection, again.** The two-line form accepted any first line, so
+  a large first line followed by a valid stub line read as a stub and was
+  never pruned. The optional header must now pass the same bounded
+  `header_line` check the stub is built with (≤ 512 bytes, `<tool> …`, or
+  `read …` for `read_file`). The size must be a `u64`. The regression
+  test adds both lookalikes (a 4 KiB first line, a 2 KiB digit run) and
+  fails without the header check.
+- **Watermark without a prompt row.** A compaction run has a placeholder
+  `user_message_id` and no `messages` row, so its watermark update matched
+  nothing and still returned success. The session layer now ignores
+  `ContextPruned` from internal runs: a summarizer request is not a
+  transcript, and nothing replays or extends it. `advance_prune_watermark`
+  returns `Unavailable` for a run with no prompt row instead of a silent
+  no-op. Regression test:
+  `the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row`.

@@ -3044,6 +3044,12 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ContextPruned { turn_ordinal })) => {
+                // A summarizer's request is not a transcript: no prompt run
+                // replays or extends it, and it has no prompt row to anchor
+                // a watermark. Its live prune is not a seam.
+                if internal {
+                    continue;
+                }
                 // Durable before the pruned request is sent: the loop is not
                 // polled again until this commits.
                 if let Err(error) = inner

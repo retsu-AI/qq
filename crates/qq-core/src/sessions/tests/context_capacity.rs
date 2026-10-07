@@ -147,6 +147,17 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
         "{}[pruned: search {{\"query\":\"needle\"}} returned 12 bytes; call it again if needed]",
         "match\n".repeat(200)
     );
+    // Two lines, the second a valid stub line, the first far past a
+    // header's bound: not a stub.
+    let long_first_line = format!(
+        "search {}\n[pruned: search {{\"query\":\"needle\"}} returned 1 bytes; call it again if needed]",
+        "m".repeat(4 * 1024)
+    );
+    // A stub line whose size is not a `u64`: not a stub.
+    let huge_size = format!(
+        "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+        "9".repeat(2 * 1024)
+    );
     let mut context = vec![
         Message::user("start"),
         Message::new(Role::Assistant, vec![call("c1", "search")]),
@@ -155,6 +166,10 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
         result("c2", "match\n".repeat(200)),
         Message::new(Role::Assistant, vec![call("c3", "search")]),
         result("c3", lookalike.clone()),
+        Message::new(Role::Assistant, vec![call("c4", "search")]),
+        result("c4", long_first_line.clone()),
+        Message::new(Role::Assistant, vec![call("c5", "search")]),
+        result("c5", huge_size.clone()),
         Message::assistant("a"),
         Message::assistant("b"),
         Message::assistant("c"),
@@ -184,11 +199,22 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
         first[1],
         "[pruned: search {\"query\":\"needle\"} returned 1200 bytes; call it again if needed]"
     );
+    for (index, original) in [(2, &lookalike), (4, &huge_size)] {
+        assert_eq!(
+            first[index],
+            format!(
+                "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+                original.len()
+            ),
+            "result {index}"
+        );
+    }
+    // The long first line is not a header, so the stub carries none.
     assert_eq!(
-        first[2],
+        first[3],
         format!(
             "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
-            lookalike.len()
+            long_first_line.len()
         )
     );
     // A second pass, as a later overflowing turn makes, changes nothing.

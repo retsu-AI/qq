@@ -677,13 +677,24 @@ fn assemble_model_context(
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;
 
 /// The live overflow-prune seam: the run's prompt and `through_turn`, its
-/// newest committed turn. A watermark already at or past it stays.
+/// newest committed turn. A watermark already at or past it stays. A run
+/// without a prompt row (a compaction run) has no seam to record: that is a
+/// caller error, never a silent success the next assembly would contradict.
 pub(super) fn advance_prune_watermark(
     connection: &mut Connection,
     identity: RunIdentity,
     through_turn: u32,
 ) -> Result<(), SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let anchored: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs r JOIN messages m ON m.id = r.user_message_id
+                       WHERE r.id = ?1 AND r.session_id = ?2 AND r.kind = 'prompt')",
+        params![identity.run_id.to_string(), identity.session_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !anchored {
+        return Err(SessionRuntimeError::Unavailable);
+    }
     transaction.execute(
         "UPDATE sessions
              SET prune_through_ordinal = p.ordinal, prune_through_turn = ?3
@@ -934,12 +945,16 @@ pub(super) fn prunable_stub(
     // A live run prunes again on every overflowing turn. A stub is never
     // stubbed again: the second stub would name the first stub's size, and
     // replay, which stubs the stored row once, would disagree with the
-    // request the model saw. Only the exact stub this call would produce
-    // counts (at most a header line, then the stub line); a real result
-    // that matched it would be stub-sized, so keeping it costs nothing.
+    // request the model saw. Only the exact form this call would produce
+    // counts: an optional header line that passes the same bounded
+    // `header_line` check the stub was built with, then the stub line with
+    // this call's name, arguments and hint and a `u64` size. Every part is
+    // bounded, so a real result that matched would be stub-sized and
+    // keeping it costs nothing.
+    let header_tool = if name == "read_file" { "read" } else { name };
     let last = match content.split_once('\n') {
         Some((_, rest)) if rest.contains('\n') => None,
-        Some((_, rest)) => Some(rest),
+        Some((_, rest)) => crate::tools::header_line(header_tool, content).map(|_| rest),
         None => Some(content),
     };
     if last
@@ -951,7 +966,9 @@ pub(super) fn prunable_stub(
         .and_then(|line| line.strip_suffix(']'))
         .and_then(|line| line.strip_suffix(hint))
         .and_then(|line| line.strip_suffix(" bytes; "))
-        .is_some_and(|size| !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit()))
+        .is_some_and(|size| {
+            size.bytes().all(|byte| byte.is_ascii_digit()) && size.parse::<u64>().is_ok()
+        })
     {
         return None;
     }
