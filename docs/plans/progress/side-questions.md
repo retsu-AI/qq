@@ -133,3 +133,9 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   and final settlement still await SQLite outside the execution deadline to
   avoid a dropped-receiver/late-commit race. This is an outstanding acceptance
   limitation, not a fully bounded 120-second API latency claim.
+
+- Public API now registers task ownership under lifecycle admission, catches
+  provider panics, and applies a caller-facing 120-second timeout including
+  admission/settlement waits; durable cleanup continues independently after
+  timeout. Panic/shutdown regression passed. Latest full workspace run passed
+  (290 s, four threads). Final independent correctness review is in progress.

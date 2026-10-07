@@ -6921,3 +6921,53 @@ async fn side_admission_concurrent_main_stream_latency_diagnostic() {
         baseline[49], baseline[94], baseline[98], side[49], side[94], side[98]
     );
 }
+
+#[tokio::test]
+async fn side_public_provider_panic_settles_interrupted_and_shutdown_drains() {
+    struct PanicLoader;
+    impl RuntimeLoader for PanicLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            Box::pin(async move {
+                struct PanicProvider;
+                impl Provider for PanicProvider {
+                    fn stream(&self, _: ModelRequest) -> ProviderStream {
+                        panic!("scripted side panic")
+                    }
+                }
+                Ok(loaded_runtime(
+                    Runtime::new(PanicProvider, "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    let harness = spawn_harness_with_loader(Arc::new(PanicLoader), 1).await;
+    assert!(
+        harness
+            .runtime
+            .answer_side_question(
+                harness.session_id,
+                "inspect".to_owned(),
+                RunCancellation::new()
+            )
+            .await
+            .is_err()
+    );
+    harness.runtime.shutdown().await.unwrap();
+    let state = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT state FROM side_questions", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, "interrupted");
+    assert_eq!(harness.runtime.inner.side_tasks.load(Ordering::Acquire), 0);
+}

@@ -107,8 +107,21 @@ impl SessionRuntime {
         cancellation: RunCancellation,
         new_thread: bool,
     ) -> Result<SideAnswer, SessionRuntimeError> {
+        let lifecycle = self.inner.lifecycle.read().await;
+        if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner.side_tasks.fetch_add(1, Ordering::AcqRel);
         let runtime = self.clone();
-        match tokio::spawn(async move {
+        let caller_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
+            impl Drop for TaskGuard {
+                fn drop(&mut self) {
+                    self.0.side_tasks.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _task = TaskGuard(Arc::clone(&runtime.inner));
             let id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
             let (request, messages) = runtime
                 .inner
@@ -125,7 +138,16 @@ impl SessionRuntime {
             .catch_unwind()
             .await
             {
-                Ok(result) => result,
+                Ok(result) => {
+                    if result.is_err() {
+                        runtime
+                            .inner
+                            .store
+                            .finish_side_question(id, qq_protocol::SideQuestionState::Failed)
+                            .await?;
+                    }
+                    result
+                }
                 Err(_) => {
                     runtime
                         .inner
@@ -135,11 +157,15 @@ impl SessionRuntime {
                     Err(SessionRuntimeError::Unavailable)
                 }
             }
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(SessionRuntimeError::Unavailable),
+        });
+        drop(lifecycle);
+        match tokio::time::timeout(Duration::from_secs(120), task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(SessionRuntimeError::Unavailable),
+            Err(_) => {
+                caller_cancellation.cancel();
+                Err(SessionRuntimeError::SideQuestionTimedOut)
+            }
         }
     }
 
