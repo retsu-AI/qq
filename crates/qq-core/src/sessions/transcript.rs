@@ -694,7 +694,7 @@ pub(super) fn capture_side_context(
         remaining -= bytes;
         newest.push(unit);
     }
-    let mut context = Vec::new();
+    let mut active_context = Vec::new();
     // Include the current prompt even when its run is unfinished, but never
     // manufacture results for in-flight tools. Completed units above remain
     // provider-valid; current partial output is explicitly omitted.
@@ -708,8 +708,34 @@ pub(super) fn capture_side_context(
         let prompt =
             format!("[Current main task; unfinished output and tool exchanges omitted]\n{prompt}");
         remaining = remaining.saturating_sub(prompt.len());
-        context.push(Message::user(prompt));
+        active_context.push(Message::user(prompt));
+        // Text-only committed assistant output is quoted as captured evidence,
+        // not replayed as an assistant/tool protocol turn.
+        let mut statement = connection.prepare_cached(
+            "SELECT CASE WHEN length(CAST(m.output AS BLOB)) <= ?2 THEN m.output ELSE NULL END
+             FROM messages m JOIN sessions s ON s.active_run_id = m.run_id
+             WHERE m.session_id = ?1 AND m.role = 'assistant' AND m.state = 'complete'
+             ORDER BY m.ordinal DESC LIMIT 16",
+        )?;
+        let texts = statement
+            .query_map(
+                params![
+                    session_id.to_string(),
+                    remaining.saturating_sub(128).min(8192)
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        for text in texts.into_iter().rev().flatten() {
+            let text = format!("[Committed main assistant text; tool exchanges omitted]\n{text}");
+            if text.len() > remaining {
+                break;
+            }
+            remaining -= text.len();
+            active_context.push(Message::user(text));
+        }
     }
+    let mut context = Vec::new();
     if let Some((_, summary)) = summary {
         match summary {
             Some(summary) if COMPACTION_SUMMARY_PREAMBLE.len() + 2 + summary.len() <= remaining => {
@@ -726,6 +752,7 @@ pub(super) fn capture_side_context(
     for unit in newest.into_iter().rev() {
         context.extend(unit);
     }
+    context.extend(active_context);
     Ok(context)
 }
 

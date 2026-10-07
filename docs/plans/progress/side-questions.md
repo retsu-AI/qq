@@ -145,3 +145,8 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   include pre-spawn elapsed time and the durable admission timestamp. Durable
   admission/finalization waits remain an explicitly open bound, so SQ1 is not
   marked ready. Public pending tasks are capped before spawning.
+
+- Active capture now quotes bounded committed assistant text after the current
+  prompt without fabricating tool protocol exchanges; settled units remain
+  intact and chronological. Current-task capture regression passes. Unfinished
+  tool exchanges are still explicitly omitted rather than split.

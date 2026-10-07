@@ -6971,3 +6971,37 @@ async fn side_public_provider_panic_settles_interrupted_and_shutdown_drains() {
     assert_eq!(state, "interrupted");
     assert_eq!(harness.runtime.inner.side_tasks.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn side_capture_current_task_is_last_and_bounded_without_synthetic_results() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("current.sqlite"),
+        0,
+        2,
+        1,
+        100,
+    );
+    let run: String = connection
+        .query_row(
+            "SELECT run_id FROM messages WHERE role = 'user' ORDER BY ordinal DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE runs SET status = 'running' WHERE id = ?1", [&run])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run, session.to_string()],
+        )
+        .unwrap();
+    let context = transcript::capture_side_context(&connection, session).unwrap();
+    assert!(transcript::context_bytes(&context) <= 32768);
+    let text = format!("{context:?}");
+    assert!(text.contains("Current main task"));
+    assert!(text.contains("prompt 1"));
+    assert!(!text.contains("interrupted before recording"));
+}
