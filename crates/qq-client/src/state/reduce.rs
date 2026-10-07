@@ -163,7 +163,16 @@ impl SessionStore {
                 self.upsert_summary((**session).clone(), context.models, 0);
             }
             SessionEvent::RunActivityChanged { run_id, activity } => {
-                if let Some(session) = self.body_mut(&session_id) {
+                // The activity names the session's active run. An in-run
+                // compaction run reports its own while the prompt run still
+                // holds the session; the prompt run already said
+                // `compacting`, so that report is not the session's.
+                if let Some(session) = self.body_mut(&session_id)
+                    && session
+                        .summary
+                        .active_run_id
+                        .is_none_or(|active| active == *run_id)
+                {
                     session.activity = Some((*run_id, *activity));
                 }
             }

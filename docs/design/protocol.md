@@ -1523,8 +1523,11 @@ so a client that loads mid-run shows the right label without waiting for the
 next event. The values are `waiting_for_provider`, `reasoning`,
 `generating_response`, `preparing_tool_call`, and `compacting` (QQ is
 summarizing earlier context: a compaction run, or a prompt run compacting its
-own turns). An in-run compaction run starts and finishes while its prompt run
-holds the session; its `run_finished` does not end the prompt run's activity.
+own turns). Every compaction run's `run_started` is followed by its own
+`run_activity_changed` `compacting`, committed together. An in-run compaction
+run starts and finishes while its prompt run holds the session: its own
+activity event and its `run_finished` do not replace or end the prompt run's
+activity.
 
 `context_tokens` is the latest exact prompt-turn input total measured for the
 session. It is absent when unknown. A successful compaction or a model change

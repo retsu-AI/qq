@@ -6,9 +6,9 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| CX0 | Plan, ADR-0056, ledger and baseline | Merged | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
-| CX1 | Narrative plus rendered record; resolved output cap | Merged | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
-| CX2 | Cache-aligned summarizer requests | Merged | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | `c37afe25` |
+| CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
+| CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
+| CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
 | CX3 | Durable prune watermark | Planned | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | | Schema 41 → 42 |
 | CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
@@ -277,3 +277,27 @@ failure.
   `generating_response`; the runtime reports `compacting` there, because
   the session's active run is the prompt run. Both the fixture and
   `one_run_spanning_several_windows…` now pin `compacting`.
+
+### 2026-10-05 — CX4 review, third pass (Codex, #252)
+
+- **Started-but-unreported.** A compaction run cancelled between its start
+  transaction and the cancellation re-read settled without ever reporting
+  `compacting`. Every start path now writes `runs.activity = 'compacting'`
+  and appends the `RunActivityChanged` in the same transaction as
+  `RunStarted`: between-run auto, manual (`start_reserved_run` for a
+  compaction run) and in-run. The separate appends in `execute_started_run`
+  and `compact_in_run` are gone, and with them the activity-write failure
+  path the first review fixed. Its regression test now injects a failed
+  compaction start instead, and checks that the prompt run fails as
+  `Server` without `/compact` advice.
+  `a_compaction_run_reports_compacting_and_nothing_else` and
+  `one_run_spanning_several_windows…` pin the adjacent sequences.
+- **Reducer.** The inner compaction run's own `RunActivityChanged` replaced
+  `SessionView.activity` with a run that was not the session's active run.
+  The reducer now applies an activity only for the active run (or when no
+  run is active). The client test reduces that event.
+- **Golden.** `completed_after_in_run_compaction` now includes the
+  `SessionCompacted` the runtime emits after the compaction run's
+  `RunFinished`, under its run id. The runtime test pins that order.
+- **Ledger.** CX0–CX2 rows now read `Shipped (sha)`, per the workflow's
+  status vocabulary.

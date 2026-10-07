@@ -1735,29 +1735,10 @@ async fn execute_started_run(
         .await;
         return;
     }
+    // A compaction run reported `compacting` in the transaction that
+    // started it and reports nothing else: the summarizer's own provider
+    // activity is not the session's.
     let internal = claimed.identity.kind == RunKind::Compaction;
-    // A compaction run reports one activity for its whole life: the
-    // summarizer's own provider activity is not the session's.
-    if internal
-        && let Err(error) = inner
-            .store
-            .append_run_activity(&claimed, RunActivity::Compacting)
-            .await
-    {
-        tool_cancellation.cancel();
-        let Ok(teardown) = resources.stop(&mut events).await else {
-            inner.failed.send_replace(true);
-            return;
-        };
-        finish_run(
-            &inner,
-            &claimed,
-            persistence_failure("failed to persist run activity", &error),
-            teardown,
-        )
-        .await;
-        return;
-    }
     let mut pending_text = String::new();
     let mut pending_channel = None;
     let mut reasoning_kind = None;

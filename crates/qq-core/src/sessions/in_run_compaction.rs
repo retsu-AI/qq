@@ -125,33 +125,6 @@ async fn compact_in_run(
             return Err(Error::Persistence(error.to_string()));
         }
     }
-    // Like a between-run step, the compaction run reports one activity for
-    // its life; the prompt run already said `Compacting` before asking. The
-    // feed delivers it; settlement waiters are not woken for an activity.
-    match inner
-        .store
-        .append_run_activity(&compaction, RunActivity::Compacting)
-        .await
-    {
-        Ok(_) => {}
-        Err(error) => {
-            guard.disarm();
-            // The provider was never asked: this is the store's failure.
-            settle_failed_with(
-                inner,
-                &compaction,
-                RunFailure {
-                    kind: RunFailureKind::Server,
-                    message: format!("failed to persist run activity: {error}"),
-                },
-            )
-            .await;
-            return Err(Error::Persistence(format!(
-                "failed to persist run activity: {error}"
-            )));
-        }
-    }
-
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.

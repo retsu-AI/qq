@@ -799,12 +799,16 @@ pub(super) fn start_reserved_run(
     // Plan identity and its descriptor are fixed in the same statement that
     // starts the run: a later configuration or credential refresh compiles a
     // new plan for later runs and never touches this row.
+    // A compaction run reports `compacting` from the transaction that
+    // starts it; a prompt run reports its activity as it goes.
+    let compacting = identity.kind == RunKind::Compaction;
     let run_started = transaction.execute(
         "UPDATE runs
              SET status = 'running', started_at_ms = ?3,
                  prompt_identity_json = ?4, resolved_model_json = ?5,
                  context_base_bytes = ?6, context_increment_bytes = 0,
-                 plan_identity_json = ?7, plan_descriptor_json = ?8
+                 plan_identity_json = ?7, plan_descriptor_json = ?8,
+                 activity = CASE WHEN ?9 THEN 'compacting' ELSE activity END
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0",
         params![
@@ -816,6 +820,7 @@ pub(super) fn start_reserved_run(
             context_base_bytes,
             plan_identity,
             audit.plan_descriptor_json.as_ref(),
+            compacting,
         ],
     )?;
     if run_started != 1 {
@@ -868,6 +873,16 @@ pub(super) fn start_reserved_run(
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
+    if compacting {
+        append_event(
+            &transaction,
+            EventContext::for_run(store_id, identity, now).uncaused(),
+            SessionEvent::RunActivityChanged {
+                run_id: identity.run_id,
+                activity: RunActivity::Compacting,
+            },
+        )?;
+    }
     transaction.commit()?;
     Ok(Some(started))
 }

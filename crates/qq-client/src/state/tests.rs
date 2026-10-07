@@ -555,9 +555,25 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
         store[&session_id].activity,
         Some((prompt, qq_protocol::RunActivity::Compacting))
     );
+    // The compaction run's own report does not take over the session.
     store.reduce_event(
         &envelope(
             2,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id: compaction,
+                activity: qq_protocol::RunActivity::Compacting,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].activity,
+        Some((prompt, qq_protocol::RunActivity::Compacting))
+    );
+    store.reduce_event(
+        &envelope(
+            3,
             session_id,
             SessionEvent::RunFinished {
                 session: Box::new(running.clone()),
@@ -576,7 +592,7 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
     );
     store.reduce_event(
         &envelope(
-            3,
+            4,
             session_id,
             SessionEvent::RunActivityChanged {
                 run_id: prompt,
@@ -593,7 +609,7 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
     idle.status = SessionStatus::Idle;
     store.reduce_event(
         &envelope(
-            4,
+            5,
             session_id,
             SessionEvent::RunFinished {
                 session: Box::new(idle),

@@ -601,8 +601,9 @@ fn current_version_streams_match_their_goldens() {
     );
 
     // Version 31: the run compacted its own earlier turns mid-run. The
-    // prompt run reports `compacting`, the compaction run starts and
-    // finishes inside it, and the prompt run's next turn waits again.
+    // prompt run reports `compacting`, the compaction run starts, finishes
+    // and records the compaction inside it, and the prompt run's next turn
+    // waits again.
     check(
         "completed_after_in_run_compaction",
         &stream(
@@ -663,6 +664,19 @@ fn current_version_streams_match_their_goldens() {
                     ),
                     compaction(
                         6,
+                        COMPACTION,
+                        SessionEvent::SessionCompacted {
+                            session: Box::new(compacting()),
+                            summary: Some(
+                                "Read the login flow; the redirect drops the return path."
+                                    .to_owned(),
+                            ),
+                            before_bytes: 48_000,
+                            after_bytes: 9_000,
+                        },
+                    ),
+                    compaction(
+                        7,
                         RUN,
                         SessionEvent::RunActivityChanged {
                             run_id: RUN,
