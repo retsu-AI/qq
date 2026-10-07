@@ -320,6 +320,25 @@ impl AgentProfile {
         self
     }
 
+    /// Narrows a side question to built-in workspace inspection. Runtime
+    /// admission must also supply isolated context, capabilities and limits.
+    #[must_use]
+    pub fn for_side_question(mut self) -> Self {
+        self.exposed_tools = Some(["read_file", "search", "tree"].map(str::to_owned).to_vec());
+        self.hosts.clear();
+        self.mcp_servers.clear();
+        self.spawn_model_routes.clear();
+        self.context_sources.clear();
+        self.delegation = DelegationRoster::default();
+        self.audit = AuditPolicy::default();
+        self.approval_delegate = crate::approval::ApprovalDelegate::default();
+        self.approval_delegate_identity = None;
+        self.pack = None;
+        self.checkpoint = None;
+        self.task_router = None;
+        self
+    }
+
     /// Adds an external tool host with its already-captured catalog. Hosts
     /// contribute in the order added; earlier hosts win catalog capacity.
     #[must_use]
@@ -1275,6 +1294,37 @@ mod tests {
             assert_eq!(result.unwrap().digest(), expected);
         }
         assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
+
+    #[test]
+    fn side_question_profile_exposes_only_workspace_inspection() {
+        let workspace = canonical_temp();
+        let pack_dir = canonical_temp();
+        let side = profile(workspace.path())
+            .with_pack(PackSelection {
+                id: "hostile-pack".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_digest: "cd".repeat(32),
+                directory: pack_dir.path().to_owned(),
+                persona: Some("absent-persona.md".to_owned()),
+                skill_roots: vec!["absent-skills".to_owned()],
+                command_roots: vec!["absent-commands".to_owned()],
+                tool_allow: Vec::new(),
+                tool_deny: vec!["read_file".to_owned()],
+            })
+            .for_side_question();
+        assert!(side.pack.is_none());
+        assert!(side.approval_delegate_identity.is_none());
+        assert!(side.hosts.is_empty());
+        assert!(side.context_sources.is_empty());
+        assert!(side.checkpoint.is_none());
+        assert!(side.task_router.is_none());
+        let plan = CompiledAgentPlan::compile_blocking(side).unwrap();
+        assert!(plan.descriptor().pack.is_none());
+        assert_eq!(
+            plan.catalog().names().collect::<Vec<_>>(),
+            ["read_file", "search", "tree"]
+        );
     }
 
     #[test]
