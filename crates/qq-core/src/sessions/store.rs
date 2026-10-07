@@ -1076,7 +1076,9 @@ impl Store {
                 [id.to_string()],
                 |row| row.get(0),
             )?;
-            let state = if state == "completed" && now_ms().saturating_sub(created) >= 120_000 {
+            let finished_at_ms = now_ms();
+            let state = if state == "completed" && finished_at_ms.saturating_sub(created) >= 120_000
+            {
                 "timed_out"
             } else {
                 state
@@ -1084,7 +1086,7 @@ impl Store {
             let changed = transaction.execute(
                 "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
                  WHERE id = ?1 AND state = 'running'",
-                params![id.to_string(), state, now_ms()],
+                params![id.to_string(), state, finished_at_ms],
             )?;
             if changed != 0 {
                 side_questions::append_side_event(&transaction, store_id, id)?;

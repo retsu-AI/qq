@@ -7125,3 +7125,46 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .unwrap();
     assert_eq!(item.state, qq_protocol::SideQuestionState::Completed);
 }
+
+#[tokio::test]
+async fn side_late_completion_settlement_is_timed_out_not_completed() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let id = RunId::generate().unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .side_source(harness.session_id, id, "late".to_owned(), false)
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
+                [id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .finish_side_question(id, qq_protocol::SideQuestionState::Completed)
+        .await
+        .unwrap();
+    let item = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(item.state, qq_protocol::SideQuestionState::TimedOut);
+}

@@ -193,15 +193,7 @@ impl SessionRuntime {
             ))
             .catch_unwind();
             tokio::pin!(execution);
-            let outcome = tokio::select! {
-                outcome = &mut execution => outcome,
-                () = tokio::time::sleep_until(deadline) => {
-                    let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
-                    let _ = execution.await;
-                    if runtime.inner.store.finish_side_question(id, qq_protocol::SideQuestionState::TimedOut).await.is_err() { runtime.inner.failed.send_replace(true); }
-                    return;
-                }
-            };
+            let outcome = execution.await;
             let result = match outcome {
                 Ok(result) => {
                     if result.is_err()
@@ -471,10 +463,18 @@ impl SessionRuntime {
                 load_side_snapshot(connection, id)
             })
             .await?;
-        if effective.state == qq_protocol::SideQuestionState::TimedOut {
-            return Err(SessionRuntimeError::SideQuestionTimedOut);
+        match effective.state {
+            qq_protocol::SideQuestionState::Completed => result,
+            qq_protocol::SideQuestionState::TimedOut => {
+                Err(SessionRuntimeError::SideQuestionTimedOut)
+            }
+            qq_protocol::SideQuestionState::Cancelled => {
+                Err(SessionRuntimeError::SideQuestionCancelled)
+            }
+            qq_protocol::SideQuestionState::Failed
+            | qq_protocol::SideQuestionState::Interrupted => Err(SessionRuntimeError::Unavailable),
+            qq_protocol::SideQuestionState::Running => Err(SessionRuntimeError::CONSTRAINT),
         }
-        result
     }
 }
 

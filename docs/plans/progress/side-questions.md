@@ -166,3 +166,10 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   settling a late admission timed_out. Success settlement checks durable
   admission age and returned state. Focused side tests pass; deterministic
   delayed-commit/race tests and independent review remain required before ready.
+
+- Owned-receipt re-review found a second competing timer outcome. Removed the
+  execution wrapper timer and map all effective durable terminal states before
+  returning, including cancellation. Finalization uses one timestamp for cutoff
+  and recorded finish. Latest full workspace suite passed (315 s) before these
+  final race corrections. Queue-handoff/finalization deadline tests remain open;
+  #266 must remain draft rather than treating green tests as acceptance.
