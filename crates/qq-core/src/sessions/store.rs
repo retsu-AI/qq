@@ -1045,23 +1045,43 @@ impl Store {
         }).await
     }
 
+    pub(super) async fn record_side_turn(
+        &self,
+        id: RunId,
+        text: String,
+        usage: Option<TokenUsage>,
+        cost: Option<u64>,
+        turns: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "UPDATE side_questions SET answer = ?2, usage_json = ?3,
+                    estimated_cost_usd_nanos = ?4, model_turns = ?5 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), text, serde_json::to_string(&usage)?, cost, turns],
+            )?;
+            Ok(())
+        }).await
+    }
+
     pub(super) async fn finish_side_question(
         &self,
         id: RunId,
         answer: Option<(String, Option<TokenUsage>)>,
     ) -> Result<(), SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            let (state, text, usage) = match answer {
-                Some((text, usage)) => ("completed", text, Some(serde_json::to_string(&usage)?)),
-                None => ("failed", String::new(), None),
+            let state = if answer.is_some() {
+                "completed"
+            } else {
+                "failed"
             };
             connection.execute(
-                "UPDATE side_questions SET state = ?2, answer = ?3, usage_json = ?4, finished_at_ms = ?5
+                "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
                  WHERE id = ?1 AND state = 'running'",
-                params![id.to_string(), state, text, usage, now_ms()],
+                params![id.to_string(), state, now_ms()],
             )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     pub(super) async fn capture_side_context(

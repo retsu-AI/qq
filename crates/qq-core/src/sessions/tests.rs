@@ -6407,3 +6407,149 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
     assert!(before.0.is_some());
     harness.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn side_recovery_marks_interrupted_without_replaying_provider_work() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("recover.sqlite");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, session, _) = create_claimed_parent(&store, directory.path()).await;
+    let id = RunId::generate().unwrap();
+    store
+        .side_source(session, id, "interrupted question".to_owned(), false)
+        .await
+        .unwrap();
+    drop(store);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path),
+        Arc::new(CountingTextLoader {
+            provider_calls: Arc::clone(&calls),
+        }),
+    )
+    .await
+    .unwrap();
+    let state = runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT state FROM side_questions", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, "interrupted");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_failure_retains_committed_turn_usage_without_charging_main() {
+    struct FailureLoader;
+    impl RuntimeLoader for FailureLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            Box::pin(async move {
+                struct FailureProvider(AtomicUsize);
+                impl Provider for FailureProvider {
+                    fn stream(&self, _: ModelRequest) -> ProviderStream {
+                        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Box::pin(stream::iter([
+                                Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                                    id: "bad".to_owned(),
+                                    name: "shell".to_owned(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                                    id: "bad".to_owned(),
+                                    json: "{}".to_owned(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                                    id: "bad".to_owned(),
+                                }),
+                                Ok(qq_provider::ProviderEvent::Completed {
+                                    usage: Some(qq_provider::ProviderUsage {
+                                        input_tokens: 10,
+                                        output_tokens: 2,
+                                        cache_read_input_tokens: 0,
+                                        cache_write_input_tokens: 0,
+                                        reasoning_tokens: None,
+                                    }),
+                                }),
+                            ]))
+                        } else {
+                            Box::pin(stream::once(async {
+                                Err(qq_provider::ProviderError::Protocol("fatal".to_owned()))
+                            }))
+                        }
+                    }
+                }
+                Ok(loaded_runtime(
+                    Runtime::new(FailureProvider(AtomicUsize::new(0)), "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    let harness = spawn_harness_with_loader(Arc::new(FailureLoader), 1).await;
+    assert!(
+        harness
+            .runtime
+            .answer_side_question(
+                harness.session_id,
+                "inspect".to_owned(),
+                RunCancellation::new()
+            )
+            .await
+            .is_err()
+    );
+    let row = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(connection.query_row(
+                "SELECT state, usage_json, model_turns FROM side_questions",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.0, "failed");
+    assert_eq!(row.2, 1);
+    let usage: Option<TokenUsage> = serde_json::from_str(&row.1).unwrap();
+    assert_eq!(usage.unwrap().output_tokens, 2);
+}
+
+#[tokio::test]
+async fn side_capture_latency_diagnostic() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("capture.sqlite"),
+        256,
+        64,
+        1,
+        1024,
+    );
+    let mut samples = Vec::new();
+    for _ in 0..100 {
+        let start = std::time::Instant::now();
+        let context = transcript::capture_side_context(&connection, session).unwrap();
+        assert!(transcript::context_bytes(&context) <= 32 * 1024);
+        samples.push(start.elapsed().as_micros());
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "side capture: 256 archived/64 retained runs, 100 samples; p50={}us p95={}us p99={}us",
+        samples[49], samples[94], samples[98]
+    );
+}

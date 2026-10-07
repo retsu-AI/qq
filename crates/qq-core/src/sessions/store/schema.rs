@@ -1389,6 +1389,8 @@ pub(in crate::sessions) fn open_database(
                 state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'failed', 'interrupted')),
                 answer TEXT NOT NULL DEFAULT '' CHECK(length(CAST(answer AS BLOB)) <= 131072),
                 usage_json TEXT,
+                estimated_cost_usd_nanos INTEGER,
+                model_turns INTEGER NOT NULL DEFAULT 0,
                 created_at_ms INTEGER NOT NULL,
                 finished_at_ms INTEGER
              );

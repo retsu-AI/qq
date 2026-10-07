@@ -87,3 +87,10 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   projection and replay/client reducer, current-main-context fidelity, stronger
   cancellation/crash tests, managed-deny evidence and latency comparison remain.
   Do not mark #266 ready on the strength of these foundation tests alone.
+
+- Follow-up: side usage/cost/model-turn totals are now committed per completed
+  turn, so a later provider failure retains spend without charging the main
+  session. Failure-accounting and reopen/no-auto-replay regression tests pass.
+- Debug diagnostic, 100 captures with 256 archived / 64 retained runs and
+  1 KiB results: p50 5,108 µs; p95 5,606 µs; p99 6,019 µs. Informational only,
+  not a baseline comparison or concurrent main-stream latency acceptance.

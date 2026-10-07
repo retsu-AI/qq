@@ -193,6 +193,16 @@ impl SessionRuntime {
                                     .and_then(|cost| total.checked_add(cost)),
                                 _ => None,
                             };
+                        self.inner
+                            .store
+                            .record_side_turn(
+                                id,
+                                answer.text.clone(),
+                                answer.usage,
+                                answer.estimated_cost_usd_nanos,
+                                answer.model_turns,
+                            )
+                            .await?;
                     }
                     RuntimeEvent::Completed { .. } => return Ok(answer),
                     RuntimeEvent::Failed { .. } | RuntimeEvent::BudgetExhausted { .. } => {
