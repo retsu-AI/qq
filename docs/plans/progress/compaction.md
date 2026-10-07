@@ -9,7 +9,7 @@ newest last.
 | CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
-| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 41 → 42; stacked on #252 |
+| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 42 → 43; stacked on #252 |
 | CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
@@ -454,3 +454,23 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
   returns `Unavailable` for a run with no prompt row instead of a silent
   no-op. Regression test:
   `the_prune_watermark_never_reports_success_for_a_run_without_a_prompt_row`.
+
+### 2026-10-05 — Stack rebased onto main (AP4.2 took schema 42)
+
+`main` advanced to `a0caa722`. AP4.2 (#257) took store schema 42
+(`child_reports`) and `DESCRIPTOR_VERSION` 13. Main is still at protocol 30.
+- **CX4** rebases cleanly. It keeps protocol 31, and the guide mentions now
+  read descriptor 13 and schema 42.
+- **CX3** moves to schema 42 → 43. Main's step 42 stays as written, and its
+  guard now accepts 43. The watermark step is 43, and every version list
+  gains `"43"`. The migration test becomes
+  `version_forty_two_gains_the_prune_watermark_at_the_newest_turn`. The
+  ADR, plan, `tools.md`, `protocol.md`, guide and root coordination rows
+  now say 43.
+- After the rebase, `a_live_prune_moves_the_watermark_and_the_next_run_extends_it`
+  failed, but correctly. Main's larger system prompt and tool block
+  (AP4.2's `wait_agents` and `cancel_agent`) put the second run past the
+  90 % threshold of the test's 16k window, which made it a legitimate
+  seam. The test now uses ten reads in a 24k window, so the second prompt
+  sits below the threshold. It also asserts the watermark did not move
+  between the runs, and it still fails if the seam records the wrong turn.

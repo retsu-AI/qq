@@ -100,7 +100,7 @@ to move in the same PR.
 
 ### CX3 — Durable prune watermark
 **Inputs:** CX2
-**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (41 → 42), `crates/qq-core/src/lib.rs` (live overflow prune)
+**Owned paths:** `crates/qq-core/src/sessions/{transcript,context}.rs`, schema (42 → 43; main took 42 for AP4.2), `crates/qq-core/src/lib.rs` (live overflow prune)
 **Gates:** `context_assembly` within noise
 **Acceptance:**
 - Assembly stubs stale read-only results only up to a durable watermark.

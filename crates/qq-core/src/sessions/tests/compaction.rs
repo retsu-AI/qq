@@ -3486,7 +3486,10 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
     // CX3: the live overflow prune is a seam. The run that stubbed its old
     // reads records the watermark before it sends the stubbed request, so
     // the next run assembles the same stubs and extends that request.
-    let turns = 8;
+    // Ten 8 KiB reads overflow a 24k window mid-run, so the run stubs and
+    // records the seam; the next prompt then sits below the proactive
+    // threshold, so it is not a seam itself and must extend.
+    let turns = 10;
     let mut harness = auto_compact_harness_with_limits(
         vec![
             AutoCompactScript::ReadNoteRepeatedly {
@@ -3495,7 +3498,7 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
             },
             AutoCompactScript::Text("again".to_owned()),
         ],
-        Some(16 * 1024),
+        Some(24 * 1024),
         2_048,
     )
     .await;
@@ -3530,6 +3533,17 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
         finished_outcome(&observed, next),
         Some(RunOutcome::Completed)
     );
+    // No seam in between: the watermark the first run left still stands.
+    let after: (Option<u64>, Option<u32>) =
+        Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+                [harness.session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(after, watermark);
     let requests = harness.requests.lock().unwrap();
     let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
     assert!(

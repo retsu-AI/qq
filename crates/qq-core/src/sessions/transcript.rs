@@ -342,7 +342,7 @@ fn assemble_model_context(
     let cutoff_ordinal = compaction
         .as_ref()
         .map_or(0, |compaction| compaction.cutoff_ordinal);
-    // The prune watermark (schema 42, ADR-0056 § 6): stale read-only results
+    // The prune watermark (schema 43, ADR-0056 § 6): stale read-only results
     // are stubbed as if the context ended at this turn, so a run's first
     // request extends the previous run's last one until the next seam moves
     // it. `None` until the session's first seam: nothing is stubbed.

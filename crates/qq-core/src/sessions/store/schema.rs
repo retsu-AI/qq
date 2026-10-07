@@ -1128,7 +1128,20 @@ pub(in crate::sessions) fn open_database(
     validate_messages_run_index(&connection)?;
     if !matches!(
         schema_version.as_deref(),
-        Some("31" | "32" | "33" | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42" | "43")
+        Some(
+            "31" | "32"
+                | "33"
+                | "34"
+                | "35"
+                | "36"
+                | "37"
+                | "38"
+                | "39"
+                | "40"
+                | "41"
+                | "42"
+                | "43"
+        )
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "routing_json")? {
@@ -1312,7 +1325,10 @@ pub(in crate::sessions) fn open_database(
         )?;
     }
     // 39: explicit provider-default effort is distinct from inheritance.
-    if !matches!(schema_version.as_deref(), Some("39" | "40" | "41" | "42" | "43")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("39" | "40" | "41" | "42" | "43")
+    ) {
         connection.execute(
             "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
             [],
