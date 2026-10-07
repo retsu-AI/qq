@@ -142,24 +142,15 @@ impl SessionRuntime {
                 }
             };
             let deadline = started + Duration::from_secs(120);
-            let mut pending = match tokio::time::timeout_at(
-                deadline,
-                runtime.inner.store.enqueue_side_admission(
-                    session,
-                    id,
-                    question.clone(),
-                    new_thread,
-                ),
-            )
-            .await
+            let mut pending = match runtime
+                .inner
+                .store
+                .enqueue_side_admission(session, id, question.clone(), new_thread, Some(deadline))
+                .await
             {
-                Ok(Ok(pending)) => pending,
-                Ok(Err(error)) => {
+                Ok(pending) => pending,
+                Err(error) => {
                     let _ = reply.send(Err(error));
-                    return;
-                }
-                Err(_) => {
-                    let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
                     return;
                 }
             };
@@ -455,15 +446,8 @@ impl SessionRuntime {
             }
             Err(_) => qq_protocol::SideQuestionState::Failed,
         };
-        self.inner.store.finish_side_question(id, state).await?;
-        let effective = self
-            .inner
-            .store
-            .call(store::Priority::AwaitControl, move |connection| {
-                load_side_snapshot(connection, id)
-            })
-            .await?;
-        match effective.state {
+        let effective = self.inner.store.finish_side_question(id, state).await?;
+        match effective {
             qq_protocol::SideQuestionState::Completed => result,
             qq_protocol::SideQuestionState::TimedOut => {
                 Err(SessionRuntimeError::SideQuestionTimedOut)

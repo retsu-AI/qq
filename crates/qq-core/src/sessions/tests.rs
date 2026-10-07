@@ -7168,3 +7168,97 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
         .unwrap();
     assert_eq!(item.state, qq_protocol::SideQuestionState::TimedOut);
 }
+
+#[tokio::test]
+async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = harness
+        .runtime
+        .inner
+        .store
+        .enqueue_side_write(None, move |_| {
+            let _ = entered.send(());
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    held.await.unwrap();
+    let id = RunId::generate().unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+    let mut receipt = harness
+        .runtime
+        .inner
+        .store
+        .enqueue_side_admission(
+            harness.session_id,
+            id,
+            "queued".to_owned(),
+            false,
+            Some(deadline),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout_at(deadline, &mut receipt)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    worker.await.unwrap().unwrap();
+    receipt.await.unwrap().unwrap();
+    let effective = harness
+        .runtime
+        .inner
+        .store
+        .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut)
+        .await
+        .unwrap();
+    assert_eq!(effective, qq_protocol::SideQuestionState::TimedOut);
+    let again = harness
+        .runtime
+        .inner
+        .store
+        .finish_side_question(id, qq_protocol::SideQuestionState::Completed)
+        .await
+        .unwrap();
+    assert_eq!(again, effective);
+}
+
+#[tokio::test]
+async fn side_expired_admission_does_not_enter_worker_queue() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let id = RunId::generate().unwrap();
+    let result = harness
+        .runtime
+        .inner
+        .store
+        .enqueue_side_admission(
+            harness.session_id,
+            id,
+            "expired".to_owned(),
+            false,
+            Some(tokio::time::Instant::now()),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(SessionRuntimeError::SideQuestionTimedOut)
+    ));
+    let count = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM side_questions WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get::<_, u64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}

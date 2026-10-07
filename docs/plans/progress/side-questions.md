@@ -173,3 +173,17 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   and recorded finish. Latest full workspace suite passed (315 s) before these
   final race corrections. Queue-handoff/finalization deadline tests remain open;
   #266 must remain draft rather than treating green tests as acceptance.
+
+### 2026-10-07 — final admission boundary corrections
+
+- Moved deadline handling into queue-capacity acquisition; accepted handoff and
+  receiver return are synchronous, removing the timeout/drop gap after send.
+- Settlement returns its effective durable state from the same transaction,
+  rather than a second queued read; cancellation/deadline winners stay authoritative.
+- Added held-worker receipt and expired-admission regression tests. Side filter:
+  33 passed; workspace tests with four threads passed (295.8 s); workspace
+  all-target/all-feature Clippy and build passed; formatting applied.
+- All concrete findings from the last independent lifecycle review are addressed
+  with tests. A fresh independent review request hit the session's eight-agent
+  limit; do not represent this as a new reviewer approval. SQ1 acceptance evidence
+  is ready for review; SQ2 surfaces remain to be implemented separately.

@@ -448,6 +448,7 @@ impl Store {
     /// Accepted work stays owned even when a side caller's deadline expires.
     pub(super) async fn enqueue_side_write<T, F>(
         &self,
+        deadline: Option<tokio::time::Instant>,
         operation: F,
     ) -> Result<oneshot::Receiver<Result<T, SessionRuntimeError>>, SessionRuntimeError>
     where
@@ -464,8 +465,37 @@ impl Store {
                 }),
             }
         });
-        self.enqueue(Priority::AwaitControl, worker::Joins::OutputGroup, job)
-            .await?;
+        let acquire = Arc::clone(&self.inner.control_slots).acquire_owned();
+        let permit = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, acquire)
+                .await
+                .map_err(|_| SessionRuntimeError::SideQuestionTimedOut)?,
+            None => acquire.await,
+        }
+        .map_err(|_| SessionRuntimeError::Unavailable)?;
+        // No await from accepted handoff through receipt return: cancellation
+        // can only discard work before it enters the worker queue.
+        let admission = self
+            .inner
+            .admission
+            .lock()
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(SessionRuntimeError::SideQuestionTimedOut);
+        }
+        match self.inner.control.try_send(WorkerMessage::Run {
+            job,
+            joins: worker::Joins::OutputGroup,
+            capacity_permit: Some(permit),
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(SessionRuntimeError::Overloaded),
+            Err(TrySendError::Disconnected(_)) => return Err(SessionRuntimeError::Unavailable),
+        }
+        drop(admission);
         Ok(response)
     }
 
@@ -997,7 +1027,7 @@ impl Store {
         new_thread: bool,
     ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
         let response = self
-            .enqueue_side_admission(session_id, question_id, question, new_thread)
+            .enqueue_side_admission(session_id, question_id, question, new_thread, None)
             .await?;
         response
             .await
@@ -1010,12 +1040,13 @@ impl Store {
         question_id: RunId,
         question: String,
         new_thread: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<
         oneshot::Receiver<Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError>>,
         SessionRuntimeError,
     > {
         let store_id = self.store_id;
-        self.enqueue_side_write(move |connection| {
+        self.enqueue_side_write(deadline, move |connection| {
             let transaction = begin_unit(connection)?;
             let source = side_questions::admit_side_question(
                 &transaction,
@@ -1057,7 +1088,7 @@ impl Store {
         &self,
         id: RunId,
         state: qq_protocol::SideQuestionState,
-    ) -> Result<(), SessionRuntimeError> {
+    ) -> Result<qq_protocol::SideQuestionState, SessionRuntimeError> {
         let store_id = self.store_id;
         self.call_write(Priority::AwaitControl, move |connection| {
             let state = match state {
@@ -1091,8 +1122,9 @@ impl Store {
             if changed != 0 {
                 side_questions::append_side_event(&transaction, store_id, id)?;
             }
+            let effective = side_questions::load_side_snapshot(&transaction, id)?.state;
             transaction.commit()?;
-            Ok(())
+            Ok(effective)
         })
         .await
     }
