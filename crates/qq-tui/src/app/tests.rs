@@ -4679,3 +4679,70 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
     );
     assert_eq!(app.startup_guidance().as_deref(), Some(CHOOSE_MODEL_NOTICE));
 }
+
+#[test]
+fn side_aliases_never_submit_or_steer_main_even_while_running() {
+    for (alias, reset) in [("/btw", false), ("/ask", false), ("/btw-new", true)] {
+        let mut app = App::new(TuiOptions::default());
+        let mut initial = snapshot();
+        initial.focused.as_mut().unwrap().summary.active_run_id = Some(RunId::generate().unwrap());
+        app.apply_snapshot(initial);
+        let id = app.focused().unwrap();
+        app.composer.text = format!("{alias} what changed?");
+        let (_, requests) = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .split();
+        assert!(
+            matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitSideQuestion { session_id, question, new_thread }, ..
+        })] if *session_id == id && question == "what changed?" && *new_thread == reset)
+        );
+        assert!(app.composer.text.is_empty());
+        assert!(app.sessions[&id].summary.active_run_id.is_some());
+    }
+}
+
+#[test]
+fn empty_side_command_opens_separate_view_and_escape_returns() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(app.view(), View::SideQuestions);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focused(), Some(id));
+}
+
+#[test]
+fn side_cancel_targets_side_id_and_not_main_run() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let body = initial.focused.as_mut().unwrap();
+    let id = RunId::generate().unwrap();
+    body.summary.active_run_id = Some(RunId::generate().unwrap());
+    body.side_questions.push(qq_protocol::SideQuestionSnapshot {
+        id,
+        thread_id: id,
+        session_id: body.summary.id,
+        question: "why?".to_owned(),
+        answer: "partial".to_owned(),
+        state: qq_protocol::SideQuestionState::Running,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 0,
+        created_at_ms: 0,
+        finished_at_ms: None,
+    });
+    app.apply_snapshot(initial);
+    app.execute(Command::ShowSideQuestions);
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(
+        matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
+        command: SessionCommand::CancelSideQuestion { side_question_id }, ..
+    })] if *side_question_id == id)
+    );
+}

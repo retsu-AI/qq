@@ -60,6 +60,8 @@ pub(crate) enum Command {
     /// the focused pane.
     ShowAttention,
     ShowChanges,
+    ShowSideQuestions,
+    CancelSideQuestion,
     FocusParent,
     FocusFirstChild,
     FocusNextSibling,
@@ -149,7 +151,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 41] = [
+pub(crate) const COMMANDS: [CommandSpec; 43] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -399,6 +401,20 @@ pub(crate) const COMMANDS: [CommandSpec; 41] = [
         ["Ctrl-R"]
     ),
     spec!(Quit, "exit QQ", System, ["/quit", "/exit"], ["Ctrl-C"]),
+    spec!(
+        ShowSideQuestions,
+        "ask or view side questions",
+        View,
+        ["/btw", "/ask", "/btw-new"],
+        []
+    ),
+    spec!(
+        CancelSideQuestion,
+        "cancel only the side question",
+        Run,
+        ["/btw-cancel"],
+        []
+    ),
 ];
 
 /// What accepting a slash entry does.

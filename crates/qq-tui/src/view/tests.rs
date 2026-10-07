@@ -5295,3 +5295,56 @@ fn a_tool_row_reuses_its_panel_across_frames_and_relays_out_on_a_new_width() {
     let back = tool_expanded_lines(&call, context(43_456_000), 80);
     assert_eq!(back, first);
 }
+
+#[test]
+fn side_view_wraps_answers_without_injecting_main_messages() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let summary = fixtures::session_summary(SESSION);
+    initial.sessions = vec![summary.clone()];
+    initial.focused = Some(fixtures::session_snapshot(summary));
+    let body = initial.focused.as_mut().unwrap();
+    let id = RunId::generate().unwrap();
+    body.side_questions.push(qq_protocol::SideQuestionSnapshot {
+        id,
+        thread_id: id,
+        session_id: body.summary.id,
+        question: "side question".to_owned(),
+        answer: "a long side answer ending with preserved-tail".to_owned(),
+        state: qq_protocol::SideQuestionState::Completed,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 1,
+        created_at_ms: 0,
+        finished_at_ms: Some(1),
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.execute(Command::ShowSideQuestions);
+    let rows = super::workspace::side_questions_body(&app, 20);
+    assert!(rows.iter().all(|row| {
+        row.width() <= 20
+            || row
+                .spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>()
+                .contains("SIDE QUESTIONS")
+            || row
+                .spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>()
+                .contains("/btw")
+    }));
+    let text = rows
+        .iter()
+        .map(|row| {
+            row.spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("preserved-tail"));
+}

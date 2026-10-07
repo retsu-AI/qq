@@ -5,8 +5,8 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | SQ0 | Agree behavior and delivery stack | In review | [#262](https://github.com/retsu-AI/qq/pull/262) | Isolated worktree `.worktrees/btw-goals` |
-| SQ1 | Isolated read-only runtime | In progress | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
-| SQ2 | Aliases and side pane | Planned | | Depends on SQ1 |
+| SQ1 | Isolated read-only runtime | In review | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
+| SQ2 | Aliases and side pane | In review | `feat/eng-1011-sq2-side-surfaces` | Depends on SQ1 |
 
 ## Entries
 
@@ -187,3 +187,18 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   with tests. A fresh independent review request hit the session's eight-agent
   limit; do not represent this as a new reviewer approval. SQ1 acceptance evidence
   is ready for review; SQ2 surfaces remain to be implemented separately.
+
+### 2026-10-07 — SQ2 aliases and separate side view
+
+- Added `/btw` and `/ask`, `/btw-new QUESTION` explicit thread reset and
+  `/btw-cancel` targeting only the side ID. Empty `/btw` opens the side view;
+  ordinary text there continues the thread. Escape returns to the main transcript.
+- Separate scrollable projection wraps complete answers; no side text enters
+  main messages. Status, independent cost and turn counts are visible.
+- Reserved names are shared with protocol, command palette/help/autocomplete;
+  guide explains capture omissions, live reads, limits and reconnect semantics.
+- Alias/non-steering, reset, cancellation-target and wrapping regression tests
+  pass. Workspace tests with four threads passed (241.2 s); Clippy/build passed.
+  Earlier registry/documentation test failure fixed by matching exact title.
+- Independent review capacity is exhausted for this run; fixes from SQ1 review
+  are evidenced, but fresh SQ2 reviewer approval is not claimed.

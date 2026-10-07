@@ -23,6 +23,7 @@ pub(crate) enum View {
     Transcript(Option<SessionId>),
     /// Every approval, failure, and unread finish across the workspace.
     Attention,
+    SideQuestions,
     /// Every file edited by any agent, grouped by path.
     Changes,
 }
@@ -38,7 +39,7 @@ impl View {
     pub(crate) const fn session(self) -> Option<SessionId> {
         match self {
             Self::Transcript(session) => session,
-            Self::Attention | Self::Changes => None,
+            Self::Attention | Self::Changes | Self::SideQuestions => None,
         }
     }
 }

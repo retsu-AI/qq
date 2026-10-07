@@ -289,6 +289,10 @@ fn has_mention_syntax(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum PendingIntent {
+    Side {
+        session_id: SessionId,
+        text: String,
+    },
     Create,
     Prompt {
         session_id: SessionId,
@@ -1168,7 +1172,8 @@ impl App {
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
-            Some(PendingIntent::Prompt { session_id, .. })
+            Some(PendingIntent::Side { session_id, .. })
+            | Some(PendingIntent::Prompt { session_id, .. })
             | Some(PendingIntent::Cancel { session_id })
             | Some(PendingIntent::Steer { session_id, .. })
             | Some(PendingIntent::Compact { session_id })
@@ -1188,9 +1193,11 @@ impl App {
             Some(PendingIntent::Create | PendingIntent::Prune) | None => self.focused(),
         };
         match intent {
-            Some(PendingIntent::Prompt { session_id, text })
+            Some(PendingIntent::Side { session_id, text })
+            | Some(PendingIntent::Prompt { session_id, text })
             | Some(PendingIntent::Steer { session_id, text })
-                if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
+                if self.focused().or(self.view_return) == Some(session_id)
+                    && self.composer.text.is_empty() =>
             {
                 self.composer.replace(text);
             }
@@ -1294,7 +1301,10 @@ impl App {
                     return Effects::redraw(Redraw::Immediate);
                 }
                 // A workspace view returns to the session it replaced.
-                if matches!(self.view(), View::Attention | View::Changes) {
+                if matches!(
+                    self.view(),
+                    View::Attention | View::Changes | View::SideQuestions
+                ) {
                     return self.leave_workspace_view();
                 }
                 // A sticky error notice dismisses first: acknowledging the
@@ -1574,6 +1584,30 @@ impl App {
     /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
+            Command::ShowSideQuestions => self.show_workspace_view(View::SideQuestions),
+            Command::CancelSideQuestion => {
+                let session_id = self.focused().or(self.view_return);
+                let running = session_id
+                    .and_then(|id| self.sessions.get(&id))
+                    .map(|session| &session.side_questions)
+                    .and_then(|items| {
+                        items
+                            .iter()
+                            .find(|item| item.state == qq_protocol::SideQuestionState::Running)
+                    });
+                let Some(id) = running.map(|item| item.id) else {
+                    return Effects::none();
+                };
+                self.send(
+                    PendingIntent::Side {
+                        session_id: session_id.unwrap(),
+                        text: String::new(),
+                    },
+                    SessionCommand::CancelSideQuestion {
+                        side_question_id: id,
+                    },
+                )
+            }
             Command::OpenHelp => self.open_commands(true),
             Command::OpenCommands => self.open_commands(false),
             Command::SearchHistory => self.open_history(),
@@ -1834,9 +1868,45 @@ impl App {
     }
 
     fn submit_prompt(&mut self) -> Effects {
-        let prompt = self.composer.expanded().trim().to_owned();
+        let mut prompt = self.composer.expanded().trim().to_owned();
+        if self.view() == View::SideQuestions && !prompt.is_empty() && !prompt.starts_with('/') {
+            prompt = format!("/btw {prompt}");
+        }
         if prompt.is_empty() {
             return Effects::none();
+        }
+        let (name, question) = prompt
+            .split_once(char::is_whitespace)
+            .unwrap_or((&prompt, ""));
+        if matches!(name, "/btw" | "/ask" | "/btw-new") {
+            let Some(session_id) = self.focused().or(self.view_return) else {
+                self.set_warning("create a session before asking a side question".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            };
+            let question = question.trim();
+            if question.is_empty() {
+                self.composer.clear();
+                return self.execute(Command::ShowSideQuestions);
+            }
+            if question.len() > 8192 {
+                self.set_warning("use /btw QUESTION (at most 8 KiB)".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            }
+            self.composer.clear();
+            if self.view() != View::SideQuestions {
+                self.show_workspace_view(View::SideQuestions);
+            }
+            return self.send(
+                PendingIntent::Side {
+                    session_id,
+                    text: prompt.clone(),
+                },
+                SessionCommand::SubmitSideQuestion {
+                    session_id,
+                    question: question.to_owned(),
+                    new_thread: name == "/btw-new",
+                },
+            );
         }
         // Reserved composer commands stay client-side. Every other leading
         // slash is submitted through the ordinary command path so the shared
@@ -2768,6 +2838,7 @@ impl App {
                 | PendingIntent::SetEffort { .. }
                 | PendingIntent::SetDelegate { .. }
                 | PendingIntent::Delete { .. }
+                | PendingIntent::Side { .. }
                 | PendingIntent::Prune => None,
             })
     }
