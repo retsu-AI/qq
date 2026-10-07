@@ -563,6 +563,21 @@ pub(super) fn admit_side_question(
         approval_delegate: None,
     };
     let mut messages = transcript::capture_side_context(transaction, session_id)?;
+    let (status, active): (String, Option<String>) = transaction.query_row(
+        "SELECT status, active_run_id FROM sessions WHERE id = ?1",
+        [session_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let notice = Message::user(format!(
+        "[Captured source session status: {status}; active run: {}]",
+        active.as_deref().unwrap_or("none")
+    ));
+    if transcript::context_bytes(&messages)
+        .saturating_add(transcript::context_bytes(std::slice::from_ref(&notice)))
+        <= 32768
+    {
+        messages.push(notice);
+    }
     let thread: Option<String> = if new_thread {
         None
     } else {

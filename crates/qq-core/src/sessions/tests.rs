@@ -7005,3 +7005,123 @@ fn side_capture_current_task_is_last_and_bounded_without_synthetic_results() {
     assert!(text.contains("prompt 1"));
     assert!(!text.contains("interrupted before recording"));
 }
+
+#[tokio::test]
+async fn side_deadline_from_admission_times_out_before_provider_load() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let harness = spawn_harness_with_loader(
+        Arc::new(CountingTextLoader {
+            provider_calls: Arc::clone(&calls),
+        }),
+        1,
+    )
+    .await;
+    let id = RunId::generate().unwrap();
+    let (request, messages) = harness
+        .runtime
+        .inner
+        .store
+        .side_source(harness.session_id, id, "expired".to_owned(), false)
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE side_questions SET created_at_ms = 0 WHERE id = ?1",
+                [id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    harness.runtime.launch_side_question((
+        harness.session_id,
+        id,
+        "expired".to_owned(),
+        request,
+        messages,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    side_questions::load_side_snapshot(connection, id)
+                })
+                .await
+                .unwrap();
+            if item.state != qq_protocol::SideQuestionState::Running {
+                assert_eq!(item.state, qq_protocol::SideQuestionState::TimedOut);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let answer = harness
+        .runtime
+        .answer_side_question(
+            harness.session_id,
+            "inspect".to_owned(),
+            RunCancellation::new(),
+        )
+        .await
+        .unwrap();
+    let before = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .finish_side_question(answer.id, qq_protocol::SideQuestionState::Failed)
+        .await
+        .unwrap();
+    let after = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let item = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, answer.id)
+        })
+        .await
+        .unwrap();
+    assert_eq!(item.state, qq_protocol::SideQuestionState::Completed);
+}

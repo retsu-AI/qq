@@ -1029,12 +1029,14 @@ impl Store {
                 }
             };
             let transaction = begin_unit(connection)?;
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
                  WHERE id = ?1 AND state = 'running'",
                 params![id.to_string(), state, now_ms()],
             )?;
-            side_questions::append_side_event(&transaction, store_id, id)?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
             transaction.commit()?;
             Ok(())
         })

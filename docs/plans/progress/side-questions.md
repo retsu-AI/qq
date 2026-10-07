@@ -150,3 +150,12 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   prompt without fabricating tool protocol exchanges; settled units remain
   intact and chronological. Current-task capture regression passes. Unfinished
   tool exchanges are still explicitly omitted rather than split.
+
+- Latest full workspace tests passed (300 s, four threads). Source run-status
+  notice is captured transactionally. Expired durable admission regression
+  confirms timeout before provider load. Terminal settlement now appends events
+  only for actual state transitions; idempotent-finalization regression passes.
+- Remaining deadline correction requires owned pending store receipts and one
+  latched terminal outcome across admission/commit waits. Review established
+  that simply timing out a JoinHandle gives inconsistent returned/durable states;
+  that workaround was removed. No ready-for-review claim until this is tested.
