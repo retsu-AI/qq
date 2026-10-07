@@ -416,3 +416,23 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
   passes, unchanged.
 - **Docs.** `tools.md` now says the threshold seam includes the storage
   backstop.
+
+### 2026-10-05 — CX3 review, third pass (Codex, #254)
+
+- **Effects across the live seam.** The live overflow prune only knew
+  effects for calls made in the current run. Earlier runs' results fell
+  back to the six built-in names, while assembly uses the stored effect.
+  So a stale read-only result from an earlier run that is not one of
+  those names (`load_skill`, `spawn_agent`, `select_tools`) stayed
+  verbatim live but was stubbed on replay, and the next request did not
+  extend the last.
+- **Fix.** Assembly now also returns the stored effect of each result in
+  block order (`load_model_context_with_effects`). The claim and every
+  reload carry it as `ClaimedRun::message_effects`, the run gets it as
+  `RunCapabilities::inherited_effects`, and the live prune classifies
+  inherited results by it. Block order is stable in that prefix: nothing
+  is inserted or removed before the prompt, and provider call ids are not
+  unique.
+- **Test.** `a_live_prune_classifies_earlier_runs_results_by_their_stored_effect`
+  uses an earlier `__test_delay` result, stored `ReadOnly` and not on the
+  list. It fails with the effects dropped.

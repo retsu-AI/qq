@@ -979,7 +979,8 @@ impl Store {
     pub(super) async fn reload_reserved_messages(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
+    ) -> Result<Option<(Vec<Message>, ResultEffects, CompactionProgress)>, SessionRuntimeError>
+    {
         #[cfg(test)]
         if let Some(failure) =
             take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)

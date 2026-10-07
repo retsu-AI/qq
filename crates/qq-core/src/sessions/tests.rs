@@ -2178,6 +2178,7 @@ fn denial_capacity_fixture(
         session_model: ModelSelection::default(),
         model: ModelSelection::default(),
         messages: Vec::new(),
+        message_effects: Vec::new(),
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -3176,6 +3177,13 @@ enum AutoCompactScript {
     /// Reads `note.txt` once per turn for `turns` turns, then streams the
     /// text: grows one run's own transcript with prunable results.
     ReadNoteRepeatedly { turns: usize, text: String },
+    /// Calls `tool` with `arguments` on the first turn, then streams the
+    /// text.
+    CallThenText {
+        tool: String,
+        arguments: String,
+        text: String,
+    },
     /// Runs `shell` (a mutating effect, so never stubbed) once per turn for
     /// `turns` turns, then streams the text. Any request ending with the
     /// summarizer instruction is answered with `summary` instead, so one
@@ -3436,6 +3444,33 @@ impl Provider for AutoCompactProvider {
                     Ok(qq_provider::ProviderEvent::Completed { usage: None }),
                 ]);
                 Box::pin(stream::iter(events))
+            }
+            AutoCompactScript::CallThenText {
+                tool,
+                arguments,
+                text,
+            } => {
+                if already_read {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: "call_tool".to_owned(),
+                            name: tool.clone(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: "call_tool".to_owned(),
+                            json: arguments.clone(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                            id: "call_tool".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
             }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {

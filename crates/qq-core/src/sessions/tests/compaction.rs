@@ -3546,6 +3546,64 @@ async fn a_live_prune_moves_the_watermark_and_the_next_run_extends_it() {
 }
 
 #[tokio::test]
+async fn a_live_prune_classifies_earlier_runs_results_by_their_stored_effect() {
+    // CX3 review: an earlier run's read-only result whose tool is not one of
+    // the built-in prunable names (`__test_delay`, like `load_skill`) is
+    // stubbed by assembly from its stored effect. The live overflow prune
+    // must classify it the same way, or the next run's first request no
+    // longer extends the stubbed one.
+    let mut harness = auto_compact_harness_with_limits(
+        vec![
+            AutoCompactScript::CallThenText {
+                tool: "__test_delay".to_owned(),
+                arguments: serde_json::json!({
+                    "delay_ms": 0,
+                    "result": "d".repeat(1_800),
+                })
+                .to_string(),
+                text: "noted".to_owned(),
+            },
+            AutoCompactScript::ReadNoteRepeatedly {
+                turns: 8,
+                text: "done".to_owned(),
+            },
+            AutoCompactScript::Text("again".to_owned()),
+        ],
+        Some(20 * 1024),
+        2_048,
+    )
+    .await;
+    std::fs::write(
+        harness.workspace_path.join("note.txt"),
+        format!("{}\n", "n".repeat(127)).repeat(64),
+    )
+    .unwrap();
+    for prompt in ["remember", "read it", "and now"] {
+        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "{prompt}"
+        );
+    }
+    let requests = harness.requests.lock().unwrap();
+    let (previous, first) = (&requests[requests.len() - 2], &requests[requests.len() - 1]);
+    // The live prune stubbed the earlier run's result, as replay does.
+    assert!(
+        previous
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content.starts_with("[pruned: __test_delay")
+            ))
+    );
+    assert_extends(previous, first);
+}
+
+#[tokio::test]
 async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
     // CX3: inside the last tenth of the window the first seam is stubbing,
     // not a summarizer. Old 12 KiB reads are re-derivable; once they are

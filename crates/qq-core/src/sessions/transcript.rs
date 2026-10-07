@@ -293,6 +293,51 @@ pub(super) fn load_model_context_with_units(
     session_id: SessionId,
     through_ordinal: u64,
 ) -> Result<(Vec<Message>, bool, Vec<ContextUnit>), SessionRuntimeError> {
+    assemble_model_context(transaction, session_id, through_ordinal)
+        .map(|assembled| (assembled.context, assembled.rewritten, assembled.units))
+}
+
+/// The stored effect class of every tool result in `context`, in block
+/// order (`None` for rows that predate the effect column). A run's live
+/// overflow prune classifies the results it inherited by these, as assembly
+/// did; results are never added, removed or reordered in that prefix, so
+/// the order is stable where provider call ids are not unique.
+pub(super) type ResultEffects = Vec<Option<EffectClass>>;
+
+/// [`load_model_context`] plus the [`ResultEffects`] of its tool results.
+pub(super) fn load_model_context_with_effects(
+    transaction: &Connection,
+    session_id: SessionId,
+    through_ordinal: u64,
+) -> Result<(Vec<Message>, ResultEffects), SessionRuntimeError> {
+    let Assembled {
+        context, effects, ..
+    } = assemble_model_context(transaction, session_id, through_ordinal)?;
+    let mut ordered = Vec::new();
+    for (message_index, message) in context.iter().enumerate() {
+        for (block_index, block) in message.content().iter().enumerate() {
+            if matches!(block, ContentBlock::ToolResult { .. }) {
+                ordered.push(effects.get(&(message_index, block_index)).copied());
+            }
+        }
+    }
+    Ok((context, ordered))
+}
+
+struct Assembled {
+    context: Vec<Message>,
+    /// Whether pruning rewrote any result.
+    rewritten: bool,
+    units: Vec<ContextUnit>,
+    /// Stored effects by (message, block) position in `context`.
+    effects: HashMap<(usize, usize), EffectClass>,
+}
+
+fn assemble_model_context(
+    transaction: &Connection,
+    session_id: SessionId,
+    through_ordinal: u64,
+) -> Result<Assembled, SessionRuntimeError> {
     let compaction = latest_compaction(transaction, session_id)?;
     let cutoff_ordinal = compaction
         .as_ref()
@@ -620,8 +665,13 @@ pub(super) fn load_model_context_with_units(
     }
     // Pruning rewrites results in place and never adds or removes messages,
     // so the unit ends computed above still index this context.
-    let context_rewritten = prune_stale_tool_results(&mut context[..prune_limit], &effects);
-    Ok((context, context_rewritten, units))
+    let rewritten = prune_stale_tool_results(&mut context[..prune_limit], &effects);
+    Ok(Assembled {
+        context,
+        rewritten,
+        units,
+        effects,
+    })
 }
 
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;

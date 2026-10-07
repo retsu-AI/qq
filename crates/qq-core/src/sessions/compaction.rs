@@ -234,6 +234,7 @@ pub(super) fn start_auto_compaction(
             session_model: original.session_model.clone(),
             model: original.model.clone(),
             messages: Vec::new(),
+            message_effects: Vec::new(),
             context_compaction_attempted: original.context_compaction_attempted.saturating_add(1),
             context_compaction_failed: false,
             context_compaction_remaining: false,
