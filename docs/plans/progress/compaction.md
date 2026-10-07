@@ -263,3 +263,17 @@ failure.
 - **Wakeups.** The in-run activity write woke settlement waiters, so a
   parent awaiting the child made a needless `run_outcome` query. It no
   longer notifies; the feed delivers activity, as on the normal path.
+
+### 2026-10-05 — CX4 review, second pass (Codex, #252)
+
+- **Prompt-run failure kind.** A store failure inside an in-run compaction
+  still failed the prompt run as `Policy` and advised `/compact`. The
+  compaction run was already `Server`. `InRunCompactionError` gains
+  `Persistence`, which now covers start, activity, cancellation-read and
+  commit failures, and the loop fails the prompt run as `Server` with the
+  store error. The regression test asserts both outcomes.
+- **Headless golden.** In `completed_after_in_run_compaction`, the
+  compaction run's `RunStarted` and `RunFinished` summaries said
+  `generating_response`; the runtime reports `compacting` there, because
+  the session's active run is the prompt run. Both the fixture and
+  `one_run_spanning_several_windows…` now pin `compacting`.

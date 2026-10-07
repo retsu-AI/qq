@@ -4222,6 +4222,17 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                     _ => None,
                 });
         assert_eq!(prompt_activity_before, Some(RunActivity::Compacting));
+        // The session's summary names the prompt run's activity, so the
+        // compaction run's start and finish both say `compacting` (the
+        // headless `completed_after_in_run_compaction` golden pins this).
+        for at in [started, finished] {
+            let (SessionEvent::RunStarted { session, .. }
+            | SessionEvent::RunFinished { session, .. }) = &observed[at].event
+            else {
+                unreachable!()
+            };
+            assert_eq!(session.activity, Some(RunActivity::Compacting));
+        }
         let prompt_activity_after =
             observed[finished..]
                 .iter()
@@ -4712,6 +4723,17 @@ async fn an_in_run_compaction_whose_activity_write_fails_settles_as_a_server_fai
     assert!(
         failure.message.contains("failed to persist run activity"),
         "{failure:?}"
+    );
+    // The prompt run names the same store failure rather than advising
+    // `/compact`, which would not help.
+    let prompt = finished_outcome(&observed, run);
+    assert!(
+        matches!(
+            &prompt,
+            Some(RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Server, message } })
+                if message.contains("failed to persist run activity") && !message.contains("/compact")
+        ),
+        "{prompt:?}"
     );
     // The summarizer was never asked.
     let requests = harness.requests.lock().unwrap();

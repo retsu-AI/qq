@@ -610,6 +610,12 @@ fn current_version_streams_match_their_goldens() {
             {
                 const COMPACTION: RunId = RunId::from_bytes([0xaf; 16]);
                 let mut events = run_events(RunOutcome::Completed, None);
+                // The session's active run is the prompt run, which already
+                // reports `compacting`, so the compaction run's summaries do.
+                let compacting = || SessionSummary {
+                    activity: Some(RunActivity::Compacting),
+                    ..summary(SessionStatus::Running, true)
+                };
                 let compaction =
                     |sequence: u64, run_id: RunId, event: SessionEvent| HeadlessRecord::Event {
                         envelope: Box::new(SessionEventEnvelope {
@@ -630,7 +636,7 @@ fn current_version_streams_match_their_goldens() {
                         3,
                         COMPACTION,
                         SessionEvent::RunStarted {
-                            session: Box::new(summary(SessionStatus::Running, true)),
+                            session: Box::new(compacting()),
                             run_id: COMPACTION,
                             plan: None,
                         },
@@ -647,7 +653,7 @@ fn current_version_streams_match_their_goldens() {
                         5,
                         COMPACTION,
                         SessionEvent::RunFinished {
-                            session: Box::new(summary(SessionStatus::Running, true)),
+                            session: Box::new(compacting()),
                             run_id: COMPACTION,
                             outcome: RunOutcome::Completed,
                             usage: Some(usage()),
