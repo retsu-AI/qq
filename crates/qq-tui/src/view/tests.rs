@@ -1016,6 +1016,94 @@ fn error_results_expand_under_the_summary_by_default() {
     assert_eq!(rows[3].trim_end(), "   ┃");
 }
 
+/// D9: a self-corrected argument is a muted `↻ corrected` with no panel, an
+/// outcome a warning `!` with its code and one line of reason, and only a
+/// failure keeps `✕` and the panel (above).
+#[test]
+fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
+    let render = |calls: &[&ToolCallSnapshot], detail| {
+        let lines =
+            render_tool_calls_simple(calls, &HashMap::new(), detail, 0, 120, &|_, _| Vec::new());
+        (squashed_rows(&lines), lines)
+    };
+    let corrected = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs","ranges":["x"]}"#,
+        ToolCallState::Failed,
+        Some("invalid_ranges: \"x\" is not <start>[-<end>]"),
+        true,
+    );
+    let (rows, lines) = render(&[&corrected], SimpleDetail::Rows);
+    assert_eq!(rows, [" ↻ Read a.rs corrected"]);
+    assert_eq!(style_of(&lines, "↻"), Some(muted()));
+    // Expanded, the model-facing text is still there, muted.
+    let (rows, _) = render(&[&corrected], SimpleDetail::Expanded);
+    assert!(
+        rows.iter().any(|row| row.contains("invalid_ranges")),
+        "{rows:?}"
+    );
+
+    let missing = tool_call_snapshot(
+        2,
+        "read_file",
+        r#"{"path":"gone.rs"}"#,
+        ToolCallState::Failed,
+        Some("path_not_found: gone.rs\nclosest: src/gone.rs"),
+        true,
+    );
+    let (rows, lines) = render(&[&missing], SimpleDetail::Rows);
+    assert_eq!(rows[0], " ! Read gone.rs path_not_found");
+    assert_eq!(style_of(&lines, "!"), Some(warning()));
+    // One row of reason, the tail line, after the `…` that says there is
+    // more on expand, inside the panel padding.
+    assert_eq!(rows.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS, "{rows:?}");
+    assert!(rows[3].contains("closest: src/gone.rs"), "{rows:?}");
+
+    // The successful retry is the record; the correction before it folds
+    // away, and a block of retried reads still collapses to one summary.
+    let retried = tool_call_snapshot(
+        3,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Completed,
+        Some("read a.rs L1-1/1 h:000000000000\n1\tx\n"),
+        false,
+    );
+    let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].starts_with(" ● Read a.rs"), "{rows:?}");
+    // A correction of a different tool is not absorbed.
+    let other = tool_call_snapshot(
+        4,
+        "search",
+        r#"{"query":"x"}"#,
+        ToolCallState::Completed,
+        Some("search \"x\" mode=content matches=0/0 files=0 scanned=0\n"),
+        false,
+    );
+    let (rows, _) = render(&[&corrected, &other], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // Folded: three good reads plus an absorbed correction fold like four.
+    let reads: Vec<ToolCallSnapshot> = (5..9)
+        .map(|byte| {
+            tool_call_snapshot(
+                byte,
+                "read_file",
+                &format!(r#"{{"path":"f{byte}.rs"}}"#),
+                ToolCallState::Completed,
+                Some("read f.rs L1-1/1 h:000000000000\n1\tx\n"),
+                false,
+            )
+        })
+        .collect();
+    let mut block: Vec<&ToolCallSnapshot> = vec![&corrected];
+    block.extend(reads.iter());
+    let (rows, _) = render(&block, SimpleDetail::Folded);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("Read ×4"), "{rows:?}");
+}
+
 #[test]
 fn pending_states_show_their_glyph_and_label() {
     let awaiting = tool_call_snapshot(

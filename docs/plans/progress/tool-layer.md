@@ -23,7 +23,7 @@ newest last.
 | T14 | `select_tools` lexical index | Planned | | |
 | T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
 | T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
-| T17 | `ToolErrorKind` severity in clients | Planned | | D9 audit; after T15 |
+| T17 | `ToolErrorKind` severity in clients | In review | `feat/eng-1012-t17-tool-error-kind` (stacked on #267) | D9 audit; derived from the error code, no wire field |
 
 ## Entries
 
@@ -290,3 +290,24 @@ Schemas are unchanged (schema hash fixture holds). `path_not_found` and
 smoke test green. Bench not re-run: each rule is a `match` on arguments
 before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
 and edit sections.
+
+### 2026-10-06 — T17 in progress → in review
+
+Branch `feat/eng-1012-t17-tool-error-kind` (worktree
+`.worktrees/tool-error-kind`), stacked on T15 (#267). Design change from
+the plan: no `error_kind` wire field. Every tool error already leads with a
+stable code, so `qq_protocol::ToolErrorKind::of` classifies the result text
+and `ToolCallSnapshot::error_kind()` applies it to completed/failed error
+rows. That grades history and old servers the same way, and avoids a store
+migration and a `PROTOCOL_VERSION` bump (the snapshot is
+`deny_unknown_fields`). Unlisted codes are `Failure`. TUI: `↻ corrected`
+muted with no panel, `! <code>` warning with a one-row tail, `✕` and the
+panel unchanged for failures; a correction followed by a successful call to
+the same tool in the block folds away (the cursor and expand still reach
+it), so a corrected block still folds to one summary. Gates: fmt, clippy
+`-D warnings` on `qq-protocol` and `qq-tui`, both test suites green (332 TUI
+lib tests plus goldens; failure-row goldens unchanged). Render bench, base
+vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
+`folded` 12.3/12.9 vs 12.4/12.3 µs, `expanded` 53.4/55.6 vs 54.1/53.8 µs
+(noise); blocks with no error skip the filter copy. Docs:
+`design/transcript.md` § Tool Rows.

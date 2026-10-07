@@ -141,7 +141,7 @@ that is prose, or reads like it, starts at the content column:
 | --- | --- | --- |
 | User prompt | `▌ ` accent | `YOU`, then the prompt text |
 | Assistant | two blanks | `QQ`, then the message body |
-| Tool summary | state glyph (`●`, `◐`, `✕`, `◇`, `○`, `◌`) | verb, subject, metric |
+| Tool summary | state glyph (`●`, `◐`, `↻`, `!`, `✕`, `◇`, `○`, `◌`) | verb, subject, metric |
 | Folded call group | `▸` accent | `Read ×4  a.rs, b.rs` |
 | Selected tool row | `▶` in cell 0, glyph in cell 1 | unchanged |
 
@@ -272,6 +272,22 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
 - In folded detail a block of more than three quiet completed calls is one
   row, `▸ Read ×4  Search ×2  a.rs, b.rs, c.rs, +1`, with the `▸` in the
   rail and the text at the content column.
+- **Error rows are graded, not uniform** (`ToolErrorKind`, tool-layer D9).
+  The kind comes from the result's leading error code
+  (`ToolErrorKind::of`), so every stored row grades the same with no wire
+  field, and the model's text never changes:
+
+  | Kind | Codes | Glyph | Right side | Under the row |
+  | --- | --- | --- | --- | --- |
+  | Correction | `invalid_*`, `bad_glob`, `cursor_invalid`, `not executed:`, `not_read:`, … | `↻` `muted` | `corrected` `muted` | nothing; the text is on expand |
+  | Outcome | `path_not_found`, `stale_file`, `not_found`, `range_out_of_bounds`, non-zero `shell`/`exec` exit, … | `!` `warning` | the code, `warning` | one row of the error tail |
+  | Failure | anything else, including unlisted codes | `✕` `error` | `failed` | the error panel |
+
+  A correction followed later in the block by a successful call to the
+  same tool is the routine "model fixed its own argument" case: its row
+  folds away and the retry is the record. Selecting or expanding it still
+  shows it. A new error code is a `Failure` until it is listed, so nothing
+  becomes quieter by accident.
 
 ### Tool Detail
 

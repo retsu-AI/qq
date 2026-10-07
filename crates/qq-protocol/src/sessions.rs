@@ -1661,6 +1661,101 @@ pub struct ToolCallSnapshot {
     pub display: Option<ToolCallDisplay>,
 }
 
+/// How serious an error result is, for rendering only: the model sees the
+/// same text whatever the kind. Derived from the result's leading error code
+/// (tool errors are `code: message`), so it needs no wire field and applies
+/// to every stored row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// The arguments broke the tool's contract (`invalid_*`, `bad_glob`,
+    /// `not executed`, ...). The model corrects them and retries.
+    Correction,
+    /// A well-formed call whose answer was "no": `path_not_found`,
+    /// `stale_file`, a non-zero exit, ...
+    Outcome,
+    /// Anything else: I/O errors, external tool failures, refusals.
+    Failure,
+}
+
+impl ToolErrorKind {
+    /// Classifies an error result's text. Unknown codes are `Failure`, so a
+    /// new error is never quieter than today until it is listed here.
+    #[must_use]
+    pub fn of(result: &str) -> Self {
+        // A batch edit prefixes its code with the failing edit's index.
+        let text = result
+            .strip_prefix("edit ")
+            .and_then(|rest| rest.split_once(": "))
+            .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()))
+            .map_or(result, |(_, rest)| rest);
+        const CORRECTION: &[&str] = &[
+            "invalid",
+            "bad_glob",
+            "cursor_invalid",
+            "handle_invalid",
+            "not executed:",
+            "not_read:",
+            "env_not_allowed:",
+            "use_builtin:",
+            "unknown tool",
+            "tool arguments exceed",
+            "regex_too_large:",
+            "outline_unsupported:",
+            "conflicting_edits:",
+            "disproportionate:",
+            "command must not be empty",
+            "query must not be empty",
+            "timeout_seconds must be",
+            "url exceeds",
+        ];
+        const OUTCOME: &[&str] = &[
+            "path_not_found",
+            "not_a_file",
+            "not_a_directory",
+            "not_text:",
+            "range_out_of_bounds:",
+            "stale_file:",
+            "not_found:",
+            "ambiguous:",
+            "exists:",
+            "too_large:",
+            "spill_missing",
+            "spill_evicted",
+            "path_escapes_workspace",
+            "shell exit=",
+            "exec exit=",
+        ];
+        if CORRECTION.iter().any(|code| text.starts_with(code)) {
+            Self::Correction
+        } else if OUTCOME.iter().any(|code| text.starts_with(code)) {
+            Self::Outcome
+        } else {
+            Self::Failure
+        }
+    }
+}
+
+impl ToolCallSnapshot {
+    /// The severity of this call's error result; `None` when it succeeded or
+    /// has not finished. Denials and interruptions are their own states and
+    /// are not classified.
+    #[must_use]
+    pub fn error_kind(&self) -> Option<ToolErrorKind> {
+        match self.state {
+            ToolCallState::Completed | ToolCallState::Failed if self.is_error => Some(
+                ToolErrorKind::of(self.result.as_deref().unwrap_or_default()),
+            ),
+            ToolCallState::Requested
+            | ToolCallState::AwaitingApproval
+            | ToolCallState::Running
+            | ToolCallState::Completed
+            | ToolCallState::Failed
+            | ToolCallState::Denied
+            | ToolCallState::Interrupted => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
@@ -2348,6 +2443,89 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             event
+        );
+    }
+
+    /// D9: corrections are the argument-contract codes the model fixes
+    /// itself, outcomes are well-formed "no" answers, and anything else
+    /// (including an unlisted code) stays a failure.
+    #[test]
+    fn tool_error_kinds_follow_the_leading_error_code() {
+        for result in [
+            "invalid_ranges: \"a\" is not <start>[-<end>]",
+            "invalid arguments: missing field `path`",
+            "bad_glob: glob must be 1 to 256 bytes",
+            "cursor_invalid: pass the next= value",
+            "not executed: this turn requested more than 16 tool calls",
+            "edit 0: not_read: a.rs has not been read in this session",
+            "edit 12: invalid_edit: old and new are identical",
+            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for result in [
+            "path_not_found: src/gone.rs",
+            "range_out_of_bounds: 900 > 40 lines",
+            "edit 1: stale_file: a.rs changed since it was read",
+            "not_found: old does not occur in a.rs",
+            "shell exit=1 elapsed=0.1 bytes=0\n",
+            "exec exit=101 elapsed=2.0 bytes=310\nerror[E0308]",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(result),
+                ToolErrorKind::Outcome,
+                "{result}"
+            );
+        }
+        for result in [
+            "",
+            "path is not a file",
+            "could not start the command: No such file or directory",
+            "MCP server returned an error",
+            "edit x: invalid_edit: not an index",
+            "forbidden: this command is refused under every approval mode",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(result),
+                ToolErrorKind::Failure,
+                "{result:?}"
+            );
+        }
+
+        let call = |state, result: &str, is_error| ToolCallSnapshot {
+            id: id(7),
+            session_id: id(3),
+            run_id: id(4),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: "{}".to_owned(),
+            state,
+            result: Some(result.to_owned()),
+            is_error,
+            display: None,
+        };
+        assert_eq!(
+            call(ToolCallState::Failed, "invalid_ranges: x", true).error_kind(),
+            Some(ToolErrorKind::Correction)
+        );
+        assert_eq!(
+            call(ToolCallState::Completed, "invalid_ranges", false).error_kind(),
+            None
+        );
+        // Denials and interruptions are states of their own, not errors to grade.
+        assert_eq!(
+            call(ToolCallState::Denied, "invalid_x", true).error_kind(),
+            None
+        );
+        assert_eq!(
+            call(ToolCallState::Interrupted, "not executed:", true).error_kind(),
+            None
         );
     }
 
