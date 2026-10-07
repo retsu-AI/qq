@@ -363,11 +363,13 @@ watermark, and neither moves it backwards:
   window stubs its live transcript first. It records the watermark at its
   newest committed turn (`RuntimeEvent::ContextPruned`) before the stubbed
   request is sent, so the next run assembles the same stubs.
-- **Proactive threshold.** A prompt planned inside the last tenth of the
-  window (`ContextPlan::Compact`) first moves the watermark to the newest
-  turn before it and reassembles, at most once per run. When the stubbed
+- **Proactive threshold.** A prompt planned to compact
+  (`ContextPlan::Compact`: inside the last tenth of the window, or over the
+  4 MiB storage backstop) first moves the watermark to the newest turn
+  before it and reassembles, at most once per run. When the stubbed
   context fits, it is sent without a summarizer; otherwise it compacts as
-  before.
+  before. The backstop makes this seam reachable for a model with no
+  declared window, which never overflows live.
 
 A session upgraded to schema 43 starts with its watermark at its newest
 turn, so it assembles exactly as before. A new session has no watermark

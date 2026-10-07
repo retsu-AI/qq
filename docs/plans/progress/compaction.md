@@ -395,3 +395,24 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
   Regression test:
   `a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is`.
   Rebased onto the CX4 review fix.
+
+### 2026-10-05 — CX3 review, second pass (Codex, #254)
+
+- **Claim (P1).** A new session's watermark is unset, so a model with no
+  declared window would reach the 4 MiB storage backstop unstubbed and be
+  refused. That does not happen: the backstop plans `Compact` (the
+  planner's `exceeds_storage`), and the threshold seam runs on every
+  `Compact` plan, window or not. It stubs, reassembles, and sends.
+  New end-to-end test:
+  `a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop`
+  (no window, 16k output cap, ~140 read runs). It sends at 4.1 MiB, then
+  0.1 MiB with 153 stubs and no summarizer. With the seam disabled, run
+  156 fails at the backstop.
+- **Fixture.** The cited fixture,
+  `capacity_accounting_measures_the_pruned_assembly_not_raw_rows`, does
+  not demonstrate the claim. Its 3 MiB rows replay at about 2 KiB each,
+  because assembly projects them through the per-turn output budget
+  before pruning, so it measures 4 KiB with the watermark unset. It still
+  passes, unchanged.
+- **Docs.** `tools.md` now says the threshold seam includes the storage
+  backstop.

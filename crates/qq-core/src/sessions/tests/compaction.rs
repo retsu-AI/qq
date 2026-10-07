@@ -3614,6 +3614,58 @@ async fn the_proactive_threshold_stubs_stale_reads_before_it_compacts() {
 }
 
 #[tokio::test]
+async fn a_session_without_a_window_still_sheds_stale_reads_before_the_storage_backstop() {
+    // CX3 review: with no declared window neither the live overflow prune
+    // nor the window threshold ever runs, so the watermark stays unset. The
+    // storage backstop is then the only seam. Stale reads must still be
+    // stubbed before it refuses the session.
+    // `read_file` returns about 26 KiB of a large file per call. A 16k
+    // output cap reserves 512 KiB of storage, so ~140 runs of history cross
+    // the backstop unstubbed.
+    let note = format!("{}\n", "n".repeat(127)).repeat(720);
+    let runs = (4 * 1024 * 1024 - 512 * 1024) / (26 * 1024) + 4;
+    let mut scripts: Vec<AutoCompactScript> = (0..runs)
+        .map(|_| AutoCompactScript::ReadNoteThenText("ok".to_owned()))
+        .collect();
+    scripts.push(AutoCompactScript::Text("still fits".to_owned()));
+    let mut harness = auto_compact_harness_with_limits(scripts, None, 16_384).await;
+    std::fs::write(harness.workspace_path.join("note.txt"), &note).unwrap();
+    for index in 0..=runs {
+        let run = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            format!("read {index}"),
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert_eq!(
+            finished_outcome(&observed, run),
+            Some(RunOutcome::Completed),
+            "run {index}"
+        );
+    }
+    let requests = harness.requests.lock().unwrap();
+    let last = requests.last().unwrap();
+    assert!(
+        crate::measure_messages(last.messages()) < 4 * 1024 * 1024,
+        "the last request stays under the storage backstop"
+    );
+    assert!(
+        last.messages()
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[pruned"))),
+        "stale reads were stubbed at a seam"
+    );
+    // Stubbing alone brought it back under; no summarizer ran.
+    assert!(!requests.iter().any(|request| {
+        request_texts(request)
+            .iter()
+            .any(|text| text.contains("Summarize this conversation"))
+    }));
+}
+
+#[tokio::test]
 async fn a_prompt_inside_the_last_tenth_of_the_window_compacts_before_it_sends() {
     // ~30k estimated tokens of history against a 32k window: the next prompt
     // still fits, but inside the ten percent headroom. It compacts first
