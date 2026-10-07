@@ -320,10 +320,6 @@ mod tests {
         for (arguments, code) in [
             (r#"{"path":"n.txt","ranges":["5-3"]}"#, "invalid_ranges"),
             (r#"{"path":"n.txt","ranges":["a"]}"#, "invalid_ranges"),
-            (
-                r#"{"path":"n.txt","ranges":["1"],"offset":2}"#,
-                "invalid_ranges",
-            ),
             (r#"{"path":"n.txt","ranges":["1-3000"]}"#, "invalid_ranges"),
             (r#"{"path":"n.txt","offset":0}"#, "invalid_offset"),
             (r#"{"path":"n.txt","limit":0}"#, "invalid_limit"),
@@ -344,6 +340,54 @@ mod tests {
         }
         // Failures record nothing.
         assert_eq!(state.recorded("n.txt"), Some(hash));
+    }
+
+    /// D9: models that fill every optional field send `offset`/`limit`
+    /// beside `ranges`, or a comma for the range separator. `ranges` wins
+    /// and the header says what was ignored.
+    #[test]
+    fn read_file_ranges_win_over_default_shaped_offset_and_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let content: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        fs::write(directory.path().join("n.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let short = &content_hash(content.as_bytes())[..12];
+
+        let read = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","ranges":["3-4"],"offset":3,"limit":200}"#,
+        );
+        assert!(!read.is_error, "{}", read.model_text);
+        assert_eq!(
+            read.model_text,
+            format!("read n.txt L3-4/20 h:{short} note=offset_ignored\n3\tline 3\n4\tline 4\n")
+        );
+        assert_eq!(
+            state.recorded("n.txt").as_deref().map(|h| &h[..12]),
+            Some(short)
+        );
+
+        let comma = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","ranges":["5,6"]}"#,
+        );
+        assert_eq!(
+            comma.model_text,
+            format!("read n.txt L5-6/20 h:{short}\n5\tline 5\n6\tline 6\n")
+        );
+        // Without ranges, offset/limit are the request and stay validated.
+        let plain = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"n.txt","offset":19}"#,
+        );
+        assert!(!plain.model_text.contains("note="), "{}", plain.model_text);
     }
 
     #[test]
@@ -1014,6 +1058,21 @@ mod tests {
             r#"{"query":"x","include":["["]}"#,
         );
         assert!(bad_glob.is_error && bad_glob.model_text.starts_with("bad_glob"));
+        // D9: an empty glob is a filled-in "no filter", and context above the
+        // bound clamps with a note instead of refusing the search.
+        let defaults = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"^fn \\w+\\(","regex":true,"context":10,"include":[""],"exclude":["","*.md"]}"#,
+        );
+        assert!(!defaults.is_error, "{}", defaults.model_text);
+        let (header, body) = defaults.model_text.split_once('\n').unwrap();
+        assert_eq!(
+            header,
+            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1 note=context_clamped=5"
+        );
+        assert!(body.starts_with("src/lib.rs\n"), "{body}");
         let escape = run_tool(&workspace, &state, "search", r#"{"query":"x","path":".."}"#);
         assert!(escape.is_error && escape.model_text.starts_with("path_escapes_workspace"));
     }
@@ -1222,6 +1281,18 @@ mod tests {
             result.model_text.lines().next().unwrap()
         );
         assert!(result.model_text.contains("2 more entries; raise limit"));
+
+        // D9: `"glob":""` is a filled-in "no filter", not `bad_glob`.
+        let unfiltered = run_tool(
+            &workspace,
+            &FileState::default(),
+            "tree",
+            &format!(
+                r#"{{"path":".","depth":1,"limit":{},"glob":""}}"#,
+                tree::MAX_ENTRIES
+            ),
+        );
+        assert_eq!(unfiltered.model_text, result.model_text);
     }
 
     #[test]

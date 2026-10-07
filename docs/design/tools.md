@@ -308,7 +308,8 @@ handle." `offset`/`limit` page it line-numbered like `read_file`
 (`read_tool_result <handle> L<a>-<b>/<total> [next=<n>]`); `query`
 (optionally `regex`) returns matching lines as `L<n>: text`
 (`… query="…" matches=<shown>/<total> lines=<n> [next=]`). A page stops
-on a whole line at 32 KiB and names the next offset. Explicit reads
+on a whole line at 32 KiB and names the next offset. An empty `query`
+pages instead of searching. Explicit reads
 return **exact, unmasked bytes**: the model asked for a specific range of
 something it already produced, and masking there would make `.env`
 debugging impossible; the inline preview stays masked so secrets do not
@@ -546,6 +547,9 @@ description and the `cursor` schema property say the same.
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
 `hint=case_insensitive_matches=N` so the model need not retry blind.
+`context` above 5 clamps to 5 with `note=context_clamped=5`, and an empty
+string in `include`/`exclude` (or `tree`'s `glob`) means no filter rather
+than `bad_glob`.
 
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
@@ -607,8 +611,12 @@ columns align across ranges; CR is stripped from CRLF files (the hash is of
 the bytes, so the guard is unaffected); lines over 2 000 bytes clip with
 `…+N` and the header counts them in `clipped=`. `ranges` (`"12"`,
 `"40-80"`, `"400-"`) are merged when they overlap or touch, emitted
-ascending, and separated by `--`; `offset`/`limit` is the one-range form
-and the two are mutually exclusive. A read is never cut mid-line: the 32
+ascending, and separated by `--`; `offset`/`limit` is the one-range form.
+When both are given, `ranges` wins and the header carries
+`note=offset_ignored`; a comma inside one range (`"370,470"`) reads as
+`-`. Models that fill every optional field send both, nearly always with
+`offset` equal to the first range's start, so refusing cost a turn for
+nothing (tool-layer D9). A read is never cut mid-line: the 32
 KiB default budget stops on a whole row, the header says
 `truncated=bytes`, and the marker names `offset=<next>` to continue from.
 The gutter is deliberate — dropping it saves tokens and costs edit
@@ -743,7 +751,9 @@ per-session grant, off by default.
 
 `edit_file` takes a batch of edits, each an exact `old`/`new` pair or an
 insertion relative to an anchor (`insert_before`/`insert_after` + `new`),
-rather than a unified diff. Exact strings are what models produce most
+rather than a unified diff. An empty string in an unused form is absent, so
+`{"old":"","insert_after":"x",…}` is an insertion; an empty string that is
+the only form given still fails. Exact strings are what models produce most
 reliably, validation is trivial, and a failed match returns a precise,
 retryable error instead of a mis-applied hunk. Rejected on the way here:
 unified-diff input (models mis-count hunks), line-range edits (numbers

@@ -94,8 +94,10 @@ enum Form<'a> {
 impl Edit {
     fn form(&self) -> Result<Form<'_>, String> {
         let new = self.new.as_deref();
+        // An empty string in an unused form is a filled-in default, not a
+        // second form: models that send every optional field send `""`.
         match (
-            self.old.as_deref(),
+            self.old.as_deref().filter(|old| !old.is_empty()),
             self.insert_before
                 .as_deref()
                 .filter(|anchor| !anchor.is_empty()),
@@ -104,9 +106,6 @@ impl Edit {
                 .filter(|anchor| !anchor.is_empty()),
         ) {
             (Some(old), None, None) => {
-                if old.is_empty() {
-                    return Err("invalid_edit: old must not be empty".to_owned());
-                }
                 let new = new.ok_or("invalid_edit: old requires new")?;
                 if old == new {
                     return Err(
@@ -117,9 +116,6 @@ impl Edit {
                 Ok(Form::Replace { old, new })
             }
             (None, Some(anchor), None) => {
-                if anchor.is_empty() {
-                    return Err("invalid_edit: insert_before must not be empty".to_owned());
-                }
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
@@ -127,14 +123,21 @@ impl Edit {
                 Ok(Form::InsertBefore { anchor, new })
             }
             (None, None, Some(anchor)) => {
-                if anchor.is_empty() {
-                    return Err("invalid_edit: insert_after must not be empty".to_owned());
-                }
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
                 let new = new.ok_or("invalid_edit: insert_after requires new")?;
                 Ok(Form::InsertAfter { anchor, new })
+            }
+            // Every form empty: the only one given has no reading.
+            (None, None, None) if self.old.is_some() => {
+                Err("invalid_edit: old must not be empty".to_owned())
+            }
+            (None, None, None) if self.insert_before.is_some() => {
+                Err("invalid_edit: insert_before must not be empty".to_owned())
+            }
+            (None, None, None) if self.insert_after.is_some() => {
+                Err("invalid_edit: insert_after must not be empty".to_owned())
             }
             _ => Err(
                 "invalid_edit: give exactly one of old/new, insert_before/new, insert_after/new"
@@ -820,5 +823,48 @@ mod tests {
                 new: "after"
             })
         ));
+    }
+
+    #[test]
+    fn empty_old_does_not_conflict_with_an_insert() {
+        let edit: Edit = serde_json::from_value(serde_json::json!({
+            "path": "README.md",
+            "old": "",
+            "new": "line\n",
+            "insert_before": "",
+            "insert_after": "anchor\n"
+        }))
+        .expect("valid edit arguments");
+
+        assert!(matches!(
+            edit.form(),
+            Ok(Form::InsertAfter {
+                anchor: "anchor\n",
+                new: "line\n"
+            })
+        ));
+    }
+
+    #[test]
+    fn an_empty_only_form_still_fails() {
+        for (field, message) in [
+            ("old", "invalid_edit: old must not be empty"),
+            (
+                "insert_before",
+                "invalid_edit: insert_before must not be empty",
+            ),
+            (
+                "insert_after",
+                "invalid_edit: insert_after must not be empty",
+            ),
+        ] {
+            let edit: Edit = serde_json::from_value(serde_json::json!({
+                "path": "README.md",
+                field: "",
+                "new": "after"
+            }))
+            .expect("valid edit arguments");
+            assert_eq!(edit.form().err().as_deref(), Some(message), "{field}");
+        }
     }
 }

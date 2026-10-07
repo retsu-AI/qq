@@ -21,7 +21,7 @@ newest last.
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
-| T15 | Default-shaped arguments read as absent | Planned | | D9 audit; coordinate with RR10 (ENG-872) |
+| T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
 | T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
 | T17 | `ToolErrorKind` severity in clients | Planned | | D9 audit; after T15 |
 
@@ -272,3 +272,21 @@ ranges+offset 252, empty `{}` 234 (Codex routes only; 60 turns, 286 empty vs
 After a contract error, the next call to the same tool failed 434 times and
 succeeded 127 times. `if_changed_since: "h:000000000000"` appeared on 6,293
 reads (harmless). No code change; T15–T17 opened.
+
+### 2026-10-06 — T15 in progress → in review
+
+Branch `fix/eng-1012-t15-tolerant-defaults` (worktree
+`.worktrees/tool-defaults`), stacked on the audit branch (#265). Each audit
+class now has its one reading: `read_file` `ranges` wins over
+`offset`/`limit` with `note=offset_ignored`, and `"a,b"` reads as `a-b`;
+`edit_file` treats an empty `old`/`insert_before`/`insert_after` as absent
+(an empty only-form still fails with its old message); `tree.glob` and
+`search.include`/`exclude` drop `""`; `read_tool_result` pages on an empty
+`query`; `search.context` above 5 clamps with `note=context_clamped=5`.
+RR10 had not landed, so the clamp lands here and RR10 keeps type coercion.
+Schemas are unchanged (schema hash fixture holds). `path_not_found` and
+`range_out_of_bounds` stay errors. Gates: fmt, clippy `-D warnings` on
+`qq-core`, `cargo test -p qq-core` green (858 lib tests), `tool_dispatch`
+smoke test green. Bench not re-run: each rule is a `match` on arguments
+before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
+and edit sections.

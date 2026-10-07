@@ -143,8 +143,9 @@ pub(crate) fn render_tool_result(
     let mut body = String::with_capacity(body_budget.min(text.len() + total_lines * 8));
     let mut body_escaped = 0_usize;
 
-    if let Some(query) = arguments.query.as_deref() {
-        if query.is_empty() || query.len() > MAX_QUERY_BYTES {
+    // `""` beside offset/limit is a filled-in default: page, don't search.
+    if let Some(query) = arguments.query.as_deref().filter(|query| !query.is_empty()) {
+        if query.len() > MAX_QUERY_BYTES {
             return Err(format!(
                 "invalid_query: query must be 1 to {MAX_QUERY_BYTES} bytes"
             ));
@@ -322,6 +323,11 @@ mod tests {
             render_tool_result("h", &args(1, 0, None, false), &text)
                 .unwrap_err()
                 .starts_with("invalid_limit")
+        );
+        // D9: an empty query beside offset/limit pages instead of failing.
+        assert_eq!(
+            render_tool_result("h", &args(49, 200, Some(""), false), &text).unwrap(),
+            tail
         );
     }
 
