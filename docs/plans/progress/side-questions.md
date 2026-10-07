@@ -5,7 +5,7 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | SQ0 | Agree behavior and delivery stack | In review | [#262](https://github.com/retsu-AI/qq/pull/262) | Isolated worktree `.worktrees/btw-goals` |
-| SQ1 | Isolated read-only runtime | In progress | `feat/eng-1011-sq1-side-runtime` | Depends on SQ0; independent authority/session review required |
+| SQ1 | Isolated read-only runtime | In progress | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
 | SQ2 | Aliases and side pane | Planned | | Depends on SQ1 |
 
 ## Entries
@@ -60,3 +60,30 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   durable side threads, isolated admission/permits/accounting, cancellation,
   protocol/reducer/reconnect, recovery and latency evidence remain outstanding.
   Do not begin SQ2 or mark SQ1 complete until acceptance/review gates pass.
+
+
+### 2026-10-07 — bounded capture and isolated execution
+
+- Implemented SQL-preflight bounded capture: at most 64 candidate complete runs,
+  128 KiB raw assembly bytes and 1024 rows per unit; 32 KiB model context,
+  complete tool-call/result units, bounded compaction summary and omissions.
+  Unfinished runs are omitted rather than synthesizing results for live tools.
+- Independent execution uses the existing compiled core plan with an exact
+  dispatch gate, restricted capabilities, separate global permits/per-session
+  admission, eight turns, 120-second deadline including waits, and 16,384
+  output tokens. Cancellation/shutdown never use the main cancellation map.
+- Schema 43 persists captures, question/answer and separate usage; continuing
+  side threads retain bounded prior exchanges, with an explicit new-thread API.
+  Admission commits before cancellation can settle queued SQLite work. Owned
+  task finalization survives API-future drop; reopen interrupts unfinished work.
+- Regression tests cover capture bounds/tool pairs, oversized/unfinished units,
+  active main provider with unchanged main request count/slot/cost, permit wait
+  cancellation/busy admission, thread continuation/reset and schema upgrade.
+- Read-only review found active-run synthetic tool results and dropped-future
+  settlement bugs; corrected both. Full workspace tests passed with four test
+  threads (316 s), after fixing schema-number guide truth. Earlier failed runs
+  remain recorded above. Clippy passed before the latest accounting/options edits.
+- SQ1 is not complete: durable per-turn failed-run accounting, typed state/event
+  projection and replay/client reducer, current-main-context fidelity, stronger
+  cancellation/crash tests, managed-deny evidence and latency comparison remain.
+  Do not mark #266 ready on the strength of these foundation tests alone.

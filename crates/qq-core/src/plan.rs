@@ -587,6 +587,24 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    pub(crate) async fn side_question_plan(&self) -> Result<Arc<Self>, PlanCompileError> {
+        let mut profile = AgentProfile::new(
+            Arc::clone(&self.runtime.provider),
+            self.descriptor.provider.clone(),
+            self.resolved_model.as_ref().clone(),
+            self.workspace.path().to_owned(),
+        );
+        profile.shell = self.runtime.shell.as_ref().clone();
+        profile.network = self.runtime.network.as_ref().clone();
+        profile.reasoning_effort = self.runtime.reasoning_effort;
+        profile.output_ceiling = self.runtime.output_ceiling;
+        profile.adapter_build = self.descriptor.adapter_build.clone();
+        profile.provenance = self.descriptor.provenance.clone();
+        profile.credential_epoch = self.credential_epoch;
+        profile.profile_id = self.descriptor.profile.clone();
+        Self::compile(profile.for_side_question()).await
+    }
+
     /// Compiles off the async executor, with at most four concurrent compiler tasks.
     /// Dropping this future does not interrupt filesystem work already started.
     pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {

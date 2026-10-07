@@ -1473,6 +1473,7 @@ async fn approval_harness_with_clocks(
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
             approval_timeout,
             delegate_timeout,
             grant_authority,
@@ -6054,4 +6055,355 @@ fn exhaustion_of(observed: &[SessionEventEnvelope], run_id: RunId) -> BudgetExha
         Some(RunOutcome::BudgetExhausted { exhaustion }) => *exhaustion,
         other => panic!("expected a budget_exhausted outcome, got {other:?}"),
     }
+}
+
+#[test]
+fn side_capture_is_bounded_and_preserves_complete_tool_units() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("capture.sqlite"),
+        0,
+        3,
+        1,
+        12_000,
+    );
+    let captured = transcript::capture_side_context(&connection, session).unwrap();
+    assert!(transcript::context_bytes(&captured) <= 32 * 1024);
+    let text = format!("{captured:?}");
+    assert!(text.contains("omits older"));
+    assert!(text.contains("prompt 2"));
+    assert!(!text.contains("prompt 0"));
+    let mut calls = std::collections::HashSet::new();
+    let mut results = std::collections::HashSet::new();
+    for block in captured.iter().flat_map(Message::content) {
+        match block {
+            ContentBlock::ToolCall { id, .. } => {
+                calls.insert(id.clone());
+            }
+            ContentBlock::ToolResult { call_id, .. } => {
+                results.insert(call_id.clone());
+            }
+            ContentBlock::Text { .. } => {}
+        }
+    }
+    assert!(!calls.is_empty());
+    assert_eq!(calls, results);
+}
+
+#[test]
+fn side_capture_omits_an_oversized_unit_before_loading_payload() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("capture.sqlite"),
+        0,
+        1,
+        1,
+        256_000,
+    );
+    let captured = transcript::capture_side_context(&connection, session).unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(format!("{captured:?}").contains("omits older"));
+}
+
+#[tokio::test]
+async fn side_answer_bypasses_the_main_permit_and_leaves_session_rows_unchanged() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let _main_permit = harness.runtime.inner.permits.acquire().await.unwrap();
+    let before = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.runtime.answer_side_question(
+            harness.session_id,
+            "what is here?".to_owned(),
+            RunCancellation::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(answer.text, "hello");
+    assert_eq!(answer.model_turns, 1);
+    assert!(answer.usage.unwrap().output_tokens > 0);
+    let after = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(harness.runtime.inner.permits.available_permits(), 0);
+    assert_eq!(harness.runtime.inner.side_permits.available_permits(), 1);
+    assert!(
+        harness
+            .runtime
+            .inner
+            .side_sessions
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn side_answer_cancellation_while_waiting_releases_only_side_admission() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let permit = harness.runtime.inner.side_permits.acquire().await.unwrap();
+    let cancellation = RunCancellation::new();
+    let runtime = harness.runtime.clone();
+    let session = harness.session_id;
+    let token = cancellation.clone();
+    let task = tokio::spawn(async move {
+        runtime
+            .answer_side_question(session, "inspect".to_owned(), token)
+            .await
+    });
+    while harness
+        .runtime
+        .inner
+        .side_sessions
+        .lock()
+        .unwrap()
+        .is_empty()
+    {
+        tokio::task::yield_now().await;
+    }
+    let busy = harness
+        .runtime
+        .answer_side_question(session, "second".to_owned(), RunCancellation::new())
+        .await;
+    assert!(matches!(busy, Err(SessionRuntimeError::SideQuestionBusy)));
+    cancellation.cancel();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SessionRuntimeError::SideQuestionCancelled)
+    ));
+    assert!(
+        harness
+            .runtime
+            .inner
+            .side_sessions
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(harness.runtime.inner.permits.available_permits(), 1);
+    let states = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT state FROM side_questions", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(states, "failed");
+    drop(permit);
+}
+
+#[tokio::test]
+async fn side_threads_continue_explicitly_reset_and_persist_before_return() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    struct SideLoader(Arc<StdMutex<Vec<ModelRequest>>>);
+    impl RuntimeLoader for SideLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let requests = Arc::clone(&self.0);
+            Box::pin(async move {
+                struct SideProvider(Arc<StdMutex<Vec<ModelRequest>>>);
+                impl Provider for SideProvider {
+                    fn stream(&self, request: ModelRequest) -> ProviderStream {
+                        self.0.lock().unwrap().push(request.clone());
+                        ScriptedProvider.stream(request)
+                    }
+                }
+                let runtime = Runtime::new(SideProvider(requests), "test-model", 256).unwrap();
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    let harness = spawn_harness_with_loader(Arc::new(SideLoader(Arc::clone(&requests))), 1).await;
+    harness
+        .runtime
+        .answer_side_question(
+            harness.session_id,
+            "first side".to_owned(),
+            RunCancellation::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .answer_side_question(
+            harness.session_id,
+            "followup side".to_owned(),
+            RunCancellation::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .answer_side_question_in_thread(
+            harness.session_id,
+            "fresh side".to_owned(),
+            RunCancellation::new(),
+            true,
+        )
+        .await
+        .unwrap();
+    {
+        let requests = requests.lock().unwrap();
+        assert!(
+            request_texts(&requests[1])
+                .iter()
+                .any(|text| text.contains("first side"))
+        );
+        assert!(
+            !request_texts(&requests[2])
+                .iter()
+                .any(|text| text.contains("first side"))
+        );
+    }
+    let rows = harness.runtime.inner.store.call(Priority::Control, |connection| {
+        Ok(connection.query_row("SELECT COUNT(*), COUNT(DISTINCT thread_id) FROM side_questions WHERE state = 'completed'", [],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))?)
+    }).await.unwrap();
+    assert_eq!(rows, (3, 2));
+}
+
+#[test]
+fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("capture.sqlite"),
+        0,
+        1,
+        1,
+        100,
+    );
+    connection
+        .execute("UPDATE runs SET status = 'running'", [])
+        .unwrap();
+    let captured = transcript::capture_side_context(&connection, session).unwrap();
+    assert!(!format!("{captured:?}").contains("prompt 0"));
+}
+
+#[test]
+fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("migration.sqlite");
+    let (connection, _) = open_database(&path).unwrap();
+    connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '42' WHERE key = 'schema_version';").unwrap();
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(STORE_SCHEMA_VERSION, 43);
+    let count: u64 = connection
+        .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    connection.execute_batch("DROP TABLE side_questions; CREATE TABLE side_questions(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, captured_context_json INTEGER NOT NULL, state TEXT NOT NULL);").unwrap();
+    drop(connection);
+    assert!(open_database(&path).is_err());
+}
+
+#[tokio::test]
+async fn side_answer_finishes_while_main_provider_is_active_without_main_requests() {
+    struct ConcurrentLoader {
+        loads: AtomicUsize,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl RuntimeLoader for ConcurrentLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let main = self.loads.fetch_add(1, Ordering::SeqCst) == 0;
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                struct MainProvider(Arc<StdMutex<Vec<ModelRequest>>>);
+                impl Provider for MainProvider {
+                    fn stream(&self, request: ModelRequest) -> ProviderStream {
+                        self.0.lock().unwrap().push(request);
+                        Box::pin(stream::pending())
+                    }
+                }
+                let runtime = if main {
+                    Runtime::new(MainProvider(requests), "test-model", 256)
+                } else {
+                    Runtime::new(ScriptedProvider, "test-model", 256)
+                }
+                .unwrap();
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let harness = spawn_harness_with_loader(
+        Arc::new(ConcurrentLoader {
+            loads: AtomicUsize::new(0),
+            requests: Arc::clone(&requests),
+        }),
+        1,
+    )
+    .await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: harness.session_id,
+                input: vec![InputPart::text("main task")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while requests.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let session = harness.session_id;
+    let before = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
+    }).await.unwrap();
+    let answer = harness
+        .runtime
+        .answer_side_question(session, "side task".to_owned(), RunCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(answer.text, "hello");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let after = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        Ok(connection.query_row("SELECT active_run_id, CAST(estimated_cost_usd_nanos AS TEXT) FROM sessions WHERE id = ?1", [session.to_string()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?)
+    }).await.unwrap();
+    assert_eq!(before, after);
+    assert!(before.0.is_some());
+    harness.runtime.shutdown().await.unwrap();
 }

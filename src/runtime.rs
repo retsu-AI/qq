@@ -3241,6 +3241,9 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidSlashCommand(_)
+        | SessionRuntimeError::InvalidSideQuestion
+        | SessionRuntimeError::SideQuestionCancelled
+        | SessionRuntimeError::SideQuestionTimedOut
         | SessionRuntimeError::InvalidRunLimits
         | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidInput(_)
@@ -3266,7 +3269,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::InvalidPageLimit) => {
             ServerHandlerError::InvalidRequest(error.to_string())
         }
-        SessionRuntimeError::QueueFull
+        SessionRuntimeError::SideQuestionBusy
+        | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
         | SessionRuntimeError::SessionLimitReached

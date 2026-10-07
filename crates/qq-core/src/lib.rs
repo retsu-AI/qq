@@ -98,7 +98,7 @@ pub use sessions::{
     ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
     RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
     RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
+    SessionRuntimeOptions, SideAnswer, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
     TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
     run_cost,
 };

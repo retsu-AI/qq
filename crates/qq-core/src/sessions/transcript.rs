@@ -293,10 +293,25 @@ pub(super) fn load_model_context_with_units(
     session_id: SessionId,
     through_ordinal: u64,
 ) -> Result<(Vec<Message>, bool, Vec<ContextUnit>), SessionRuntimeError> {
-    let compaction = latest_compaction(transaction, session_id)?;
-    let cutoff_ordinal = compaction
-        .as_ref()
-        .map_or(0, |compaction| compaction.cutoff_ordinal);
+    load_model_context_window(transaction, session_id, through_ordinal, None)
+}
+
+fn load_model_context_window(
+    transaction: &Connection,
+    session_id: SessionId,
+    through_ordinal: u64,
+    window_start: Option<u64>,
+) -> Result<(Vec<Message>, bool, Vec<ContextUnit>), SessionRuntimeError> {
+    let compaction = if window_start.is_some() {
+        None
+    } else {
+        latest_compaction(transaction, session_id)?
+    };
+    let cutoff_ordinal = window_start.unwrap_or_else(|| {
+        compaction
+            .as_ref()
+            .map_or(0, |compaction| compaction.cutoff_ordinal)
+    });
     // SQLite integers are i64; `u64::MAX` means "everything".
     let through_ordinal = through_ordinal.min(u64::try_from(i64::MAX).unwrap_or(u64::MAX));
     let session = session_id.to_string();
@@ -589,6 +604,114 @@ pub(super) fn load_model_context_with_units(
     // so the unit ends computed above still index this context.
     let context_rewritten = prune_stale_tool_results(&mut context, &effects);
     Ok((context, context_rewritten, units))
+}
+
+/// Capture complete recent units with bounded payload allocation. SQL preflight
+/// measures raw storage before the existing assembler copies or decodes a unit.
+pub(super) fn capture_side_context(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<Vec<Message>, SessionRuntimeError> {
+    const LIMIT: usize = 32 * 1024;
+    const SCAN_BYTES: u64 = 128 * 1024;
+    const NOTICE: &str = "[Captured context omits older or oversized complete units. Live inspection reads current files, not a filesystem snapshot.]";
+    let summary: Option<(u64, Option<String>)> = connection
+        .query_row(
+            "SELECT cutoff_ordinal, CASE WHEN length(CAST(summary AS BLOB)) <= ?2
+             THEN summary ELSE NULL END FROM session_compactions
+         WHERE session_id = ?1 AND scope_run_id IS NULL ORDER BY rowid DESC LIMIT 1",
+            params![session_id.to_string(), LIMIT.saturating_sub(NOTICE.len())],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let cutoff = summary.as_ref().map_or(0, |(cutoff, _)| *cutoff);
+    let mut statement = connection.prepare_cached(
+        "SELECT m.ordinal, m.run_id FROM messages m JOIN runs r ON r.id = m.run_id
+         WHERE m.session_id = ?1 AND m.ordinal > ?2 AND m.role = 'user' AND m.steering = 0
+           AND m.state IN ('complete', 'cancelled', 'failed', 'interrupted')
+           AND r.status IN ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused')
+         ORDER BY m.ordinal DESC LIMIT 65",
+    )?;
+    let candidates = statement
+        .query_map(params![session_id.to_string(), cutoff], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut remaining = LIMIT.saturating_sub(NOTICE.len());
+    let mut scanned = 0_u64;
+    let mut newest = Vec::new();
+    let unfinished: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE session_id = ?1 AND status IN ('running', 'preparing', 'queued'))",
+        [session_id.to_string()], |row| row.get(0),
+    )?;
+    let mut omitted = candidates.len() > 64 || unfinished;
+    for (ordinal, run) in candidates.into_iter().take(64) {
+        let (bytes, rows): (u64, u64) = connection.query_row(
+            "SELECT COALESCE(SUM(bytes), 0), COUNT(*) FROM (
+              SELECT length(CAST(output AS BLOB)) + length(CAST(refusal AS BLOB))
+                     + COALESCE(length(CAST(input_json AS BLOB)), 0) AS bytes
+                FROM messages WHERE run_id = ?1
+              UNION ALL SELECT length(CAST(c.text AS BLOB)) FROM message_chunks c
+                JOIN messages m ON m.id = c.message_id WHERE m.run_id = ?1
+              UNION ALL SELECT length(CAST(assistant_content_json AS BLOB))
+                FROM model_turns WHERE run_id = ?1
+              UNION ALL SELECT COALESCE(length(CAST(result AS BLOB)), 0)
+                FROM tool_calls WHERE run_id = ?1
+              UNION ALL SELECT length(CAST(a.path AS BLOB)) + COALESCE(length(b.content), 0) + 128
+                FROM message_attachments a JOIN messages m ON m.id = a.message_id
+                JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
+                WHERE m.run_id = ?1
+              UNION ALL SELECT length(CAST(summary AS BLOB)) FROM session_compactions
+                WHERE scope_run_id = ?1
+              UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_deliveries
+                WHERE parent_run_id = ?1
+              UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_reports
+                WHERE parent_run_id = ?1
+              UNION ALL SELECT COALESCE(length(CAST(outcome_json AS BLOB)), 0)
+                FROM runs WHERE id = ?1
+              LIMIT 1025
+            )",
+            [&run],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if rows > 1024 || bytes > SCAN_BYTES.saturating_sub(scanned) {
+            omitted = true;
+            break;
+        }
+        scanned += bytes;
+        let (unit, _, _) = load_model_context_window(
+            connection,
+            session_id,
+            ordinal,
+            Some(ordinal.saturating_sub(1)),
+        )?;
+        let bytes = context_bytes(&unit);
+        if bytes > remaining {
+            omitted = true;
+            break;
+        }
+        remaining -= bytes;
+        newest.push(unit);
+    }
+    let mut context = Vec::new();
+    if let Some((_, summary)) = summary {
+        match summary {
+            Some(summary) if COMPACTION_SUMMARY_PREAMBLE.len() + 2 + summary.len() <= remaining => {
+                context.push(Message::user(format!(
+                    "{COMPACTION_SUMMARY_PREAMBLE}\n\n{summary}"
+                )));
+            }
+            Some(_) | None => omitted = true,
+        }
+    }
+    if omitted {
+        context.insert(0, Message::user(NOTICE));
+    }
+    for unit in newest.into_iter().rev() {
+        context.extend(unit);
+    }
+    Ok(context)
 }
 
 type RecordedTurnResults = HashMap<u32, HashMap<String, RecordedResult>>;

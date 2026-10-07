@@ -965,6 +965,124 @@ impl Store {
         .await
     }
 
+    pub(super) async fn side_source(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+    ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let transaction = connection.transaction()?;
+            let row = transaction.query_row(
+                "SELECT w.path, s.model, s.model_is_fallback, s.max_output_tokens,
+                        s.organization, s.profile, s.reasoning_effort
+                 FROM sessions s JOIN workspaces w ON w.id = s.workspace_id WHERE s.id = ?1",
+                [session_id.to_string()], |row| Ok((
+                    row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?, row.get::<_, Option<u32>>(3)?,
+                    row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                )),
+            ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
+            let request = RuntimeLoadRequest {
+                workspace: row.0,
+                model: ModelSelection { model: row.1, model_is_fallback: row.2,
+                    max_output_tokens: row.3, organization: row.4 },
+                profile: parse_profile(row.5.as_deref())?,
+                reasoning_effort: parse_reasoning_effort(row.6.as_deref())?,
+                checkpoint: None, routing: None, approval_delegate: None,
+            };
+            let mut messages = transcript::capture_side_context(&transaction, session_id)?;
+            let thread: Option<String> = if new_thread { None } else {
+                transaction.query_row(
+                    "SELECT thread_id FROM side_questions WHERE session_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                    [session_id.to_string()], |row| row.get(0),
+                ).optional()?
+            };
+            let thread = thread.unwrap_or_else(|| question_id.to_string());
+            let mut statement = transaction.prepare_cached(
+                "SELECT CASE WHEN length(CAST(question AS BLOB)) + length(CAST(answer AS BLOB)) <= 32768
+                    THEN question ELSE NULL END,
+                    CASE WHEN length(CAST(question AS BLOB)) + length(CAST(answer AS BLOB)) <= 32768
+                    THEN answer ELSE NULL END
+                 FROM side_questions WHERE session_id = ?1 AND thread_id = ?2 AND state = 'completed'
+                 ORDER BY rowid DESC LIMIT 65",
+            )?;
+            let history = statement.query_map(params![session_id.to_string(), thread], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            })?.collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let mut retained = Vec::new();
+            let mut bytes = 0_usize;
+            let mut omitted = history.len() > 64;
+            for (question, answer) in history.into_iter().take(64) {
+                let (Some(question), Some(answer)) = (question, answer) else { omitted = true; break; };
+                if question.len() + answer.len() > (32 * 1024_usize - 128).saturating_sub(bytes) {
+                    omitted = true; break;
+                }
+                bytes += question.len() + answer.len();
+                retained.push((question, answer));
+            }
+            if omitted { messages.push(Message::user("[Older side-thread exchanges omitted.]")); }
+            for (question, answer) in retained.into_iter().rev() {
+                messages.push(Message::user(question));
+                messages.push(Message::assistant(answer));
+            }
+            let stored: Vec<_> = messages.iter().map(|message| {
+                (format!("{:?}", message.role()), message.content().iter()
+                    .map(PersistedContentBlock::from).collect::<Vec<_>>(), message.replay())
+            }).collect();
+            let context = serde_json::to_string(&stored)?;
+            if context.len() > 262144 { return Err(SessionRuntimeError::CONSTRAINT); }
+            transaction.execute(
+                "INSERT INTO side_questions(id, session_id, question, captured_context_json, state, created_at_ms, thread_id)
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6)",
+                params![question_id.to_string(), session_id.to_string(), question, context, now_ms(), thread],
+            )?;
+            transaction.commit()?;
+            Ok((request, messages))
+        }).await
+    }
+
+    pub(super) async fn finish_side_question(
+        &self,
+        id: RunId,
+        answer: Option<(String, Option<TokenUsage>)>,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let (state, text, usage) = match answer {
+                Some((text, usage)) => ("completed", text, Some(serde_json::to_string(&usage)?)),
+                None => ("failed", String::new(), None),
+            };
+            connection.execute(
+                "UPDATE side_questions SET state = ?2, answer = ?3, usage_json = ?4, finished_at_ms = ?5
+                 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), state, text, usage, now_ms()],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    pub(super) async fn capture_side_context(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<Message>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let transaction = connection.transaction()?;
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            transcript::capture_side_context(&transaction, session_id)
+        })
+        .await
+    }
+
     pub(super) async fn load_summarizer_input(
         &self,
         session_id: SessionId,
