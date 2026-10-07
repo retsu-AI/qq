@@ -26,6 +26,7 @@ SESSION = "ac" * 16
 RUN = "ad" * 16
 CHILD_SESSION = "ae" * 16
 CHILD_RUN = "af" * 16
+COMPACTION_RUN = "a7" * 16
 
 QQ_VERSION = "0.1.0"
 PROTOCOL_SOURCE = Path(__file__).resolve().parents[3] / "crates/qq-protocol/src/lib.rs"
@@ -538,9 +539,12 @@ def cancellation() -> None:
 
 
 def compaction() -> None:
-    # Mid-run auto-compaction does not happen in today's runtime (compaction
-    # is idle-only); this fixture exercises the schema-valid event so the
-    # converter is ready when Phase 2 makes it observable in a trace.
+    # A run that outgrows the window compacts its own earlier turns mid-run
+    # (protocol 31): the prompt run reports `compacting`, an internal
+    # compaction run starts (reporting `compacting` in the same commit),
+    # finishes, and records `session_compacted` under its own run id; then
+    # the prompt run's next turn waits for the provider again. The session's
+    # active run stays the prompt run throughout.
     trace = Trace()
     trace.trial()
     prompt_flow(trace, "Refactor the parser module.")
@@ -565,14 +569,47 @@ def compaction() -> None:
         },
     )
     trace.event(
+        {"type": "run_activity_changed", "run_id": RUN,
+         "activity": "compacting"}
+    )
+    compacting = {"activity": "compacting"}
+    trace.event(
+        {
+            "type": "run_started",
+            "session": session_summary(updated_at_ms=trace.now_ms) | compacting,
+            "run_id": COMPACTION_RUN,
+        },
+        run=COMPACTION_RUN,
+    )
+    trace.event(
+        {"type": "run_activity_changed", "run_id": COMPACTION_RUN,
+         "activity": "compacting"},
+        run=COMPACTION_RUN,
+    )
+    trace.event(
+        {
+            "type": "run_finished",
+            "session": session_summary(updated_at_ms=trace.now_ms) | compacting,
+            "run_id": COMPACTION_RUN,
+            "outcome": {"type": "completed"},
+            "usage": {
+                "input_tokens": 1800,
+                "cache_read_input_tokens": 1600,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 300,
+            },
+        },
+        run=COMPACTION_RUN,
+    )
+    trace.event(
         {
             "type": "session_compacted",
-            "session": session_summary(updated_at_ms=trace.now_ms),
+            "session": session_summary(updated_at_ms=trace.now_ms) | compacting,
             "summary": "intent: refactor parser; done: survey",
             "before_bytes": 3_200_000,
             "after_bytes": 240_000,
         },
-        run=None,
+        run=COMPACTION_RUN,
     )
     trace.event(
         {"type": "run_activity_changed", "run_id": RUN,

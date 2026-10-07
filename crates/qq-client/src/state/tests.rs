@@ -527,6 +527,105 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
 }
 
 #[test]
+fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_keeps_it() {
+    // CX4: a prompt run reports `Compacting` while it summarizes its own
+    // turns. The compaction run that does the work finishes while the
+    // prompt run still holds the session; that finish must not blank the
+    // prompt run's activity, while the prompt run's own finish does.
+    let session_id = SessionId::from_bytes([3; 16]);
+    let prompt = RunId::from_bytes([4; 16]);
+    let compaction = RunId::from_bytes([5; 16]);
+    let mut store = SessionStore::default();
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(prompt);
+    store.upsert_summary(running.clone(), &[], 0);
+    store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id: prompt,
+                activity: qq_protocol::RunActivity::Compacting,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].activity,
+        Some((prompt, qq_protocol::RunActivity::Compacting))
+    );
+    // The compaction run's own report does not take over the session.
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id: compaction,
+                activity: qq_protocol::RunActivity::Compacting,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].activity,
+        Some((prompt, qq_protocol::RunActivity::Compacting))
+    );
+    store.reduce_event(
+        &envelope(
+            3,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running.clone()),
+                run_id: compaction,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].activity,
+        Some((prompt, qq_protocol::RunActivity::Compacting))
+    );
+    store.reduce_event(
+        &envelope(
+            4,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id: prompt,
+                activity: qq_protocol::RunActivity::WaitingForProvider,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        store[&session_id].activity,
+        Some((prompt, qq_protocol::RunActivity::WaitingForProvider))
+    );
+    let mut idle = summary(session_id);
+    idle.status = SessionStatus::Idle;
+    store.reduce_event(
+        &envelope(
+            5,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(idle),
+                run_id: prompt,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store[&session_id].activity, None);
+}
+
+#[test]
 fn deleting_the_shown_session_refocuses_its_neighbour_and_fetches_a_cold_body() {
     let a = SessionId::from_bytes([0xa; 16]);
     let b = SessionId::from_bytes([0xb; 16]);

@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | CX0+CX1 in review (#239); CX2 in review, stacked on it. ADR-0056 Proposed |
+| Now | CX0–CX2 merged (#239, #250). CX4 in review; CX3 stacked on it. ADR-0056 Proposed |
 | Decision | [ADR-0056](../adr/0056-compaction-narrative-and-record.md) (amends how ADR-0039 § 3's summarizer request is built) |
 | Ledger | [`progress/compaction.md`](./progress/compaction.md) |
 | Linear | [ENG-992](https://linear.app/retsu-ai/issue/ENG-992) (plan); CX0 [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) … CX5 [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) |

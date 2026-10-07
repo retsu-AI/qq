@@ -2313,6 +2313,11 @@ impl plan::CompiledAgentPlan {
                         } else {
                             messages[reducible_messages..cut].to_vec()
                         };
+                        // The summarizer is one silent provider turn; this
+                        // run's next turn reports `WaitingForProvider` again.
+                        yield RuntimeEvent::ActivityChanged {
+                            activity: RunActivity::Compacting,
+                        };
                         match compactor
                             .compact(runtime::InRunCompactionRequest {
                                 transcript,
@@ -2337,11 +2342,18 @@ impl plan::CompiledAgentPlan {
                                 yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
                             }
                             Err(error) => {
-                                yield RuntimeEvent::Failed {
-                                    kind: RunFailureKind::Policy,
-                                    message: format!(
-                                        "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
-                                    ),
+                                yield match error {
+                                    runtime::InRunCompactionError::Persistence(_) => RuntimeEvent::Failed {
+                                        kind: RunFailureKind::Server,
+                                        message: format!("in-run compaction failed: {error}"),
+                                    },
+                                    runtime::InRunCompactionError::SummarizerFailed(_)
+                                    | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
+                                        kind: RunFailureKind::Policy,
+                                        message: format!(
+                                            "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
+                                        ),
+                                    },
                                 };
                                 return;
                             }

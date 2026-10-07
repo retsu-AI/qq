@@ -1,6 +1,84 @@
 use super::*;
 
 #[tokio::test]
+async fn a_compaction_run_reports_compacting_and_nothing_else() {
+    // CX4: a compaction run is one activity from start to finish. A
+    // snapshot taken while the summarizer is at the model already names it,
+    // and the summarizer's own provider activity is never published.
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("hello".to_owned()),
+        AutoCompactScript::Text(valid_summary("work so far")),
+        AutoCompactScript::Text("hello again".to_owned()),
+        AutoCompactScript::Stall,
+    ])
+    .await;
+    let first = queue_prompt(&harness.runtime, harness.session_id, "hi".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(first)).await;
+
+    let compaction = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    assert_eq!(
+        finished_outcome(&observed, compaction),
+        Some(RunOutcome::Completed)
+    );
+    let activities: Vec<(RunId, RunActivity)> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunActivityChanged { run_id, activity } => Some((*run_id, *activity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(activities, [(compaction, RunActivity::Compacting)]);
+    // It is reported by the transaction that starts the run, so a run
+    // cancelled before its first poll still says what it was.
+    let started = observed
+        .iter()
+        .position(|event| matches!(&event.event, SessionEvent::RunStarted { run_id, .. } if *run_id == compaction))
+        .unwrap();
+    assert!(matches!(
+        observed[started + 1].event,
+        SessionEvent::RunActivityChanged {
+            activity: RunActivity::Compacting,
+            ..
+        }
+    ));
+    assert_eq!(
+        observed[started + 1].cursor.sequence,
+        observed[started].cursor.sequence + 1
+    );
+
+    // A second compaction parks at the model; the snapshot says why.
+    let second = queue_prompt(&harness.runtime, harness.session_id, "more".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(second)).await;
+    let parked = compact_session(&harness.runtime, harness.session_id).await;
+    collect_until(&mut harness.events, |event| {
+        matches!(
+            event,
+            SessionEvent::RunActivityChanged { run_id, activity: RunActivity::Compacting }
+                if *run_id == parked
+        )
+    })
+    .await;
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            8,
+            8,
+        ))
+        .await
+        .unwrap();
+    let summary = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == harness.session_id)
+        .unwrap();
+    assert_eq!(summary.active_run_id, Some(parked));
+    assert_eq!(summary.activity, Some(RunActivity::Compacting));
+}
+
+#[tokio::test]
 async fn compact_session_is_refused_while_active_and_never_runs_a_summarizer_tool_call() {
     let mut harness = session_management_harness().await;
     let queued = harness
@@ -4127,6 +4205,90 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
                 if run_id == compaction
         )));
     }
+    // CX4: the prompt run reports `Compacting` before each of its
+    // compaction runs starts and `WaitingForProvider` after it finishes; the
+    // compaction run itself reports only `Compacting`.
+    let activities: Vec<(RunId, RunActivity)> = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::RunActivityChanged { run_id, activity } => Some((*run_id, *activity)),
+            _ => None,
+        })
+        .collect();
+    for compaction in &compactions {
+        let position = |wanted: &dyn Fn(&SessionEvent) -> bool| {
+            observed
+                .iter()
+                .position(|event| wanted(&event.event))
+                .unwrap()
+        };
+        let started = position(
+            &|event| matches!(event, SessionEvent::RunStarted { run_id, .. } if run_id == compaction),
+        );
+        let finished = position(
+            &|event| matches!(event, SessionEvent::RunFinished { run_id, .. } if run_id == compaction),
+        );
+        let prompt_activity_before =
+            observed[..started]
+                .iter()
+                .rev()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunActivityChanged { run_id, activity } if *run_id == run => {
+                        Some(*activity)
+                    }
+                    _ => None,
+                });
+        assert_eq!(prompt_activity_before, Some(RunActivity::Compacting));
+        // The session's summary names the prompt run's activity, so the
+        // compaction run's start and finish both say `compacting` (the
+        // headless `completed_after_in_run_compaction` golden pins this).
+        for at in [started, finished] {
+            let (SessionEvent::RunStarted { session, .. }
+            | SessionEvent::RunFinished { session, .. }) = &observed[at].event
+            else {
+                unreachable!()
+            };
+            assert_eq!(session.activity, Some(RunActivity::Compacting));
+        }
+        // Its own `compacting` commits with its start, so no cancel between
+        // the two can leave a started compaction run unreported.
+        assert!(
+            matches!(
+                &observed[started + 1],
+                SessionEventEnvelope { run_id: Some(id), event: SessionEvent::RunActivityChanged { activity: RunActivity::Compacting, .. }, cursor, .. }
+                    if id == compaction && cursor.sequence == observed[started].cursor.sequence + 1
+            ),
+            "{:?}",
+            observed[started + 1].event
+        );
+        // The compaction is recorded right after its run finishes, under
+        // that run's id, before the prompt run moves on (the golden's order).
+        assert!(
+            matches!(
+                &observed[finished + 1],
+                SessionEventEnvelope { run_id: Some(id), event: SessionEvent::SessionCompacted { .. }, .. }
+                    if id == compaction
+            ),
+            "{:?}",
+            observed[finished + 1].event
+        );
+        let prompt_activity_after =
+            observed[finished..]
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunActivityChanged { run_id, activity } if *run_id == run => {
+                        Some(*activity)
+                    }
+                    _ => None,
+                });
+        assert_eq!(prompt_activity_after, Some(RunActivity::WaitingForProvider));
+        let own: Vec<RunActivity> = activities
+            .iter()
+            .filter(|(run_id, _)| run_id == compaction)
+            .map(|(_, activity)| *activity)
+            .collect();
+        assert_eq!(own, [RunActivity::Compacting]);
+    }
     // An in-run summary sends the run's own system prompt and tools, and
     // its messages are a prefix of the request the run sent just before it
     // (the turn that overflowed is cut at the boundary), so a provider
@@ -4555,6 +4717,50 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
         .unwrap();
     assert_eq!(session.status, SessionStatus::Idle);
     assert_eq!(session.active_run_id, None);
+}
+
+#[tokio::test]
+async fn an_in_run_compaction_that_cannot_start_fails_the_prompt_run_as_a_server_failure() {
+    // CX4 review: the compaction run's start (its row, `RunStarted`, and its
+    // `compacting` activity, one transaction) can fail in the store. The
+    // provider was never asked, so the prompt run must not blame the context
+    // or advise `/compact`.
+    let mut harness = in_run_compaction_harness(48, 16 * 1024, "work so far").await;
+    Connection::open(harness.workspace_path.join("sessions.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_compaction_start BEFORE INSERT ON runs
+             WHEN NEW.kind = 'compaction'
+             BEGIN SELECT RAISE(ABORT, 'injected start failure'); END;",
+        )
+        .unwrap();
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    let prompt = finished_outcome(&observed, run);
+    assert!(
+        matches!(
+            &prompt,
+            Some(RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Server, message } })
+                if message.contains("could not be persisted") && !message.contains("/compact")
+        ),
+        "{prompt:?}"
+    );
+    // No compaction run exists, and the summarizer was never asked.
+    assert!(!observed.iter().any(
+        |event| matches!(&event.event, SessionEvent::RunStarted { run_id, .. } if *run_id != run)
+    ));
+    let requests = harness.requests.lock().unwrap();
+    assert!(
+        !requests.iter().any(|request| request_texts(request)
+            .iter()
+            .any(|text| text.contains("Summarize this conversation"))),
+        "the summarizer must not be polled"
+    );
 }
 
 #[tokio::test]

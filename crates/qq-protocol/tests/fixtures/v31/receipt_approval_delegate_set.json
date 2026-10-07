@@ -1,0 +1,13 @@
+{
+  "command_id": "28282828282828282828282828282828",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 15
+  },
+  "outcome": {
+    "type": "approval_delegate_set",
+    "session_id": "03030303030303030303030303030303",
+    "delegate": "off"
+  }
+}

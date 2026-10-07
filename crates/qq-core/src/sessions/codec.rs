@@ -63,6 +63,7 @@ pub(super) const fn run_activity_column(activity: RunActivity) -> &'static str {
         RunActivity::Reasoning => "reasoning",
         RunActivity::GeneratingResponse => "generating_response",
         RunActivity::PreparingToolCall => "preparing_tool_call",
+        RunActivity::Compacting => "compacting",
     }
 }
 
@@ -72,6 +73,7 @@ pub(super) fn parse_run_activity(column: &str) -> Result<RunActivity, SessionRun
         "reasoning" => Ok(RunActivity::Reasoning),
         "generating_response" => Ok(RunActivity::GeneratingResponse),
         "preparing_tool_call" => Ok(RunActivity::PreparingToolCall),
+        "compacting" => Ok(RunActivity::Compacting),
         _ => Err(SessionRuntimeError::CODEC),
     }
 }

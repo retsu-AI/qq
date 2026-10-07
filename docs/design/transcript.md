@@ -348,3 +348,27 @@ output is the thing the user is waiting for. A trailing partial line
 waits for its newline. The buffer is discarded when the call reaches a
 terminal state or a snapshot reloads; the bounded result persisted on
 the tool call is always authoritative.
+
+## Run Activity
+
+While a run is working, the composer rule and the session's rail row say
+what it is doing. The words come from the run's latest `RunActivity`
+(`waiting for provider`, `reasoning`, `responding`, `preparing a tool
+call`, `compacting context`), and the composer rule adds the elapsed time.
+The activity belongs to the session's active run, and only that run's
+reports change it (`qq-client` `state::reduce`):
+
+- A prompt run compacting its own earlier turns reports `compacting` before
+  the summarizer is asked and `waiting for provider` at its next turn. The
+  internal compaction run it starts reports `compacting` as well. That
+  report, and the compaction run's own finish, leave the prompt run's
+  activity as it is, because the prompt run still holds the session.
+- On the rail, a running session shows the first of: an approval wait, the
+  running tool's verb, the streamed text tail, then the activity. The one
+  exception is `compacting context`, which wins over the tail. The text a
+  compacting run streamed before compacting is stale until the summary
+  lands. The `sessions` golden pins this.
+- A compaction produces no transcript row of its own. The summary replaces
+  history in the model's context, not on screen; the run's earlier turns
+  stay rendered as they were.
+

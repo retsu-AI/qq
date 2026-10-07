@@ -1735,6 +1735,9 @@ async fn execute_started_run(
         .await;
         return;
     }
+    // A compaction run reported `compacting` in the transaction that
+    // started it and reports nothing else: the summarizer's own provider
+    // activity is not the session's.
     let internal = claimed.identity.kind == RunKind::Compaction;
     let mut pending_text = String::new();
     let mut pending_channel = None;

@@ -1111,6 +1111,10 @@ pub enum RunActivity {
     /// The provider is constructing one or more tool calls. Arguments may be
     /// incomplete and are deliberately not exposed by this status channel.
     PreparingToolCall,
+    /// QQ is summarizing earlier context so the session fits its window:
+    /// a between-run or manual compaction run, or a prompt run compacting its
+    /// own earlier turns. The next activity or the run's end replaces it.
+    Compacting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3515,7 +3519,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 30);
+        assert_eq!(crate::PROTOCOL_VERSION, 31);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
