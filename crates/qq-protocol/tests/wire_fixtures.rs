@@ -217,6 +217,15 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
     };
 
     check(
+        "command_cancel_side_question",
+        &command(
+            0x7b,
+            SessionCommand::CancelSideQuestion {
+                side_question_id: run_id,
+            },
+        ),
+    );
+    check(
         "command_submit_side_question",
         &command(
             0x7a,

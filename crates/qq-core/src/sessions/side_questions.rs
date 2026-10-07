@@ -109,9 +109,32 @@ impl SessionRuntime {
     ) -> Result<SideAnswer, SessionRuntimeError> {
         let runtime = self.clone();
         match tokio::spawn(async move {
-            runtime
-                .execute_side_question(session, question, cancellation, new_thread, None)
-                .await
+            let id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+            let (request, messages) = runtime
+                .inner
+                .store
+                .side_source(session, id, question.clone(), new_thread)
+                .await?;
+            match AssertUnwindSafe(runtime.execute_side_question(
+                session,
+                question,
+                cancellation,
+                new_thread,
+                Some((id, request, messages)),
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    runtime
+                        .inner
+                        .store
+                        .finish_side_question(id, qq_protocol::SideQuestionState::Interrupted)
+                        .await?;
+                    Err(SessionRuntimeError::Unavailable)
+                }
+            }
         })
         .await
         {
@@ -170,18 +193,18 @@ impl SessionRuntime {
                     .await?
             }
         };
-        let stored = self
-            .inner
-            .store
-            .call(store::Priority::AwaitControl, move |connection| {
-                load_side_snapshot(connection, id)
-            })
-            .await?;
-        if stored.state != qq_protocol::SideQuestionState::Running {
-            return Err(SessionRuntimeError::SideQuestionCancelled);
-        }
         let deadline = started + Duration::from_secs(120);
         let work = tokio::time::timeout_at(deadline, async {
+            let stored = self
+                .inner
+                .store
+                .call(store::Priority::AwaitControl, move |connection| {
+                    load_side_snapshot(connection, id)
+                })
+                .await?;
+            if stored.state != qq_protocol::SideQuestionState::Running {
+                return Err(SessionRuntimeError::SideQuestionCancelled);
+            }
             let _permit = self
                 .inner
                 .side_permits
@@ -240,6 +263,9 @@ impl SessionRuntime {
             while let Some(event) = events.next().await {
                 match event {
                     RuntimeEvent::OutputTextDelta { text } => {
+                        if text.is_empty() {
+                            continue;
+                        }
                         if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
                             return Err(SessionRuntimeError::CONSTRAINT);
                         }

@@ -917,6 +917,12 @@ impl CompiledAgentPlan {
                 .tools
                 .retain(|tool| !denied_tools.iter().any(|name| name == tool.spec.name()));
         }
+        if !static_tools
+            .iter()
+            .any(|tool| tool.host == ToolHost::SpawnAgent)
+        {
+            static_tools.retain(|tool| !follows_spawn(tool));
+        }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
         let descriptor = AgentPlanDescriptor {

@@ -6821,3 +6821,103 @@ async fn side_partial_text_is_durable_before_completion_and_cancel_preserves_it(
     assert_eq!(item.answer, "partial evidence");
     assert_eq!(item.state, qq_protocol::SideQuestionState::Cancelled);
 }
+
+#[tokio::test]
+async fn side_admission_concurrent_main_stream_latency_diagnostic() {
+    async fn trial(side: bool) -> Vec<u128> {
+        struct Loader {
+            loads: AtomicUsize,
+            times: Arc<StdMutex<Vec<std::time::Instant>>>,
+        }
+        impl RuntimeLoader for Loader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let main = self.loads.fetch_add(1, Ordering::SeqCst) == 0;
+                let times = Arc::clone(&self.times);
+                Box::pin(async move {
+                    struct Ticker(Arc<StdMutex<Vec<std::time::Instant>>>);
+                    impl Provider for Ticker {
+                        fn stream(&self, _: ModelRequest) -> ProviderStream {
+                            let times = Arc::clone(&self.0);
+                            Box::pin(async_stream::stream! {
+                                for _ in 0..100 {
+                                    tokio::time::sleep(Duration::from_millis(2)).await;
+                                    times.lock().unwrap().push(std::time::Instant::now());
+                                    yield Ok(qq_provider::ProviderEvent::OutputTextDelta { text: "x".to_owned() });
+                                }
+                                yield Ok(qq_provider::ProviderEvent::Completed { usage: None });
+                            })
+                        }
+                    }
+                    let runtime = if main {
+                        Runtime::new(Ticker(times), "test-model", 256)
+                    } else {
+                        Runtime::new(ScriptedProvider, "test-model", 256)
+                    }
+                    .unwrap();
+                    Ok(loaded_runtime(runtime, &request.workspace, None))
+                })
+            }
+        }
+        let times = Arc::new(StdMutex::new(Vec::new()));
+        let harness = spawn_harness_with_loader(
+            Arc::new(Loader {
+                loads: AtomicUsize::new(0),
+                times: Arc::clone(&times),
+            }),
+            1,
+        )
+        .await;
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: harness.session_id,
+                    input: vec![InputPart::text("main")],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        while times.lock().unwrap().len() < 10 {
+            tokio::task::yield_now().await;
+        }
+        if side {
+            harness
+                .runtime
+                .answer_side_question(
+                    harness.session_id,
+                    "side".to_owned(),
+                    RunCancellation::new(),
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while times.lock().unwrap().len() < 100 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let deltas = {
+            let times = times.lock().unwrap();
+            times
+                .windows(2)
+                .map(|pair| pair[1].duration_since(pair[0]).as_micros())
+                .collect::<Vec<_>>()
+        };
+        harness.runtime.shutdown().await.unwrap();
+        deltas
+    }
+    let mut baseline = trial(false).await;
+    let mut side = trial(true).await;
+    baseline.sort_unstable();
+    side.sort_unstable();
+    eprintln!(
+        "main stream debug 99 gaps: baseline p50={}us p95={}us max={}us; with side p50={}us p95={}us max={}us",
+        baseline[49], baseline[94], baseline[98], side[49], side[94], side[98]
+    );
+}

@@ -122,3 +122,14 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   bounded capture p50 5,161 µs / p95 5,286 µs. Bounds cost extra SQLite queries;
   concurrent main-stream latency acceptance is still outstanding. SQ1 remains
   draft pending that evidence and complete review of final state.
+
+- Concurrent debug provider-stream diagnostic (99 gaps, 2 ms requested cadence):
+  baseline p50 3,030 µs / p95 6,612 µs / max 9,584 µs; with one side admission
+  p50 3,031 µs / p95 7,015 µs / max 8,254 µs. About 6.1% p95 variation in this
+  scripted fixture; no claim of live-provider or production performance.
+- Follow-up re-review found empty-delta amplification, public API panic
+  settlement and spawn-follower deny ordering; corrected them. Deadline now
+  encloses snapshot lookup, loader, permits and execution, but durable admission
+  and final settlement still await SQLite outside the execution deadline to
+  avoid a dropped-receiver/late-commit race. This is an outstanding acceptance
+  limitation, not a fully bounded 120-second API latency claim.
