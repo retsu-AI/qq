@@ -686,6 +686,7 @@ pub(super) fn render_tool_calls(
                 lines.extend(tool_error_lines(
                     strip_header(result, header_word(&call.name)),
                     rows,
+                    MAX_TOOL_ERROR_BYTES,
                     style,
                     width,
                 ));
@@ -794,6 +795,17 @@ pub(super) fn tool_summary_line(
             }
     });
     let state = match call.error_kind() {
+        // A command outcome's metric already reads `exit 101`; the `!` glyph
+        // carries the grade, so the label would only repeat the number.
+        Some(ToolErrorKind::Outcome)
+            if call
+                .result
+                .as_deref()
+                .and_then(|result| header_field(result, &call.name, "exit"))
+                .is_some() =>
+        {
+            None
+        }
         Some(kind @ (ToolErrorKind::Correction | ToolErrorKind::Outcome)) => {
             Some(tool_error_label(call, kind))
         }
@@ -927,10 +939,6 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
                     !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
                 })
                 .map_or(result, |(_, rest)| rest);
-            let result = result
-                .strip_prefix("shell ")
-                .or_else(|| result.strip_prefix("exec "))
-                .unwrap_or(result);
             // `fetch <url> status=404`: the status is the answer, not the URL.
             let fetch_status = result
                 .strip_prefix("fetch ")
@@ -970,10 +978,11 @@ fn absorbed_correction(calls: &[&ToolCallSnapshot], index: usize) -> bool {
 pub(super) fn tool_error_lines(
     result: &str,
     max_rows: usize,
+    max_bytes: usize,
     style: Style,
     width: usize,
 ) -> Vec<Line> {
-    let text = bounded_tail(result, MAX_TOOL_ERROR_BYTES);
+    let text = bounded_tail(result, max_bytes);
     let total = text.lines().count();
     let content_width = tool_panel_content_width(width);
     let mut body = Vec::with_capacity(max_rows + 1);
@@ -1036,26 +1045,29 @@ pub(super) fn tool_expanded_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let row = context.row;
-    // Corrections and outcomes keep their text for here; a failure already
+    // Corrections and outcomes keep their text for here, under the timing
+    // line and with the same budget as any expanded result; a failure already
     // showed its panel. An outcome drops its tool header (the row says it).
-    match call.error_kind() {
-        Some(ToolErrorKind::Correction) => lines.extend(tool_error_lines(
+    let graded = match call.error_kind() {
+        Some(ToolErrorKind::Correction) => tool_error_lines(
             call.result.as_deref().unwrap_or_default(),
-            MAX_TOOL_ERROR_ROWS,
+            MAX_TOOL_RESULT_ROWS,
+            MAX_TOOL_DETAIL_BYTES,
             muted(),
             width,
-        )),
-        Some(ToolErrorKind::Outcome) => lines.extend(tool_error_lines(
+        ),
+        Some(ToolErrorKind::Outcome) => tool_error_lines(
             strip_header(
                 call.result.as_deref().unwrap_or_default(),
                 header_word(&call.name),
             ),
-            MAX_TOOL_ERROR_ROWS,
+            MAX_TOOL_RESULT_ROWS,
+            MAX_TOOL_DETAIL_BYTES,
             warning(),
             width,
-        )),
-        Some(ToolErrorKind::Failure) | None => {}
-    }
+        ),
+        Some(ToolErrorKind::Failure) | None => Vec::new(),
+    };
     let timing = context.clock.timing;
     let running = call.state == ToolCallState::Running;
     // The timing line answers "is this new, or am I still waiting on the
@@ -1087,6 +1099,7 @@ pub(super) fn tool_expanded_lines(
         when.push(fields.join(" · "), muted());
         lines.push(truncate_line(when, width));
     }
+    lines.extend(graded);
     let mut cached = row.panel.borrow_mut();
     if !cached
         .as_ref()
