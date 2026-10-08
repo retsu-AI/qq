@@ -1681,15 +1681,36 @@ impl ToolErrorKind {
     /// Classifies an error result's text. Unknown codes are `Failure`, so a
     /// new error is never quieter than today until it is listed here.
     #[must_use]
-    pub fn of(result: &str) -> Self {
+    pub fn of(name: &str, result: &str) -> Self {
+        // External tools own arbitrary error text; never infer a recoverable
+        // QQ contract error from an external server's message.
+        if !matches!(
+            name,
+            "read_file"
+                | "write_file"
+                | "edit_file"
+                | "search"
+                | "tree"
+                | "list_dir"
+                | "shell"
+                | "exec"
+                | "fetch"
+                | "ask_user"
+                | "read_tool_result"
+        ) {
+            return Self::Failure;
+        }
         // A batch edit prefixes its code with the failing edit's index.
         let text = result
             .strip_prefix("edit ")
             .and_then(|rest| rest.split_once(": "))
-            .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()))
+            .filter(|(index, _)| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
             .map_or(result, |(_, rest)| rest);
         const CORRECTION: &[&str] = &[
-            "invalid",
+            "invalid_",
+            "invalid arguments:",
             "bad_glob",
             "cursor_invalid",
             "handle_invalid",
@@ -1743,7 +1764,7 @@ impl ToolCallSnapshot {
     pub fn error_kind(&self) -> Option<ToolErrorKind> {
         match self.state {
             ToolCallState::Completed | ToolCallState::Failed if self.is_error => Some(
-                ToolErrorKind::of(self.result.as_deref().unwrap_or_default()),
+                ToolErrorKind::of(&self.name, self.result.as_deref().unwrap_or_default()),
             ),
             ToolCallState::Requested
             | ToolCallState::AwaitingApproval
@@ -2462,7 +2483,7 @@ mod tests {
             "env_not_allowed: GH_TOKEN is not in policy.shell_env",
         ] {
             assert_eq!(
-                ToolErrorKind::of(result),
+                ToolErrorKind::of("read_file", result),
                 ToolErrorKind::Correction,
                 "{result}"
             );
@@ -2476,7 +2497,7 @@ mod tests {
             "exec exit=101 elapsed=2.0 bytes=310\nerror[E0308]",
         ] {
             assert_eq!(
-                ToolErrorKind::of(result),
+                ToolErrorKind::of("read_file", result),
                 ToolErrorKind::Outcome,
                 "{result}"
             );
@@ -2487,14 +2508,29 @@ mod tests {
             "could not start the command: No such file or directory",
             "MCP server returned an error",
             "edit x: invalid_edit: not an index",
+            "edit : stale_file: missing index",
             "forbidden: this command is refused under every approval mode",
         ] {
             assert_eq!(
-                ToolErrorKind::of(result),
+                ToolErrorKind::of("read_file", result),
                 ToolErrorKind::Failure,
                 "{result:?}"
             );
         }
+
+        for name in ["mcp__example__read", "external", "embedded_read"] {
+            for result in [
+                "invalid credentials",
+                "invalid_arguments: denied",
+                "not_found: service unavailable",
+            ] {
+                assert_eq!(ToolErrorKind::of(name, result), ToolErrorKind::Failure);
+            }
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "invalid credentials"),
+            ToolErrorKind::Failure
+        );
 
         let call = |state, result: &str, is_error| ToolCallSnapshot {
             id: id(7),

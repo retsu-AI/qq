@@ -322,3 +322,15 @@ vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
 - `tool_dispatch`: 30 alternating release A/B pairs, #265 f7ecfb83 baseline versus T15+repairs: median 74,890 → 66,261 ns (no observed regression).
 - I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
 - This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
+
+### 2026-10-07 — T17 review repairs
+
+- Inherited T15 repairs without rewriting published history; #272 remains stacked on #267.
+- Classifier requires a QQ built-in name; external error text defaults to Failure. `invalid credentials` is not a correction even on built-ins.
+- Expanded correction detail follows inline/inspector placement; batch-edit and command outcomes label `stale_file` / `exit=N` rather than the tool name.
+- Protocol and TUI suites/goldens pass (333 TUI unit tests, 6 goldens); workspace fmt/Clippy/tests (full rerun)/build pass.
+- Initial build exhausted disk; removed only this worktree's generated incremental cache and disabled incremental compilation. Initial workspace test hit the existing headless child-cost timeout; full rerun passed.
+- 30 release A/B render pairs against original T17 117f8f94: rows median 24.45→25.30 µs, folded 12.60→13.10, expanded 53.80→55.80, inspector 38.95→39.75 (<5% each).
+- Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
+- Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
+

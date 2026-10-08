@@ -666,9 +666,6 @@ pub(super) fn render_tool_calls(
             let panel = match call.error_kind() {
                 Some(ToolErrorKind::Failure) => Some((MAX_TOOL_ERROR_ROWS, failure())),
                 Some(ToolErrorKind::Outcome) => Some((1, warning())),
-                Some(ToolErrorKind::Correction) if context.expanded => {
-                    Some((MAX_TOOL_ERROR_ROWS, muted()))
-                }
                 Some(ToolErrorKind::Correction) | None => None,
             };
             if let Some((rows, style)) = panel {
@@ -909,6 +906,17 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
         ToolErrorKind::Correction => ("corrected", muted()),
         ToolErrorKind::Outcome => {
             let result = call.result.as_deref().unwrap_or_default();
+            let result = result
+                .strip_prefix("edit ")
+                .and_then(|rest| rest.split_once(": "))
+                .filter(|(index, _)| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .map_or(result, |(_, rest)| rest);
+            let result = result
+                .strip_prefix("shell ")
+                .or_else(|| result.strip_prefix("exec "))
+                .unwrap_or(result);
             let code = result
                 .split([':', ' ', '\n'])
                 .next()
@@ -1003,6 +1011,14 @@ pub(super) fn tool_expanded_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let row = context.row;
+    if call.error_kind() == Some(ToolErrorKind::Correction) {
+        lines.extend(tool_error_lines(
+            call.result.as_deref().unwrap_or_default(),
+            MAX_TOOL_ERROR_ROWS,
+            muted(),
+            width,
+        ));
+    }
     let timing = context.clock.timing;
     let running = call.state == ToolCallState::Running;
     // The timing line answers "is this new, or am I still waiting on the
