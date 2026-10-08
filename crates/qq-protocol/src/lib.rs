@@ -64,7 +64,7 @@ pub use sessions::{
     SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
     SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
     SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot, ToolCallState,
-    ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
+    ToolErrorKind, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
 pub const PROTOCOL_VERSION: u16 = 31;

@@ -23,7 +23,7 @@ newest last.
 | T14 | `select_tools` lexical index | Planned | | |
 | T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
 | T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
-| T17 | `ToolErrorKind` severity in clients | Planned | | D9 audit; after T15 |
+| T17 | `ToolErrorKind` severity in clients | In review | `feat/eng-1012-t17-tool-error-kind` (stacked on #267) | D9 audit; derived from the error code, no wire field |
 
 ## Entries
 
@@ -291,6 +291,27 @@ smoke test green. Bench not re-run: each rule is a `match` on arguments
 before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
 and edit sections.
 
+### 2026-10-06 — T17 in progress → in review
+
+Branch `feat/eng-1012-t17-tool-error-kind` (worktree
+`.worktrees/tool-error-kind`), stacked on T15 (#267). Design change from
+the plan: no `error_kind` wire field. Every tool error already leads with a
+stable code, so `qq_protocol::ToolErrorKind::of` classifies the result text
+and `ToolCallSnapshot::error_kind()` applies it to completed/failed error
+rows. That grades history and old servers the same way, and avoids a store
+migration and a `PROTOCOL_VERSION` bump (the snapshot is
+`deny_unknown_fields`). Unlisted codes are `Failure`. TUI: `↻ corrected`
+muted with no panel, `! <code>` warning with a one-row tail, `✕` and the
+panel unchanged for failures; a correction followed by a successful call to
+the same tool in the block folds away (the cursor and expand still reach
+it), so a corrected block still folds to one summary. Gates: fmt, clippy
+`-D warnings` on `qq-protocol` and `qq-tui`, both test suites green (332 TUI
+lib tests plus goldens; failure-row goldens unchanged). Render bench, base
+vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
+`folded` 12.3/12.9 vs 12.4/12.3 µs, `expanded` 53.4/55.6 vs 54.1/53.8 µs
+(noise); blocks with no error skip the filter copy. Docs:
+`design/transcript.md` § Tool Rows.
+
 ### 2026-10-07 — T15 review repairs
 
 - Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
@@ -302,14 +323,71 @@ and edit sections.
 - I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
 - This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
 
+### 2026-10-07 — T17 review repairs
+
+- Inherited T15 repairs without rewriting published history; #272 remains stacked on #267.
+- Classifier requires a QQ built-in name; external error text defaults to Failure. `invalid credentials` is not a correction even on built-ins.
+- Expanded correction detail follows inline/inspector placement; batch-edit and command outcomes label `stale_file` / `exit=N` rather than the tool name.
+- Protocol and TUI suites/goldens pass (333 TUI unit tests, 6 goldens); workspace fmt/Clippy/tests (full rerun)/build pass.
+- Initial build exhausted disk; removed only this worktree's generated incremental cache and disabled incremental compilation. Initial workspace test hit the existing headless child-cost timeout; full rerun passed.
+- 30 release A/B render pairs against original T17 117f8f94: rows median 24.45→25.30 µs, folded 12.60→13.10, expanded 53.80→55.80, inspector 38.95→39.75 (<5% each).
+- Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
+- Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
+
 ### 2026-10-08 — T15 review repair: notes for every ignored default
 
 - Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
 - Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
 - `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
 
+### 2026-10-08 — T17 review repair: all QQ-owned tools are graded
+
+- Codex (#272) pointed out that `select_tools`, `search_history`, `load_skill`, `spawn_agent`, `wait_agents`, and `cancel_agent` return `query must not be empty` / `invalid arguments:` but sat outside the built-in allowlist, so those corrections stayed red failures and could not fold into a retry. They are now in `ToolErrorKind::of`'s allowlist. External tools still cannot match: the catalog admits only `mcp__`/`ext__` names.
+- Regression: each new name grades both corrections as `Correction` and `invalid credentials` as `Failure`.
+- Merged #267 `4688477f` (ignored-default notes) first; the only conflict was the ledger, kept both entries.
+
 ### 2026-10-08 — T15 review repair: read note before bounding
 
 - Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
 - Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
 - `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.
+
+### 2026-10-08 — T17 review repairs, round 3
+
+Seven Codex findings on 966d93a5, all valid:
+
+- Policy refusals stay failures: `env_not_allowed:`, `use_builtin:`, and `path_escapes_workspace` are in neither list (I had also reintroduced the escape code in the outcome list while merging the earlier repair).
+- Only a numeric nonzero `shell`/`exec` exit is an `Outcome`; `exit=timeout`, `signal:N`, `unknown`, and `exit=0` stay failures.
+- `fetch` with HTTP 404/410 is an `Outcome` (labelled `status=404`); 401/403/429/5xx stay failures.
+- Semantic argument errors are corrections: `ask_user needs …`/`question N …`, `invalid url:`, `task must not be empty`, `id must be a sub-agent id …`.
+- Pre-dispatch rejections keep provenance under any requested name: `unknown tool "…"` and `not executed: this …` grade as corrections, while other `not executed:`/`unknown tool` text from an external name stays a failure.
+- The TUI no longer strips a batch-edit outcome (`edit 1: stale_file: …`) as if it were a header, so its one-line reason survives.
+- Regressions for each in `qq-protocol` and `qq-tui`.
+
+### 2026-10-08 — T17 review repairs, round 4
+
+Five more Codex findings on 4c8cb067, all valid (two were regressions from round 3):
+
+- Denied and interrupted calls have no grade but are errors; the round-3 panel match dropped their reason. An ungraded error again opens the failure panel, as before T17.
+- An expanded outcome (`exec exit=101` plus compiler output) now shows its full text in the warning style, inline and in the inspector; collapsed it still shows one tail line.
+- Pre-dispatch text (`unknown tool "…"`, `not executed: this …`) is trusted only under names that cannot be external; under `mcp__`/`ext__` it stays a `Failure`, since MCP text passes through verbatim.
+- `wait_agents` plural validation errors (`ids may name at most …`, `ids must be sub-agent ids …`) are corrections.
+- `load_skill` `unknown command or skill /…` and the `Sub-agent … is not a background sub-agent …` result of `cancel_agent`/`wait_agents` are outcomes.
+- Regressions in `qq-protocol` (all of the above, including the spoof cases) and `qq-tui` (denied/interrupted panels, expanded outcome).
+
+### 2026-10-08 — T17 review repairs, round 5
+
+Four more Codex findings on 3207f528, all valid. This round audited every error string the QQ-owned tools can return instead of fixing one at a time:
+
+- `spawn_agent` routing the model can change (`no delegation roster is configured`, `model … is not on the delegation roster`, `no roster entry declares the … role`) are corrections. `load_skill` never returns ambiguous or reserved names (`resolve_disclosed` folds both into `unknown command or skill /…`), so that text is not classified. A spent budget, an unavailable spawner, `handle_foreign_session`, and guidance I/O errors stay failures.
+- An expanded correction or outcome uses the normal expanded result budget (12 rows, 4 KiB), not the 6-row, 2 KiB failure panel, and renders under the timing line.
+- A command outcome's label no longer repeats the exit status the row metric already shows (`exit 101`).
+- Regressions in `qq-protocol` (routing and refusal cases) and `qq-tui` (budget, ordering, no duplicate exit).
+
+### 2026-10-08 — T17 review repairs, round 6
+
+Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/`bounded_result`/`spawn_error` string in `qq-core` against both lists:
+
+- `too_deep:` and oversized *content* (`too_large: content exceeds`, `too_large: the edited …`) are corrections. An existing oversized file stays an outcome. `not_utf8:` is an outcome, like `not_text:`.
+- A correction folds only into a successful same-name call from a later turn (`turn_ordinal`). A sibling in the same turn is not a retry.
+- The exit label is suppressed only while the `exit N` metric is actually rendered. A narrow row keeps `exit=N`.

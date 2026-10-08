@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | T15 in review (stacked on #265). 2026-10-06 failure audit (§ D9) opened T15–T17 |
+| Now | T15 in review (stacked on #265); T17 in review (stacked on T15). 2026-10-06 failure audit (§ D9) opened T15–T17 |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
 | Open | T15 default-shaped arguments, T16 Responses empty arguments, T17 error severity in clients (from the D9 audit); T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
@@ -273,25 +273,33 @@ produced `{}`, then make it the fixture. If the capture shows the server
 really sent `{}`, drop the adapter change and record that instead.
 
 **T17 — error severity in clients.** Add `ToolErrorKind { Correction,
-Outcome, Failure }` to `ToolOutput` and an additive, optional
-`error_kind` on the protocol's tool-call result (absent means `Failure`, so
-old clients and stored rows keep today's rendering). Tools pick the kind
-where they build the error:
+Outcome, Failure }`, derived in `qq-protocol` from the built-in tool name
+and result's leading error code (`ToolErrorKind::of`,
+`ToolCallSnapshot::error_kind`). External-tool errors remain `Failure`
+regardless of text. As built,
+it carries no wire field: tool errors already start with a stable `code:`,
+so classifying on read grades every stored row and old peer identically,
+needs no store migration and no `PROTOCOL_VERSION` bump (the snapshot is
+`deny_unknown_fields`, so even an optional field would have been one).
+The classes:
 
 - `Correction`: argument-contract errors (`invalid_*`, `bad_glob`,
   `cursor_invalid`, decode errors) and harness `not executed` refusals.
 - `Outcome`: the call was well-formed and the answer was "no", such as
   `path_not_found`, `not_text`, `range_out_of_bounds`, `stale_file`,
-  `not_found`, `ambiguous`, or a non-zero exit from `exec`/`shell`.
+  `not_found`, `ambiguous`, a numeric non-zero exit from `exec`/`shell`
+  (a timeout, signal, or unknown ending is a `Failure`), or an HTTP 404/410
+  from `fetch`.
 - `Failure`: everything else, including I/O errors, interrupted, denied,
-  and forbidden.
+  forbidden, and refusals: `path_escapes_workspace`, `env_not_allowed`, and
+  `use_builtin` enforce policy and stay visible.
 
 The TUI renders `Correction` as a muted `↻` with no error panel (the text
 stays on expand) and `Outcome` as a warning-colored `!` with a one-line
 reason. Only `Failure` keeps `✕` and the panel. A `Correction` followed in
-the same run by a successful call to the same tool folds into that call's
+the same block by a successful call to the same tool folds into that call's
 row. The model-facing text and the persisted result do not change; this is
-rendering and one additive field.
+rendering only.
 
 Acceptance for the three slices: rerun the D9 queries over a week of
 sessions after they land. The goal is read-side `Correction` below 1 % of
@@ -328,7 +336,7 @@ table is `tools.md` § Approval Policy.
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
-| T17 | `ToolErrorKind` severity: protocol additive `error_kind`, TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `tools/output.rs`, `qq-protocol` tool result, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
+| T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9; remaining: T13 → T14 → T11

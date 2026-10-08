@@ -1665,6 +1665,189 @@ pub struct ToolCallSnapshot {
     pub display: Option<ToolCallDisplay>,
 }
 
+/// How serious an error result is, for rendering only: the model sees the
+/// same text whatever the kind. Derived from the result's leading error code
+/// (tool errors are `code: message`), so it needs no wire field and applies
+/// to every stored row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// The arguments broke the tool's contract (`invalid_*`, `bad_glob`,
+    /// `not executed`, ...). The model corrects them and retries.
+    Correction,
+    /// A well-formed call whose answer was "no": `path_not_found`,
+    /// `stale_file`, a non-zero exit, ...
+    Outcome,
+    /// Anything else: I/O errors, external tool failures, refusals.
+    Failure,
+}
+
+impl ToolErrorKind {
+    /// Classifies an error result's text. Unknown codes are `Failure`, so a
+    /// new error is never quieter than today until it is listed here.
+    #[must_use]
+    pub fn of(name: &str, result: &str) -> Self {
+        // QQ's own pre-dispatch rejections (`not executed: this …` from the
+        // run loop, `unknown tool "…"` from the catalog) are persisted under
+        // whatever name the model requested. A name that cannot be an external
+        // tool (those always start `mcp__`/`ext__`, which the catalog requires)
+        // never reached a host, so the text is QQ's. An external name's text
+        // may come from the server and is never trusted.
+        if !(name.starts_with("mcp__") || name.starts_with("ext__"))
+            && (result.starts_with("not executed: this ") || result.starts_with("unknown tool \""))
+        {
+            return Self::Correction;
+        }
+        // External tools own arbitrary error text; never infer a recoverable
+        // QQ contract error from an external server's message.
+        if !matches!(
+            name,
+            "read_file"
+                | "write_file"
+                | "edit_file"
+                | "search"
+                | "tree"
+                | "list_dir"
+                | "shell"
+                | "exec"
+                | "fetch"
+                | "ask_user"
+                | "read_tool_result"
+                | "select_tools"
+                | "search_history"
+                | "load_skill"
+                | "spawn_agent"
+                | "wait_agents"
+                | "cancel_agent"
+        ) {
+            return Self::Failure;
+        }
+        // A batch edit prefixes its code with the failing edit's index.
+        let text = result
+            .strip_prefix("edit ")
+            .and_then(|rest| rest.split_once(": "))
+            .filter(|(index, _)| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .map_or(result, |(_, rest)| rest);
+        const CORRECTION: &[&str] = &[
+            "invalid_",
+            "invalid arguments:",
+            "bad_glob",
+            "cursor_invalid",
+            "handle_invalid",
+            "not executed:",
+            "not_read:",
+            "tool arguments exceed",
+            // Argument bounds of `write_file`/`edit_file`: shallower path,
+            // smaller content. An existing oversized file is an outcome below.
+            "too_deep:",
+            "too_large: content exceeds",
+            "too_large: the edited ",
+            "regex_too_large:",
+            "outline_unsupported:",
+            "conflicting_edits:",
+            "disproportionate:",
+            "command must not be empty",
+            "query must not be empty",
+            "timeout_seconds must be",
+            "url exceeds",
+            "invalid url:",
+            "ask_user needs ",
+            "question ",
+            "task must not be empty",
+            "id must be a sub-agent id",
+            "ids must be sub-agent ids",
+            "ids may name at most",
+            // `spawn_agent` routing the model can change on retry; a spent
+            // budget or an unavailable spawner is a refusal and stays a failure.
+            "no delegation roster is configured",
+            "no roster entry declares the ",
+        ];
+        // Policy refusals (`env_not_allowed:`, `use_builtin:`) and the
+        // workspace boundary (`path_escapes_workspace`) are deliberately in
+        // neither list: a refused operation stays a visible failure.
+        const OUTCOME: &[&str] = &[
+            "path_not_found",
+            "not_a_file",
+            "not_a_directory",
+            "not_text:",
+            "not_utf8:",
+            "range_out_of_bounds:",
+            "stale_file:",
+            "not_found:",
+            "ambiguous:",
+            "exists:",
+            "too_large:",
+            "spill_missing",
+            "spill_evicted",
+        ];
+        // A command that ran and exited with a number other than zero is an
+        // answer; a timeout, signal, or unknown ending is an execution failure.
+        let command_exit = ["shell exit=", "exec exit="].iter().any(|prefix| {
+            text.strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|code| code.parse::<i32>().ok())
+                .is_some_and(|code| code != 0)
+        });
+        // `fetch <url> status=<n>`: a missing page is an answer; auth, rate
+        // limit, and server errors stay failures.
+        let fetch_missing = name == "fetch"
+            && text.starts_with("fetch ")
+            && text
+                .lines()
+                .next()
+                .and_then(|header| {
+                    header
+                        .split_whitespace()
+                        .find_map(|token| token.strip_prefix("status="))
+                })
+                .is_some_and(|status| matches!(status, "404" | "410"));
+        // Well-formed "no" answers of the orchestration tools: a skill that
+        // is not disclosed, and a child that is not outstanding.
+        let skill_no = name == "load_skill" && text.starts_with("unknown command or skill /");
+        // `model "x" is not on the delegation roster; choose a role instead`.
+        let route_correction = name == "spawn_agent"
+            && text.starts_with("model ")
+            && text.contains(" is not on the delegation roster");
+        let orchestration_no = skill_no
+            || (matches!(name, "cancel_agent" | "wait_agents")
+                && text.starts_with("Sub-agent ")
+                && text.contains(" is not a background sub-agent"));
+        if route_correction || CORRECTION.iter().any(|code| text.starts_with(code)) {
+            Self::Correction
+        } else if command_exit
+            || fetch_missing
+            || orchestration_no
+            || OUTCOME.iter().any(|code| text.starts_with(code))
+        {
+            Self::Outcome
+        } else {
+            Self::Failure
+        }
+    }
+}
+
+impl ToolCallSnapshot {
+    /// The severity of this call's error result; `None` when it succeeded or
+    /// has not finished. Denials and interruptions are their own states and
+    /// are not classified.
+    #[must_use]
+    pub fn error_kind(&self) -> Option<ToolErrorKind> {
+        match self.state {
+            ToolCallState::Completed | ToolCallState::Failed if self.is_error => Some(
+                ToolErrorKind::of(&self.name, self.result.as_deref().unwrap_or_default()),
+            ),
+            ToolCallState::Requested
+            | ToolCallState::AwaitingApproval
+            | ToolCallState::Running
+            | ToolCallState::Completed
+            | ToolCallState::Failed
+            | ToolCallState::Denied
+            | ToolCallState::Interrupted => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
@@ -2352,6 +2535,332 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
             event
+        );
+    }
+
+    /// D9: corrections are the argument-contract codes the model fixes
+    /// itself, outcomes are well-formed "no" answers, and anything else
+    /// (including an unlisted code) stays a failure.
+    #[test]
+    fn tool_error_kinds_follow_the_leading_error_code() {
+        for result in [
+            "invalid_ranges: \"a\" is not <start>[-<end>]",
+            "invalid arguments: missing field `path`",
+            "bad_glob: glob must be 1 to 256 bytes",
+            "cursor_invalid: pass the next= value",
+            "not executed: this turn requested more than 16 tool calls",
+            "edit 0: not_read: a.rs has not been read in this session",
+            "edit 12: invalid_edit: old and new are identical",
+            "invalid url: relative URL without a base",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("read_file", result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for result in [
+            "path_not_found: src/gone.rs",
+            "range_out_of_bounds: 900 > 40 lines",
+            "edit 1: stale_file: a.rs changed since it was read",
+            "not_found: old does not occur in a.rs",
+            "shell exit=1 elapsed=0.1 bytes=0\n",
+            "exec exit=101 elapsed=2.0 bytes=310\nerror[E0308]",
+            "exec exit=-9 elapsed=2.0 bytes=0\n",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("read_file", result),
+                ToolErrorKind::Outcome,
+                "{result}"
+            );
+        }
+        for result in [
+            "",
+            "path is not a file",
+            "could not start the command: No such file or directory",
+            "MCP server returned an error",
+            "edit x: invalid_edit: not an index",
+            "edit : stale_file: missing index",
+            "forbidden: this command is refused under every approval mode",
+            // Refusals stay visible failures, not routine corrections.
+            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+            "use_builtin: rg is refused under policy.builtin_preference=strict",
+            "path_escapes_workspace: ../secret",
+            // Only a numeric nonzero exit is an outcome.
+            "shell exit=0 elapsed=0.1 bytes=0\n",
+            "shell exit=timeout elapsed=30.0 bytes=0\n",
+            "exec exit=signal:9 elapsed=0.1 bytes=0\n",
+            "exec exit=unknown elapsed=0.1 bytes=0\n",
+            "shell exit=1oops elapsed=0.1 bytes=0\n",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("read_file", result),
+                ToolErrorKind::Failure,
+                "{result:?}"
+            );
+        }
+        for result in [
+            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+            "shell exit=timeout elapsed=30.0 bytes=0\n",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("shell", result),
+                ToolErrorKind::Failure,
+                "{result:?}"
+            );
+        }
+
+        // Semantic argument errors of the other QQ-owned tools.
+        for (name, result) in [
+            ("ask_user", "ask_user needs 1-4 questions, got 0"),
+            ("ask_user", "question 1 is empty or longer than 512 bytes"),
+            (
+                "ask_user",
+                "question 2 needs 2-6 options (or free_text with no options), got 1",
+            ),
+            ("fetch", "invalid url: relative URL without a base"),
+            ("spawn_agent", "task must not be empty"),
+            (
+                "cancel_agent",
+                "id must be a sub-agent id from a spawn_agent result",
+            ),
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, result),
+                ToolErrorKind::Correction,
+                "{name}: {result}"
+            );
+        }
+
+        // A fetch that reached the server and found nothing is an answer;
+        // auth, rate-limit, and server errors stay failures.
+        for status in ["404", "410"] {
+            assert_eq!(
+                ToolErrorKind::of(
+                    "fetch",
+                    &format!("fetch http://h/x status={status} type=text/plain bytes=9\nbody")
+                ),
+                ToolErrorKind::Outcome,
+                "{status}"
+            );
+        }
+        for status in ["401", "403", "429", "500", "503"] {
+            assert_eq!(
+                ToolErrorKind::of(
+                    "fetch",
+                    &format!("fetch http://h/x status={status} type=text/plain bytes=9\nbody")
+                ),
+                ToolErrorKind::Failure,
+                "{status}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "fetch http://h/x status=404"),
+            ToolErrorKind::Failure
+        );
+
+        // QQ's own pre-dispatch rejections keep their provenance for names
+        // that cannot be external; text under an `mcp__`/`ext__` name may come
+        // from the server and is never trusted, even when it looks the same.
+        for name in ["made_up", "shell_v2"] {
+            for result in [
+                "unknown tool \"made_up\"",
+                "not executed: this turn requested more than 16 tool calls and only the first 16 ran; call this again next turn",
+            ] {
+                assert_eq!(
+                    ToolErrorKind::of(name, result),
+                    ToolErrorKind::Correction,
+                    "{name}: {result}"
+                );
+            }
+            assert_eq!(
+                ToolErrorKind::of(name, "unknown tool in the upstream catalog"),
+                ToolErrorKind::Failure,
+                "{name}"
+            );
+        }
+        for name in ["mcp__srv__tool", "ext__host__tool"] {
+            for result in [
+                "unknown tool \"widget\"",
+                "not executed: this operation is unavailable",
+                "not executed: this turn requested more than 16 tool calls",
+            ] {
+                assert_eq!(
+                    ToolErrorKind::of(name, result),
+                    ToolErrorKind::Failure,
+                    "{name}: {result}"
+                );
+            }
+        }
+
+        // The remaining orchestration validation errors and "no" answers.
+        for result in [
+            "ids may name at most 8 sub-agents",
+            "ids must be sub-agent ids from spawn_agent results",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("wait_agents", result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for (name, result) in [
+            ("load_skill", "unknown command or skill /missing"),
+            (
+                "cancel_agent",
+                "Sub-agent 0123 is not a background sub-agent of this run that is still outstanding (its answer may already have reached you).",
+            ),
+            (
+                "wait_agents",
+                "Sub-agent 0123 is not a background sub-agent of this run that is still outstanding (its answer may already have reached you).",
+            ),
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, result),
+                ToolErrorKind::Outcome,
+                "{name}: {result}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "unknown command or skill /missing"),
+            ToolErrorKind::Failure
+        );
+
+        // `spawn_agent` routing the model can change, versus refusals it cannot.
+        for (name, result, kind) in [
+            (
+                "write_file",
+                "too_deep: at most 8 missing parent directories are created",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "write_file",
+                "too_large: content exceeds the 8 MiB file size limit",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "edit_file",
+                "edit 0: too_large: the edited a.rs exceeds the 8 MiB file size limit",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "edit_file",
+                "edit 0: too_large: file exceeds the 8 MiB editable size limit",
+                ToolErrorKind::Outcome,
+            ),
+            (
+                "edit_file",
+                "edit 0: not_utf8: a.bin is not valid UTF-8",
+                ToolErrorKind::Outcome,
+            ),
+        ] {
+            assert_eq!(ToolErrorKind::of(name, result), kind, "{result}");
+        }
+        for result in [
+            "no delegation roster is configured, so role cannot be used; omit role (and model) to use the configured worker model",
+            "model \"gpt-x\" is not on the delegation roster; choose a role instead or use one of the listed routes",
+            "no roster entry declares the reviewer role; choose one of the roles listed in the system prompt",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("spawn_agent", result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for result in [
+            "this run cannot afford a sub-agent: its cost budget is spent; continue with what you have",
+            "spawn_agent is not available in this session: this run is at the deepest delegation level its configuration permits.",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("spawn_agent", result),
+                ToolErrorKind::Failure,
+                "{result}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("load_skill", "selected guidance a.md is not a regular file"),
+            ToolErrorKind::Failure
+        );
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "handle_foreign_session: stored outputs are readable only by the session that produced them"
+            ),
+            ToolErrorKind::Failure
+        );
+
+        // Every QQ-owned tool is graded; external tools live under `mcp__`
+        // and `ext__`, which the catalog requires, so they cannot take these
+        // names.
+        for name in [
+            "select_tools",
+            "search_history",
+            "load_skill",
+            "spawn_agent",
+            "wait_agents",
+            "cancel_agent",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, "query must not be empty"),
+                ToolErrorKind::Correction,
+                "{name}"
+            );
+            assert_eq!(
+                ToolErrorKind::of(name, "invalid arguments: missing field `id`"),
+                ToolErrorKind::Correction,
+                "{name}"
+            );
+            assert_eq!(
+                ToolErrorKind::of(name, "invalid credentials"),
+                ToolErrorKind::Failure,
+                "{name}"
+            );
+        }
+
+        for name in ["mcp__example__read", "external", "embedded_read"] {
+            for result in [
+                "invalid credentials",
+                "invalid_arguments: denied",
+                "not_found: service unavailable",
+            ] {
+                assert_eq!(ToolErrorKind::of(name, result), ToolErrorKind::Failure);
+            }
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "invalid credentials"),
+            ToolErrorKind::Failure
+        );
+
+        let call = |state, result: &str, is_error| ToolCallSnapshot {
+            id: id(7),
+            session_id: id(3),
+            run_id: id(4),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: "{}".to_owned(),
+            state,
+            result: Some(result.to_owned()),
+            is_error,
+            display: None,
+        };
+        assert_eq!(
+            call(ToolCallState::Failed, "invalid_ranges: x", true).error_kind(),
+            Some(ToolErrorKind::Correction)
+        );
+        assert_eq!(
+            call(ToolCallState::Completed, "invalid_ranges", false).error_kind(),
+            None
+        );
+        // Denials and interruptions are states of their own, not errors to grade.
+        assert_eq!(
+            call(ToolCallState::Denied, "invalid_x", true).error_kind(),
+            None
+        );
+        assert_eq!(
+            call(ToolCallState::Interrupted, "not executed:", true).error_kind(),
+            None
         );
     }
 

@@ -1016,6 +1016,354 @@ fn error_results_expand_under_the_summary_by_default() {
     assert_eq!(rows[3].trim_end(), "   ┃");
 }
 
+/// D9: a self-corrected argument is a muted `↻ corrected` with no panel, an
+/// outcome a warning `!` with its code and one line of reason, and only a
+/// failure keeps `✕` and the panel (above).
+#[test]
+fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
+    let render = |calls: &[&ToolCallSnapshot], detail| {
+        let lines =
+            render_tool_calls_simple(calls, &HashMap::new(), detail, 0, 120, &|_, _| Vec::new());
+        (squashed_rows(&lines), lines)
+    };
+    let corrected = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs","ranges":["x"]}"#,
+        ToolCallState::Failed,
+        Some("invalid_ranges: \"x\" is not <start>[-<end>]"),
+        true,
+    );
+    let (rows, lines) = render(&[&corrected], SimpleDetail::Rows);
+    assert_eq!(rows, [" ↻ Read a.rs corrected"]);
+    assert_eq!(style_of(&lines, "↻"), Some(muted()));
+    // Expanded, the model-facing text is still there, muted.
+    let (rows, _) = render(&[&corrected], SimpleDetail::Expanded);
+    assert!(
+        rows.iter().any(|row| row.contains("invalid_ranges")),
+        "{rows:?}"
+    );
+
+    let missing = tool_call_snapshot(
+        2,
+        "read_file",
+        r#"{"path":"gone.rs"}"#,
+        ToolCallState::Failed,
+        Some("path_not_found: gone.rs\nclosest: src/gone.rs"),
+        true,
+    );
+    let (rows, lines) = render(&[&missing], SimpleDetail::Rows);
+    assert_eq!(rows[0], " ! Read gone.rs path_not_found");
+    assert_eq!(style_of(&lines, "!"), Some(warning()));
+    // One row of reason, the tail line, after the `…` that says there is
+    // more on expand, inside the panel padding.
+    assert_eq!(rows.len(), 1 + 2 + TOOL_PANEL_PADDING_ROWS, "{rows:?}");
+    assert!(rows[3].contains("closest: src/gone.rs"), "{rows:?}");
+
+    // The successful retry is the record; the correction before it folds
+    // away, and a block of retried reads still collapses to one summary.
+    let mut retried = tool_call_snapshot(
+        3,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Completed,
+        Some("read a.rs L1-1/1 h:000000000000\n1\tx\n"),
+        false,
+    );
+    // A sibling call in the same turn is not a retry: the model had not
+    // seen the error yet, so the correction keeps its row.
+    let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    retried.turn_ordinal = corrected.turn_ordinal + 1;
+    let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].starts_with(" ● Read a.rs"), "{rows:?}");
+    // A correction of a different tool is not absorbed.
+    let other = tool_call_snapshot(
+        4,
+        "search",
+        r#"{"query":"x"}"#,
+        ToolCallState::Completed,
+        Some("search \"x\" mode=content matches=0/0 files=0 scanned=0\n"),
+        false,
+    );
+    let (rows, _) = render(&[&corrected, &other], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // Folded: three good reads plus an absorbed correction fold like four.
+    let reads: Vec<ToolCallSnapshot> = (5..9)
+        .map(|byte| {
+            let mut read = tool_call_snapshot(
+                byte,
+                "read_file",
+                &format!(r#"{{"path":"f{byte}.rs"}}"#),
+                ToolCallState::Completed,
+                Some("read f.rs L1-1/1 h:000000000000\n1\tx\n"),
+                false,
+            );
+            read.turn_ordinal = corrected.turn_ordinal + 1;
+            read
+        })
+        .collect();
+    let mut block: Vec<&ToolCallSnapshot> = vec![&corrected];
+    block.extend(reads.iter());
+    let (rows, _) = render(&block, SimpleDetail::Folded);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("Read ×4"), "{rows:?}");
+}
+
+#[test]
+fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
+    let corrected = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Failed,
+        Some("invalid_ranges: fix the range"),
+        true,
+    );
+    let row = ToolRow::derive(&corrected);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_detail: false,
+        fold: false,
+        selected: false,
+    };
+    let transcript = tools::render_tool_calls(
+        &[&corrected],
+        &HashMap::new(),
+        &|_| context,
+        0,
+        120,
+        &|_, _| Vec::new(),
+        &|_, _| Vec::new(),
+    );
+    assert!(
+        !squashed_rows(&transcript)
+            .iter()
+            .any(|row| row.contains("fix the range"))
+    );
+    let inspector = tools::tool_expanded_lines(&corrected, context, 120);
+    assert!(
+        squashed_rows(&inspector)
+            .iter()
+            .any(|row| row.contains("fix the range"))
+    );
+    for (name, result, label) in [
+        ("edit_file", "edit 1: stale_file: changed", "stale_file"),
+        ("exec", "exec exit=101 elapsed=1 bytes=0", "exit 101"),
+        ("shell", "shell exit=1 elapsed=1 bytes=0", "exit 1"),
+    ] {
+        let call = tool_call_snapshot(2, name, "{}", ToolCallState::Failed, Some(result), true);
+        let rows = squashed_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert!(rows[0].contains(label), "{rows:?}");
+    }
+    // On a row too narrow for the metric, the label keeps the exit code.
+    let long = tool_call_snapshot(
+        3,
+        "exec",
+        r#"{"program":"cargo","args":["test","--workspace","--all-features","--no-fail-fast"]}"#,
+        ToolCallState::Failed,
+        Some("exec exit=101 elapsed=1 bytes=0"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&long],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        24,
+        &|_, _| Vec::new(),
+    ));
+    assert!(rows[0].contains("exit=101"), "{rows:?}");
+    // The one-line reason under a batch-edit outcome survives header
+    // stripping, and a fetch 404 is labelled by its status.
+    let stale = tool_call_snapshot(
+        4,
+        "edit_file",
+        "{}",
+        ToolCallState::Failed,
+        Some("edit 1: stale_file: a.rs changed since it was read"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&stale],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("a.rs changed since it was read")),
+        "{rows:?}"
+    );
+    let missing = tool_call_snapshot(
+        5,
+        "fetch",
+        "{}",
+        ToolCallState::Failed,
+        Some("fetch http://h/missing status=404 type=text/plain bytes=9\nnot found"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&missing],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows[0].contains("status=404") && !rows[0].contains('✕'),
+        "{rows:?}"
+    );
+    let external = tool_call_snapshot(
+        3,
+        "mcp__server__read",
+        "{}",
+        ToolCallState::Failed,
+        Some("invalid credentials"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&external],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(rows[0].contains('✕'), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.contains("invalid credentials")),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output() {
+    for (state, reason) in [
+        (ToolCallState::Denied, "denied by policy: rm is forbidden"),
+        (ToolCallState::Interrupted, "interrupted before it finished"),
+    ] {
+        let call = tool_call_snapshot(1, "shell", "{}", state, Some(reason), true);
+        let rows = squashed_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert!(rows.iter().any(|row| row.contains(reason)), "{rows:?}");
+    }
+
+    let output = "exec exit=101 elapsed=2.0 bytes=90\nerror[E0308]: mismatched types\n --> src/lib.rs:3:5\nhelp: try this";
+    let outcome = tool_call_snapshot(2, "exec", "{}", ToolCallState::Failed, Some(output), true);
+    // Collapsed: one line of the tail.
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&outcome],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows.iter().any(|row| row.contains("help: try this")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("mismatched types")),
+        "{rows:?}"
+    );
+    // Expanded, in the inspector or inline: every diagnostic line.
+    let row = ToolRow::derive(&outcome);
+    for inline_detail in [false, true] {
+        let context = ToolRowContext {
+            row: &row,
+            clock: RowClock {
+                timing: qq_client::state::ToolCallTiming::default(),
+                now_ms: 0,
+            },
+            expanded: true,
+            inline_detail,
+            fold: false,
+            selected: false,
+        };
+        let lines = squashed_rows(&tools::tool_expanded_lines(&outcome, context, 120));
+        assert!(
+            lines.iter().any(|line| line.contains("mismatched types"))
+                && lines.iter().any(|line| line.contains("src/lib.rs:3:5")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn expanded_outcomes_use_the_result_budget_under_the_timing_line_without_repeating_the_exit() {
+    let diagnostics: String = (1..=10).map(|n| format!("diagnostic {n}\n")).collect();
+    let result = format!("exec exit=101 elapsed=2.0 bytes=90\n{diagnostics}");
+    let call = tool_call_snapshot(1, "exec", "{}", ToolCallState::Failed, Some(&result), true);
+    // The row names the exit once: the metric, not the label as well.
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&call],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows[0].matches("101").count(), 1, "{rows:?}");
+
+    let row = ToolRow::derive(&call);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming {
+                started_at_ms: Some(1_000),
+                finished_at_ms: Some(3_000),
+                ..qq_client::state::ToolCallTiming::default()
+            },
+            now_ms: 3_000,
+        },
+        expanded: true,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
+    // More than the six-row failure panel: the normal expanded budget.
+    assert!(
+        lines.iter().any(|line| line.contains("diagnostic 10"))
+            && lines.iter().any(|line| line.contains("diagnostic 5")),
+        "{lines:?}"
+    );
+    // Timing comes first, then the detail panel.
+    let timing = lines
+        .iter()
+        .position(|line| line.contains("started"))
+        .unwrap();
+    let detail = lines
+        .iter()
+        .position(|line| line.contains("diagnostic 1"))
+        .unwrap();
+    assert!(timing < detail, "{lines:?}");
+}
+
 #[test]
 fn pending_states_show_their_glyph_and_label() {
     let awaiting = tool_call_snapshot(
