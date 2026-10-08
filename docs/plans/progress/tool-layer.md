@@ -345,3 +345,9 @@ vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
 - Codex (#272) pointed out that `select_tools`, `search_history`, `load_skill`, `spawn_agent`, `wait_agents`, and `cancel_agent` return `query must not be empty` / `invalid arguments:` but sat outside the built-in allowlist, so those corrections stayed red failures and could not fold into a retry. They are now in `ToolErrorKind::of`'s allowlist. External tools still cannot match: the catalog admits only `mcp__`/`ext__` names.
 - Regression: each new name grades both corrections as `Correction` and `invalid credentials` as `Failure`.
 - Merged #267 `4688477f` (ignored-default notes) first; the only conflict was the ledger, kept both entries.
+
+### 2026-10-08 — T15 review repair: read note before bounding
+
+- Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
+- Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.
