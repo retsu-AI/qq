@@ -154,7 +154,8 @@ Agent packs add a third source: a pack selected by the session's profile
 contributes its declared skill and command roots as `pack:<id>/...` between
 the native and compatibility tiers, and prepends its persona to the system
 prompt. Packs are directories with a `pack.ron` manifest discovered from the
-global configuration directory and, for trusted projects, `.qq/packs/`; see
+global configuration directory and `.qq/packs/` (each project manifest
+admitted only once its exact content is trusted); see
 `docs/design/architecture.md`.
 
 User-home, administrator-managed, and bundled roots are reserved follow-up

@@ -89,9 +89,9 @@ pub(super) fn load_for_client(
     let mut report = LoadReport {
         sources: vec![compiled_report],
         pending: Vec::new(),
+        loaded_packs: 0,
     };
     let mut seen = BTreeSet::new();
-    let mut admitted_packs = 0_usize;
 
     // Discovered packs are the lowest lane: global first, then each project
     // directory root-to-leaf, so a nearer pack of the same id replaces a
@@ -101,7 +101,7 @@ pub(super) fn load_for_client(
         &loader.paths.global_dir.join("packs"),
         SourceKind::Global,
         probes,
-        &mut admitted_packs,
+        &mut report.loaded_packs,
     )? {
         merged.admit_pack(pack);
     }
@@ -140,7 +140,7 @@ pub(super) fn load_for_client(
             &directory.join(".qq").join("packs"),
             SourceKind::Project,
             probes,
-            &mut admitted_packs,
+            &mut report.loaded_packs,
         )? {
             if let Some(pack) = withhold_untrusted_pack(pack, &trust, &mut report.pending) {
                 merged.admit_pack(pack);
@@ -505,13 +505,13 @@ fn scan_pending_trust(
     probes: &mut Probes,
 ) -> Result<Vec<PendingTrust>, ConfigError> {
     let mut pending = Vec::new();
-    let mut discovered_packs = 0_usize;
+    let mut loaded_packs = 0_usize;
     for directory in project_directories(cwd, probes) {
         for pack in crate::pack::discover(
             &directory.join(".qq").join("packs"),
             SourceKind::Project,
             probes,
-            &mut discovered_packs,
+            &mut loaded_packs,
         )? {
             withhold_untrusted_pack(pack, trust, &mut pending);
         }
@@ -532,7 +532,7 @@ fn scan_pending_trust(
         for candidate in candidates {
             let (source, content) = read_candidate(&candidate)?;
             let document = Document::parse(&content, &source)?;
-            for pack in explicit_project_packs(&document, &source, probes)? {
+            for pack in explicit_project_packs(&document, &source, probes, &mut loaded_packs)? {
                 withhold_untrusted_pack(pack, trust, &mut pending);
             }
             let Some(digest) = document.sensitive_digest()? else {
@@ -736,6 +736,9 @@ pub(super) struct FileCandidate {
 struct LoadReport {
     sources: Vec<SourceReport>,
     pending: Vec<PendingTrust>,
+    /// Pack manifests read so far, admitted or withheld; bounded by
+    /// `MAX_PACKS` across discovery and explicit entries.
+    loaded_packs: usize,
 }
 
 fn apply_candidate(
@@ -785,18 +788,11 @@ fn apply_document(
     let sensitive = pending_digest.is_none();
     merged.apply_document(&document, &source, sensitive);
     if sensitive {
-        apply_explicit_packs(
-            &document,
-            &source,
-            trust,
-            merged,
-            &mut report.pending,
-            probes,
-        )?;
+        apply_explicit_packs(&document, &source, trust, merged, report, probes)?;
     } else {
         // The file's own entry is pending; list the manifests it names too so
         // one review covers everything trusting this file would admit.
-        for pack in explicit_project_packs(&document, &source, probes)? {
+        for pack in explicit_project_packs(&document, &source, probes, &mut report.loaded_packs)? {
             withhold_untrusted_pack(pack, trust, &mut report.pending);
         }
     }
@@ -827,7 +823,7 @@ fn apply_explicit_packs(
     source: &SourceIdentity,
     trust: &TrustState,
     merged: &mut MergeState,
-    pending: &mut Vec<PendingTrust>,
+    report: &mut LoadReport,
     probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     use crate::document::{Field, PackPatch};
@@ -851,9 +847,16 @@ fn apply_explicit_packs(
                                 path: resolved,
                             });
                         }
-                        let pack =
-                            crate::pack::load_explicit(&resolved, id, source.kind(), probes)?;
-                        if let Some(pack) = withhold_untrusted_pack(pack, trust, pending) {
+                        let pack = crate::pack::load_explicit(
+                            &resolved,
+                            id,
+                            source.kind(),
+                            probes,
+                            &mut report.loaded_packs,
+                        )?;
+                        if let Some(pack) =
+                            withhold_untrusted_pack(pack, trust, &mut report.pending)
+                        {
                             merged.admit_pack(pack);
                         }
                     }
@@ -871,6 +874,7 @@ fn explicit_project_packs(
     document: &Document,
     source: &SourceIdentity,
     probes: &mut Probes,
+    loaded: &mut usize,
 ) -> Result<Vec<crate::AgentPack>, ConfigError> {
     use crate::document::{Field, PackPatch};
     let mut packs = Vec::new();
@@ -893,6 +897,7 @@ fn explicit_project_packs(
                 id,
                 source.kind(),
                 probes,
+                loaded,
             )?);
         }
     }

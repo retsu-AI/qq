@@ -4180,6 +4180,51 @@ fn explicit_project_pack_manifests_are_trust_gated_by_content() {
 }
 
 #[test]
+fn explicit_pack_reads_before_trust_are_bounded() {
+    // An untrusted project file's explicit entries are read for review
+    // before anyone consents, so they share the per-load pack bound with
+    // discovery instead of letting a repository make every load read and
+    // parse an unbounded number of manifests.
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    let mut entries = String::new();
+    for index in 0..=MAX_PACKS {
+        let id = format!("kit-{index}");
+        tree.write(
+            format!("work/vendor/{id}/pack.ron"),
+            &format!(r#"(schema: 1, id: "{id}", version: "1.0.0")"#),
+        );
+        entries.push_str(&format!(r#""{id}": Pack(path: "../vendor/{id}"), "#));
+    }
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {entries} }})"),
+    );
+    let request = tree.request();
+
+    let loaded = tree.loader().load(&request);
+    assert!(
+        matches!(loaded, Err(ConfigError::TooManyPacks { limit: MAX_PACKS })),
+        "{loaded:?}"
+    );
+    let scanned = tree.loader().pending_trust(&request);
+    assert!(
+        matches!(scanned, Err(ConfigError::TooManyPacks { limit: MAX_PACKS })),
+        "{scanned:?}"
+    );
+
+    // At the bound, one review covers the file and every manifest it names.
+    fs::remove_dir_all(tree.path(format!("work/vendor/kit-{MAX_PACKS}"))).unwrap();
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("an untrusted project file requires trust");
+    };
+    assert_eq!(pending.len(), MAX_PACKS + 1, "the file and its packs");
+}
+
+#[test]
 fn agent_pack_manifests_fail_fast_on_every_documented_error() {
     let tree = TempTree::new();
     tree.write(

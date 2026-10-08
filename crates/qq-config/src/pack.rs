@@ -288,11 +288,12 @@ impl AgentPack {
 
 /// Discovers packs under `directory/<id>/pack.ron`. Absent or empty
 /// directories contribute nothing; every path inspected is recorded.
+/// `loaded` counts manifests read in this load, admitted or withheld.
 pub(crate) fn discover(
     directory: &Path,
     kind: SourceKind,
     probes: &mut Probes,
-    admitted: &mut usize,
+    loaded: &mut usize,
 ) -> Result<Vec<AgentPack>, ConfigError> {
     probes.record(directory);
     crate::loader::reject_symlink_components(directory)?;
@@ -334,27 +335,35 @@ pub(crate) fn discover(
             // unrelated content under `packs/` cannot fail configuration.
             continue;
         }
-        if *admitted >= MAX_PACKS {
+        if *loaded >= MAX_PACKS {
             return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
         }
         let pack = load_pack(&pack_directory, &id, kind)?;
-        *admitted += 1;
+        *loaded += 1;
         packs.push(pack);
     }
     Ok(packs)
 }
 
 /// Loads one explicitly declared pack directory. `expected_id` is the
-/// configuration key it was declared under.
+/// configuration key it was declared under. Explicit entries share the
+/// `loaded` bound with discovery: an untrusted project file's entries are
+/// read for review before consent, so their count must not be unbounded.
 pub(crate) fn load_explicit(
     directory: &Path,
     expected_id: &str,
     kind: SourceKind,
     probes: &mut Probes,
+    loaded: &mut usize,
 ) -> Result<AgentPack, ConfigError> {
     probes.record(directory);
     probes.record(&directory.join(PACK_MANIFEST_FILE));
-    load_pack(directory, expected_id, kind)
+    if *loaded >= MAX_PACKS {
+        return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
+    }
+    let pack = load_pack(directory, expected_id, kind)?;
+    *loaded += 1;
+    Ok(pack)
 }
 
 fn load_pack(

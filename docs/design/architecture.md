@@ -630,10 +630,15 @@ An agent pack is a directory with a `pack.ron` manifest (`PACK_SCHEMA_VERSION
 = 1`) declaring an identifier, version, optional persona file, skill and
 command roots, a tool allow/deny policy, per-profile MCP subsets, and the
 minimum protocol version it requires. `qq-config` discovers packs from
-`<global>/packs/<id>/` and, when the project is trusted, `.qq/packs/<id>/`
-root-to-leaf, plus explicit `packs:` entries; at most 32 are admitted, later
-layers win by identifier, and every manifest error is a typed configuration
-failure that names the pack. Pack profiles merge beneath the configuration's
+`<global>/packs/<id>/` and `.qq/packs/<id>/` root-to-leaf, plus explicit
+`packs:` entries; at most 32 manifests are read per load, later layers win
+by identifier, and every manifest error is a typed configuration failure
+that names the pack. A project pack (discovered under `.qq/packs/` or named
+by a project file) is its own trust subject: it is admitted only when a
+trust record covers its canonical manifest path and the SHA-256 of its
+bytes, independent of whether the directory's configuration is trusted.
+Manifests named by a still-pending project file are listed in the same
+pending set, so one review covers both. Pack profiles merge beneath the configuration's
 own `profiles` in the same flat namespace and a name declared by both is a
 conflict, not a silent override.
 
