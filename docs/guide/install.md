@@ -128,12 +128,17 @@ qq config paths     # where QQ will look for configuration and keep sessions
 Rerun the route you installed with (`install.sh`, `brew upgrade qq`,
 `nix profile upgrade`, `cargo binstall --git … qq`). QQ uses 0ver: a patch
 release can change compatibility contracts. Read the release's **Upgrading**
-notes before upgrading, back up the session store in the `data` directory
-printed by `qq config paths`, and upgrade/restart server and clients together
-when the protocol changes. `qq version` shows the store schema QQ migrates to
-on first open; migrations are forward-only, so rollback needs the old binary
-and a pre-upgrade backup. Release notes are on the
+notes before upgrading. Locate the session store in the `data` directory
+printed by `qq config paths`. For a safe backup, stop every QQ process
+(`qq serve`, the TUI, and any `qq run`) and copy `sessions.sqlite3` together
+with any adjacent `sessions.sqlite3-wal` and `sessions.sqlite3-shm` files.
+If QQ must stay running, use SQLite's consistent `.backup` instead; do not
+copy a live database or data directory non-atomically. Follow the absolute-path
+backup and rollback procedure in the release's **Upgrading** notes on the
 [releases page](https://github.com/retsu-AI/qq/releases).
+Upgrade/restart server and clients together when the protocol changes.
+`qq version` shows the store schema QQ migrates to on first open; migrations
+are forward-only, so rollback needs the old binary and a pre-upgrade backup.
 
 ## Uninstall
 
