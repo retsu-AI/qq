@@ -4,12 +4,12 @@
 
 | | |
 | --- | --- |
-| Now | T15, T16, T17 in review (stacked: #265 ← T15 ← T17 ← T16). 2026-10-06 failure audit (§ D9) opened T15–T17 |
+| Now | T15–T17 merged (#267, #273, #272); D9's week-of-use outcome measurement remains open. T13 ablations and T14/T11 are next; T10 remains gated |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
-| Open | T15 default-shaped arguments, T16 Responses empty arguments, T17 error severity in clients (from the D9 audit); T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
+| Open | D9 post-merge qualification; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
 
-Updated 2026-10-06. Opened 2026-09-11; supersedes the R6 search/patch/terminal
+Updated 2026-10-08. Opened 2026-09-11; supersedes the R6 search/patch/terminal
 candidates in `terminal-bench-readiness.md` § Phase 6 (which keep their
 evaluation method and acceptance targets). The per-feature harness catalog
 that motivated it is superseded by

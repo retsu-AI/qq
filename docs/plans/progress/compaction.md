@@ -9,8 +9,8 @@ newest last.
 | CX0 | Plan, ADR-0056, ledger and baseline | Shipped (`d3de2996`) | [ENG-993](https://linear.app/retsu-ai/issue/ENG-993) | [#239](https://github.com/retsu-AI/qq/pull/239) | Same PR as CX1 |
 | CX1 | Narrative plus rendered record; resolved output cap | Shipped (`d3de2996`) | [ENG-994](https://linear.app/retsu-ai/issue/ENG-994) | [#239](https://github.com/retsu-AI/qq/pull/239) | No schema or protocol change |
 | CX2 | Cache-aligned summarizer requests | Shipped (`c37afe25`) | [ENG-995](https://linear.app/retsu-ai/issue/ENG-995) | [#250](https://github.com/retsu-AI/qq/pull/250) | |
-| CX3 | Durable prune watermark | In review | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 42 → 43; stacked on #252 |
-| CX4 | `RunActivity::Compacting` | In review | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
+| CX3 | Durable prune watermark | Shipped (`065cdf33`) | [ENG-996](https://linear.app/retsu-ai/issue/ENG-996) | [#254](https://github.com/retsu-AI/qq/pull/254) | Schema 42 → 43 |
+| CX4 | `RunActivity::Compacting` | Shipped (`fc3205da`) | [ENG-997](https://linear.app/retsu-ai/issue/ENG-997) | [#252](https://github.com/retsu-AI/qq/pull/252) | `PROTOCOL_VERSION` 30 → 31; takes AC14's compaction-activity item |
 | CX5 | Live qualification | Planned | [ENG-998](https://linear.app/retsu-ai/issue/ENG-998) | | 7 days after CX3 |
 
 ## Entries
@@ -474,3 +474,9 @@ CX3 is stacked on CX4 (#252). Store schema 41 → 42 adds
   seam. The test now uses ten reads in a 24k window, so the second prompt
   sits below the threshold. It also asserts the watermark did not move
   between the runs, and it still fails if the seam records the wrong turn.
+
+### 2026-10-08 — v0.1.6 release reconciliation
+
+- CX4 #252 merged `fc3205da`; CX3 #254 merged `065cdf33`; current-state rows corrected to shipped.
+- CX5 remains unqualified. Seven days after CX3's merge is 2026-10-14 17:34 UTC; deployment and sufficient normal use must be confirmed before recording acceptance.
+- v0.1.6 includes the implementation without claiming the live <30-second p50 target or completed seven-day qualification.

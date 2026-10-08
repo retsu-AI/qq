@@ -21,9 +21,9 @@ newest last.
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
-| T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
-| T16 | Responses arguments from `*.done` events | In review | `fix/eng-1012-t16-responses-done-arguments` (stacked on T17) | D9 audit; confirmed by a captured Codex stream |
-| T17 | `ToolErrorKind` severity in clients | In review | `feat/eng-1012-t17-tool-error-kind` (stacked on #267) | D9 audit; derived from the error code, no wire field |
+| T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
+| T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
+| T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 
 ## Entries
 
@@ -431,3 +431,12 @@ Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/
 - `too_deep:` and oversized *content* (`too_large: content exceeds`, `too_large: the edited …`) are corrections. An existing oversized file stays an outcome. `not_utf8:` is an outcome, like `not_text:`.
 - A correction folds only into a successful same-name call from a later turn (`turn_ordinal`). A sibling in the same turn is not a retry.
 - The exit label is suppressed only while the `exit N` metric is actually rendered. A narrow row keeps `exit=N`.
+
+### 2026-10-08 — v0.1.6 release reconciliation
+
+- Audit #265 merged `87c81cdd`; T15 #267 `409dd758`, T17 #272 `6d46e257`, T16 #273 `1844b434` are shipped on main.
+- Release branch inherits the final review repairs, including normalization notes and conservative error grading; no unpushed review-worktree changes were imported.
+- D9's week-of-use correction/error-rate qualification remains open; fixtures and review receipts do not establish the <1% live target.
+- Release upgrade notes name protocol 31, descriptor 13, schema 43, and the new exact-content project-pack trust requirement; guide version pins intentionally remain v0.1.5 until assets publish.
+- Release docs verification: docs-truth 23/23, fmt, workspace all-target/all-feature Clippy, build, and final default-parallel workspace tests passed; `git diff --check` passed.
+- Two earlier workspace runs hit existing headless/progress timeout failures; the headless isolated rerun passed. Serial run was declined and not retried; final normal workspace run passed. Logs `target/release-0.1.6-{clippy,tests,tests-rerun,tests-final}.log`; no root-cause claim.
