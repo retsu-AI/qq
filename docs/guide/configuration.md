@@ -251,7 +251,9 @@ A pack is a directory with `pack.ron` that bundles profiles, a persona
 prompt, skills, commands, and MCP declarations. Packs are discovered from
 `<global>/packs/<id>/` and `.qq/packs/<id>/`, or declared explicitly. A
 project pack (discovered under `.qq/packs/` or named by a project file) loads
-only once you have trusted that exact `pack.ron`; editing it asks again:
+only once you have trusted that exact `pack.ron`; editing it asks again. A
+project file's `path` must stay inside the repository (no absolute path,
+`..` out of it, or symbolic link):
 
 ```ron
 packs: {
@@ -283,8 +285,9 @@ packs: {
 )
 ```
 
-Limits: 32 packs per load, 16 profiles per pack, 64 KiB manifest. A pack
-profile shadows nothing: a profile of the same name in your config wins.
+Limits: 32 pack directories per load (including ones without a
+`pack.ron`), 16 profiles per pack, 64 KiB manifest. A pack profile shadows
+nothing: a profile of the same name in your config wins.
 
 ## `delegation`
 

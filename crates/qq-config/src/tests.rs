@@ -4253,11 +4253,36 @@ fn explicit_pack_reads_before_trust_are_bounded() {
 }
 
 #[test]
-fn an_untrusted_file_cannot_make_qq_read_packs_outside_the_project() {
-    // Before consent, a pending file's explicit entries are read only
-    // beneath the project root: an absolute or `..` path (a UNC share, an
-    // automount) is not touched until the file itself is trusted. The
-    // outside manifest is invalid, so reading it would fail the load.
+fn placeholder_pack_directories_spend_the_load_budget() {
+    // Directories without a manifest are ignored, but each is listed and
+    // probed on every load, so they count toward the bound too.
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    for index in 0..MAX_PACKS {
+        fs::create_dir_all(tree.path(format!("work/.qq/packs/empty-{index}"))).unwrap();
+    }
+    let request = tree.request();
+    tree.loader().load(&request).unwrap();
+    fs::create_dir_all(tree.path("work/.qq/packs/one-too-many")).unwrap();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+    assert!(matches!(
+        tree.loader().pending_trust(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+}
+
+#[test]
+fn project_pack_paths_that_leave_the_repository_are_rejected_unread() {
+    // A repository's `packs` entries are read before the user consents, so
+    // one that leaves it (absolute, `..`, a UNC share, an automount) is an
+    // error and is never opened. The outside manifest is invalid RON, so
+    // reading it would surface `Parse` instead of `InvalidPack`.
     let tree = TempTree::new();
     tree.write(
         "global/config.ron",
@@ -4265,82 +4290,47 @@ fn an_untrusted_file_cannot_make_qq_read_packs_outside_the_project() {
     );
     let outside = tree.write("outside/kit/pack.ron", "not ron");
     let outside_directory = fs::canonicalize(outside.parent().unwrap()).unwrap();
-    tree.write(
-        "work/.qq/config.ron",
-        &format!(
-            r#"(version: 1, packs: {{ "kit": Pack(path: {:?}), "up": Pack(path: "../../outside/kit") }})"#,
-            outside_directory.display().to_string()
-        ),
-    );
     let request = tree.request();
+    for path in [
+        outside_directory.display().to_string(),
+        "../../outside/kit".to_owned(),
+    ] {
+        tree.write(
+            "work/.qq/config.ron",
+            &format!(r#"(version: 1, packs: {{ "kit": Pack(path: {path:?}) }})"#),
+        );
+        for result in [
+            tree.loader().load(&request).map(|_| ()),
+            tree.loader().pending_trust(&request).map(|_| ()),
+            tree.loader().grant_pending_trust(&request).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(ConfigError::InvalidPack { message, .. }) if message.contains("leaves the project")),
+                "{path}: {result:?}"
+            );
+        }
+        assert!(!tree.path("data/trust.ron").exists());
+    }
 
-    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
-        panic!("only the declaring file is pending");
-    };
-    assert_eq!(pending.len(), 1, "{pending:?}");
-    assert!(pending[0].source().label().ends_with(".qq/config.ron"));
-    let scanned = tree.loader().pending_trust(&request).unwrap();
-    assert_eq!(scanned, pending, "`qq trust` sees the same set");
-
-    // Trusting the file is consent to read what it names; the manifest is
-    // then reported on its own terms.
-    let reviewed: Vec<ProcessTrust> = pending.iter().filter_map(PendingTrust::reviewed).collect();
-    tree.loader()
-        .grant_reviewed_trust(&request, &reviewed)
-        .unwrap();
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::Parse { .. })
-    ));
-
-    // A valid outside manifest is a second review, then loads.
+    // A path that only passes through `..` and stays inside is fine.
     tree.write(
-        "outside/kit/pack.ron",
-        r#"(schema: 1, id: "kit", version: "1.0.0", mcp: { "x": Stdio(command: "sh") })"#,
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
     );
     tree.write(
         "work/.qq/config.ron",
-        &format!(
-            r#"(version: 1, packs: {{ "kit": Pack(path: {:?}) }})"#,
-            outside_directory.display().to_string()
-        ),
-    );
-    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
-        panic!("the edited file is pending");
-    };
-    assert_eq!(pending.len(), 1, "the outside pack waits for the file");
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
-        panic!("the outside pack is reviewed on its own");
-    };
-    assert_eq!(pending.len(), 1);
-    assert!(
-        pending[0]
-            .source()
-            .label()
-            .ends_with("outside/kit/pack.ron")
-    );
-    assert!(
-        pending[0]
-            .declarations()
-            .contains(&TrustDeclaration::McpStdio {
-                name: "x".to_owned(),
-                command: "sh".to_owned(),
-            })
+        r#"(version: 1, packs: { "kit": Pack(path: "../vendor/../vendor/kit") })"#,
     );
     tree.loader().grant_pending_trust(&request).unwrap();
-    assert!(
-        tree.loader()
-            .load(&request)
-            .unwrap()
-            .mcp_servers()
-            .contains_key("x")
+    assert_eq!(
+        tree.loader().load(&request).unwrap().packs()["kit"].version(),
+        "1.0.0"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn an_untrusted_file_cannot_reach_outside_the_project_through_a_link() {
+fn project_pack_paths_through_a_link_are_rejected_unread() {
     use std::os::unix::fs::symlink;
 
     let tree = TempTree::new();
@@ -4349,19 +4339,42 @@ fn an_untrusted_file_cannot_reach_outside_the_project_through_a_link() {
         r#"(version: 1, model: "openai/gpt-5.6")"#,
     );
     tree.write("outside/kit/pack.ron", "not ron");
+    let request = tree.request();
+
+    // A linked pack directory.
     fs::create_dir_all(tree.path("work/vendor")).unwrap();
     symlink(tree.path("outside/kit"), tree.path("work/vendor/kit")).unwrap();
     tree.write(
         "work/.qq/config.ron",
         r#"(version: 1, packs: { "kit": Pack(path: "../vendor/kit") })"#,
     );
-    let request = tree.request();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
 
-    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
-        panic!("the link is not followed before consent");
-    };
-    assert_eq!(pending.len(), 1, "{pending:?}");
-    assert_eq!(tree.loader().pending_trust(&request).unwrap(), pending);
+    // A real directory whose `pack.ron` leaf is a link.
+    fs::remove_file(tree.path("work/vendor/kit")).unwrap();
+    fs::create_dir_all(tree.path("work/vendor/kit")).unwrap();
+    symlink(
+        tree.path("outside/kit/pack.ron"),
+        tree.path("work/vendor/kit/pack.ron"),
+    )
+    .unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
 }
 
 #[test]

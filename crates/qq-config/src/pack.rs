@@ -288,7 +288,9 @@ impl AgentPack {
 
 /// Discovers packs under `directory/<id>/pack.ron`. Absent or empty
 /// directories contribute nothing; every path inspected is recorded.
-/// `loaded` counts manifests read in this load, admitted or withheld.
+/// `loaded` counts pack directories inspected in this load (admitted,
+/// withheld, or without a manifest), so a repository cannot make every load
+/// list and probe an unbounded number of placeholder directories.
 pub(crate) fn discover(
     directory: &Path,
     kind: SourceKind,
@@ -321,6 +323,9 @@ pub(crate) fn discover(
             error,
         })?;
         if file_type.is_dir() {
+            if *loaded + ids.len() >= MAX_PACKS {
+                return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
+            }
             ids.push(name);
         }
     }
@@ -330,17 +335,13 @@ pub(crate) fn discover(
         let pack_directory = directory.join(&id);
         let manifest_path = pack_directory.join(PACK_MANIFEST_FILE);
         probes.record(&manifest_path);
+        *loaded += 1;
         if !manifest_path.is_file() {
             // A directory without a manifest is not a pack; ignore it so
             // unrelated content under `packs/` cannot fail configuration.
             continue;
         }
-        if *loaded >= MAX_PACKS {
-            return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
-        }
-        let pack = load_pack(&pack_directory, &id, kind)?;
-        *loaded += 1;
-        packs.push(pack);
+        packs.push(load_pack(&pack_directory, &id, kind)?);
     }
     Ok(packs)
 }

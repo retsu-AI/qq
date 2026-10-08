@@ -545,12 +545,13 @@ fn scan_pending_trust(
             let pending_digest = document
                 .sensitive_digest()?
                 .filter(|digest| !trust.contains(path, digest));
-            // Mirror `apply_document`: a trusted file's entries are read
-            // wherever they point; an untrusted file's only beneath the root.
-            let confine = pending_digest.as_ref().map(|_| project_root.as_path());
-            for pack in
-                explicit_project_packs(&document, &source, confine, probes, &mut loaded_packs)?
-            {
+            for pack in explicit_project_packs(
+                &document,
+                &source,
+                &project_root,
+                probes,
+                &mut loaded_packs,
+            )? {
                 withhold_untrusted_pack(pack, trust, &mut pending);
             }
             if let Some(digest) = pending_digest {
@@ -810,7 +811,7 @@ fn apply_document(
         for pack in explicit_project_packs(
             &document,
             &source,
-            Some(&report.project_root),
+            &report.project_root,
             probes,
             &mut report.loaded_packs,
         )? {
@@ -859,7 +860,19 @@ fn apply_explicit_packs(
                 match patch {
                     PackPatch::Remove => merged.remove_pack(id),
                     PackPatch::Pack { path } => {
-                        let resolved = resolve_explicit_pack(id, path, source)?;
+                        let resolved = if source.kind() == SourceKind::Project {
+                            match project_pack_directory(id, path, source, &report.project_root)? {
+                                Some(directory) => directory,
+                                None => {
+                                    return Err(ConfigError::PackMissing {
+                                        id: id.clone(),
+                                        path: resolve_explicit_pack(id, path, source)?,
+                                    });
+                                }
+                            }
+                        } else {
+                            resolve_explicit_pack(id, path, source)?
+                        };
                         let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
                         probes.record(&manifest);
                         if !manifest.is_file() {
@@ -889,23 +902,14 @@ fn apply_explicit_packs(
 }
 
 /// The existing packs a project file names explicitly, loaded for trust
-/// review only. Missing directories are skipped: applying a trusted file
-/// reports them.
-///
-/// With `confine` (the declaring file is itself untrusted, so nobody has
-/// consented to it yet) only directories lexically beneath that root and
-/// reached through no symbolic link are touched: an entry pointing
-/// elsewhere (an absolute or `..` path, a UNC share, an automount, a link
-/// out of the repository) is not even stat'd. It is read, and reviewed as
-/// its own manifest, once the declaring file is trusted.
-///
-/// Every entry that touches the filesystem spends one unit of `loaded`,
-/// whether or not a manifest is there, so a document cannot buy unbounded
-/// probes with entries that point at nothing.
+/// review whether or not the file itself is trusted yet. Missing
+/// directories are skipped: applying a trusted file reports them. Every
+/// entry spends one unit of `loaded`, manifest or not, so a document cannot
+/// buy unbounded probes with entries that point at nothing.
 fn explicit_project_packs(
     document: &Document,
     source: &SourceIdentity,
-    confine: Option<&Path>,
+    project_root: &Path,
     probes: &mut Probes,
     loaded: &mut usize,
 ) -> Result<Vec<crate::AgentPack>, ConfigError> {
@@ -921,79 +925,20 @@ fn explicit_project_packs(
         let PackPatch::Pack { path } = patch else {
             continue;
         };
-        let resolved = resolve_explicit_pack(id, path, source)?;
-        let Some(project_root) = confine else {
-            if *loaded >= crate::pack::MAX_PACKS {
-                return Err(ConfigError::TooManyPacks {
-                    limit: crate::pack::MAX_PACKS,
-                });
-            }
-            let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
-            probes.record(&manifest);
-            if manifest.is_file() {
-                packs.push(crate::pack::load_explicit(
-                    &resolved,
-                    id,
-                    source.kind(),
-                    probes,
-                    loaded,
-                )?);
-            } else {
-                *loaded += 1;
-            }
-            continue;
-        };
-        let mut normalized = PathBuf::new();
-        for component in resolved.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => normalized.push(other),
-            }
-        }
-        let Ok(beneath) = normalized.strip_prefix(project_root) else {
-            continue;
-        };
         if *loaded >= crate::pack::MAX_PACKS {
             return Err(ConfigError::TooManyPacks {
                 limit: crate::pack::MAX_PACKS,
             });
         }
-        // `lstat` each component below the (canonical) root; the first
-        // link or missing component ends the walk without following it.
-        let mut directory = project_root.to_owned();
-        let mut reachable = true;
-        for component in beneath.components() {
-            directory.push(component);
-            match fs::symlink_metadata(&directory) {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-                Ok(_) => {
-                    reachable = false;
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    reachable = false;
-                    break;
-                }
-                Err(error) => {
-                    return Err(ConfigError::Io {
-                        path: directory,
-                        error,
-                    });
-                }
-            }
-        }
-        if !reachable {
+        let Some(directory) = project_pack_directory(id, path, source, project_root)? else {
             *loaded += 1;
             continue;
-        }
-        let manifest = normalized.join(crate::pack::PACK_MANIFEST_FILE);
+        };
+        let manifest = directory.join(crate::pack::PACK_MANIFEST_FILE);
         probes.record(&manifest);
         if manifest.is_file() {
             packs.push(crate::pack::load_explicit(
-                &normalized,
+                &directory,
                 id,
                 source.kind(),
                 probes,
@@ -1004,6 +949,79 @@ fn explicit_project_packs(
         }
     }
     Ok(packs)
+}
+
+/// Resolves a project file's explicit pack path and requires it to stay
+/// inside the project: lexically beneath `project_root` (the canonical VCS
+/// root, else `cwd`) and reached through no symbolic link, the manifest
+/// leaf included. A repository's entries are read before the user consents
+/// to them, so a path that leaves it (absolute, `..`, a UNC share, an
+/// automount, a link) is a configuration error and is never touched; packs
+/// outside the repository belong in the user's own configuration.
+/// `Ok(None)` is a directory that does not exist (yet).
+fn project_pack_directory(
+    id: &str,
+    path: &str,
+    source: &SourceIdentity,
+    project_root: &Path,
+) -> Result<Option<PathBuf>, ConfigError> {
+    let outside = || ConfigError::InvalidPack {
+        origin: source.clone(),
+        message: format!(
+            "pack {id:?} path {path:?} leaves the project; declare packs outside the repository in your global configuration"
+        ),
+    };
+    let resolved = resolve_explicit_pack(id, path, source)?;
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            // The root is canonical (`\\?\C:` on Windows) while a document
+            // may write `C:`; compare drive paths in the canonical form.
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) => {
+                    normalized.push(format!(r"\\?\{}:", char::from(drive.to_ascii_uppercase())))
+                }
+                _ => normalized.push(prefix.as_os_str()),
+            },
+            other => normalized.push(other),
+        }
+    }
+    let Ok(beneath) = normalized.strip_prefix(project_root) else {
+        return Err(outside());
+    };
+    let mut current = project_root.to_owned();
+    for component in beneath
+        .components()
+        .chain(std::iter::once(std::path::Component::Normal(
+            crate::pack::PACK_MANIFEST_FILE.as_ref(),
+        )))
+    {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ConfigError::SymlinkSource { path: current });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The manifest alone missing is reported by the caller.
+                if current.file_name() == Some(crate::pack::PACK_MANIFEST_FILE.as_ref()) {
+                    break;
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(ConfigError::Io {
+                    path: current,
+                    error,
+                });
+            }
+        }
+    }
+    Ok(Some(normalized))
 }
 
 fn resolve_explicit_pack(

@@ -18,10 +18,11 @@ QQ therefore refuses to load a project file that declares anything sensitive
 until you have accepted that exact content. Every project `pack.ron` (under
 `.qq/packs/` or named by a project `packs` entry) is sensitive on its own,
 even in a repository with no other configuration, and changing one asks
-again. Before you trust a project file, QQ reads the packs it names only
-inside the repository; one it points at elsewhere (an absolute path, `..`
-out of the repository, a symbolic link) is not opened until you trust the
-file, and is then reviewed as a second step. A `packs` entry in your own
+again. A project `packs` entry must stay inside the repository: an
+absolute path, `..` out of it, or a symbolic link is a configuration error
+and is never opened, because QQ lists those manifests before you have
+trusted anything. Declare packs that live elsewhere in your own global
+configuration instead. A `packs` entry in your own
 global, `QQ_CONFIG`, or managed configuration is yours and loads without a
 prompt, even when it points into a repository.
 
