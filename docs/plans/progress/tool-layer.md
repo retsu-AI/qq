@@ -21,7 +21,7 @@ newest last.
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
-| T15 | Default-shaped arguments read as absent | Planned | | D9 audit; coordinate with RR10 (ENG-872) |
+| T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
 | T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
 | T17 | `ToolErrorKind` severity in clients | Planned | | D9 audit; after T15 |
 
@@ -272,3 +272,44 @@ ranges+offset 252, empty `{}` 234 (Codex routes only; 60 turns, 286 empty vs
 After a contract error, the next call to the same tool failed 434 times and
 succeeded 127 times. `if_changed_since: "h:000000000000"` appeared on 6,293
 reads (harmless). No code change; T15–T17 opened.
+
+### 2026-10-06 — T15 in progress → in review
+
+Branch `fix/eng-1012-t15-tolerant-defaults` (worktree
+`.worktrees/tool-defaults`), stacked on the audit branch (#265). Each audit
+class now has its one reading: `read_file` `ranges` wins over
+`offset`/`limit` with `note=offset_ignored`, and `"a,b"` reads as `a-b`;
+`edit_file` treats an empty `old`/`insert_before`/`insert_after` as absent
+(an empty only-form still fails with its old message); `tree.glob` and
+`search.include`/`exclude` drop `""`; `read_tool_result` pages on an empty
+`query`; `search.context` above 5 clamps with `note=context_clamped=5`.
+RR10 had not landed, so the clamp lands here and RR10 keeps type coercion.
+Schemas are unchanged (schema hash fixture holds). `path_not_found` and
+`range_out_of_bounds` stay errors. Gates: fmt, clippy `-D warnings` on
+`qq-core`, `cargo test -p qq-core` green (858 lib tests), `tool_dispatch`
+smoke test green. Bench not re-run: each rule is a `match` on arguments
+before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
+and edit sections.
+
+### 2026-10-07 — T15 review repairs
+
+- Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
+- Added failing-first regressions for empty edit forms in approval previews and ignored-offset notes on unchanged/info/outline/image reads; both now pass.
+- Approval previews normalize the same empty unused forms as execution; ambiguous and empty-only forms remain rejected.
+- `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy, workspace tests (full rerun), and workspace build passed.
+- Initial workspace run timed out in two existing headless budget tests; both isolated reruns and the full workspace rerun passed. No root-cause claim.
+- `tool_dispatch`: 30 alternating release A/B pairs, #265 f7ecfb83 baseline versus T15+repairs: median 74,890 → 66,261 ns (no observed regression).
+- I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
+- This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
+
+### 2026-10-08 — T15 review repair: notes for every ignored default
+
+- Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
+- Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
+
+### 2026-10-08 — T15 review repair: read note before bounding
+
+- Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
+- Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.

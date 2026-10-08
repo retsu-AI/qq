@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | No slice in progress. 2026-10-06 failure audit (§ D9) opened T15–T17 |
+| Now | T15 in review (stacked on #265). 2026-10-06 failure audit (§ D9) opened T15–T17 |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
 | Open | T15 default-shaped arguments, T16 Responses empty arguments, T17 error severity in clients (from the D9 audit); T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
