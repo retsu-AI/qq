@@ -1148,8 +1148,8 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
     );
     for (name, result, label) in [
         ("edit_file", "edit 1: stale_file: changed", "stale_file"),
-        ("exec", "exec exit=101 elapsed=1 bytes=0", "exit=101"),
-        ("shell", "shell exit=1 elapsed=1 bytes=0", "exit=1"),
+        ("exec", "exec exit=101 elapsed=1 bytes=0", "exit 101"),
+        ("shell", "shell exit=1 elapsed=1 bytes=0", "exit 1"),
     ] {
         let call = tool_call_snapshot(2, name, "{}", ToolCallState::Failed, Some(result), true);
         let rows = squashed_rows(&render_tool_calls_simple(
@@ -1286,6 +1286,57 @@ fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output()
             "{lines:?}"
         );
     }
+}
+
+#[test]
+fn expanded_outcomes_use_the_result_budget_under_the_timing_line_without_repeating_the_exit() {
+    let diagnostics: String = (1..=10).map(|n| format!("diagnostic {n}\n")).collect();
+    let result = format!("exec exit=101 elapsed=2.0 bytes=90\n{diagnostics}");
+    let call = tool_call_snapshot(1, "exec", "{}", ToolCallState::Failed, Some(&result), true);
+    // The row names the exit once: the metric, not the label as well.
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&call],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert_eq!(rows[0].matches("101").count(), 1, "{rows:?}");
+
+    let row = ToolRow::derive(&call);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming {
+                started_at_ms: Some(1_000),
+                finished_at_ms: Some(3_000),
+                ..qq_client::state::ToolCallTiming::default()
+            },
+            now_ms: 3_000,
+        },
+        expanded: true,
+        inline_detail: true,
+        fold: false,
+        selected: false,
+    };
+    let lines = squashed_rows(&tools::tool_expanded_lines(&call, context, 120));
+    // More than the six-row failure panel: the normal expanded budget.
+    assert!(
+        lines.iter().any(|line| line.contains("diagnostic 10"))
+            && lines.iter().any(|line| line.contains("diagnostic 5")),
+        "{lines:?}"
+    );
+    // Timing comes first, then the detail panel.
+    let timing = lines
+        .iter()
+        .position(|line| line.contains("started"))
+        .unwrap();
+    let detail = lines
+        .iter()
+        .position(|line| line.contains("diagnostic 1"))
+        .unwrap();
+    assert!(timing < detail, "{lines:?}");
 }
 
 #[test]

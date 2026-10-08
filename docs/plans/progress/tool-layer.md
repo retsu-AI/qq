@@ -414,3 +414,12 @@ Five more Codex findings on 4c8cb067, all valid (two were regressions from round
 - `wait_agents` plural validation errors (`ids may name at most …`, `ids must be sub-agent ids …`) are corrections.
 - `load_skill` `unknown command or skill /…` and the `Sub-agent … is not a background sub-agent …` result of `cancel_agent`/`wait_agents` are outcomes.
 - Regressions in `qq-protocol` (all of the above, including the spoof cases) and `qq-tui` (denied/interrupted panels, expanded outcome).
+
+### 2026-10-08 — T17 review repairs, round 5
+
+Four more Codex findings on 3207f528, all valid. This round audited every error string the QQ-owned tools can return instead of fixing one at a time:
+
+- `spawn_agent` routing the model can change (`no delegation roster is configured`, `model … is not on the delegation roster`, `no roster entry declares the … role`) are corrections. `load_skill` never returns ambiguous or reserved names (`resolve_disclosed` folds both into `unknown command or skill /…`), so that text is not classified. A spent budget, an unavailable spawner, `handle_foreign_session`, and guidance I/O errors stay failures.
+- An expanded correction or outcome uses the normal expanded result budget (12 rows, 4 KiB), not the 6-row, 2 KiB failure panel, and renders under the timing line.
+- A command outcome's label no longer repeats the exit status the row metric already shows (`exit 101`).
+- Regressions in `qq-protocol` (routing and refusal cases) and `qq-tui` (budget, ordering, no duplicate exit).

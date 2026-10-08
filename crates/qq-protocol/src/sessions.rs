@@ -1749,6 +1749,10 @@ impl ToolErrorKind {
             "id must be a sub-agent id",
             "ids must be sub-agent ids",
             "ids may name at most",
+            // `spawn_agent` routing the model can change on retry; a spent
+            // budget or an unavailable spawner is a refusal and stays a failure.
+            "no delegation roster is configured",
+            "no roster entry declares the ",
         ];
         // Policy refusals (`env_not_allowed:`, `use_builtin:`) and the
         // workspace boundary (`path_escapes_workspace`) are deliberately in
@@ -1790,12 +1794,16 @@ impl ToolErrorKind {
                 .is_some_and(|status| matches!(status, "404" | "410"));
         // Well-formed "no" answers of the orchestration tools: a skill that
         // is not disclosed, and a child that is not outstanding.
-        let orchestration_no = (name == "load_skill"
-            && text.starts_with("unknown command or skill /"))
+        let skill_no = name == "load_skill" && text.starts_with("unknown command or skill /");
+        // `model "x" is not on the delegation roster; choose a role instead`.
+        let route_correction = name == "spawn_agent"
+            && text.starts_with("model ")
+            && text.contains(" is not on the delegation roster");
+        let orchestration_no = skill_no
             || (matches!(name, "cancel_agent" | "wait_agents")
                 && text.starts_with("Sub-agent ")
                 && text.contains(" is not a background sub-agent"));
-        if CORRECTION.iter().any(|code| text.starts_with(code)) {
+        if route_correction || CORRECTION.iter().any(|code| text.starts_with(code)) {
             Self::Correction
         } else if command_exit
             || fetch_missing
@@ -2705,6 +2713,40 @@ mod tests {
         }
         assert_eq!(
             ToolErrorKind::of("read_file", "unknown command or skill /missing"),
+            ToolErrorKind::Failure
+        );
+
+        // `spawn_agent` routing the model can change, versus refusals it cannot.
+        for result in [
+            "no delegation roster is configured, so role cannot be used; omit role (and model) to use the configured worker model",
+            "model \"gpt-x\" is not on the delegation roster; choose a role instead or use one of the listed routes",
+            "no roster entry declares the reviewer role; choose one of the roles listed in the system prompt",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("spawn_agent", result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for result in [
+            "this run cannot afford a sub-agent: its cost budget is spent; continue with what you have",
+            "spawn_agent is not available in this session: this run is at the deepest delegation level its configuration permits.",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("spawn_agent", result),
+                ToolErrorKind::Failure,
+                "{result}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("load_skill", "selected guidance a.md is not a regular file"),
+            ToolErrorKind::Failure
+        );
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "handle_foreign_session: stored outputs are readable only by the session that produced them"
+            ),
             ToolErrorKind::Failure
         );
 
