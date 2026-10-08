@@ -1697,6 +1697,12 @@ impl ToolErrorKind {
                 | "fetch"
                 | "ask_user"
                 | "read_tool_result"
+                | "select_tools"
+                | "search_history"
+                | "load_skill"
+                | "spawn_agent"
+                | "wait_agents"
+                | "cancel_agent"
         ) {
             return Self::Failure;
         }
@@ -2515,6 +2521,34 @@ mod tests {
                 ToolErrorKind::of("read_file", result),
                 ToolErrorKind::Failure,
                 "{result:?}"
+            );
+        }
+
+        // Every QQ-owned tool is graded; external tools live under `mcp__`
+        // and `ext__`, which the catalog requires, so they cannot take these
+        // names.
+        for name in [
+            "select_tools",
+            "search_history",
+            "load_skill",
+            "spawn_agent",
+            "wait_agents",
+            "cancel_agent",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, "query must not be empty"),
+                ToolErrorKind::Correction,
+                "{name}"
+            );
+            assert_eq!(
+                ToolErrorKind::of(name, "invalid arguments: missing field `id`"),
+                ToolErrorKind::Correction,
+                "{name}"
+            );
+            assert_eq!(
+                ToolErrorKind::of(name, "invalid credentials"),
+                ToolErrorKind::Failure,
+                "{name}"
             );
         }
 

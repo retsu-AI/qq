@@ -339,3 +339,9 @@ vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
 - Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
 - Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
 - `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
+
+### 2026-10-08 — T17 review repair: all QQ-owned tools are graded
+
+- Codex (#272) pointed out that `select_tools`, `search_history`, `load_skill`, `spawn_agent`, `wait_agents`, and `cancel_agent` return `query must not be empty` / `invalid arguments:` but sat outside the built-in allowlist, so those corrections stayed red failures and could not fold into a retry. They are now in `ToolErrorKind::of`'s allowlist. External tools still cannot match: the catalog admits only `mcp__`/`ext__` names.
+- Regression: each new name grades both corrections as `Correction` and `invalid credentials` as `Failure`.
+- Merged #267 `4688477f` (ignored-default notes) first; the only conflict was the ledger, kept both entries.
