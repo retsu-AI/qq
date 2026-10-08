@@ -250,6 +250,9 @@ pub(crate) fn render_tool_result(
     };
     let mut header =
         Header::new("read_tool_result", Some(handle)).token(format_args!("{window}/{total_lines}"));
+    if arguments.query.as_deref() == Some("") {
+        header = header.field("note", "empty_query_ignored");
+    }
     if stopped {
         header = header
             .field("truncated", "bytes")
@@ -324,10 +327,11 @@ mod tests {
                 .unwrap_err()
                 .starts_with("invalid_limit")
         );
-        // D9: an empty query beside offset/limit pages instead of failing.
+        // D9: an empty query beside offset/limit pages instead of failing,
+        // and the header says the query was ignored.
         assert_eq!(
             render_tool_result("h", &args(49, 200, Some(""), false), &text).unwrap(),
-            tail
+            tail.replacen('\n', " note=empty_query_ignored\n", 1)
         );
     }
 

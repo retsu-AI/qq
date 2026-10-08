@@ -1101,9 +1101,25 @@ mod tests {
         let (header, body) = defaults.model_text.split_once('\n').unwrap();
         assert_eq!(
             header,
-            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1 note=context_clamped=5"
+            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1 note=context_clamped=5,empty_glob_ignored"
         );
         assert!(body.starts_with("src/lib.rs\n"), "{body}");
+        let empty_only = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"^fn \\w+\\(","regex":true,"include":[""]}"#,
+        );
+        assert!(
+            empty_only
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(" note=empty_glob_ignored"),
+            "{}",
+            empty_only.model_text
+        );
         let escape = run_tool(&workspace, &state, "search", r#"{"query":"x","path":".."}"#);
         assert!(escape.is_error && escape.model_text.starts_with("path_escapes_workspace"));
     }
@@ -1323,7 +1339,10 @@ mod tests {
                 tree::MAX_ENTRIES
             ),
         );
-        assert_eq!(unfiltered.model_text, result.model_text);
+        let (header, body) = unfiltered.model_text.split_once('\n').unwrap();
+        let (expected_header, expected_body) = result.model_text.split_once('\n').unwrap();
+        assert_eq!(header, format!("{expected_header} note=empty_glob_ignored"));
+        assert_eq!(body, expected_body);
     }
 
     #[test]
@@ -2166,6 +2185,23 @@ mod tests {
                 .starts_with("edit dry_run files=1 edits=1\n"),
             "{}",
             preview.model_text
+        );
+        // D9: an empty unused form is ignored and the header says so.
+        let tolerant = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"","insert_after":"beta","new":"gamma","if_hash":"h:{short}"}}],"dry_run":true}}"#
+            ),
+        );
+        assert!(!tolerant.is_error, "{}", tolerant.model_text);
+        assert!(
+            tolerant
+                .model_text
+                .starts_with("edit dry_run files=1 edits=1 note=empty_form_ignored\n"),
+            "{}",
+            tolerant.model_text
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
