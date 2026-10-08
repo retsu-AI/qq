@@ -638,7 +638,9 @@ by a project file) is its own trust subject: it is admitted only when a
 trust record covers its canonical manifest path and the SHA-256 of its
 bytes, independent of whether the directory's configuration is trusted.
 Manifests named by a still-pending project file are listed in the same
-pending set, so one review covers both. Pack profiles merge beneath the configuration's
+pending set, so one review covers both; before that consent only entries
+lexically beneath the VCS root and reached through no symbolic link are
+read, and any other entry is read (and reviewed) once the file is trusted. Pack profiles merge beneath the configuration's
 own `profiles` in the same flat namespace and a name declared by both is a
 conflict, not a silent override.
 

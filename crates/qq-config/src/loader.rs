@@ -86,10 +86,12 @@ pub(super) fn load_for_client(
     let mdm = read_mdm_document(loader)?;
     let organization = selected_organization(loader, request, &cwd, &trust, mdm.as_ref(), probes)?;
     let (mut merged, compiled_report) = MergeState::compiled();
+    let directories = project_directories(&cwd, probes);
     let mut report = LoadReport {
         sources: vec![compiled_report],
         pending: Vec::new(),
         loaded_packs: 0,
+        project_root: directories.first().cloned().unwrap_or_else(|| cwd.clone()),
     };
     let mut seen = BTreeSet::new();
 
@@ -131,7 +133,7 @@ pub(super) fn load_for_client(
         )?;
     }
 
-    for directory in project_directories(&cwd, probes) {
+    for directory in directories {
         // Project packs are sensitive (they may declare MCP servers that run
         // commands, grants, and approval modes), so each manifest is its own
         // trust subject: it is admitted only once its exact bytes are
@@ -506,7 +508,12 @@ fn scan_pending_trust(
 ) -> Result<Vec<PendingTrust>, ConfigError> {
     let mut pending = Vec::new();
     let mut loaded_packs = 0_usize;
-    for directory in project_directories(cwd, probes) {
+    let directories = project_directories(cwd, probes);
+    let project_root = directories
+        .first()
+        .cloned()
+        .unwrap_or_else(|| cwd.to_owned());
+    for directory in directories {
         for pack in crate::pack::discover(
             &directory.join(".qq").join("packs"),
             SourceKind::Project,
@@ -532,16 +539,21 @@ fn scan_pending_trust(
         for candidate in candidates {
             let (source, content) = read_candidate(&candidate)?;
             let document = Document::parse(&content, &source)?;
-            for pack in explicit_project_packs(&document, &source, probes, &mut loaded_packs)? {
-                withhold_untrusted_pack(pack, trust, &mut pending);
-            }
-            let Some(digest) = document.sensitive_digest()? else {
-                continue;
-            };
             let path = source
                 .path()
                 .expect("project file sources always have a canonical path");
-            if !trust.contains(path, &digest) {
+            let pending_digest = document
+                .sensitive_digest()?
+                .filter(|digest| !trust.contains(path, digest));
+            // Mirror `apply_document`: a trusted file's entries are read
+            // wherever they point; an untrusted file's only beneath the root.
+            let confine = pending_digest.as_ref().map(|_| project_root.as_path());
+            for pack in
+                explicit_project_packs(&document, &source, confine, probes, &mut loaded_packs)?
+            {
+                withhold_untrusted_pack(pack, trust, &mut pending);
+            }
+            if let Some(digest) = pending_digest {
                 let sections = document.sensitive_sections();
                 let declarations = document.sensitive_declarations();
                 pending.push(PendingTrust::new(source, digest, sections, declarations));
@@ -739,6 +751,9 @@ struct LoadReport {
     /// Pack manifests read so far, admitted or withheld; bounded by
     /// `MAX_PACKS` across discovery and explicit entries.
     loaded_packs: usize,
+    /// The outermost project directory (VCS root, else `cwd`). Packs an
+    /// untrusted file names are read for review only beneath it.
+    project_root: PathBuf,
 }
 
 fn apply_candidate(
@@ -792,7 +807,13 @@ fn apply_document(
     } else {
         // The file's own entry is pending; list the manifests it names too so
         // one review covers everything trusting this file would admit.
-        for pack in explicit_project_packs(&document, &source, probes, &mut report.loaded_packs)? {
+        for pack in explicit_project_packs(
+            &document,
+            &source,
+            Some(&report.project_root),
+            probes,
+            &mut report.loaded_packs,
+        )? {
             withhold_untrusted_pack(pack, trust, &mut report.pending);
         }
     }
@@ -870,9 +891,17 @@ fn apply_explicit_packs(
 /// The existing packs a project file names explicitly, loaded for trust
 /// review only. Missing directories are skipped: applying a trusted file
 /// reports them.
+///
+/// With `confine` (the declaring file is itself untrusted, so nobody has
+/// consented to it yet) only directories lexically beneath that root and
+/// reached through no symbolic link are touched: an entry pointing
+/// elsewhere (an absolute or `..` path, a UNC share, an automount, a link
+/// out of the repository) is not even stat'd. It is read, and reviewed as
+/// its own manifest, once the declaring file is trusted.
 fn explicit_project_packs(
     document: &Document,
     source: &SourceIdentity,
+    confine: Option<&Path>,
     probes: &mut Probes,
     loaded: &mut usize,
 ) -> Result<Vec<crate::AgentPack>, ConfigError> {
@@ -889,11 +918,65 @@ fn explicit_project_packs(
             continue;
         };
         let resolved = resolve_explicit_pack(id, path, source)?;
-        let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
+        let Some(project_root) = confine else {
+            let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
+            probes.record(&manifest);
+            if manifest.is_file() {
+                packs.push(crate::pack::load_explicit(
+                    &resolved,
+                    id,
+                    source.kind(),
+                    probes,
+                    loaded,
+                )?);
+            }
+            continue;
+        };
+        let mut normalized = PathBuf::new();
+        for component in resolved.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => normalized.push(other),
+            }
+        }
+        let Ok(beneath) = normalized.strip_prefix(project_root) else {
+            continue;
+        };
+        // `lstat` each component below the (canonical) root; the first
+        // link or missing component ends the walk without following it.
+        let mut directory = project_root.to_owned();
+        let mut reachable = true;
+        for component in beneath.components() {
+            directory.push(component);
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    reachable = false;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    reachable = false;
+                    break;
+                }
+                Err(error) => {
+                    return Err(ConfigError::Io {
+                        path: directory,
+                        error,
+                    });
+                }
+            }
+        }
+        if !reachable {
+            continue;
+        }
+        let manifest = normalized.join(crate::pack::PACK_MANIFEST_FILE);
         probes.record(&manifest);
         if manifest.is_file() {
             packs.push(crate::pack::load_explicit(
-                &resolved,
+                &normalized,
                 id,
                 source.kind(),
                 probes,
