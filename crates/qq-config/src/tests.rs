@@ -4217,11 +4217,39 @@ fn explicit_pack_reads_before_trust_are_bounded() {
     );
 
     // At the bound, one review covers the file and every manifest it names.
-    fs::remove_dir_all(tree.path(format!("work/vendor/kit-{MAX_PACKS}"))).unwrap();
+    let at_bound = entries.replace(
+        &format!(r#""kit-{MAX_PACKS}": Pack(path: "../vendor/kit-{MAX_PACKS}"), "#),
+        "",
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {at_bound} }})"),
+    );
     let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
         panic!("an untrusted project file requires trust");
     };
     assert_eq!(pending.len(), MAX_PACKS + 1, "the file and its packs");
+
+    // Entries that point at nothing spend the budget too, so a document
+    // cannot buy unbounded probes with missing directories.
+    let mut missing = String::new();
+    for index in 0..=MAX_PACKS {
+        missing.push_str(&format!(
+            r#""ghost-{index}": Pack(path: "../nowhere/{index}"), "#
+        ));
+    }
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {missing} }})"),
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+    assert!(matches!(
+        tree.loader().pending_trust(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
 }
 
 #[test]

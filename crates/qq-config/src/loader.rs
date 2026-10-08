@@ -898,6 +898,10 @@ fn apply_explicit_packs(
 /// elsewhere (an absolute or `..` path, a UNC share, an automount, a link
 /// out of the repository) is not even stat'd. It is read, and reviewed as
 /// its own manifest, once the declaring file is trusted.
+///
+/// Every entry that touches the filesystem spends one unit of `loaded`,
+/// whether or not a manifest is there, so a document cannot buy unbounded
+/// probes with entries that point at nothing.
 fn explicit_project_packs(
     document: &Document,
     source: &SourceIdentity,
@@ -919,6 +923,11 @@ fn explicit_project_packs(
         };
         let resolved = resolve_explicit_pack(id, path, source)?;
         let Some(project_root) = confine else {
+            if *loaded >= crate::pack::MAX_PACKS {
+                return Err(ConfigError::TooManyPacks {
+                    limit: crate::pack::MAX_PACKS,
+                });
+            }
             let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
             probes.record(&manifest);
             if manifest.is_file() {
@@ -929,6 +938,8 @@ fn explicit_project_packs(
                     probes,
                     loaded,
                 )?);
+            } else {
+                *loaded += 1;
             }
             continue;
         };
@@ -945,6 +956,11 @@ fn explicit_project_packs(
         let Ok(beneath) = normalized.strip_prefix(project_root) else {
             continue;
         };
+        if *loaded >= crate::pack::MAX_PACKS {
+            return Err(ConfigError::TooManyPacks {
+                limit: crate::pack::MAX_PACKS,
+            });
+        }
         // `lstat` each component below the (canonical) root; the first
         // link or missing component ends the walk without following it.
         let mut directory = project_root.to_owned();
@@ -970,6 +986,7 @@ fn explicit_project_packs(
             }
         }
         if !reachable {
+            *loaded += 1;
             continue;
         }
         let manifest = normalized.join(crate::pack::PACK_MANIFEST_FILE);
@@ -982,6 +999,8 @@ fn explicit_project_packs(
                 probes,
                 loaded,
             )?);
+        } else {
+            *loaded += 1;
         }
     }
     Ok(packs)
