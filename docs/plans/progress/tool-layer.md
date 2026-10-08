@@ -363,3 +363,14 @@ Seven Codex findings on 966d93a5, all valid:
 - Pre-dispatch rejections keep provenance under any requested name: `unknown tool "…"` and `not executed: this …` grade as corrections, while other `not executed:`/`unknown tool` text from an external name stays a failure.
 - The TUI no longer strips a batch-edit outcome (`edit 1: stale_file: …`) as if it were a header, so its one-line reason survives.
 - Regressions for each in `qq-protocol` and `qq-tui`.
+
+### 2026-10-08 — T17 review repairs, round 4
+
+Five more Codex findings on 4c8cb067, all valid (two were regressions from round 3):
+
+- Denied and interrupted calls have no grade but are errors; the round-3 panel match dropped their reason. An ungraded error again opens the failure panel, as before T17.
+- An expanded outcome (`exec exit=101` plus compiler output) now shows its full text in the warning style, inline and in the inspector; collapsed it still shows one tail line.
+- Pre-dispatch text (`unknown tool "…"`, `not executed: this …`) is trusted only under names that cannot be external; under `mcp__`/`ext__` it stays a `Failure`, since MCP text passes through verbatim.
+- `wait_agents` plural validation errors (`ids may name at most …`, `ids must be sub-agent ids …`) are corrections.
+- `load_skill` `unknown command or skill /…` and the `Sub-agent … is not a background sub-agent …` result of `cancel_agent`/`wait_agents` are outcomes.
+- Regressions in `qq-protocol` (all of the above, including the spoof cases) and `qq-tui` (denied/interrupted panels, expanded outcome).

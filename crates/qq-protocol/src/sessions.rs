@@ -1682,11 +1682,15 @@ impl ToolErrorKind {
     /// new error is never quieter than today until it is listed here.
     #[must_use]
     pub fn of(name: &str, result: &str) -> Self {
-        // QQ's own pre-dispatch rejections are persisted under whatever name
-        // the model requested, including external names. Only these two exact
-        // shapes (`not executed: this …` from the run loop and `unknown tool
-        // "…"` from the catalog) are trusted without a built-in name.
-        if result.starts_with("not executed: this ") || result.starts_with("unknown tool \"") {
+        // QQ's own pre-dispatch rejections (`not executed: this …` from the
+        // run loop, `unknown tool "…"` from the catalog) are persisted under
+        // whatever name the model requested. A name that cannot be an external
+        // tool (those always start `mcp__`/`ext__`, which the catalog requires)
+        // never reached a host, so the text is QQ's. An external name's text
+        // may come from the server and is never trusted.
+        if !(name.starts_with("mcp__") || name.starts_with("ext__"))
+            && (result.starts_with("not executed: this ") || result.starts_with("unknown tool \""))
+        {
             return Self::Correction;
         }
         // External tools own arbitrary error text; never infer a recoverable
@@ -1743,6 +1747,8 @@ impl ToolErrorKind {
             "question ",
             "task must not be empty",
             "id must be a sub-agent id",
+            "ids must be sub-agent ids",
+            "ids may name at most",
         ];
         // Policy refusals (`env_not_allowed:`, `use_builtin:`) and the
         // workspace boundary (`path_escapes_workspace`) are deliberately in
@@ -1782,9 +1788,19 @@ impl ToolErrorKind {
                         .find_map(|token| token.strip_prefix("status="))
                 })
                 .is_some_and(|status| matches!(status, "404" | "410"));
+        // Well-formed "no" answers of the orchestration tools: a skill that
+        // is not disclosed, and a child that is not outstanding.
+        let orchestration_no = (name == "load_skill"
+            && text.starts_with("unknown command or skill /"))
+            || (matches!(name, "cancel_agent" | "wait_agents")
+                && text.starts_with("Sub-agent ")
+                && text.contains(" is not a background sub-agent"));
         if CORRECTION.iter().any(|code| text.starts_with(code)) {
             Self::Correction
-        } else if command_exit || fetch_missing || OUTCOME.iter().any(|code| text.starts_with(code))
+        } else if command_exit
+            || fetch_missing
+            || orchestration_no
+            || OUTCOME.iter().any(|code| text.starts_with(code))
         {
             Self::Outcome
         } else {
@@ -2625,9 +2641,10 @@ mod tests {
             ToolErrorKind::Failure
         );
 
-        // QQ's own pre-dispatch rejections keep their provenance whatever
-        // name the model asked for; arbitrary external text does not.
-        for name in ["mcp__srv__tool", "ext__host__tool", "made_up"] {
+        // QQ's own pre-dispatch rejections keep their provenance for names
+        // that cannot be external; text under an `mcp__`/`ext__` name may come
+        // from the server and is never trusted, even when it looks the same.
+        for name in ["made_up", "shell_v2"] {
             for result in [
                 "unknown tool \"made_up\"",
                 "not executed: this turn requested more than 16 tool calls and only the first 16 ran; call this again next turn",
@@ -2639,16 +2656,57 @@ mod tests {
                 );
             }
             assert_eq!(
-                ToolErrorKind::of(name, "not executed: the server said so"),
-                ToolErrorKind::Failure,
-                "{name}"
-            );
-            assert_eq!(
                 ToolErrorKind::of(name, "unknown tool in the upstream catalog"),
                 ToolErrorKind::Failure,
                 "{name}"
             );
         }
+        for name in ["mcp__srv__tool", "ext__host__tool"] {
+            for result in [
+                "unknown tool \"widget\"",
+                "not executed: this operation is unavailable",
+                "not executed: this turn requested more than 16 tool calls",
+            ] {
+                assert_eq!(
+                    ToolErrorKind::of(name, result),
+                    ToolErrorKind::Failure,
+                    "{name}: {result}"
+                );
+            }
+        }
+
+        // The remaining orchestration validation errors and "no" answers.
+        for result in [
+            "ids may name at most 8 sub-agents",
+            "ids must be sub-agent ids from spawn_agent results",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("wait_agents", result),
+                ToolErrorKind::Correction,
+                "{result}"
+            );
+        }
+        for (name, result) in [
+            ("load_skill", "unknown command or skill /missing"),
+            (
+                "cancel_agent",
+                "Sub-agent 0123 is not a background sub-agent of this run that is still outstanding (its answer may already have reached you).",
+            ),
+            (
+                "wait_agents",
+                "Sub-agent 0123 is not a background sub-agent of this run that is still outstanding (its answer may already have reached you).",
+            ),
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, result),
+                ToolErrorKind::Outcome,
+                "{name}: {result}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "unknown command or skill /missing"),
+            ToolErrorKind::Failure
+        );
 
         // Every QQ-owned tool is graded; external tools live under `mcp__`
         // and `ext__`, which the catalog requires, so they cannot take these

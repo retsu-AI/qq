@@ -669,11 +669,18 @@ pub(super) fn render_tool_calls(
         if let Some(result) = call.result.as_deref() {
             // Only a failure opens its panel by default; a correction keeps
             // its text for the expanded body, and an outcome shows the one
-            // line that says why.
-            let panel = match call.error_kind() {
-                Some(ToolErrorKind::Failure) => Some((MAX_TOOL_ERROR_ROWS, failure())),
-                Some(ToolErrorKind::Outcome) => Some((1, warning())),
-                Some(ToolErrorKind::Correction) | None => None,
+            // line that says why (the expanded body shows all of it). A
+            // denied or interrupted call has no grade but is still an error:
+            // its reason is the panel, as before grading existed.
+            let panel = match (call.error_kind(), call.is_error) {
+                (Some(ToolErrorKind::Failure), _) | (None, true) => {
+                    Some((MAX_TOOL_ERROR_ROWS, failure()))
+                }
+                (Some(ToolErrorKind::Outcome), _) if context.expanded && context.inline_detail => {
+                    None
+                }
+                (Some(ToolErrorKind::Outcome), _) => Some((1, warning())),
+                (Some(ToolErrorKind::Correction), _) | (None, false) => None,
             };
             if let Some((rows, style)) = panel {
                 lines.extend(tool_error_lines(
@@ -1029,13 +1036,25 @@ pub(super) fn tool_expanded_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let row = context.row;
-    if call.error_kind() == Some(ToolErrorKind::Correction) {
-        lines.extend(tool_error_lines(
+    // Corrections and outcomes keep their text for here; a failure already
+    // showed its panel. An outcome drops its tool header (the row says it).
+    match call.error_kind() {
+        Some(ToolErrorKind::Correction) => lines.extend(tool_error_lines(
             call.result.as_deref().unwrap_or_default(),
             MAX_TOOL_ERROR_ROWS,
             muted(),
             width,
-        ));
+        )),
+        Some(ToolErrorKind::Outcome) => lines.extend(tool_error_lines(
+            strip_header(
+                call.result.as_deref().unwrap_or_default(),
+                header_word(&call.name),
+            ),
+            MAX_TOOL_ERROR_ROWS,
+            warning(),
+            width,
+        )),
+        Some(ToolErrorKind::Failure) | None => {}
     }
     let timing = context.clock.timing;
     let running = call.state == ToolCallState::Running;
