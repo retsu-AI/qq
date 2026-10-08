@@ -1162,6 +1162,49 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         ));
         assert!(rows[0].contains(label), "{rows:?}");
     }
+    // The one-line reason under a batch-edit outcome survives header
+    // stripping, and a fetch 404 is labelled by its status.
+    let stale = tool_call_snapshot(
+        4,
+        "edit_file",
+        "{}",
+        ToolCallState::Failed,
+        Some("edit 1: stale_file: a.rs changed since it was read"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&stale],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("a.rs changed since it was read")),
+        "{rows:?}"
+    );
+    let missing = tool_call_snapshot(
+        5,
+        "fetch",
+        "{}",
+        ToolCallState::Failed,
+        Some("fetch http://h/missing status=404 type=text/plain bytes=9\nnot found"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&missing],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows[0].contains("status=404") && !rows[0].contains('✕'),
+        "{rows:?}"
+    );
     let external = tool_call_snapshot(
         3,
         "mcp__server__read",

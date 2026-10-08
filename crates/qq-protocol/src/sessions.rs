@@ -1682,6 +1682,13 @@ impl ToolErrorKind {
     /// new error is never quieter than today until it is listed here.
     #[must_use]
     pub fn of(name: &str, result: &str) -> Self {
+        // QQ's own pre-dispatch rejections are persisted under whatever name
+        // the model requested, including external names. Only these two exact
+        // shapes (`not executed: this …` from the run loop and `unknown tool
+        // "…"` from the catalog) are trusted without a built-in name.
+        if result.starts_with("not executed: this ") || result.starts_with("unknown tool \"") {
+            return Self::Correction;
+        }
         // External tools own arbitrary error text; never infer a recoverable
         // QQ contract error from an external server's message.
         if !matches!(
@@ -1722,9 +1729,6 @@ impl ToolErrorKind {
             "handle_invalid",
             "not executed:",
             "not_read:",
-            "env_not_allowed:",
-            "use_builtin:",
-            "unknown tool",
             "tool arguments exceed",
             "regex_too_large:",
             "outline_unsupported:",
@@ -1734,7 +1738,15 @@ impl ToolErrorKind {
             "query must not be empty",
             "timeout_seconds must be",
             "url exceeds",
+            "invalid url:",
+            "ask_user needs ",
+            "question ",
+            "task must not be empty",
+            "id must be a sub-agent id",
         ];
+        // Policy refusals (`env_not_allowed:`, `use_builtin:`) and the
+        // workspace boundary (`path_escapes_workspace`) are deliberately in
+        // neither list: a refused operation stays a visible failure.
         const OUTCOME: &[&str] = &[
             "path_not_found",
             "not_a_file",
@@ -1748,13 +1760,32 @@ impl ToolErrorKind {
             "too_large:",
             "spill_missing",
             "spill_evicted",
-            "path_escapes_workspace",
-            "shell exit=",
-            "exec exit=",
         ];
+        // A command that ran and exited with a number other than zero is an
+        // answer; a timeout, signal, or unknown ending is an execution failure.
+        let command_exit = ["shell exit=", "exec exit="].iter().any(|prefix| {
+            text.strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|code| code.parse::<i32>().ok())
+                .is_some_and(|code| code != 0)
+        });
+        // `fetch <url> status=<n>`: a missing page is an answer; auth, rate
+        // limit, and server errors stay failures.
+        let fetch_missing = name == "fetch"
+            && text.starts_with("fetch ")
+            && text
+                .lines()
+                .next()
+                .and_then(|header| {
+                    header
+                        .split_whitespace()
+                        .find_map(|token| token.strip_prefix("status="))
+                })
+                .is_some_and(|status| matches!(status, "404" | "410"));
         if CORRECTION.iter().any(|code| text.starts_with(code)) {
             Self::Correction
-        } else if OUTCOME.iter().any(|code| text.starts_with(code)) {
+        } else if command_exit || fetch_missing || OUTCOME.iter().any(|code| text.starts_with(code))
+        {
             Self::Outcome
         } else {
             Self::Failure
@@ -2486,7 +2517,7 @@ mod tests {
             "not executed: this turn requested more than 16 tool calls",
             "edit 0: not_read: a.rs has not been read in this session",
             "edit 12: invalid_edit: old and new are identical",
-            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+            "invalid url: relative URL without a base",
         ] {
             assert_eq!(
                 ToolErrorKind::of("read_file", result),
@@ -2501,6 +2532,7 @@ mod tests {
             "not_found: old does not occur in a.rs",
             "shell exit=1 elapsed=0.1 bytes=0\n",
             "exec exit=101 elapsed=2.0 bytes=310\nerror[E0308]",
+            "exec exit=-9 elapsed=2.0 bytes=0\n",
         ] {
             assert_eq!(
                 ToolErrorKind::of("read_file", result),
@@ -2516,11 +2548,105 @@ mod tests {
             "edit x: invalid_edit: not an index",
             "edit : stale_file: missing index",
             "forbidden: this command is refused under every approval mode",
+            // Refusals stay visible failures, not routine corrections.
+            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+            "use_builtin: rg is refused under policy.builtin_preference=strict",
+            "path_escapes_workspace: ../secret",
+            // Only a numeric nonzero exit is an outcome.
+            "shell exit=0 elapsed=0.1 bytes=0\n",
+            "shell exit=timeout elapsed=30.0 bytes=0\n",
+            "exec exit=signal:9 elapsed=0.1 bytes=0\n",
+            "exec exit=unknown elapsed=0.1 bytes=0\n",
+            "shell exit=1oops elapsed=0.1 bytes=0\n",
         ] {
             assert_eq!(
                 ToolErrorKind::of("read_file", result),
                 ToolErrorKind::Failure,
                 "{result:?}"
+            );
+        }
+        for result in [
+            "env_not_allowed: GH_TOKEN is not in policy.shell_env",
+            "shell exit=timeout elapsed=30.0 bytes=0\n",
+        ] {
+            assert_eq!(
+                ToolErrorKind::of("shell", result),
+                ToolErrorKind::Failure,
+                "{result:?}"
+            );
+        }
+
+        // Semantic argument errors of the other QQ-owned tools.
+        for (name, result) in [
+            ("ask_user", "ask_user needs 1-4 questions, got 0"),
+            ("ask_user", "question 1 is empty or longer than 512 bytes"),
+            (
+                "ask_user",
+                "question 2 needs 2-6 options (or free_text with no options), got 1",
+            ),
+            ("fetch", "invalid url: relative URL without a base"),
+            ("spawn_agent", "task must not be empty"),
+            (
+                "cancel_agent",
+                "id must be a sub-agent id from a spawn_agent result",
+            ),
+        ] {
+            assert_eq!(
+                ToolErrorKind::of(name, result),
+                ToolErrorKind::Correction,
+                "{name}: {result}"
+            );
+        }
+
+        // A fetch that reached the server and found nothing is an answer;
+        // auth, rate-limit, and server errors stay failures.
+        for status in ["404", "410"] {
+            assert_eq!(
+                ToolErrorKind::of(
+                    "fetch",
+                    &format!("fetch http://h/x status={status} type=text/plain bytes=9\nbody")
+                ),
+                ToolErrorKind::Outcome,
+                "{status}"
+            );
+        }
+        for status in ["401", "403", "429", "500", "503"] {
+            assert_eq!(
+                ToolErrorKind::of(
+                    "fetch",
+                    &format!("fetch http://h/x status={status} type=text/plain bytes=9\nbody")
+                ),
+                ToolErrorKind::Failure,
+                "{status}"
+            );
+        }
+        assert_eq!(
+            ToolErrorKind::of("read_file", "fetch http://h/x status=404"),
+            ToolErrorKind::Failure
+        );
+
+        // QQ's own pre-dispatch rejections keep their provenance whatever
+        // name the model asked for; arbitrary external text does not.
+        for name in ["mcp__srv__tool", "ext__host__tool", "made_up"] {
+            for result in [
+                "unknown tool \"made_up\"",
+                "not executed: this turn requested more than 16 tool calls and only the first 16 ran; call this again next turn",
+            ] {
+                assert_eq!(
+                    ToolErrorKind::of(name, result),
+                    ToolErrorKind::Correction,
+                    "{name}: {result}"
+                );
+            }
+            assert_eq!(
+                ToolErrorKind::of(name, "not executed: the server said so"),
+                ToolErrorKind::Failure,
+                "{name}"
+            );
+            assert_eq!(
+                ToolErrorKind::of(name, "unknown tool in the upstream catalog"),
+                ToolErrorKind::Failure,
+                "{name}"
             );
         }
 
