@@ -423,3 +423,11 @@ Four more Codex findings on 3207f528, all valid. This round audited every error 
 - An expanded correction or outcome uses the normal expanded result budget (12 rows, 4 KiB), not the 6-row, 2 KiB failure panel, and renders under the timing line.
 - A command outcome's label no longer repeats the exit status the row metric already shows (`exit 101`).
 - Regressions in `qq-protocol` (routing and refusal cases) and `qq-tui` (budget, ordering, no duplicate exit).
+
+### 2026-10-08 — T17 review repairs, round 6
+
+Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/`bounded_result`/`spawn_error` string in `qq-core` against both lists:
+
+- `too_deep:` and oversized *content* (`too_large: content exceeds`, `too_large: the edited …`) are corrections. An existing oversized file stays an outcome. `not_utf8:` is an outcome, like `not_text:`.
+- A correction folds only into a successful same-name call from a later turn (`turn_ordinal`). A sibling in the same turn is not a retry.
+- The exit label is suppressed only while the `exit N` metric is actually rendered. A narrow row keeps `exit=N`.

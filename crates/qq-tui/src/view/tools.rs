@@ -794,18 +794,17 @@ pub(super) fn tool_summary_line(
                 0
             }
     });
+    // A command outcome's metric already reads `exit 101`: while the metric
+    // shows, the label would only repeat it; once layout drops the metric,
+    // the label is the only place the exit code remains.
+    let exit_in_metric = call.error_kind() == Some(ToolErrorKind::Outcome)
+        && metric.is_some()
+        && call
+            .result
+            .as_deref()
+            .and_then(|result| header_field(result, &call.name, "exit"))
+            .is_some();
     let state = match call.error_kind() {
-        // A command outcome's metric already reads `exit 101`; the `!` glyph
-        // carries the grade, so the label would only repeat the number.
-        Some(ToolErrorKind::Outcome)
-            if call
-                .result
-                .as_deref()
-                .and_then(|result| header_field(result, &call.name, "exit"))
-                .is_some() =>
-        {
-            None
-        }
         Some(kind @ (ToolErrorKind::Correction | ToolErrorKind::Outcome)) => {
             Some(tool_error_label(call, kind))
         }
@@ -848,7 +847,7 @@ pub(super) fn tool_summary_line(
     let mut show_metric = metric.is_some();
     let right_width = |show_metric: bool, show_duration: bool| {
         let mut total = if show_metric { metric_width } else { 0 };
-        if state.is_some() {
+        if state.is_some() && !(exit_in_metric && show_metric) {
             total += if show_metric { 3 } else { 0 } + state_width;
         }
         if show_duration {
@@ -893,7 +892,7 @@ pub(super) fn tool_summary_line(
                 line.push(TRUNCATED_SUFFIX, muted());
             }
         }
-        if let Some((label, style)) = state {
+        if let Some((label, style)) = state.filter(|_| !(exit_in_metric && show_metric)) {
             if show_metric {
                 line.push(" · ", muted());
             }
@@ -939,6 +938,11 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
                     !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
                 })
                 .map_or(result, |(_, rest)| rest);
+            // `exec exit=101 …`: shown only when layout dropped the metric.
+            let result = result
+                .strip_prefix("shell ")
+                .or_else(|| result.strip_prefix("exec "))
+                .unwrap_or(result);
             // `fetch <url> status=404`: the status is the answer, not the URL.
             let fetch_status = result
                 .strip_prefix("fetch ")
@@ -967,7 +971,12 @@ fn absorbed_correction(calls: &[&ToolCallSnapshot], index: usize) -> bool {
     let call = calls[index];
     call.error_kind() == Some(ToolErrorKind::Correction)
         && calls[index + 1..].iter().any(|later| {
-            later.name == call.name && later.state == ToolCallState::Completed && !later.is_error
+            // Only a later turn can be a retry: the model cannot see a
+            // result within the turn that issued the call.
+            later.name == call.name
+                && later.turn_ordinal > call.turn_ordinal
+                && later.state == ToolCallState::Completed
+                && !later.is_error
         })
 }
 
