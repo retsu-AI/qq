@@ -7,7 +7,7 @@ First stop for anything: `qq doctor`. It runs every local readiness check and
 puts the fix next to whatever failed:
 
 ```
-qq 0.1.5 (1a2b3c4 2026-09-29) · protocol 31 · capabilities 1 · descriptor 13 · store schema 43
+qq 0.1.6 (fef41a4 2026-10-08) · protocol 31 · capabilities 1 · descriptor 13 · store schema 43
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5

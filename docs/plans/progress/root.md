@@ -478,3 +478,11 @@ slice is on `main`.
 User authorized publishing regression and merging AC10 forward through AC11/AC12.1 without force pushes.
 Shared manifest/CI/map extraction remains limited to #253 → #256 → #258; AP4.2 untouched.
 Relative performance/size evidence in autonomous-core ledger; inherited 48 MB absolute size failure and high host pressure explicitly retained, not waived.
+
+### 2026-10-08 — v0.1.6 post-publication follow-up
+
+- Release workflow 37833036979 succeeded at tag commit `fef41a46`; published release has all five target archives and SHA256SUMS.
+- Unpinned install.sh smoke installed into `target/qq-release-check-0.1.6/bin`, verified the archive checksum, and printed `qq 0.1.6 (fef41a4 2026-10-08)`; `qq version` reports 31/1/13/43.
+- Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
+- `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
+- Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.

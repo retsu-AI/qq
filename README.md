@@ -23,7 +23,7 @@ release's `SHA256SUMS`, and installs to `~/.local/bin`. Other routes:
 
 | | |
 | --- | --- |
-| Homebrew | `brew install retsu-ai/qq/qq` (once the tap is published) |
+| Homebrew | `brew install retsu-ai/qq/qq` |
 | Nix | `nix run github:retsu-AI/qq` or `nix profile install github:retsu-AI/qq` |
 | cargo-binstall | `cargo binstall --git https://github.com/retsu-AI/qq qq` |
 | From source | `cargo install --git https://github.com/retsu-AI/qq --locked qq` |
