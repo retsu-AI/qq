@@ -22,7 +22,7 @@ newest last.
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
 | T15 | Default-shaped arguments read as absent | In review | `fix/eng-1012-t15-tolerant-defaults` (stacked on #265) | D9 audit; lands the `search.context` clamp ahead of RR10 (ENG-872) |
-| T16 | Responses arguments from `*.done` events | Planned | | D9 audit; capture a Codex stream first |
+| T16 | Responses arguments from `*.done` events | In review | `fix/eng-1012-t16-responses-done-arguments` (stacked on T17) | D9 audit; confirmed by a captured Codex stream |
 | T17 | `ToolErrorKind` severity in clients | In review | `feat/eng-1012-t17-tool-error-kind` (stacked on #267) | D9 audit; derived from the error code, no wire field |
 
 ## Entries
@@ -312,6 +312,36 @@ vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
 (noise); blocks with no error skip the filter copy. Docs:
 `design/transcript.md` § Tool Rows.
 
+### 2026-10-06 — T16 captured, in progress → in review
+
+Capture first, in a throwaway worktree (`.worktrees/t16-capture`, never
+pushed): the OpenAI stream loop appended every SSE `data:` line to a file,
+and the session database went to a temp path so the user's store was
+untouched. `qq --model openai-codex/<model> run --approval read-only` in a
+scratch directory under `/tmp`, asking for a 12+ call parallel batch:
+`gpt-5.5` 13/13 calls streamed deltas; `gpt-6.1-sol` 5/5; `gpt-6-astra` and
+`gpt-6-sol` 1/16 each — the other 15 sent `output_item.added` (empty
+`arguments`), then `function_call_arguments.done` and `output_item.done`
+with identical complete `arguments`, and no delta. The hypothesis held: those
+15 calls would have run as `{}`. Where deltas existed, both done payloads
+matched them byte for byte (34 calls).
+
+Fix on branch `fix/eng-1012-t16-responses-done-arguments` (worktree
+`.worktrees/responses-args`), stacked on T17: the decoder reads `arguments`
+from both done events and emits it once, as one `ToolCallArgumentsDelta`
+before `ToolCallCompleted`, for a call that had no delta; done payloads
+after deltas are ignored, not compared (see the plan's T16). A call with no
+arguments anywhere still completes empty. Regression test
+`parallel_calls_without_deltas_take_their_arguments_from_the_done_events`
+mirrors the captured shape (`obfuscation`, `status`, spaced JSON). Gates:
+`cargo test -p qq-provider` (241 lib + 19), minimal profile
+`--no-default-features --features test-support` (192 + 19), workspace
+clippy `-D warnings`, fmt. `sse_decode` bench, base vs branch: allocations
+identical; `openai_responses` frame+parse 105/838/1683 vs 99/809/1617 µs
+(64 KiB / 512 KiB / 1 MiB; noise). Not re-run end to end with the fixed
+binary against Codex: the approval reviewer declined a second live model
+call.
+
 ### 2026-10-07 — T15 review repairs
 
 - Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
@@ -333,6 +363,16 @@ vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
 - 30 release A/B render pairs against original T17 117f8f94: rows median 24.45→25.30 µs, folded 12.60→13.10, expanded 53.80→55.80, inspector 38.95→39.75 (<5% each).
 - Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
 - Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
+
+### 2026-10-07 — T16 review repair and final stack verification
+
+- Inherited T15/T17 repairs with merge commits, preserving published branch history.
+- Empty argument deltas validate the item ID but do not mark arguments emitted; complete done payloads remain available. Extended parallel-call regression failed before repair and passes after it.
+- Final independent read-only review: Approve for T16 and the T17 nonempty-index correction; no blockers, reviewer did not run tests.
+- Final stack workspace fmt, all-target/all-feature Clippy, default-parallel workspace tests, and build passed; provider minimal-profile Clippy/tests passed.
+- Earlier workspace attempts failed in existing deadline/progress/headless timing tests under load; isolated reruns passed, and a final full default-parallel rerun passed. Four-thread attempt also failed one budget assertion; no harmlessness/root-cause claim.
+- Logs `target/t16-{clippy,tests-final,build,minimal-clippy,minimal-tests}.log`; no live-provider retest or paid calls.
+- Existing T16 SSE decode measurement retained; repair adds only an empty-payload guard, with bounded output accounting and no schema/wire changes.
 
 ### 2026-10-08 — T15 review repair: notes for every ignored default
 
