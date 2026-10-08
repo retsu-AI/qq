@@ -217,6 +217,9 @@ impl Provider for OpenAi {
                         }
                         DecodedEvent::ToolCallArguments { item_id, json } => {
                             let id = tool_calls.get(&item_id)?.to_owned();
+                            if json.is_empty() {
+                                continue;
+                            }
                             output_bytes.add(json.len())?;
                             if !emitted.contains(&item_id) {
                                 emitted.push(item_id);
@@ -1528,6 +1531,7 @@ mod tests {
             "data: {\"type\":\"response.output_item.added\",\"output_index\":1,",
             "\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",",
             "\"name\":\"read_file\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_2\",",
             "\"output_index\":1,\"arguments\":\"{\\\"path\\\": \\\"a.txt\\\"}\"}\n\n",
             "data: {\"type\":\"response.output_item.done\",\"output_index\":1,",

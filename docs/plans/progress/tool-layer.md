@@ -364,3 +364,13 @@ call.
 - Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
 - Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
 
+### 2026-10-07 — T16 review repair and final stack verification
+
+- Inherited T15/T17 repairs with merge commits, preserving published branch history.
+- Empty argument deltas validate the item ID but do not mark arguments emitted; complete done payloads remain available. Extended parallel-call regression failed before repair and passes after it.
+- Final independent read-only review: Approve for T16 and the T17 nonempty-index correction; no blockers, reviewer did not run tests.
+- Final stack workspace fmt, all-target/all-feature Clippy, default-parallel workspace tests, and build passed; provider minimal-profile Clippy/tests passed.
+- Earlier workspace attempts failed in existing deadline/progress/headless timing tests under load; isolated reruns passed, and a final full default-parallel rerun passed. Four-thread attempt also failed one budget assertion; no harmlessness/root-cause claim.
+- Logs `target/t16-{clippy,tests-final,build,minimal-clippy,minimal-tests}.log`; no live-provider retest or paid calls.
+- Existing T16 SSE decode measurement retained; repair adds only an empty-payload guard, with bounded output accounting and no schema/wire changes.
+
