@@ -158,17 +158,17 @@ pub(super) fn read_file(
                     .field("lines", total_lines);
                 ToolOutput::success(header.into_line())
             } else {
-                lines(
-                    &loaded,
-                    short,
-                    total_lines,
-                    &ranges,
-                    offset_ignored,
-                    cancelled,
-                )
+                lines(&loaded, short, total_lines, &ranges, cancelled)
             }
         }
     };
+    if !result.is_error && offset_ignored {
+        let end = result
+            .model_text
+            .find('\n')
+            .unwrap_or(result.model_text.len());
+        result.model_text.insert_str(end, " note=offset_ignored");
+    }
     if !result.is_error
         && let Some(update) = update
     {
@@ -306,7 +306,6 @@ fn lines(
     short: &str,
     total_lines: usize,
     ranges: &[Range],
-    offset_ignored: bool,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
@@ -423,9 +422,6 @@ fn lines(
         .token(format_args!("h:{short}"));
     if clipped_lines > 0 {
         header = header.field("clipped", clipped_lines);
-    }
-    if offset_ignored {
-        header = header.field("note", "offset_ignored");
     }
     if stopped {
         header = header.field("truncated", "bytes");

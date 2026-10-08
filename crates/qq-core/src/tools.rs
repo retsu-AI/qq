@@ -391,6 +391,37 @@ mod tests {
     }
 
     #[test]
+    fn read_file_reports_ignored_offsets_in_every_successful_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let content = "fn a() {}\n";
+        fs::write(directory.path().join("a.rs"), content).unwrap();
+        fs::write(directory.path().join("pic.png"), b"\x89PNG\r\n\x1a\n\x00").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let short = &content_hash(content.as_bytes())[..12];
+        for arguments in [
+            format!(
+                r#"{{"path":"a.rs","ranges":["1"],"offset":0,"limit":0,"if_changed_since":"h:{short}"}}"#
+            ),
+            r#"{"path":"a.rs","ranges":["1"],"offset":0,"mode":"info"}"#.to_owned(),
+            r#"{"path":"a.rs","ranges":["1"],"limit":0,"mode":"outline"}"#.to_owned(),
+            r#"{"path":"pic.png","ranges":["1"],"offset":0}"#.to_owned(),
+        ] {
+            let read = run_tool(&workspace, &state, "read_file", &arguments);
+            assert!(!read.is_error, "{}", read.model_text);
+            assert!(
+                read.model_text
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .ends_with(" note=offset_ignored"),
+                "{}",
+                read.model_text
+            );
+        }
+    }
+
+    #[test]
     fn read_file_if_changed_since_skips_unchanged_content_but_still_records() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.rs"), "fn a() {}\n").unwrap();

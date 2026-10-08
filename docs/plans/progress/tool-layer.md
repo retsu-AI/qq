@@ -290,3 +290,14 @@ Schemas are unchanged (schema hash fixture holds). `path_not_found` and
 smoke test green. Bench not re-run: each rule is a `match` on arguments
 before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
 and edit sections.
+
+### 2026-10-07 — T15 review repairs
+
+- Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
+- Added failing-first regressions for empty edit forms in approval previews and ignored-offset notes on unchanged/info/outline/image reads; both now pass.
+- Approval previews normalize the same empty unused forms as execution; ambiguous and empty-only forms remain rejected.
+- `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy, workspace tests (full rerun), and workspace build passed.
+- Initial workspace run timed out in two existing headless budget tests; both isolated reruns and the full workspace rerun passed. No root-cause claim.
+- `tool_dispatch`: 30 alternating release A/B pairs, #265 f7ecfb83 baseline versus T15+repairs: median 74,890 → 66,261 ns (no observed regression).
+- I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
+- This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
