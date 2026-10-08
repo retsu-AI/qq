@@ -307,3 +307,9 @@ and edit sections.
 - Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
 - Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
 - `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
+
+### 2026-10-08 — T15 review repair: read note before bounding
+
+- Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
+- Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.

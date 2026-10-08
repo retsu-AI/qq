@@ -422,6 +422,34 @@ mod tests {
     }
 
     #[test]
+    fn a_spilled_read_stores_the_ignored_offset_note() {
+        let directory = tempfile::tempdir().unwrap();
+        // 400 outline rows of ~190 bytes overrun the 32 KiB read bound.
+        let source: String = (0..400)
+            .map(|n| format!("fn f{n:03}_{}() {{}}\n", "x".repeat(180)))
+            .collect();
+        fs::write(directory.path().join("big.rs"), source).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let read = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"big.rs","mode":"outline","ranges":["1"],"offset":1}"#,
+        );
+        assert!(!read.is_error, "{}", read.model_text);
+        let spill = read.spill.as_ref().expect("the outline overran the bound");
+        let header = spill.text.lines().next().unwrap();
+        assert!(header.ends_with(" note=offset_ignored"), "{header}");
+        assert!(
+            read.model_text
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(" note=offset_ignored")
+        );
+    }
+
+    #[test]
     fn read_file_if_changed_since_skips_unchanged_content_but_still_records() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.rs"), "fn a() {}\n").unwrap();
