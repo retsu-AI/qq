@@ -958,7 +958,9 @@ fn explicit_project_packs(
 /// to them, so a path that leaves it (absolute, `..`, a UNC share, an
 /// automount, a link) is a configuration error and is never touched; packs
 /// outside the repository belong in the user's own configuration.
-/// `Ok(None)` is a directory that does not exist (yet).
+/// `Ok(None)` is a directory that does not exist (yet). On Windows,
+/// `FileType::is_symlink` is true for every name-surrogate reparse point,
+/// so directory junctions are rejected as links too.
 fn project_pack_directory(
     id: &str,
     path: &str,
@@ -979,11 +981,19 @@ fn project_pack_directory(
                 normalized.pop();
             }
             std::path::Component::CurDir => {}
-            // The root is canonical (`\\?\C:` on Windows) while a document
-            // may write `C:`; compare drive paths in the canonical form.
+            // The root is canonical (`\\?\C:`, `\\?\UNC\server\share` on
+            // Windows) while a document may write `C:` or `\\server\share`;
+            // compare in the canonical form.
             std::path::Component::Prefix(prefix) => match prefix.kind() {
                 std::path::Prefix::Disk(drive) => {
                     normalized.push(format!(r"\\?\{}:", char::from(drive.to_ascii_uppercase())))
+                }
+                std::path::Prefix::UNC(server, share) => {
+                    let mut verbatim = std::ffi::OsString::from(r"\\?\UNC\");
+                    verbatim.push(server);
+                    verbatim.push(r"\");
+                    verbatim.push(share);
+                    normalized.push(verbatim);
                 }
                 _ => normalized.push(prefix.as_os_str()),
             },

@@ -4275,6 +4275,61 @@ fn placeholder_pack_directories_spend_the_load_budget() {
         tree.loader().pending_trust(&request),
         Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
     ));
+
+    // Stray files are listed too and spend the same budget.
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    for index in 0..=MAX_PACKS {
+        tree.write(format!("work/.qq/packs/file-{index}"), "");
+    }
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn discovered_project_pack_links_are_rejected_before_they_are_followed() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write(
+        "outside/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
+    );
+    let request = tree.request();
+
+    fs::create_dir_all(tree.path("work/.qq/packs/kit")).unwrap();
+    symlink(
+        tree.path("outside/kit/pack.ron"),
+        tree.path("work/.qq/packs/kit/pack.ron"),
+    )
+    .unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
+
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    symlink(tree.path("outside"), tree.path("work/.qq/packs")).unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
 }
 
 #[test]

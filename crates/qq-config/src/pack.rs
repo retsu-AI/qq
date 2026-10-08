@@ -288,17 +288,19 @@ impl AgentPack {
 
 /// Discovers packs under `directory/<id>/pack.ron`. Absent or empty
 /// directories contribute nothing; every path inspected is recorded.
-/// `loaded` counts pack directories inspected in this load (admitted,
-/// withheld, or without a manifest), so a repository cannot make every load
-/// list and probe an unbounded number of placeholder directories.
+/// `loaded` counts every entry inspected in this load (packs admitted or
+/// withheld, directories without a manifest, stray files), so a repository
+/// cannot make every load list and probe an unbounded number of entries.
+/// Links are rejected before anything is recorded: recording follows a
+/// link's target, and project packs are read before the user consents.
 pub(crate) fn discover(
     directory: &Path,
     kind: SourceKind,
     probes: &mut Probes,
     loaded: &mut usize,
 ) -> Result<Vec<AgentPack>, ConfigError> {
-    probes.record(directory);
     crate::loader::reject_symlink_components(directory)?;
+    probes.record(directory);
     let listing = match fs::read_dir(directory) {
         Ok(listing) => listing,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -315,6 +317,10 @@ pub(crate) fn discover(
             path: directory.to_owned(),
             error,
         })?;
+        if *loaded >= MAX_PACKS {
+            return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
+        }
+        *loaded += 1;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -323,9 +329,6 @@ pub(crate) fn discover(
             error,
         })?;
         if file_type.is_dir() {
-            if *loaded + ids.len() >= MAX_PACKS {
-                return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
-            }
             ids.push(name);
         }
     }
@@ -334,8 +337,22 @@ pub(crate) fn discover(
     for id in ids {
         let pack_directory = directory.join(&id);
         let manifest_path = pack_directory.join(PACK_MANIFEST_FILE);
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ConfigError::SymlinkSource {
+                    path: manifest_path,
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ConfigError::Io {
+                    path: manifest_path,
+                    error,
+                });
+            }
+        }
         probes.record(&manifest_path);
-        *loaded += 1;
         if !manifest_path.is_file() {
             // A directory without a manifest is not a pack; ignore it so
             // unrelated content under `packs/` cannot fail configuration.

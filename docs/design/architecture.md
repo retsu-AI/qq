@@ -642,7 +642,9 @@ pending set, so one review covers both. Because those manifests are read
 before consent, a project entry must resolve lexically beneath the VCS root
 (else `cwd`) through no symbolic link, manifest leaf included; any other
 path is `InvalidPack` or `SymlinkSource` and is never opened. The 32-entry
-bound counts every pack directory inspected, with or without a manifest. Pack profiles merge beneath the configuration's
+bound counts every entry inspected (packs, directories without a
+manifest, stray files), and discovery rejects a linked `packs/` directory
+or `pack.ron` before recording it. Pack profiles merge beneath the configuration's
 own `profiles` in the same flat namespace and a name declared by both is a
 conflict, not a silent override.
 
