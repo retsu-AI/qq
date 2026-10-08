@@ -374,3 +374,32 @@ call.
 - Logs `target/t16-{clippy,tests-final,build,minimal-clippy,minimal-tests}.log`; no live-provider retest or paid calls.
 - Existing T16 SSE decode measurement retained; repair adds only an empty-payload guard, with bounded output accounting and no schema/wire changes.
 
+### 2026-10-08 — T15 review repair: notes for every ignored default
+
+- Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
+- Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
+
+### 2026-10-08 — T17 review repair: all QQ-owned tools are graded
+
+- Codex (#272) pointed out that `select_tools`, `search_history`, `load_skill`, `spawn_agent`, `wait_agents`, and `cancel_agent` return `query must not be empty` / `invalid arguments:` but sat outside the built-in allowlist, so those corrections stayed red failures and could not fold into a retry. They are now in `ToolErrorKind::of`'s allowlist. External tools still cannot match: the catalog admits only `mcp__`/`ext__` names.
+- Regression: each new name grades both corrections as `Correction` and `invalid credentials` as `Failure`.
+- Merged #267 `4688477f` (ignored-default notes) first; the only conflict was the ledger, kept both entries.
+
+### 2026-10-08 — T15 review repair: read note before bounding
+
+- Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
+- Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.
+
+### 2026-10-08 — T17 review repairs, round 3
+
+Seven Codex findings on 966d93a5, all valid:
+
+- Policy refusals stay failures: `env_not_allowed:`, `use_builtin:`, and `path_escapes_workspace` are in neither list (I had also reintroduced the escape code in the outcome list while merging the earlier repair).
+- Only a numeric nonzero `shell`/`exec` exit is an `Outcome`; `exit=timeout`, `signal:N`, `unknown`, and `exit=0` stay failures.
+- `fetch` with HTTP 404/410 is an `Outcome` (labelled `status=404`); 401/403/429/5xx stay failures.
+- Semantic argument errors are corrections: `ask_user needs …`/`question N …`, `invalid url:`, `task must not be empty`, `id must be a sub-agent id …`.
+- Pre-dispatch rejections keep provenance under any requested name: `unknown tool "…"` and `not executed: this …` grade as corrections, while other `not executed:`/`unknown tool` text from an external name stays a failure.
+- The TUI no longer strips a batch-edit outcome (`edit 1: stale_file: …`) as if it were a header, so its one-line reason survives.
+- Regressions for each in `qq-protocol` and `qq-tui`.

@@ -340,10 +340,17 @@ fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     let Some(header) = result.lines().next() else {
         return result;
     };
-    if !header
+    let Some(rest) = header
         .strip_prefix(tool)
-        .is_some_and(|rest| rest.starts_with(' '))
-    {
+        .filter(|rest| rest.starts_with(' '))
+    else {
+        return result;
+    };
+    // `edit <n>: <code>: …` is a batch-edit error, not a header: keep it so
+    // the reason survives.
+    if rest[1..].split_once(": ").is_some_and(|(index, _)| {
+        !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
         return result;
     }
     result.get(header.len() + 1..).unwrap_or_default()
@@ -917,11 +924,22 @@ fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Styl
                 .strip_prefix("shell ")
                 .or_else(|| result.strip_prefix("exec "))
                 .unwrap_or(result);
-            let code = result
-                .split([':', ' ', '\n'])
-                .next()
-                .filter(|code| !code.is_empty() && code.len() <= 24)
-                .unwrap_or("no result");
+            // `fetch <url> status=404`: the status is the answer, not the URL.
+            let fetch_status = result
+                .strip_prefix("fetch ")
+                .and_then(|rest| rest.lines().next())
+                .and_then(|header| {
+                    header
+                        .split_whitespace()
+                        .find(|token| token.starts_with("status="))
+                });
+            let code = fetch_status.unwrap_or_else(|| {
+                result
+                    .split([':', ' ', '\n'])
+                    .next()
+                    .filter(|code| !code.is_empty() && code.len() <= 24)
+                    .unwrap_or("no result")
+            });
             (code, warning())
         }
         ToolErrorKind::Failure => (tool_state_label(call.state), failure()),

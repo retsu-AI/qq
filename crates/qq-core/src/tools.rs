@@ -422,6 +422,34 @@ mod tests {
     }
 
     #[test]
+    fn a_spilled_read_stores_the_ignored_offset_note() {
+        let directory = tempfile::tempdir().unwrap();
+        // 400 outline rows of ~190 bytes overrun the 32 KiB read bound.
+        let source: String = (0..400)
+            .map(|n| format!("fn f{n:03}_{}() {{}}\n", "x".repeat(180)))
+            .collect();
+        fs::write(directory.path().join("big.rs"), source).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let read = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"big.rs","mode":"outline","ranges":["1"],"offset":1}"#,
+        );
+        assert!(!read.is_error, "{}", read.model_text);
+        let spill = read.spill.as_ref().expect("the outline overran the bound");
+        let header = spill.text.lines().next().unwrap();
+        assert!(header.ends_with(" note=offset_ignored"), "{header}");
+        assert!(
+            read.model_text
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(" note=offset_ignored")
+        );
+    }
+
+    #[test]
     fn read_file_if_changed_since_skips_unchanged_content_but_still_records() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.rs"), "fn a() {}\n").unwrap();
@@ -1101,9 +1129,25 @@ mod tests {
         let (header, body) = defaults.model_text.split_once('\n').unwrap();
         assert_eq!(
             header,
-            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1 note=context_clamped=5"
+            "search \"^fn \\\\w+\\\\(\" mode=content matches=1/1 files=1 scanned=1 note=context_clamped=5,empty_glob_ignored"
         );
         assert!(body.starts_with("src/lib.rs\n"), "{body}");
+        let empty_only = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"^fn \\w+\\(","regex":true,"include":[""]}"#,
+        );
+        assert!(
+            empty_only
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(" note=empty_glob_ignored"),
+            "{}",
+            empty_only.model_text
+        );
         let escape = run_tool(&workspace, &state, "search", r#"{"query":"x","path":".."}"#);
         assert!(escape.is_error && escape.model_text.starts_with("path_escapes_workspace"));
     }
@@ -1323,7 +1367,10 @@ mod tests {
                 tree::MAX_ENTRIES
             ),
         );
-        assert_eq!(unfiltered.model_text, result.model_text);
+        let (header, body) = unfiltered.model_text.split_once('\n').unwrap();
+        let (expected_header, expected_body) = result.model_text.split_once('\n').unwrap();
+        assert_eq!(header, format!("{expected_header} note=empty_glob_ignored"));
+        assert_eq!(body, expected_body);
     }
 
     #[test]
@@ -2166,6 +2213,23 @@ mod tests {
                 .starts_with("edit dry_run files=1 edits=1\n"),
             "{}",
             preview.model_text
+        );
+        // D9: an empty unused form is ignored and the header says so.
+        let tolerant = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"","insert_after":"beta","new":"gamma","if_hash":"h:{short}"}}],"dry_run":true}}"#
+            ),
+        );
+        assert!(!tolerant.is_error, "{}", tolerant.model_text);
+        assert!(
+            tolerant
+                .model_text
+                .starts_with("edit dry_run files=1 edits=1 note=empty_form_ignored\n"),
+            "{}",
+            tolerant.model_text
         );
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),

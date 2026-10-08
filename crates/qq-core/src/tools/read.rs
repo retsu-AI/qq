@@ -125,10 +125,13 @@ pub(super) fn read_file(
             if loaded.size > MAX_READ_SCAN_BYTES {
                 header = header.field("scanned", MAX_READ_SCAN_BYTES);
             }
+            if offset_ignored {
+                header = header.field("note", "offset_ignored");
+            }
             ToolOutput::success(header.into_line())
         }
         _ if image => {
-            let header = Header::new("read", Some(&loaded.path))
+            let mut header = Header::new("read", Some(&loaded.path))
                 .token("info")
                 .field("size", loaded.size)
                 .token(format_args!("h:{short}"))
@@ -141,34 +144,40 @@ pub(super) fn read_file(
                         "image_unsupported_by_model"
                     },
                 );
+            if offset_ignored {
+                header = header.field("note", "offset_ignored");
+            }
             ToolOutput::success(header.into_line())
         }
         _ if binary => ToolOutput::error(format!(
             "not_text: {} is binary ({} bytes); use mode=info",
             loaded.path, loaded.size
         )),
-        ReadMode::Outline => outline(&loaded, short, total_lines),
+        ReadMode::Outline => outline(&loaded, short, total_lines, offset_ignored),
         ReadMode::Lines => {
             if let (Some(since), Some(hash)) = (&arguments.if_changed_since, &loaded.hash)
                 && since[2..] == hash[..SHORT_HASH_LEN]
             {
-                let header = Header::new("read", Some(&loaded.path))
+                let mut header = Header::new("read", Some(&loaded.path))
                     .token("unchanged")
                     .token(format_args!("h:{short}"))
                     .field("lines", total_lines);
+                if offset_ignored {
+                    header = header.field("note", "offset_ignored");
+                }
                 ToolOutput::success(header.into_line())
             } else {
-                lines(&loaded, short, total_lines, &ranges, cancelled)
+                lines(
+                    &loaded,
+                    short,
+                    total_lines,
+                    &ranges,
+                    offset_ignored,
+                    cancelled,
+                )
             }
         }
     };
-    if !result.is_error && offset_ignored {
-        let end = result
-            .model_text
-            .find('\n')
-            .unwrap_or(result.model_text.len());
-        result.model_text.insert_str(end, " note=offset_ignored");
-    }
     if !result.is_error
         && let Some(update) = update
     {
@@ -306,6 +315,7 @@ fn lines(
     short: &str,
     total_lines: usize,
     ranges: &[Range],
+    offset_ignored: bool,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
@@ -429,6 +439,10 @@ fn lines(
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
     }
+    // In the header before bounding, so a spilled result stores it too.
+    if offset_ignored {
+        header = header.field("note", "offset_ignored");
+    }
     let mut out = header.into_line();
     out.push_str(&body);
     if stopped {
@@ -453,7 +467,7 @@ fn lines(
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the
 /// defining line's indentation, ≤ [`MAX_OUTLINE_ITEMS`] rows.
-fn outline(loaded: &Loaded, short: &str, total_lines: usize) -> ToolOutput {
+fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: bool) -> ToolOutput {
     let language = Language::from_path(&loaded.path);
     let Some(items) = language.outline(&loaded.bytes) else {
         return ToolOutput::error(format!(
@@ -505,6 +519,9 @@ fn outline(loaded: &Loaded, short: &str, total_lines: usize) -> ToolOutput {
         .token(format_args!("h:{short}"));
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
+    }
+    if offset_ignored {
+        header = header.field("note", "offset_ignored");
     }
     let mut out = header.into_line();
     out.push_str(&body);

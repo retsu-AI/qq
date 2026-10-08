@@ -549,7 +549,9 @@ file scanned. A case-sensitive content search that finds nothing reports
 `hint=case_insensitive_matches=N` so the model need not retry blind.
 `context` above 5 clamps to 5 with `note=context_clamped=5`, and an empty
 string in `include`/`exclude` (or `tree`'s `glob`) means no filter rather
-than `bad_glob`.
+than `bad_glob`, with `note=empty_glob_ignored`. An empty `read_tool_result`
+`query` pages and carries `note=empty_query_ignored`; an `edit_file` call with
+an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting

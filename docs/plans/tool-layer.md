@@ -295,9 +295,12 @@ The classes:
   `cursor_invalid`, decode errors) and harness `not executed` refusals.
 - `Outcome`: the call was well-formed and the answer was "no", such as
   `path_not_found`, `not_text`, `range_out_of_bounds`, `stale_file`,
-  `not_found`, `ambiguous`, or a non-zero exit from `exec`/`shell`.
+  `not_found`, `ambiguous`, a numeric non-zero exit from `exec`/`shell`
+  (a timeout, signal, or unknown ending is a `Failure`), or an HTTP 404/410
+  from `fetch`.
 - `Failure`: everything else, including I/O errors, interrupted, denied,
-  and forbidden.
+  forbidden, and refusals: `path_escapes_workspace`, `env_not_allowed`, and
+  `use_builtin` enforce policy and stay visible.
 
 The TUI renders `Correction` as a muted `↻` with no error panel (the text
 stays on expand) and `Outcome` as a warning-colored `!` with a one-line

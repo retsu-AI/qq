@@ -289,6 +289,17 @@ pub(super) fn edit_file(
     }
 
     let edits_total: usize = planned.values().map(|file| file.changes.len()).sum();
+    // `form()` succeeded for every edit, so an empty string left in any form
+    // field was an unused filled-in default.
+    let note = if arguments.edits.iter().any(|edit| {
+        [&edit.old, &edit.insert_before, &edit.insert_after]
+            .into_iter()
+            .any(|form| form.as_deref() == Some(""))
+    }) {
+        " note=empty_form_ignored"
+    } else {
+        ""
+    };
     let mut diff = String::new();
     for file in planned.values() {
         let before = std::str::from_utf8(&file.original.bytes).unwrap_or("");
@@ -297,7 +308,10 @@ pub(super) fn edit_file(
     let first_path = planned.keys().next().cloned().unwrap_or_default();
 
     if arguments.dry_run {
-        let mut text = format!("edit dry_run files={} edits={edits_total}\n", planned.len());
+        let mut text = format!(
+            "edit dry_run files={} edits={edits_total}{note}\n",
+            planned.len()
+        );
         for file in planned.values() {
             push_file_line(&mut text, file, &content_hash(file.text.as_bytes()));
         }
@@ -332,7 +346,10 @@ pub(super) fn edit_file(
     }
     let mut applied: Vec<String> = Vec::with_capacity(planned.len());
     let mut updates: Vec<FileStateUpdate> = Vec::with_capacity(planned.len());
-    let mut text = format!("edit ok files={} edits={edits_total}\n", planned.len());
+    let mut text = format!(
+        "edit ok files={} edits={edits_total}{note}\n",
+        planned.len()
+    );
     for file in planned.values() {
         if let Err(error) = apply_atomically(
             workspace,

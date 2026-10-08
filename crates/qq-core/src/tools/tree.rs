@@ -101,6 +101,7 @@ pub(super) fn tree(
         ));
     }
     // `""` is a filled-in default for "no filter", not a pattern.
+    let empty_glob = arguments.glob.as_deref() == Some("");
     let filter = match arguments.glob.as_ref().filter(|glob| !glob.is_empty()) {
         None => PathFilter::new(&[], &[]),
         Some(glob) if glob.len() > MAX_GLOB_BYTES => {
@@ -223,6 +224,9 @@ pub(super) fn tree(
         .field("dirs", total_dirs);
     if let Some(reason) = stop {
         header = header.field("partial", reason.label());
+    }
+    if empty_glob {
+        header = header.field("note", "empty_glob_ignored");
     }
     let mut text = header.into_line();
     render_children(&nodes, &roots, 0, &mut text);
