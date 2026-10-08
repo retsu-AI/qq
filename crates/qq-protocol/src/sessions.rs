@@ -1734,6 +1734,11 @@ impl ToolErrorKind {
             "not executed:",
             "not_read:",
             "tool arguments exceed",
+            // Argument bounds of `write_file`/`edit_file`: shallower path,
+            // smaller content. An existing oversized file is an outcome below.
+            "too_deep:",
+            "too_large: content exceeds",
+            "too_large: the edited ",
             "regex_too_large:",
             "outline_unsupported:",
             "conflicting_edits:",
@@ -1762,6 +1767,7 @@ impl ToolErrorKind {
             "not_a_file",
             "not_a_directory",
             "not_text:",
+            "not_utf8:",
             "range_out_of_bounds:",
             "stale_file:",
             "not_found:",
@@ -2717,6 +2723,35 @@ mod tests {
         );
 
         // `spawn_agent` routing the model can change, versus refusals it cannot.
+        for (name, result, kind) in [
+            (
+                "write_file",
+                "too_deep: at most 8 missing parent directories are created",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "write_file",
+                "too_large: content exceeds the 8 MiB file size limit",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "edit_file",
+                "edit 0: too_large: the edited a.rs exceeds the 8 MiB file size limit",
+                ToolErrorKind::Correction,
+            ),
+            (
+                "edit_file",
+                "edit 0: too_large: file exceeds the 8 MiB editable size limit",
+                ToolErrorKind::Outcome,
+            ),
+            (
+                "edit_file",
+                "edit 0: not_utf8: a.bin is not valid UTF-8",
+                ToolErrorKind::Outcome,
+            ),
+        ] {
+            assert_eq!(ToolErrorKind::of(name, result), kind, "{result}");
+        }
         for result in [
             "no delegation roster is configured, so role cannot be used; omit role (and model) to use the configured worker model",
             "model \"gpt-x\" is not on the delegation roster; choose a role instead or use one of the listed routes",

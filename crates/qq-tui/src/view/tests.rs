@@ -1062,7 +1062,7 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
 
     // The successful retry is the record; the correction before it folds
     // away, and a block of retried reads still collapses to one summary.
-    let retried = tool_call_snapshot(
+    let mut retried = tool_call_snapshot(
         3,
         "read_file",
         r#"{"path":"a.rs"}"#,
@@ -1070,6 +1070,11 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
         Some("read a.rs L1-1/1 h:000000000000\n1\tx\n"),
         false,
     );
+    // A sibling call in the same turn is not a retry: the model had not
+    // seen the error yet, so the correction keeps its row.
+    let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    retried.turn_ordinal = corrected.turn_ordinal + 1;
     let (rows, _) = render(&[&corrected, &retried], SimpleDetail::Rows);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows[0].starts_with(" ● Read a.rs"), "{rows:?}");
@@ -1087,14 +1092,16 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
     // Folded: three good reads plus an absorbed correction fold like four.
     let reads: Vec<ToolCallSnapshot> = (5..9)
         .map(|byte| {
-            tool_call_snapshot(
+            let mut read = tool_call_snapshot(
                 byte,
                 "read_file",
                 &format!(r#"{{"path":"f{byte}.rs"}}"#),
                 ToolCallState::Completed,
                 Some("read f.rs L1-1/1 h:000000000000\n1\tx\n"),
                 false,
-            )
+            );
+            read.turn_ordinal = corrected.turn_ordinal + 1;
+            read
         })
         .collect();
     let mut block: Vec<&ToolCallSnapshot> = vec![&corrected];
@@ -1162,6 +1169,24 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
         ));
         assert!(rows[0].contains(label), "{rows:?}");
     }
+    // On a row too narrow for the metric, the label keeps the exit code.
+    let long = tool_call_snapshot(
+        3,
+        "exec",
+        r#"{"program":"cargo","args":["test","--workspace","--all-features","--no-fail-fast"]}"#,
+        ToolCallState::Failed,
+        Some("exec exit=101 elapsed=1 bytes=0"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&long],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        24,
+        &|_, _| Vec::new(),
+    ));
+    assert!(rows[0].contains("exit=101"), "{rows:?}");
     // The one-line reason under a batch-edit outcome survives header
     // stripping, and a fetch 404 is labelled by its status.
     let stale = tool_call_snapshot(
