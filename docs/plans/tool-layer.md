@@ -281,8 +281,10 @@ parallel calls, and the other 15 carried their arguments only on the two
 done events, identically. The regression test reproduces that shape.
 
 **T17 — error severity in clients.** Add `ToolErrorKind { Correction,
-Outcome, Failure }`, derived in `qq-protocol` from the result's leading
-error code (`ToolErrorKind::of`, `ToolCallSnapshot::error_kind`). As built,
+Outcome, Failure }`, derived in `qq-protocol` from the built-in tool name
+and result's leading error code (`ToolErrorKind::of`,
+`ToolCallSnapshot::error_kind`). External-tool errors remain `Failure`
+regardless of text. As built,
 it carries no wire field: tool errors already start with a stable `code:`,
 so classifying on read grades every stored row and old peer identically,
 needs no store migration and no `PROTOCOL_VERSION` bump (the snapshot is

@@ -341,3 +341,26 @@ identical; `openai_responses` frame+parse 105/838/1683 vs 99/809/1617 µs
 (64 KiB / 512 KiB / 1 MiB; noise). Not re-run end to end with the fixed
 binary against Codex: the approval reviewer declined a second live model
 call.
+
+### 2026-10-07 — T15 review repairs
+
+- Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
+- Added failing-first regressions for empty edit forms in approval previews and ignored-offset notes on unchanged/info/outline/image reads; both now pass.
+- Approval previews normalize the same empty unused forms as execution; ambiguous and empty-only forms remain rejected.
+- `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy, workspace tests (full rerun), and workspace build passed.
+- Initial workspace run timed out in two existing headless budget tests; both isolated reruns and the full workspace rerun passed. No root-cause claim.
+- `tool_dispatch`: 30 alternating release A/B pairs, #265 f7ecfb83 baseline versus T15+repairs: median 74,890 → 66,261 ns (no observed regression).
+- I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
+- This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
+
+### 2026-10-07 — T17 review repairs
+
+- Inherited T15 repairs without rewriting published history; #272 remains stacked on #267.
+- Classifier requires a QQ built-in name; external error text defaults to Failure. `invalid credentials` is not a correction even on built-ins.
+- Expanded correction detail follows inline/inspector placement; batch-edit and command outcomes label `stale_file` / `exit=N` rather than the tool name.
+- Protocol and TUI suites/goldens pass (333 TUI unit tests, 6 goldens); workspace fmt/Clippy/tests (full rerun)/build pass.
+- Initial build exhausted disk; removed only this worktree's generated incremental cache and disabled incremental compilation. Initial workspace test hit the existing headless child-cost timeout; full rerun passed.
+- 30 release A/B render pairs against original T17 117f8f94: rows median 24.45→25.30 µs, folded 12.60→13.10, expanded 53.80→55.80, inspector 38.95→39.75 (<5% each).
+- Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
+- Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
+

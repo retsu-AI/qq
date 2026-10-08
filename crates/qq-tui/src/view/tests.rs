@@ -1105,6 +1105,87 @@ fn error_rows_grade_by_kind_and_corrections_fold_into_their_retry() {
 }
 
 #[test]
+fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
+    let corrected = tool_call_snapshot(
+        1,
+        "read_file",
+        r#"{"path":"a.rs"}"#,
+        ToolCallState::Failed,
+        Some("invalid_ranges: fix the range"),
+        true,
+    );
+    let row = ToolRow::derive(&corrected);
+    let context = ToolRowContext {
+        row: &row,
+        clock: RowClock {
+            timing: qq_client::state::ToolCallTiming::default(),
+            now_ms: 0,
+        },
+        expanded: true,
+        inline_detail: false,
+        fold: false,
+        selected: false,
+    };
+    let transcript = tools::render_tool_calls(
+        &[&corrected],
+        &HashMap::new(),
+        &|_| context,
+        0,
+        120,
+        &|_, _| Vec::new(),
+        &|_, _| Vec::new(),
+    );
+    assert!(
+        !squashed_rows(&transcript)
+            .iter()
+            .any(|row| row.contains("fix the range"))
+    );
+    let inspector = tools::tool_expanded_lines(&corrected, context, 120);
+    assert!(
+        squashed_rows(&inspector)
+            .iter()
+            .any(|row| row.contains("fix the range"))
+    );
+    for (name, result, label) in [
+        ("edit_file", "edit 1: stale_file: changed", "stale_file"),
+        ("exec", "exec exit=101 elapsed=1 bytes=0", "exit=101"),
+        ("shell", "shell exit=1 elapsed=1 bytes=0", "exit=1"),
+    ] {
+        let call = tool_call_snapshot(2, name, "{}", ToolCallState::Failed, Some(result), true);
+        let rows = squashed_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert!(rows[0].contains(label), "{rows:?}");
+    }
+    let external = tool_call_snapshot(
+        3,
+        "mcp__server__read",
+        "{}",
+        ToolCallState::Failed,
+        Some("invalid credentials"),
+        true,
+    );
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&external],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(rows[0].contains('✕'), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.contains("invalid credentials")),
+        "{rows:?}"
+    );
+}
+
+#[test]
 fn pending_states_show_their_glyph_and_label() {
     let awaiting = tool_call_snapshot(
         1,

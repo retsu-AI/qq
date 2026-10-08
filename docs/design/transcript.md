@@ -273,9 +273,10 @@ the call's cached `ToolRow` (verb, subject, metric) plus the live clock:
   row, `▸ Read ×4  Search ×2  a.rs, b.rs, c.rs, +1`, with the `▸` in the
   rail and the text at the content column.
 - **Error rows are graded, not uniform** (`ToolErrorKind`, tool-layer D9).
-  The kind comes from the result's leading error code
-  (`ToolErrorKind::of`), so every stored row grades the same with no wire
-  field, and the model's text never changes:
+  The kind comes from the built-in tool name and result's leading error
+  code (`ToolErrorKind::of`); external-tool errors remain failures regardless
+  of their text. Every stored row grades the same with no wire field, and
+  the model's text never changes:
 
   | Kind | Codes | Glyph | Right side | Under the row |
   | --- | --- | --- | --- | --- |
