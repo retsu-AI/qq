@@ -1229,6 +1229,66 @@ fn correction_details_follow_the_inspector_and_outcomes_name_the_code() {
 }
 
 #[test]
+fn denied_and_interrupted_keep_their_reason_and_outcomes_expand_to_full_output() {
+    for (state, reason) in [
+        (ToolCallState::Denied, "denied by policy: rm is forbidden"),
+        (ToolCallState::Interrupted, "interrupted before it finished"),
+    ] {
+        let call = tool_call_snapshot(1, "shell", "{}", state, Some(reason), true);
+        let rows = squashed_rows(&render_tool_calls_simple(
+            &[&call],
+            &HashMap::new(),
+            SimpleDetail::Rows,
+            0,
+            120,
+            &|_, _| Vec::new(),
+        ));
+        assert!(rows.iter().any(|row| row.contains(reason)), "{rows:?}");
+    }
+
+    let output = "exec exit=101 elapsed=2.0 bytes=90\nerror[E0308]: mismatched types\n --> src/lib.rs:3:5\nhelp: try this";
+    let outcome = tool_call_snapshot(2, "exec", "{}", ToolCallState::Failed, Some(output), true);
+    // Collapsed: one line of the tail.
+    let rows = squashed_rows(&render_tool_calls_simple(
+        &[&outcome],
+        &HashMap::new(),
+        SimpleDetail::Rows,
+        0,
+        120,
+        &|_, _| Vec::new(),
+    ));
+    assert!(
+        rows.iter().any(|row| row.contains("help: try this")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("mismatched types")),
+        "{rows:?}"
+    );
+    // Expanded, in the inspector or inline: every diagnostic line.
+    let row = ToolRow::derive(&outcome);
+    for inline_detail in [false, true] {
+        let context = ToolRowContext {
+            row: &row,
+            clock: RowClock {
+                timing: qq_client::state::ToolCallTiming::default(),
+                now_ms: 0,
+            },
+            expanded: true,
+            inline_detail,
+            fold: false,
+            selected: false,
+        };
+        let lines = squashed_rows(&tools::tool_expanded_lines(&outcome, context, 120));
+        assert!(
+            lines.iter().any(|line| line.contains("mismatched types"))
+                && lines.iter().any(|line| line.contains("src/lib.rs:3:5")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
 fn pending_states_show_their_glyph_and_label() {
     let awaiting = tool_call_snapshot(
         1,
