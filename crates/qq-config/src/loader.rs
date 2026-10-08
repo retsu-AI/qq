@@ -970,7 +970,7 @@ fn project_pack_directory(
     let outside = || ConfigError::InvalidPack {
         origin: source.clone(),
         message: format!(
-            "pack {id:?} path {path:?} leaves the project; declare packs outside the repository in your global configuration"
+            "pack {id:?} path {path:?} leaves the project; use a path relative to this file, and declare packs outside the repository in your global configuration"
         ),
     };
     let resolved = resolve_explicit_pack(id, path, source)?;
