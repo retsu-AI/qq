@@ -75,7 +75,7 @@ may append a **request** row; only root changes a request's status.
 | 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 | 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
-| 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
+| 0055 | Decision-model provider seam in `qq-provider` and a `qq-decision` crate; reverses the Jev plan's no-new-crate non-goal | decision-models DM0 (ENG-985) | Accepted 2026-09-30 (owner, PR #231): `docs/adr/0055-decision-model-seam-and-crate.md` |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
@@ -169,6 +169,8 @@ Next free number: 0057. Reserve here before opening a PR that adds an ADR.
 | 2026-09-24 | onboarding-ux OB7 (ENG-881) | `docs/adr/README.md` (ADR-0042 row); `crates/qq-client/src/port.rs` `ClientRequest::Models` (client-internal enum, not wire) | The trust prompt is client-side per ADR-0042; **no `PROTOCOL_VERSION` change** (stays 28). The plan's "needs a protocol addition" note is superseded by the ADR | Done in the OB7 PR |
 | 2026-09-25 | mcp-pinning MP1 (ENG-939) | `Cargo.lock` (`sha2` for `qq-mcp`, already locked via other crates); `crates/qq-core/src/plan/descriptor.rs` `DESCRIPTOR_VERSION` 9 → 10 (`McpServerDescriptor.pin`); `docs/adr/README.md` (ADR-0046 row); `docs/design/architecture.md` § compiled plan identity; `docs/design/protocol.md` descriptor note; `docs/guide/cli.md` (`qq mcp inspect`) | The configured pin must be in durable plan identity or pinned and unpinned plans share a digest | Done in the ENG-939 PR |
 | 2026-09-28 | release v0.1.5 (ENG-968) | `docs/runbooks/release.md` § Versioning; `docs/design/architecture.md` § run loop and reasoning effort; root `Cargo.toml` / `Cargo.lock` version bump (release PR) | Adopt 0ver (contract bumps no longer force MINOR) and correct post-v0.1.4 drift before tagging | In review (stack ENG-969 … ENG-977) |
+| 2026-09-30 | decision-models DM0 (ENG-985) | `docs/design/architecture.md` (line 65 link only), `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md`, `docs/adr/README.md` (ADR-0055 row) | Rename the Jev docs to `decision-models.md` and keep every link resolving | Done in the DM0 PR |
+| 2026-09-30 | decision-models DM1 | root `Cargo.toml` (`crates/qq-decision` member and workspace dependency), `AGENTS.md` § Repository Map, `docs/design/architecture.md` § Repository Layout and § Extension Contract (owner table: `qq-decision`; lanes: decision providers) | ADR-0055's new crate | Open; ADR-0055 accepted 2026-09-30, lands with DM1 after DM0 acceptance and explicit owner scope/implementation approval |
 | 2026-09-30 | autonomous-core AC0 (ENG-986) | `benchmarks/perf/README.md`, future `benchmarks/perf/budgets-v1.json` / `xtask/src/perf.rs` | Register standalone soak / `turn_overhead` boundaries now; qualify and register new H0 metrics together in AC0.2, never add budgets for absent metrics or widen existing gates | Open; standalone inventory amendment proposed in AC0.1 |
 | 2026-10-01 | autonomous-core AP1 (ENG-989) | `docs/design/architecture.md` § compiled plan prompt prefix (key gains the sub-agent state) and § child sessions (the `Sub-agent:` prompt section) | The prompt-prefix key and the child prompt changed; architecture must describe them as built | Done in the AP1 PR |
 | 2026-10-01 | autonomous-core AP3a (ENG-990) | `docs/design/architecture.md` § run loop slices and the measured-token paragraph; `docs/design/protocol.md` version history (store schema 40); guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 39 → 40 (`model_turns.notice`); the slice seam no longer changes the system prompt | Done in the AP3a PR |
@@ -486,3 +488,14 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-09 — PR249 replacement documentation repair
+
+Restored accepted0055 with currentmain0056/0057 and all later entries, including
+the original DM0/DM1 shared-file requests; DM1 still needs explicit owner
+implementation approval. Future §§4–7 move to the sole plan; full calibration
+key, bounded transport, JV1 subpart dependencies and eight review dispositions
+are planning contracts. The historical23-test receipt stays dated October4.
+Source DAG26nodes/45edges/0cycles and89local links/15heading fragments pass;
+diff/source checks only, no runtime/provider/paid work. Independent final
+review, new-head CI and publication remain pending; maintainer holds remain.

@@ -1,15 +1,49 @@
-# Jev in QQ
+# Decision models in QQ
 
-This is the single design document for QQ's optional TypeSafe Jev
-integration. It records what Jev is, what QQ does with it today, why the
-current integration hands most work back to a human, and the direction the
-[Jev plan](../plans/jev.md) follows. Operator procedure is in the
-[Jev runbook](../runbooks/jev.md). Progress is in the
-[ledger](../plans/progress/jev.md).
+This is the single design document for QQ's optional **decision models**:
+models that answer a bounded, typed question with a probability
+distribution instead of generating text. TypeSafe Jev is the only one QQ
+ships today. Additional vendors belong to the future decision-model plan.
+
+This document covers the built Jev integration, findings, and historical
+provenance: what decision models are and what each vendor offers (§ 1), what
+QQ does with Jev today (§ 2), why that integration hands most work back to a
+human (§ 3), and the provenance record (§ 8). The future principles,
+architecture, model-landing procedure, and differentiators are maintained once
+in the [decision-model plan](../plans/decision-models.md#future-architecture):
+[§4 principles](../plans/decision-models.md#4-principles), [§5 architecture](../plans/decision-models.md#5-architecture), [§6 model landing](../plans/decision-models.md#6-how-new-decision-models-land), and [§7 differentiators](../plans/decision-models.md#7-what-makes-this-worth-using).
+They are planned capabilities, not claims about the built system. Accepted
+[ADR-0055](../adr/0055-decision-model-seam-and-crate.md) records the crate
+boundary. Operator procedure is in the
+[runbook](../runbooks/decision-models.md), and progress in the
+[ledger](../plans/progress/decision-models.md).
 
 Code anchors in § 3 were checked against `main` at `1e91895` (2026-09-28).
+Future code ownership is specified only by the linked plan and ADR-0055.
 
-## 1. What Jev is
+## 1. Decision models
+
+A decision model takes `state` (text or JSON, and for some vendors images)
+plus a set of named questions with finite answer spaces. It returns a typed
+answer for each question. The industry calls these "System One" models. In
+QQ they are the cheap, fast half of the harness: the LLM plans, writes and
+explains, and the decision model answers the small, repeated judgments that
+would otherwise cost an LLM turn or a human interruption.
+
+Three properties hold for every vendor, and QQ's design depends on them:
+
+- **Typed is not correct.** Schema-valid output says nothing about
+  semantics, authorization or resistance to injection.
+- **Scores are estimates.** A vendor's `confidence`, or a probability, is
+  not a calibrated probability of being right for QQ's traffic until QQ
+  measures it on labeled QQ outcomes.
+- **Contracts differ.** Question kinds, label limits, rounding, confidence
+  formulas, pricing and whether probabilities are returned at all all vary
+  by vendor and model version. "Sharing the interface does not make their
+  reasoning ability or probabilities interchangeable" (OpenClaw's decision
+  model docs, below).
+
+### 1.1 TypeSafe Jev
 
 TypeSafe describes Jev as a "System One" model trained with Reinforcement
 Learning for Calibrated Decisions (RLCD). Its API takes structured or
@@ -63,13 +97,97 @@ Sources, accessed 2026-09-25:
 - [Independent confidence and rounding study](https://bernoulli.app/articles/is-jev-confident)
 - [Official confidence guidance](https://docs.typesafe.ai/confidence)
 
+### 1.2 OpenAI Decisions API
+
+Announced at DevDay on 2026-09-29. Confirmed by OpenAI's own recap:
+
+> Decisions API enables real-time decision-making by focusing Luna's
+> intelligence on a specific set of user-defined questions with finite
+> pre-defined answers. Developers supply context using text or images, and
+> get back answers they can use to classify content, route requests, or
+> choose an agent's next action. Available in limited preview today with a
+> broad release planned in the coming days.
+
+Reported by press, from OpenAI's launch materials, but not in the recap:
+
+- It runs on a version of GPT-6 Luna.
+- About 150 ms per decision, against about 1.6 s for the same task through
+  the regular Luna API. That is a vendor chart, not a latency distribution.
+
+**Not published as of 2026-09-30.** There is no API reference, guide or
+changelog entry on `developers.openai.com`; the guide path returns 404. That
+leaves these unknown:
+
+- endpoint and authentication, including whether Codex/ChatGPT sign-in
+  works;
+- model identifiers and pinning;
+- request and response schema: question kinds, label limits, how multiple
+  questions are expressed, whether answers carry a full distribution;
+- rounding, confidence semantics, usage accounting, pricing, rate limits;
+- data retention and zero-data-retention eligibility.
+
+QQ therefore designs against the capability, not a guessed payload. The
+adapter is written from the published contract, with fixtures copied from
+it (plan DM5). Anything QQ can't verify is an unknown capability and fails
+closed: for example, an answer with no distribution can't settle an
+authority decision.
+
+Sources, accessed 2026-09-30:
+
+- [OpenAI DevDay 2026 recap](https://openai.com/index/devday-2026-recap/) (primary)
+- [OpenAI Developer Community DevDay summary](https://community.openai.com/t/devday-2026-announcements-and-developer-resources/1402006)
+- [The Decoder: DevDay report with the latency chart](https://the-decoder.com/openai-expands-codex-and-its-api-at-devday-with-security-scans-a-decisions-api-and-ultrafast/)
+- [OrcaRouter: what is and isn't published](https://www.orcarouter.ai/blog/openai-decisions-api-gpt-6-luna)
+
+### 1.3 Other surfaces with the same shape
+
+Jev's `state` + named `questions` request with `noul`/`choice`/`score`
+answers is becoming a de facto wire family:
+
+| Surface | What it is | Wire |
+| --- | --- | --- |
+| [OpenRouter `alpha.decisions`](https://openrouter.ai/docs/client-sdks/python/sdks/decisions/README) | A multi-vendor "Decisions router"; example model `typesafe/jev-1.13` | Jev's shape, plus OpenRouter headers, provider preferences and typed 402/413/429/529 errors |
+| LLM Gateway `POST /v1/systemone` | Gateway for System One models | Jev's path and shape (vendor blog, unverified) |
+| [OpenDecision](https://deepanwadhwa.github.io/OpenDecision/) | Open-weight local decision model | `POST /v1/systemone`; adds a `Relation` kind (supports, contradicts, unknown, conflicted) |
+| [OpenClaw `decisionModel`](https://docs.openclaw.ai/concepts/decision-models) | A model role in another harness, with ONNX and TypeSafe providers | Normalizes to `choice`/`score`/`boolean`; keeps the original distributions and rounding; an `unavailable` outcome with typed reasons |
+
+OpenClaw is the nearest design precedent:
+
+- Decision models are a separate role, and selecting one starts nothing.
+- There is no automatic fallback to a chat model.
+- Providers declare capabilities and bounds, and a request that exceeds
+  them is rejected, never truncated.
+- A `purpose` and `rubricVersion` travel with every result as provenance.
+
+QQ plans to adopt those four rules in the future architecture (§ 5 of the
+[plan](../plans/decision-models.md#5-architecture)). OpenClaw stops at
+evaluation, and the planned QQ design goes further in three places: durable receipts, calibration per model and rubric,
+and consumers that can settle holds.
+
+### 1.4 What QQ may rely on across vendors
+
+Only what a provider **declares** in its capabilities ([planned §5.2](../plans/decision-models.md#52-layers-and-ownership))
+and QQ has **verified** with fixtures:
+
+- the question kinds it supports;
+- the maximum number of labels, anchors and questions, and the maximum
+  state size;
+- whether it accepts images;
+- whether it returns a full distribution, only a winner, or a vendor
+  confidence;
+- its documented rounding tolerance;
+- its price per input and output token, or "unknown";
+- whether its model id is exact or an alias (`jev-latest`).
+
+Everything else is treated as unknown, and unknown fails closed.
+
 ## 2. What QQ does with Jev today
 
 Four capabilities, each off by default and enabled independently. A stored
 TypeSafe key is not consent; turning one capability on never turns on
 another (ADR-0030). All four use the pinned model `jev-1.13.0`, a fixed
 endpoint, bounded requests (approval sends paths and grant lists unmasked;
-see the [runbook](../runbooks/jev.md#approval-delegate--jev_approval)), and typed parsers. A malformed or missing
+see the [runbook](../runbooks/decision-models.md#approval-delegate--jev_approval)), and typed parsers. A malformed or missing
 answer is always treated as "no decision", never as a positive one.
 
 | Capability | Setting | When it runs | Bounds | On no decision |
@@ -182,116 +300,30 @@ Findings 1, 2 and 7 are design choices; findings 3–6 are defects. None of
 them justifies lowering the 0.7 threshold. That would treat missing context
 and missing authority as model uncertainty.
 
-## 4. Direction
+## 4. Future architecture and experiments
 
-This section is the target the [plan](../plans/jev.md) builds toward, not
-behavior as built; §§ 2–3 describe today. Where it differs from today, the
-owning JV slice is the change (for example, `enforce` does add a serial
-review today: finding 8, JV12).
+The implementation target, ownership, and differentiators are tracked in the
+[decision-model plan](../plans/decision-models.md#future-architecture).
+The design document retains the built system, findings, and provenance; future
+architecture is amended here only as slices land.
 
-**Jev replaces an LLM turn or a human interruption. It should never add a
-serial wait to the hot path.** The rules below follow from that.
+## 8. Provenance
 
-- **Code owns authority; Jev answers the semantic questions code cannot.**
-  - Classify every action by effect: local read, recoverable workspace
-    write, public network read, network write, credential access,
-    system-level, publish.
-  - Operator policy decides which classes may be delegated at all.
-  - Publishing, protected-branch operations, credential access, privilege
-    escalation, cross-workspace access and policy changes are always
-    decided by a human. Jev's confidence doesn't change that.
-  - A GET is not safe by itself: the URL, query data, credentials,
-    redirects and destination policy all matter.
-- **Ask narrow questions in parallel, then combine in code.**
-  - One request asks whether the call is relevant to the effective task,
-    whether it conflicts with an explicit constraint, whether the evidence
-    is sufficient, and for a typed concern reason.
-  - Code combines the answers with thresholds per effect class, calibrated
-    on QQ outcomes.
-  - Correlated probabilities are never multiplied as though independent.
-- **Give Jev the real context, bounded.**
-  - Include the effective task (original request plus applied steering),
-    the delegated scope, the current plan, and short summaries of recent
-    results with provenance.
-  - Mark missing information as missing; it is never proof that an action
-    is unnecessary.
-  - Tool output and model rationale are untrusted data, never permission.
-- **The server owns the hold lifecycle.**
-  - Phases are durable and replayable: delegate-pending, fallback-pending,
-    human-required, terminal.
-  - Clients take focus and alert only for human-required.
-  - A human can still deliberately override a pending decision.
-  - Headless follows the same phases, not a guessed flag or timer.
-- **Batch per turn.** All held calls from one model turn share one Jev
-  request. Independent reads keep running in parallel.
-- **Every attempt leaves a receipt.** Before dispatch, admit the worst-case
-  spend and persist a pending marker. Persist the result or unknown spend
-  before publishing. Record the raw distribution, confidence, parse result,
-  policy identity, latency and cost.
-- **Shadow before settle.** A new policy scores real holds while humans keep
-  deciding. It settles holds only after a pre-agreed safety and utility gate
-  passes.
-- **Opt-in is easy and honest.**
-  - A preset may bundle capabilities, but only as an explained multi-choice
-    that still lists each capability separately.
-  - `jev_approval` keeps its own consent.
-  - One server-side Off wins everywhere.
-  - A `/jev` view shows effective settings with their sources, what is sent
-    to TypeSafe, spend, and interruptions saved.
-- **Measure what matters.** The headline metric is human interruptions per
-  successful agent-hour, within false-approval limits. Report it alongside
-  time, tokens and cost to an independently verified result. Count
-  human-required phases and actual human answers, not
-  `ToolApprovalRequested`.
-
-### Acceleration opportunities
-
-These are hypotheses until the plan measures them. Take them one at a time;
-each ships only on evidence.
-
-| Opportunity | Replaces | Question shape |
-| --- | --- | --- |
-| Per-turn effort and model routing by predicted adequacy; code chooses among adequate options by measured cost and latency | Over-provisioned reasoning on every turn | `noul` per candidate |
-| Context retention ranking at compaction | Tokens resent every turn | `score` per unit |
-| Search and file result ranking before reads | Speculative reads | `score` per result |
-| Failure classification (transient, logic, environment, flaky) driving retry policy | An LLM diagnosis turn | `choice` |
-| Loop and stuck detection (repeated reads, edit back-and-forth) | Wasted turns, human rescue | `noul` |
-| Claim-to-evidence completion check, advisory | LLM self-verification turns | `noul` per claim |
-
-Jev never replaces running tests, citing sources, durable state, idempotent
-tools, cancellation or bounded resources. For long runs, those matter more
-than any judge.
-
-### Rejected alternatives
-
-- **Lower thresholds to reduce prompts.** This confuses missing context and
-  authority with model uncertainty.
-- **Prompt the human while Jev races them.** Successful delegation becomes
-  an interruption, and a quick human answer cancels valid work.
-- **A longer headless grace timer.** A timing guess duplicates server state
-  and still fails under load, reconnect or fallback.
-- **Let a stored credential or one intensity knob enable everything.**
-  Consent, review frequency and authorization are different things.
-- **Require strict completion review before approving tools.** A review
-  after the result can't authorize a side effect that already happened.
-- **A generic decision-engine crate or a separate recovery agent.** The
-  existing approval, routing, checkpoint and budget seams are enough.
-
-## 5. Provenance
-
-This document replaces the following, which were deleted in the
-consolidation. Git history retains them except where noted.
+This document was `design/jev.md` until 2026-09-30. That version replaced
+the following, which were deleted in the consolidation. Git history retains
+them except where noted.
 
 - `design/jev-runtime-review-2026-09-18.md`: review of #72. Its opt-in
   contract shipped in #74–#78 and ADR-0030.
-- `design/jev-delegation-audit-2026-09-25.md`: now § 1 and § 3. It was
+- `design/jev-delegation-audit-2026-09-25.md`: now § 1.1 and § 3. It was
   never on `main`; the original is commit `0c1cbd6`, kept by GitHub at
   `refs/pull/193/head` (`git fetch origin pull/193/head`). Its probe source
   was local (`target/qq-perf/jev-audit-2026-09-25/`) and is not retained.
 - `plans/jev-opt-in.md` and `plans/progress/jev-opt-in.md`: J1–J9 shipped.
-  The receipt is summarized in the [ledger](../plans/progress/jev.md).
+  The receipt is summarized in the
+  [ledger](../plans/progress/decision-models.md).
 
 The unmerged proposal in draft PR #193 (ENG-938) is folded into the
-[plan](../plans/jev.md): `plans/jev-usefulness.md`, its PR comparison,
-`runbooks/jev-qualification.md`, and a proposed ADR numbered 0046, which
-collides with the accepted MCP-pinning ADR-0046.
+[plan](../plans/decision-models.md): `plans/jev-usefulness.md`, its PR
+comparison, `runbooks/jev-qualification.md`, and a proposed ADR numbered
+0046, which collides with the accepted MCP-pinning ADR-0046.

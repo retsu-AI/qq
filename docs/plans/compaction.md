@@ -49,7 +49,7 @@ to move in the same PR.
 
 ### CX0 — Plan, ADR-0056, ledger and live baseline
 **Inputs:** none
-**Owned paths:** `docs/plans/compaction.md`, `docs/plans/progress/compaction.md`, `docs/adr/0055-*.md`, index rows in `docs/plans/README.md`, `docs/plans/progress/README.md`, `docs/adr/README.md`, the ADR reservation in `docs/plans/progress/root.md`
+**Owned paths:** `docs/plans/compaction.md`, `docs/plans/progress/compaction.md`, `docs/adr/0056-*.md`, index rows in `docs/plans/README.md`, `docs/plans/progress/README.md`, `docs/adr/README.md`, the ADR reservation in `docs/plans/progress/root.md`
 **Gates:** none (docs)
 **Acceptance:** the baseline query reproduces the ledger table read-only on the lead's store
 **Docs:** this plan, ADR-0056
