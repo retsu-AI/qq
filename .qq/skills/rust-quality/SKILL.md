@@ -17,7 +17,14 @@ relative to this skill file; the read paths are workspace-root paths.
 | Selected chapter | `read_file` workspace path | Markdown link |
 | --- | --- | --- |
 | Functional design | `.qq/skills/rust-quality/references/functional-design.md` | [Functional design](references/functional-design.md) |
+| Ownership | `.qq/skills/rust-quality/references/ownership.md` | [Ownership](references/ownership.md) |
+| Types and APIs | `.qq/skills/rust-quality/references/types-and-apis.md` | [Types and APIs](references/types-and-apis.md) |
+| Error handling | `.qq/skills/rust-quality/references/error-handling.md` | [Error handling](references/error-handling.md) |
 | Async and concurrency | `.qq/skills/rust-quality/references/async-and-concurrency.md` | [Async and concurrency](references/async-and-concurrency.md) |
+| Performance | `.qq/skills/rust-quality/references/performance.md` | [Performance](references/performance.md) |
+| Testing | `.qq/skills/rust-quality/references/testing.md` | [Testing](references/testing.md) |
+| Tooling and verification | `.qq/skills/rust-quality/references/tooling-and-verification.md` | [Tooling and verification](references/tooling-and-verification.md) |
+| Review procedure | `.qq/skills/rust-quality/references/review.md` | [Review procedure](references/review.md) |
 
 Batch independent reads.
 Do not assume `load_skill` automatically loads supporting files. Load additional

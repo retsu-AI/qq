@@ -523,8 +523,9 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
   Its independent focused test is
   `tests::exact_pr243_rust_quality_skill_is_discovered_and_loaded`, passed 1/1
   against the actual workspace discovery and `load_skill` path. The existing
-  evidence packet is
-  `reviews/qq-backlog-readiness-20261004/control-and-feedback-readback.json`.
+  raw harness, command, environment and stdout are retained in the manager's
+  `reviews/startup-chat-accounting-2026-10-03/pr-completion-20261003/qq243-review/`
+  packet (outside this repository), alongside its independent `REVIEW.md`.
   That receipt covers the original skill subject and scope. The replacement
   reuses that payload and path contract; it does not claim a fresh
   provider-backed session or external model run.
@@ -532,3 +533,11 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
   chapters and compiled from their actual fences. This is source-based example
   verification, distinct from the retained loader receipt.
 - Current-main integration is based on `03077dfaad966f6b69a5e1984ae7826c864126fa`.
+- Pinned Rust 1.97.1: actual fences from both edited chapters compiled; nine
+  repaired-example tests and two original-surface checks passed. The original
+  worker-first test's send-poll probe observed zero sink polls before shutdown;
+  removing only cancellation at the repaired blocked send failed on timeout.
+  Fmt, exact-filter guard and diff checks passed. Raw commands, extracted
+  sources and exit receipts are retained in the manager's
+  `reviews/qq-composition-20261004/pr247-repair-20261009/` packet. Fresh native
+  loading and non-author acceptance remain separate checks before publishing.

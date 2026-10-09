@@ -164,6 +164,9 @@ fn maximum_sequence_replay_remains_idempotent() {
 
 #[test]
 fn state_construction_rejects_inconsistent_sequence_payload_pairs() {
+    let empty = State::new(0, 0, None).expect("valid empty state");
+    assert_eq!(decide(&empty, Event { sequence: 0, delta: 3 }),
+        Err(TransitionError::OutOfOrder { expected: 1, actual: 0 }));
     assert_eq!(
         State::new(0, 0, Some(3)),
         Err(TransitionError::InvalidState {
@@ -183,6 +186,8 @@ fn state_construction_rejects_inconsistent_sequence_payload_pairs() {
 
 `decide` preserves state on rejection by borrowing immutably. `apply` uses local
 mutation without cloning the state. The two-phase API is useful only when the
+constructor is the only ingress to the private state representation, including
+restoration; decoding raw fields must call `State::new` before use. The
 caller enforces its assumptions: keep decisions internal, serialize writers, and
 never apply a decision to a different or advanced state. This example does not
 solve concurrent writes or persistence by itself.
