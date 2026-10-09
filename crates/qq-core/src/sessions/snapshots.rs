@@ -114,13 +114,23 @@ impl SnapshotBudget {
 
     /// Charges one row whose variable text totals `text_bytes` (escaped) and
     /// says whether it fits. The check never reserves a partial row.
-    fn admit(&mut self, text_bytes: usize) -> bool {
+    pub(super) fn admit(&mut self, text_bytes: usize) -> bool {
         let cost = text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES);
         if cost > self.remaining {
             return false;
         }
         self.remaining -= cost;
         true
+    }
+
+    pub(super) const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Charges rows admitted against a separate reserve.
+    pub(super) fn charge(&mut self, text_bytes: usize, rows: usize) {
+        let cost = text_bytes.saturating_add(rows.saturating_mul(SNAPSHOT_ROW_OVERHEAD_BYTES));
+        self.remaining = self.remaining.saturating_sub(cost);
     }
 }
 
@@ -131,6 +141,9 @@ pub(super) fn load_session_snapshot(
     budget: &mut SnapshotBudget,
 ) -> Result<SessionSnapshot, SessionRuntimeError> {
     let summary = load_session_summary(transaction, session_id)?;
+    // Side questions draw first from a reserved share so a long transcript
+    // cannot starve a running question out of a reconnect snapshot.
+    let side_questions = side_questions::load_side_snapshots(transaction, session_id, budget)?;
     // Messages order by run first, then by ordinal within the run, so a
     // prompt queued while a run streams does not interleave with that run's
     // later per-turn messages (which receive higher session ordinals).
@@ -219,6 +232,7 @@ pub(super) fn load_session_snapshot(
     }
     tool_calls.reverse();
     Ok(SessionSnapshot {
+        side_questions,
         summary,
         messages,
         runs,

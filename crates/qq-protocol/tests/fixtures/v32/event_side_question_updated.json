@@ -1,0 +1,25 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 1
+  },
+  "session_id": "03030303030303030303030303030303",
+  "occurred_at_ms": 2,
+  "event": {
+    "type": "side_question_updated",
+    "side_question": {
+      "id": "04040404040404040404040404040404",
+      "thread_id": "04040404040404040404040404040404",
+      "session_id": "03030303030303030303030303030303",
+      "question": "What does this mean?",
+      "answer": "An isolated answer.",
+      "state": "completed",
+      "usage": null,
+      "estimated_cost_usd_nanos": null,
+      "model_turns": 1,
+      "created_at_ms": 1,
+      "finished_at_ms": 2
+    }
+  }
+}

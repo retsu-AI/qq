@@ -445,6 +445,60 @@ impl Store {
             .await
     }
 
+    /// Accepted work stays owned even when a side caller's deadline expires.
+    pub(super) async fn enqueue_side_write<T, F>(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        operation: F,
+    ) -> Result<oneshot::Receiver<Result<T, SessionRuntimeError>>, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        let job: worker::DatabaseJob = Box::new(move |connection| {
+            let result = operation(connection);
+            worker::JobOutcome {
+                ok: result.is_ok(),
+                settle: Box::new(move |commit| {
+                    let _ = reply.send(commit.and(result));
+                }),
+            }
+        });
+        let acquire = Arc::clone(&self.inner.control_slots).acquire_owned();
+        let permit = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, acquire)
+                .await
+                .map_err(|_| SessionRuntimeError::SideQuestionTimedOut)?,
+            None => acquire.await,
+        }
+        .map_err(|_| SessionRuntimeError::Unavailable)?;
+        // No await from accepted handoff through receipt return: cancellation
+        // can only discard work before it enters the worker queue.
+        let admission = self
+            .inner
+            .admission
+            .lock()
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(SessionRuntimeError::SideQuestionTimedOut);
+        }
+        match self.inner.control.try_send(WorkerMessage::Run {
+            job,
+            joins: worker::Joins::OutputGroup,
+            capacity_permit: Some(permit),
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(SessionRuntimeError::Overloaded),
+            Err(TrySendError::Disconnected(_)) => return Err(SessionRuntimeError::Unavailable),
+        }
+        drop(admission);
+        Ok(response)
+    }
+
     async fn call_with<T, F>(
         &self,
         priority: Priority,
@@ -961,6 +1015,160 @@ impl Store {
         let original = original.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_auto_compaction(connection, store_id, &original, &audit, cutoff_ordinal)
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn side_source(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+    ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
+        let response = self
+            .enqueue_side_admission(session_id, question_id, question, new_thread, None)
+            .await?;
+        response
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+    }
+
+    pub(super) async fn enqueue_side_admission(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<
+        oneshot::Receiver<Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError>>,
+        SessionRuntimeError,
+    > {
+        let store_id = self.store_id;
+        self.enqueue_side_write(deadline, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let source = side_questions::admit_side_question(
+                &transaction,
+                store_id,
+                session_id,
+                question_id,
+                question,
+                new_thread,
+            )?;
+            transaction.commit()?;
+            Ok(source)
+        })
+        .await
+    }
+
+    /// Persists a side answer update. `usage`/`cost` are the committed totals,
+    /// or `None` while a provider request is in flight (spend unknown). A row
+    /// that is no longer running (cancelled, or deleted with its session)
+    /// takes no update and publishes nothing.
+    pub(super) async fn record_side_turn(
+        &self,
+        id: RunId,
+        text: String,
+        usage: Option<TokenUsage>,
+        cost: Option<u64>,
+        turns: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let usage = usage.map(|usage| serde_json::to_string(&usage)).transpose()?;
+            let changed = transaction.execute(
+                "UPDATE side_questions SET answer = ?2, usage_json = ?3,
+                    estimated_cost_usd_nanos = ?4, model_turns = ?5 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), text, usage, cost, turns],
+            )?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
+    /// Settles a running side question and returns its effective state. When
+    /// `spend_known` is false a provider request may have been in flight, so
+    /// persisted usage and cost become unknown. A completion at or past
+    /// `duration_ms` from admission settles as timed out. A row deleted with
+    /// its session (possible only after cancellation released it) reports
+    /// `Cancelled`.
+    pub(super) async fn finish_side_question(
+        &self,
+        id: RunId,
+        state: qq_protocol::SideQuestionState,
+        spend_known: bool,
+        duration_ms: u64,
+    ) -> Result<qq_protocol::SideQuestionState, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let state = match state {
+                qq_protocol::SideQuestionState::Completed => "completed",
+                qq_protocol::SideQuestionState::Cancelled => "cancelled",
+                qq_protocol::SideQuestionState::TimedOut => "timed_out",
+                qq_protocol::SideQuestionState::Interrupted => "interrupted",
+                qq_protocol::SideQuestionState::Failed => "failed",
+                qq_protocol::SideQuestionState::Running => {
+                    return Err(SessionRuntimeError::CONSTRAINT);
+                }
+            };
+            let transaction = begin_unit(connection)?;
+            let created: Option<u64> = transaction
+                .query_row(
+                    "SELECT created_at_ms FROM side_questions WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(created) = created else {
+                transaction.commit()?;
+                return Ok(qq_protocol::SideQuestionState::Cancelled);
+            };
+            let finished_at_ms = now_ms();
+            let state = if state == "completed"
+                && finished_at_ms.saturating_sub(created) >= duration_ms
+            {
+                "timed_out"
+            } else {
+                state
+            };
+            let changed = transaction.execute(
+                "UPDATE side_questions SET state = ?2, finished_at_ms = ?3,
+                    usage_json = CASE WHEN ?4 THEN usage_json ELSE NULL END,
+                    estimated_cost_usd_nanos = CASE WHEN ?4 THEN estimated_cost_usd_nanos ELSE NULL END
+                 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), state, finished_at_ms, spend_known],
+            )?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
+            let effective = side_questions::load_side_snapshot(&transaction, id)?.state;
+            transaction.commit()?;
+            Ok(effective)
+        })
+        .await
+    }
+
+    pub(super) async fn capture_side_context(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<Message>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let transaction = connection.transaction()?;
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            transcript::capture_side_context(&transaction, session_id)
         })
         .await
     }

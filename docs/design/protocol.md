@@ -55,8 +55,15 @@ evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 31
+PROTOCOL_VERSION = 32
 ```
+
+Version 32 adds isolated side-question submission and cancellation commands,
+separate durable side-question snapshots, and replayable side projection updates.
+Cancelling a question that already settled returns
+`side_question_already_finished` with its effective state and changes
+nothing; an unknown side-question id is a client error. These do not alter
+the main session transcript or accounting.
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
 values (1–12) belonged to pre-release iterations and no released build
@@ -231,7 +238,8 @@ answers of non-blocking sub-agents, and schema 42 `child_reports`, their
 delivered interim reports (ADR-0054 § 4). No wire shape changed: a delivered
 answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
-`prune_through_turn`; ADR-0056 § 6); no wire shape changed.
+`prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
+`side_questions`, the isolated side-question rows behind protocol 32.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

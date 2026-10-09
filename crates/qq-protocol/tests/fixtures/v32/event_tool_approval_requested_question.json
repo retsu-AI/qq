@@ -1,0 +1,37 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 22
+  },
+  "session_id": "03030303030303030303030303030303",
+  "run_id": "04040404040404040404040404040404",
+  "caused_by": "07070707070707070707070707070707",
+  "occurred_at_ms": 1700000000000,
+  "event": {
+    "type": "tool_approval_requested",
+    "tool_call": {
+      "id": "07070707070707070707070707070707",
+      "session_id": "03030303030303030303030303030303",
+      "run_id": "04040404040404040404040404040404",
+      "turn_ordinal": 1,
+      "call_ordinal": 1,
+      "provider_call_id": "call_0",
+      "name": "ask_user",
+      "arguments": "{\"questions\":[{\"prompt\":\"Which crate?\",\"options\":[\"qq-core\",\"qq-tui\"]}]}",
+      "state": "awaiting_approval",
+      "is_error": false
+    },
+    "question": {
+      "questions": [
+        {
+          "prompt": "Which crate?",
+          "options": [
+            "qq-core",
+            "qq-tui"
+          ]
+        }
+      ]
+    }
+  }
+}

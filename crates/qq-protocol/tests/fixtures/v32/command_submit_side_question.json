@@ -1,0 +1,9 @@
+{
+  "command_id": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+  "command": {
+    "type": "submit_side_question",
+    "session_id": "03030303030303030303030303030303",
+    "question": "What does this mean?",
+    "new_thread": false
+  }
+}

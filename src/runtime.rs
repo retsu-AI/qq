@@ -1800,6 +1800,7 @@ impl RuntimeFactory {
                 .collect();
             profile = profile.with_exposed_tools(names);
         }
+        profile = profile.with_side_question_denies(snapshot.policy().deny_tools().to_vec());
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
@@ -3241,6 +3242,9 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
         | SessionRuntimeError::InvalidSlashCommand(_)
+        | SessionRuntimeError::InvalidSideQuestion
+        | SessionRuntimeError::SideQuestionCancelled
+        | SessionRuntimeError::SideQuestionTimedOut
         | SessionRuntimeError::InvalidRunLimits
         | SessionRuntimeError::InvalidOutputContract(_)
         | SessionRuntimeError::InvalidInput(_)
@@ -3252,6 +3256,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::SessionActive
         | SessionRuntimeError::ParentWorkspaceMismatch
         | SessionRuntimeError::RunNotFound
+        | SessionRuntimeError::SideQuestionNotFound
         | SessionRuntimeError::ToolCallNotFound
         | SessionRuntimeError::ApprovalNotPending
         | SessionRuntimeError::ChildAuthorityEscalation
@@ -3266,7 +3271,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::InvalidPageLimit) => {
             ServerHandlerError::InvalidRequest(error.to_string())
         }
-        SessionRuntimeError::QueueFull
+        SessionRuntimeError::SideQuestionBusy
+        | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
         | SessionRuntimeError::SessionLimitReached

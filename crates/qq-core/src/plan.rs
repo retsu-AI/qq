@@ -131,6 +131,7 @@ pub struct AgentProfile {
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
     exposed_tools: Option<Vec<String>>,
+    side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
 }
@@ -176,6 +177,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            side_question_denies: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
         }
@@ -278,6 +280,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            side_question_denies: Vec::new(),
             context_sources: runtime
                 .context_sources
                 .iter()
@@ -317,6 +320,32 @@ impl AgentProfile {
     #[must_use]
     pub fn with_exposed_tools(mut self, tools: Vec<String>) -> Self {
         self.exposed_tools = Some(tools);
+        self
+    }
+
+    /// Managed hard denies a derived side-question plan must honor. Main
+    /// catalogs are unchanged: there managed denies filter grants, not
+    /// exposure (headless contract), so these apply only in
+    /// [`CompiledAgentPlan::side_question_plan`], which grants nothing.
+    #[must_use]
+    pub fn with_side_question_denies(mut self, names: Vec<String>) -> Self {
+        self.side_question_denies = names;
+        self
+    }
+
+    pub fn for_side_question(mut self) -> Self {
+        self.exposed_tools = Some(["read_file", "search", "tree"].map(str::to_owned).to_vec());
+        self.hosts.clear();
+        self.mcp_servers.clear();
+        self.spawn_model_routes.clear();
+        self.context_sources.clear();
+        self.delegation = DelegationRoster::default();
+        self.audit = AuditPolicy::default();
+        self.approval_delegate = crate::approval::ApprovalDelegate::default();
+        self.approval_delegate_identity = None;
+        self.pack = None;
+        self.checkpoint = None;
+        self.task_router = None;
         self
     }
 
@@ -495,6 +524,7 @@ pub struct CompiledAgentPlan {
     descriptor_json: Arc<str>,
     digest: AgentPlanDigest,
     credential_epoch: CredentialEpoch,
+    side_question_denies: Arc<[String]>,
     /// Instruction files plus skill root directories: everything a cache
     /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
@@ -568,6 +598,41 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    pub(crate) async fn side_question_plan(&self) -> Result<Arc<Self>, PlanCompileError> {
+        let mut profile = AgentProfile::new(
+            Arc::clone(&self.runtime.provider),
+            self.descriptor.provider.clone(),
+            self.resolved_model.as_ref().clone(),
+            self.workspace.path().to_owned(),
+        );
+        profile.shell = self.runtime.shell.as_ref().clone();
+        profile.network = self.runtime.network.as_ref().clone();
+        profile.reasoning_effort = self.runtime.reasoning_effort;
+        profile.output_ceiling = self.runtime.output_ceiling;
+        profile.adapter_build = self.descriptor.adapter_build.clone();
+        profile.provenance = self.descriptor.provenance.clone();
+        profile.credential_epoch = self.credential_epoch;
+        profile.profile_id = self.descriptor.profile.clone();
+        let mut profile = profile.for_side_question();
+        // Side authority is an intersection with the effective source catalog
+        // minus managed hard denies: a side question has no grant path, so a
+        // denied built-in is removed outright rather than restored.
+        profile.exposed_tools = Some(
+            ["read_file", "search", "tree"]
+                .into_iter()
+                .filter(|name| {
+                    self.catalog.lookup(name).is_some()
+                        && !self
+                            .side_question_denies
+                            .iter()
+                            .any(|denied| denied == name)
+                })
+                .map(str::to_owned)
+                .collect(),
+        );
+        Self::compile(profile).await
+    }
+
     /// Compiles off the async executor, with at most four concurrent compiler tasks.
     /// Dropping this future does not interrupt filesystem work already started.
     pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
@@ -617,6 +682,7 @@ impl CompiledAgentPlan {
             profile_id,
             pack,
             exposed_tools,
+            side_question_denies,
             context_sources,
             context_cache,
         } = profile;
@@ -965,6 +1031,7 @@ impl CompiledAgentPlan {
             descriptor: Arc::new(descriptor),
             digest,
             credential_epoch,
+            side_question_denies: side_question_denies.into(),
             sources,
             estimated_bytes,
         }))
@@ -1275,6 +1342,75 @@ mod tests {
             assert_eq!(result.unwrap().digest(), expected);
         }
         assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_preserves_source_tool_exclusions() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["search".to_owned(), "tree".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        let mut names = side.catalog().names().collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["search", "tree"]);
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_cannot_restore_managed_denied_tools() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_side_question_denies(vec!["read_file".to_owned(), "search".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        assert_eq!(side.catalog().names().collect::<Vec<_>>(), ["tree"]);
+        // Managed denies filter grants on the main run, not exposure: the
+        // main catalog and plan identity are exactly those without them.
+        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        assert!(source.catalog().lookup("read_file").is_some());
+        assert!(source.catalog().lookup("search").is_some());
+        assert_eq!(
+            source.catalog().names().collect::<Vec<_>>(),
+            plain.catalog().names().collect::<Vec<_>>()
+        );
+        assert_eq!(source.digest(), plain.digest());
+    }
+
+    #[test]
+    fn side_question_profile_exposes_only_workspace_inspection() {
+        let workspace = canonical_temp();
+        let pack_dir = canonical_temp();
+        let side = profile(workspace.path())
+            .with_pack(PackSelection {
+                id: "hostile-pack".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_digest: "cd".repeat(32),
+                directory: pack_dir.path().to_owned(),
+                persona: Some("absent-persona.md".to_owned()),
+                skill_roots: vec!["absent-skills".to_owned()],
+                command_roots: vec!["absent-commands".to_owned()],
+                tool_allow: Vec::new(),
+                tool_deny: vec!["read_file".to_owned()],
+            })
+            .for_side_question();
+        assert!(side.pack.is_none());
+        assert!(side.approval_delegate_identity.is_none());
+        assert!(side.hosts.is_empty());
+        assert!(side.context_sources.is_empty());
+        assert!(side.checkpoint.is_none());
+        assert!(side.task_router.is_none());
+        let plan = CompiledAgentPlan::compile_blocking(side).unwrap();
+        assert!(plan.descriptor().pack.is_none());
+        assert_eq!(
+            plan.catalog().names().collect::<Vec<_>>(),
+            ["read_file", "search", "tree"]
+        );
     }
 
     #[test]

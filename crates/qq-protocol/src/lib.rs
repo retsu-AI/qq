@@ -62,12 +62,13 @@ pub use sessions::{
     RoutingDecision, RoutingOutcome, RunActivity, RunFailure, RunLimits, RunOutcome, RunPause,
     RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
     SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
-    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot, ToolCallState,
-    ToolErrorKind, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
+    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SideQuestionSnapshot,
+    SideQuestionState, SnapshotRequest, SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage,
+    ToolCallDisplay, ToolCallSnapshot, ToolCallState, ToolErrorKind, ToolExposure,
+    WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 31;
+pub const PROTOCOL_VERSION: u16 = 32;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles

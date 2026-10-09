@@ -2002,6 +2002,8 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -2074,6 +2076,8 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -3261,6 +3265,8 @@ async fn schedules_ready_sessions_fairly() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,

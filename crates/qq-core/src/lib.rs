@@ -98,9 +98,9 @@ pub use sessions::{
     ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
     RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
     RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
-    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
-    run_cost,
+    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
+    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
+    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
@@ -13219,6 +13219,128 @@ mod tests {
             std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "before"
         );
+    }
+
+    #[tokio::test]
+    async fn side_question_rejects_forbidden_calls_without_dispatch_or_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "builtin evidence").unwrap();
+        let collision_host = Arc::new(WideHost::new(1));
+        let collision_calls = Arc::clone(&collision_host.calls);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let host = WideHost::new(2);
+        let calls = Arc::clone(&host.calls);
+        let forbidden = [
+            "edit_file",
+            "write_file",
+            "shell",
+            "exec",
+            "fetch",
+            "spawn_agent",
+            "wait_agents",
+            "cancel_agent",
+            "load_skill",
+            "search_history",
+            "read_tool_result",
+            "select_tools",
+            "ext__wide__tool01",
+            "mcp__executor__execute",
+            "missing",
+        ];
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    forbidden
+                        .iter()
+                        .map(|name| (*name, "{}".to_owned()))
+                        .chain(std::iter::once((
+                            "read_file",
+                            r#"{"path":"note.txt"}"#.to_owned(),
+                        )))
+                        .collect(),
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap()
+        .with_tool_host(Arc::new(host));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            let mut profile = plan::AgentProfile::embedded(&runtime, workspace);
+            // A supplied host catalog cannot impersonate an allowed built-in.
+            profile = profile.with_host(plan::HostSnapshot {
+                host: collision_host,
+                catalog: HostCatalog {
+                    generation: 1,
+                    tools: ["read_file", "search", "tree"]
+                        .into_iter()
+                        .map(|name| HostTool {
+                            spec: qq_provider::ToolSpec::new(
+                                name,
+                                "Impersonated inspection",
+                                serde_json::json!({"type": "object"}),
+                            ),
+                            hints: ToolHints {
+                                read_only: true,
+                                ..ToolHints::default()
+                            },
+                        })
+                        .collect(),
+                    readiness: HostReadiness::Ready,
+                },
+            });
+            plan::CompiledAgentPlan::compile_blocking(profile.for_side_question()).unwrap()
+        })
+        .await
+        .unwrap();
+        struct NoApproval;
+        impl ToolGate for NoApproval {
+            fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
+                assert_eq!(call.name, "read_file", "forbidden call reached the gate");
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+        let events = plan
+            .execute(
+                vec![Message::user("inspect only")],
+                RunCancellation::new(),
+                Arc::new(NoApproval),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::restricted(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                    RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
+                        if result.contains("unknown tool")
+                ))
+                .count(),
+            forbidden.len(),
+            "{events:?}"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(collision_calls.lock().unwrap().is_empty());
+        assert!(events.iter().any(|event| matches!(event,
+            RuntimeEvent::ToolCallFinished { result, is_error: false, .. }
+                if result.contains("builtin evidence")
+        )));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            let mut names = tool_names(request);
+            names.sort_unstable();
+            assert_eq!(names, ["read_file", "search", "tree"]);
+        }
     }
 
     #[tokio::test]

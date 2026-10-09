@@ -2432,6 +2432,7 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
+        side_questions: Vec::new(),
         summary: summary.clone(),
         messages: vec![MessageSnapshot {
             id: id(summary.id.as_bytes()[0], MessageId::from_bytes),
