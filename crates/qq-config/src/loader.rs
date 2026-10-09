@@ -86,12 +86,14 @@ pub(super) fn load_for_client(
     let mdm = read_mdm_document(loader)?;
     let organization = selected_organization(loader, request, &cwd, &trust, mdm.as_ref(), probes)?;
     let (mut merged, compiled_report) = MergeState::compiled();
+    let directories = project_directories(&cwd, probes);
     let mut report = LoadReport {
         sources: vec![compiled_report],
         pending: Vec::new(),
+        loaded_packs: 0,
+        project_root: directories.first().cloned().unwrap_or_else(|| cwd.clone()),
     };
     let mut seen = BTreeSet::new();
-    let mut admitted_packs = 0_usize;
 
     // Discovered packs are the lowest lane: global first, then each project
     // directory root-to-leaf, so a nearer pack of the same id replaces a
@@ -101,7 +103,7 @@ pub(super) fn load_for_client(
         &loader.paths.global_dir.join("packs"),
         SourceKind::Global,
         probes,
-        &mut admitted_packs,
+        &mut report.loaded_packs,
     )? {
         merged.admit_pack(pack);
     }
@@ -131,24 +133,20 @@ pub(super) fn load_for_client(
         )?;
     }
 
-    for directory in project_directories(&cwd, probes) {
-        // Project packs are sensitive (they may declare MCP servers), so
-        // they are admitted only when the project's configuration is
-        // trusted, exactly like `mcp` in `.qq/config.ron`. An untrusted
-        // project contributes no packs and no pending-trust entry of its
-        // own: trusting the directory's configuration admits them.
-        let project_trusted = trust.project_trusted(&directory, probes)?;
-        if project_trusted {
-            for pack in crate::pack::discover(
-                &directory.join(".qq").join("packs"),
-                SourceKind::Project,
-                probes,
-                &mut admitted_packs,
-            )? {
+    for directory in directories {
+        // Project packs are sensitive (they may declare MCP servers that run
+        // commands, grants, and approval modes), so each manifest is its own
+        // trust subject: it is admitted only once its exact bytes are
+        // trusted, whatever the directory's configuration files declare.
+        for pack in crate::pack::discover(
+            &directory.join(".qq").join("packs"),
+            SourceKind::Project,
+            probes,
+            &mut report.loaded_packs,
+        )? {
+            if let Some(pack) = withhold_untrusted_pack(pack, &trust, &mut report.pending) {
                 merged.admit_pack(pack);
             }
-        } else {
-            probes.record(&directory.join(".qq").join("packs"));
         }
         if let Some(candidate) =
             discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
@@ -501,15 +499,29 @@ pub(super) fn ensure_reviewed(
     Ok(())
 }
 
-/// Every project configuration file from the VCS root down to `cwd` whose
-/// sensitive digest `trust` does not cover, in load order.
+/// Every project configuration file and project pack manifest from the VCS
+/// root down to `cwd` whose digest `trust` does not cover, in load order.
 fn scan_pending_trust(
     cwd: &Path,
     trust: &TrustState,
     probes: &mut Probes,
 ) -> Result<Vec<PendingTrust>, ConfigError> {
     let mut pending = Vec::new();
-    for directory in project_directories(cwd, probes) {
+    let mut loaded_packs = 0_usize;
+    let directories = project_directories(cwd, probes);
+    let project_root = directories
+        .first()
+        .cloned()
+        .unwrap_or_else(|| cwd.to_owned());
+    for directory in directories {
+        for pack in crate::pack::discover(
+            &directory.join(".qq").join("packs"),
+            SourceKind::Project,
+            probes,
+            &mut loaded_packs,
+        )? {
+            withhold_untrusted_pack(pack, trust, &mut pending);
+        }
         let mut candidates = Vec::new();
         if let Some(candidate) =
             discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
@@ -527,13 +539,22 @@ fn scan_pending_trust(
         for candidate in candidates {
             let (source, content) = read_candidate(&candidate)?;
             let document = Document::parse(&content, &source)?;
-            let Some(digest) = document.sensitive_digest()? else {
-                continue;
-            };
             let path = source
                 .path()
                 .expect("project file sources always have a canonical path");
-            if !trust.contains(path, &digest) {
+            let pending_digest = document
+                .sensitive_digest()?
+                .filter(|digest| !trust.contains(path, digest));
+            for pack in explicit_project_packs(
+                &document,
+                &source,
+                &project_root,
+                probes,
+                &mut loaded_packs,
+            )? {
+                withhold_untrusted_pack(pack, trust, &mut pending);
+            }
+            if let Some(digest) = pending_digest {
                 let sections = document.sensitive_sections();
                 let declarations = document.sensitive_declarations();
                 pending.push(PendingTrust::new(source, digest, sections, declarations));
@@ -728,6 +749,12 @@ pub(super) struct FileCandidate {
 struct LoadReport {
     sources: Vec<SourceReport>,
     pending: Vec<PendingTrust>,
+    /// Pack manifests read so far, admitted or withheld; bounded by
+    /// `MAX_PACKS` across discovery and explicit entries.
+    loaded_packs: usize,
+    /// The outermost project directory (VCS root, else `cwd`). Packs an
+    /// untrusted file names are read for review only beneath it.
+    project_root: PathBuf,
 }
 
 fn apply_candidate(
@@ -777,7 +804,19 @@ fn apply_document(
     let sensitive = pending_digest.is_none();
     merged.apply_document(&document, &source, sensitive);
     if sensitive {
-        apply_explicit_packs(&document, &source, merged, probes)?;
+        apply_explicit_packs(&document, &source, trust, merged, report, probes)?;
+    } else {
+        // The file's own entry is pending; list the manifests it names too so
+        // one review covers everything trusting this file would admit.
+        for pack in explicit_project_packs(
+            &document,
+            &source,
+            &report.project_root,
+            probes,
+            &mut report.loaded_packs,
+        )? {
+            withhold_untrusted_pack(pack, trust, &mut report.pending);
+        }
     }
     let status = if let Some(digest) = pending_digest {
         report.pending.push(PendingTrust::new(
@@ -799,11 +838,14 @@ fn apply_document(
 /// Applies a layer's explicit `packs` entries. Paths resolve relative to the
 /// declaring file; virtual sources (inline, MDM, remote) may only use
 /// absolute paths. Discovery is not repeated here: an explicit entry names
-/// exactly one directory.
+/// exactly one directory. A pack named by a project file is a project pack
+/// and is admitted only when its manifest is trusted.
 fn apply_explicit_packs(
     document: &Document,
     source: &SourceIdentity,
+    trust: &TrustState,
     merged: &mut MergeState,
+    report: &mut LoadReport,
     probes: &mut Probes,
 ) -> Result<(), ConfigError> {
     use crate::document::{Field, PackPatch};
@@ -818,19 +860,18 @@ fn apply_explicit_packs(
                 match patch {
                     PackPatch::Remove => merged.remove_pack(id),
                     PackPatch::Pack { path } => {
-                        let path = Path::new(path);
-                        let resolved = if path.is_absolute() {
-                            path.to_owned()
-                        } else if let Some(declaring) = source.path().and_then(Path::parent) {
-                            declaring.join(path)
+                        let resolved = if source.kind() == SourceKind::Project {
+                            match project_pack_directory(id, path, source, &report.project_root)? {
+                                Some(directory) => directory,
+                                None => {
+                                    return Err(ConfigError::PackMissing {
+                                        id: id.clone(),
+                                        path: resolve_explicit_pack(id, path, source)?,
+                                    });
+                                }
+                            }
                         } else {
-                            return Err(ConfigError::InvalidPack {
-                                origin: source.clone(),
-                                message: format!(
-                                    "pack {id:?} path must be absolute in a {:?} source",
-                                    source.kind()
-                                ),
-                            });
+                            resolve_explicit_pack(id, path, source)?
                         };
                         let manifest = resolved.join(crate::pack::PACK_MANIFEST_FILE);
                         probes.record(&manifest);
@@ -840,15 +881,213 @@ fn apply_explicit_packs(
                                 path: resolved,
                             });
                         }
-                        let pack =
-                            crate::pack::load_explicit(&resolved, id, source.kind(), probes)?;
-                        merged.admit_pack(pack);
+                        let pack = crate::pack::load_explicit(
+                            &resolved,
+                            id,
+                            source.kind(),
+                            probes,
+                            &mut report.loaded_packs,
+                        )?;
+                        if let Some(pack) =
+                            withhold_untrusted_pack(pack, trust, &mut report.pending)
+                        {
+                            merged.admit_pack(pack);
+                        }
                     }
                 }
             }
             Ok(())
         }
     }
+}
+
+/// The existing packs a project file names explicitly, loaded for trust
+/// review whether or not the file itself is trusted yet. Missing
+/// directories are skipped: applying a trusted file reports them. Every
+/// entry spends one unit of `loaded`, manifest or not, so a document cannot
+/// buy unbounded probes with entries that point at nothing.
+fn explicit_project_packs(
+    document: &Document,
+    source: &SourceIdentity,
+    project_root: &Path,
+    probes: &mut Probes,
+    loaded: &mut usize,
+) -> Result<Vec<crate::AgentPack>, ConfigError> {
+    use crate::document::{Field, PackPatch};
+    let mut packs = Vec::new();
+    if source.kind() != SourceKind::Project {
+        return Ok(packs);
+    }
+    let Field::Set(patches) = document.packs() else {
+        return Ok(packs);
+    };
+    for (id, patch) in &patches.0 {
+        let PackPatch::Pack { path } = patch else {
+            continue;
+        };
+        if *loaded >= crate::pack::MAX_PACKS {
+            return Err(ConfigError::TooManyPacks {
+                limit: crate::pack::MAX_PACKS,
+            });
+        }
+        let Some(directory) = project_pack_directory(id, path, source, project_root)? else {
+            *loaded += 1;
+            continue;
+        };
+        let manifest = directory.join(crate::pack::PACK_MANIFEST_FILE);
+        probes.record(&manifest);
+        if manifest.is_file() {
+            packs.push(crate::pack::load_explicit(
+                &directory,
+                id,
+                source.kind(),
+                probes,
+                loaded,
+            )?);
+        } else {
+            *loaded += 1;
+        }
+    }
+    Ok(packs)
+}
+
+/// Resolves a project file's explicit pack path and requires it to stay
+/// inside the project: lexically beneath `project_root` (the canonical VCS
+/// root, else `cwd`) and reached through no symbolic link, the manifest
+/// leaf included. A repository's entries are read before the user consents
+/// to them, so a path that leaves it (absolute, `..`, a UNC share, an
+/// automount, a link) is a configuration error and is never touched; packs
+/// outside the repository belong in the user's own configuration.
+/// `Ok(None)` is a directory that does not exist (yet). On Windows,
+/// `FileType::is_symlink` is true for every name-surrogate reparse point,
+/// so directory junctions are rejected as links too.
+fn project_pack_directory(
+    id: &str,
+    path: &str,
+    source: &SourceIdentity,
+    project_root: &Path,
+) -> Result<Option<PathBuf>, ConfigError> {
+    let outside = || ConfigError::InvalidPack {
+        origin: source.clone(),
+        message: format!(
+            "pack {id:?} path {path:?} leaves the project; use a path relative to this file, and declare packs outside the repository in your global configuration"
+        ),
+    };
+    let resolved = resolve_explicit_pack(id, path, source)?;
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            // The root is canonical (`\\?\C:`, `\\?\UNC\server\share` on
+            // Windows) while a document may write `C:` or `\\server\share`;
+            // compare in the canonical form.
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) => {
+                    normalized.push(format!(r"\\?\{}:", char::from(drive.to_ascii_uppercase())))
+                }
+                std::path::Prefix::UNC(server, share) => {
+                    let mut verbatim = std::ffi::OsString::from(r"\\?\UNC\");
+                    verbatim.push(server);
+                    verbatim.push(r"\");
+                    verbatim.push(share);
+                    normalized.push(verbatim);
+                }
+                _ => normalized.push(prefix.as_os_str()),
+            },
+            other => normalized.push(other),
+        }
+    }
+    let Ok(beneath) = normalized.strip_prefix(project_root) else {
+        return Err(outside());
+    };
+    let mut current = project_root.to_owned();
+    for component in beneath
+        .components()
+        .chain(std::iter::once(std::path::Component::Normal(
+            crate::pack::PACK_MANIFEST_FILE.as_ref(),
+        )))
+    {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ConfigError::SymlinkSource { path: current });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The manifest alone missing is reported by the caller.
+                if current.file_name() == Some(crate::pack::PACK_MANIFEST_FILE.as_ref()) {
+                    break;
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(ConfigError::Io {
+                    path: current,
+                    error,
+                });
+            }
+        }
+    }
+    Ok(Some(normalized))
+}
+
+fn resolve_explicit_pack(
+    id: &str,
+    path: &str,
+    source: &SourceIdentity,
+) -> Result<PathBuf, ConfigError> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(path.to_owned())
+    } else if let Some(declaring) = source.path().and_then(Path::parent) {
+        Ok(declaring.join(path))
+    } else {
+        Err(ConfigError::InvalidPack {
+            origin: source.clone(),
+            message: format!(
+                "pack {id:?} path must be absolute in a {:?} source",
+                source.kind()
+            ),
+        })
+    }
+}
+
+/// Returns `pack` when it may be admitted. A project pack whose exact
+/// manifest bytes are not trusted is withheld and listed in `pending`
+/// instead, so a repository cannot contribute MCP servers, profiles, or
+/// grants through a pack the user never reviewed.
+fn withhold_untrusted_pack(
+    pack: crate::AgentPack,
+    trust: &TrustState,
+    pending: &mut Vec<PendingTrust>,
+) -> Option<crate::AgentPack> {
+    if pack.source().kind() != SourceKind::Project {
+        return Some(pack);
+    }
+    let path = pack
+        .source()
+        .path()
+        .expect("pack sources always have a manifest path");
+    let digest = pack.manifest_digest();
+    if trust.contains(path, digest) {
+        return Some(pack);
+    }
+    let listed = pending
+        .iter()
+        .any(|item| item.source().path() == Some(path) && item.digest() == digest);
+    if !listed {
+        let (sections, declarations) = pack.trust_summary();
+        pending.push(PendingTrust::new(
+            pack.source().clone(),
+            digest.to_owned(),
+            sections,
+            declarations,
+        ));
+    }
+    None
 }
 
 /// Canonicalizes a working directory the way every configuration load does,
@@ -1213,40 +1452,6 @@ impl TrustState {
         self.records
             .iter()
             .any(|record| record.path == path && record.digest == digest)
-    }
-
-    /// Whether every sensitive configuration file under `directory` (its
-    /// `qq.ron` and `.qq/config.ron` plus fragments) is trusted, or none
-    /// declares anything sensitive. Packs under the directory follow this
-    /// decision so trusting a project admits its packs.
-    pub(super) fn project_trusted(
-        &self,
-        directory: &Path,
-        probes: &mut Probes,
-    ) -> Result<bool, ConfigError> {
-        let mut candidates = Vec::new();
-        if let Some(candidate) =
-            discover_file(directory.join("qq.ron"), SourceKind::Project, false, probes)?
-        {
-            candidates.push(candidate);
-        }
-        candidates.extend(discover_layer_directory(
-            &directory.join(".qq"),
-            "config.ron",
-            "config.d",
-            SourceKind::Project,
-            probes,
-        )?);
-        for candidate in candidates {
-            let (source, content) = read_candidate(&candidate)?;
-            let document = Document::parse(&content, &source)?;
-            if let Some(digest) = document.sensitive_digest()?
-                && !self.contains(&candidate.path, &digest)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     pub(super) fn insert(&mut self, path: PathBuf, digest: String) {

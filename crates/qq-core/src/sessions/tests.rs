@@ -17,6 +17,8 @@ mod deadlines;
 mod delegation;
 mod feeds;
 mod migrations;
+mod nonblocking;
+mod progress;
 mod replay_identity;
 mod runs;
 mod settlement;
@@ -976,6 +978,11 @@ impl Provider for RenewableSliceProvider {
                     "edit_file",
                     r#"{"edits":[{"path":"slice-effects.txt","old":"seed","new":"seedx"}]}"#,
                 )
+            } else if index == crate::MAX_TOOL_CALLS_PER_TURN - 1 {
+                // One write per turn is progress (ADR-0054 § 1), so these
+                // slice fixtures reach the 256-call checkpoint, not the
+                // 64-call stall report.
+                ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
             } else {
                 ("read_file", r#"{"path":"note.txt"}"#)
             };
@@ -2171,6 +2178,7 @@ fn denial_capacity_fixture(
         session_model: ModelSelection::default(),
         model: ModelSelection::default(),
         messages: Vec::new(),
+        message_effects: Vec::new(),
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2508,6 +2516,27 @@ mod reference_assembly {
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
 
+        let watermark: Option<(String, u32)> = transaction.query_row(
+            "SELECT (SELECT r.id FROM messages m JOIN runs r ON r.id = m.run_id
+                     WHERE m.session_id = s.id AND m.ordinal = s.prune_through_ordinal
+                       AND m.role = 'user' AND m.steering = 0),
+                    s.prune_through_turn
+                 FROM sessions s WHERE s.id = ?1",
+            [session_id.to_string()],
+            |row| {
+                Ok(row
+                    .get::<_, Option<String>>(0)?
+                    .zip(row.get::<_, Option<u32>>(1)?))
+            },
+        )?;
+        let watermark_ordinal: Option<u64> = transaction.query_row(
+            "SELECT prune_through_ordinal FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let watermark = watermark.filter(|_| watermark_ordinal.is_some());
+        // Pruning reads only the context through the watermark turn.
+        let mut prune_limit = 0_usize;
         let mut context = Vec::new();
         if let Some(compaction) = compaction {
             context.push(Message::user(format!(
@@ -2517,6 +2546,11 @@ mod reference_assembly {
         }
         for id in message_ids {
             let snapshot = load_message(transaction, parse_id(&id)?)?;
+            let snapshot_ordinal: u64 = transaction.query_row(
+                "SELECT ordinal FROM messages WHERE id = ?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )?;
             if snapshot.role != MessageRole::User {
                 return Err(SessionRuntimeError::CODEC);
             }
@@ -2544,13 +2578,35 @@ mod reference_assembly {
                     |row| row.get(0),
                 )?;
                 if has_turns {
-                    reference_append_run_turns(transaction, snapshot.run_id, &mut context)?;
+                    let through = watermark
+                        .as_ref()
+                        .filter(|(run, _)| *run == snapshot.run_id.to_string())
+                        .map(|(_, turn)| *turn);
+                    reference_append_run_turns(
+                        transaction,
+                        snapshot.run_id,
+                        &mut context,
+                        through.map(|turn| (turn, &mut prune_limit)),
+                    )?;
                 } else {
                     reference_append_legacy_run_messages(
                         transaction,
                         snapshot.run_id,
                         &mut context,
                     )?;
+                    let mut statement = transaction.prepare(
+                        "SELECT text, delivery_ordinal FROM child_deliveries
+                             WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
+                         UNION ALL
+                         SELECT text, delivery_ordinal FROM child_reports
+                             WHERE parent_run_id = ?1
+                         ORDER BY 2",
+                    )?;
+                    for text in statement
+                        .query_map([snapshot.run_id.to_string()], |row| row.get::<_, String>(0))?
+                    {
+                        context.push(Message::user(text?));
+                    }
                 }
             }
             if matches!(status.as_str(), "cancelled" | "failed" | "interrupted") {
@@ -2564,10 +2620,14 @@ mod reference_assembly {
                     context.push(Message::user(notice));
                 }
             }
+            if watermark_ordinal.is_some_and(|watermark| snapshot_ordinal < watermark) {
+                prune_limit = context.len();
+            }
         }
         // The reference predates the stored effect column and prunes by
         // name alone; the differential fixtures use built-in tools only.
-        let context_rewritten = prune_stale_tool_results(&mut context, &HashMap::new());
+        let context_rewritten =
+            prune_stale_tool_results(&mut context[..prune_limit], &HashMap::new());
         Ok((context, context_rewritten))
     }
     fn reference_append_legacy_run_messages(
@@ -2662,6 +2722,7 @@ mod reference_assembly {
         transaction: &Connection,
         run_id: RunId,
         context: &mut Vec<Message>,
+        mut watermark: Option<(u32, &mut usize)>,
     ) -> Result<(), SessionRuntimeError> {
         let mut statement = transaction.prepare(
             "SELECT turn_ordinal, assistant_content_json, truncated, notice FROM model_turns
@@ -2700,6 +2761,24 @@ mod reference_assembly {
             .into_iter()
             .map(|(turn, output, id)| Ok((turn, render_message(transaction, &id, output)?)))
             .collect::<Result<std::collections::VecDeque<_>, SessionRuntimeError>>()?;
+        // Delivered sub-agent answers and interim reports, per run, in
+        // delivery order: before the turn whose request first carried them,
+        // after its steering; a NULL turn (the run settled first) after the
+        // run.
+        let mut statement = transaction.prepare(
+            "SELECT turn_ordinal, text, delivery_ordinal FROM child_deliveries
+                 WHERE parent_run_id = ?1 AND delivered_at_ms IS NOT NULL
+             UNION ALL
+             SELECT turn_ordinal, text, delivery_ordinal FROM child_reports
+                 WHERE parent_run_id = ?1
+             ORDER BY 3",
+        )?;
+        let mut delivered = statement
+            .query_map([run_id.to_string()], |row| {
+                Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<std::collections::VecDeque<_>, _>>()?;
+        drop(statement);
         // The newest in-run marker scoped to this run replaces its turns
         // through `turn_cutoff`, plus the steering applied before them.
         let marker: Option<(String, u32)> = transaction
@@ -2731,9 +2810,18 @@ mod reference_assembly {
                 {
                     steering.pop_front();
                 }
+                while delivered
+                    .front()
+                    .is_some_and(|(before, _)| before.is_some_and(|before| before <= first_kept))
+                {
+                    delivered.pop_front();
+                }
                 context.push(Message::user(format!(
                     "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
                 )));
+                if let Some((_, limit)) = watermark.as_mut() {
+                    **limit = context.len();
+                }
             }
         }
         for (turn_ordinal, content_json, truncated, notice) in turns {
@@ -2744,13 +2832,24 @@ mod reference_assembly {
                 let (_, text) = steering.pop_front().expect("front was just checked");
                 context.push(Message::user(text));
             }
-            // The checkpoint or continuation notice the live run placed
-            // before this turn's request.
+            while delivered
+                .front()
+                .is_some_and(|(before, _)| before.is_some_and(|before| before <= turn_ordinal))
+            {
+                let (_, text) = delivered.pop_front().expect("front was just checked");
+                context.push(Message::user(text));
+            }
+            // The runtime notice (report, stall report, continuation, or
+            // final answer) the live run placed before this turn's request.
             match notice.as_deref() {
                 None => {}
                 Some("report") => context.push(Message::user(crate::SLICE_CHECKPOINT_NOTICE)),
                 Some("continuation") => {
                     context.push(Message::user(crate::SLICE_CONTINUATION_NOTICE));
+                }
+                Some("stall_report") => context.push(Message::user(crate::STALL_REPORT_NOTICE)),
+                Some("final_answer") => {
+                    context.push(Message::user(crate::SUBAGENT_FINAL_ANSWER_NOTICE));
                 }
                 Some(_) => return Err(SessionRuntimeError::CODEC),
             }
@@ -2837,6 +2936,11 @@ mod reference_assembly {
             if truncated {
                 context.push(Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE));
             }
+            if let Some((through, limit)) = watermark.as_mut()
+                && turn_ordinal <= *through
+            {
+                **limit = context.len();
+            }
         }
         // Steering applied for a turn that never committed (the run settled
         // first) still reached the model's request; keep it so the transcript
@@ -2844,8 +2948,29 @@ mod reference_assembly {
         for (_, text) in steering {
             context.push(Message::user(text));
         }
+        for (_, text) in delivered {
+            context.push(Message::user(text));
+        }
         Ok(())
     }
+}
+
+/// Moves the session's prune watermark to its newest committed turn, as a
+/// seam would: assembly then stubs every stale read-only result, which is
+/// what tests of the stubbing itself need.
+fn mark_prune_seam(database: &std::path::Path, session_id: SessionId) {
+    let connection = Connection::open(database).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET (prune_through_ordinal, prune_through_turn) = (
+                 SELECT m.ordinal, t.turn_ordinal
+                 FROM messages m JOIN model_turns t ON t.run_id = m.run_id
+                 WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0
+                 ORDER BY m.ordinal DESC, t.turn_ordinal DESC LIMIT 1)
+             WHERE id = ?1",
+            [session_id.to_string()],
+        )
+        .unwrap();
 }
 
 /// Asserts the joined context loader assembles exactly what the reference
@@ -2935,6 +3060,15 @@ fn summarized_turns(request: &ModelRequest) -> usize {
 fn valid_summary(body: &str) -> String {
     format!(
         "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
+         4. Open problems: {body}\n5. Next step: {body}"
+    )
+}
+
+/// A summary in the six-section format stored before ADR-0056. It is never
+/// re-validated, and the next compaction folds it into the new sections.
+fn old_format_summary(body: &str) -> String {
+    format!(
+        "1. Intent: {body}\n2. Decisions and constraints: {body}\n3. Work state: {body}\n\
          4. Files touched: {body}\n5. Errors: {body}\n6. User messages: {body}"
     )
 }
@@ -2951,6 +3085,28 @@ async fn compact_session(runtime: &SessionRuntime, session_id: SessionId) -> Run
         panic!("unexpected receipt")
     };
     run_id
+}
+
+/// The answers delivered into a parent's requests (ADR-0054 § 4), in the
+/// order they arrived: each `(answer text, the child answered)`. The answer
+/// text is what follows the notice's header line.
+fn delivered_answers(requests: &[ModelRequest]) -> Vec<(String, bool)> {
+    let mut seen = Vec::new();
+    for request in requests {
+        for text in request_texts(request) {
+            let Some(rest) = text.strip_prefix(
+                "[QQ runtime notice; not a user instruction]\nA sub-agent you started has finished.\n",
+            ) else {
+                continue;
+            };
+            let (header, answer) = rest.split_once(":\n\n").expect("a delivery notice header");
+            let entry = (answer.to_owned(), header.ends_with("Its answer"));
+            if !seen.contains(&entry) {
+                seen.push(entry);
+            }
+        }
+    }
+    seen
 }
 
 /// The concatenated text of each message in a captured provider request.
@@ -3021,6 +3177,13 @@ enum AutoCompactScript {
     /// Reads `note.txt` once per turn for `turns` turns, then streams the
     /// text: grows one run's own transcript with prunable results.
     ReadNoteRepeatedly { turns: usize, text: String },
+    /// Calls `tool` with `arguments` on the first turn, then streams the
+    /// text.
+    CallThenText {
+        tool: String,
+        arguments: String,
+        text: String,
+    },
     /// Runs `shell` (a mutating effect, so never stubbed) once per turn for
     /// `turns` turns, then streams the text. Any request ending with the
     /// summarizer instruction is answered with `summary` instead, so one
@@ -3050,6 +3213,9 @@ enum AutoCompactScript {
     /// summarizer instruction is answered with a valid summary carrying
     /// `turns_done`, so in-run compactions after the checkpoint keep going.
     ShellBatchesAcrossACheckpoint { calls: usize, text: String },
+    /// One turn that writes `text` (when not empty) and then calls `tool`
+    /// with empty arguments.
+    ToolCallWithText { text: String, tool: String },
     /// `ShellRepeatedlyWithSummaries` whose summarizer reply is cut at the
     /// output limit after `cut` bytes on the first request and completed on
     /// the continuation, so an in-run summary exercises the truncation join.
@@ -3257,6 +3423,55 @@ impl Provider for AutoCompactProvider {
                     reason: qq_provider::IncompleteReason::OutputTokens,
                 }),
             ])),
+            AutoCompactScript::ToolCallWithText { text, tool } => {
+                let id = format!("call_summarizer_{}", prior_results.len());
+                let mut events = Vec::new();
+                if !text.is_empty() {
+                    events.push(Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: text.clone(),
+                    }));
+                }
+                events.extend([
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: tool.clone(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"canary"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                    Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                ]);
+                Box::pin(stream::iter(events))
+            }
+            AutoCompactScript::CallThenText {
+                tool,
+                arguments,
+                text,
+            } => {
+                if already_read {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: "call_tool".to_owned(),
+                            name: tool.clone(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: "call_tool".to_owned(),
+                            json: arguments.clone(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                            id: "call_tool".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
+            }
             AutoCompactScript::ReadNoteThenText(text) => {
                 if already_read {
                     Box::pin(stream::iter([
@@ -5814,7 +6029,7 @@ struct BudgetLoopProvider {
 
 impl Provider for BudgetLoopProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        let has_tools = !request.tools().is_empty();
+        let has_tools = request.tool_choice() == qq_provider::ToolChoice::Auto;
         self.requests.lock().unwrap().push(request);
         if self.hang {
             return Box::pin(stream::pending());

@@ -33,7 +33,7 @@ Sections `delegation` and `audit` replace as a whole.
 | 2 | global packs | `<global>/packs/<id>/pack.ron` |
 | 3 | organization manifest | cached from `qq org enroll` |
 | 4 | **your global config** | `<global>/config.ron`, then `<global>/config.d/*.ron` sorted |
-| 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (trusted only), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
+| 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (each manifest trusted on its own), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
 | 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING`, `QQ_JEV_APPROVAL`, `QQ_APPROVAL_DELEGATE` |
@@ -249,8 +249,11 @@ profiles (below) add prompts, skills, and tool filters.
 
 A pack is a directory with `pack.ron` that bundles profiles, a persona
 prompt, skills, commands, and MCP declarations. Packs are discovered from
-`<global>/packs/<id>/` and, once the project is trusted, `.qq/packs/<id>/`;
-or declared explicitly:
+`<global>/packs/<id>/` and `.qq/packs/<id>/`, or declared explicitly. A
+project pack (discovered under `.qq/packs/` or named by a project file) loads
+only once you have trusted that exact `pack.ron`; editing it asks again. A
+project file's `path` must stay inside the repository (no path that leads
+out of it, and no symbolic link):
 
 ```ron
 packs: {
@@ -282,8 +285,9 @@ packs: {
 )
 ```
 
-Limits: 32 packs per load, 16 profiles per pack, 64 KiB manifest. A pack
-profile shadows nothing: a profile of the same name in your config wins.
+Limits: 32 entries across `packs/` directories per load (including
+directories without a `pack.ron` and stray files), 16 profiles per pack, 64 KiB manifest. A pack profile shadows
+nothing: a profile of the same name in your config wins.
 
 ## `delegation`
 
@@ -301,6 +305,19 @@ delegation: (
     write_children: false,       // may children edit files?
 )
 ```
+
+Sub-agents are read-only by default. To let the spawning agent choose write
+access, set `delegation.write_children: true` and configure `reviewer_model`.
+The `spawn_agent` tool then offers `authority: "read" | "write"`; omitting it
+still chooses read-only. Write children can edit files and run commands under
+supervised approval, with each such action reviewed before execution. Only a
+top-level run may spawn a write child, and only one write child runs at a time.
+The parent's approval policy still gates the write spawn.
+
+A run that may spawn sub-agents also gets `wait_agents` (wait for its
+background sub-agents) and `cancel_agent` (stop one). They come and go with
+`spawn_agent`: allowing, denying, or exposing `spawn_agent` in policy or a
+pack applies to all three, and the two are not tool names of their own there.
 
 Up to 8 roster entries. Each route must resolve like `model`. An entry may pin
 the reasoning effort its children run at with `effort: low` (any effort value);

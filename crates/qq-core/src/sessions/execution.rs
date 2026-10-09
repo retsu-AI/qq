@@ -69,11 +69,38 @@ impl ToolGate for CompactionRunGate {
     }
 }
 
-/// Output tokens reserved for the summarizer's reply. A long session's
-/// structured summary runs well past 2 k tokens; a reserve that small forced
-/// the output-truncation continuation path on every real compaction and
-/// failed any summary longer than the continuation cap allowed.
-pub(super) const COMPACTION_OUTPUT_RESERVE_TOKENS: u32 = 8_192;
+/// The prompt prefix a session's prompt runs use, for a summarizer that must
+/// share their provider cache (ADR-0056 § 5). It mirrors the capabilities
+/// `prepare_execution` gives a prompt run: a root session's prompts are the
+/// user's, a child session's are its parent's task. A user prompt typed into
+/// a child session uses the user key instead, so its compaction only misses
+/// the cache. The golden tests hold the two derivations equal.
+fn session_prompt_prefix_key(
+    claimed: &ClaimedRun,
+    loaded: &LoadedRuntime,
+) -> crate::plan::PromptPrefixKey {
+    let delegation = &loaded.plan.descriptor().delegation;
+    let user = claimed.depth == 0;
+    crate::plan::PromptPrefixKey {
+        tools: Some(crate::catalog::StaticFilter {
+            spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
+            search_history: true,
+            read_tool_result: true,
+            load_skill: user,
+            read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
+        }),
+        guidance: user,
+        subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
+            match claimed.approval_mode {
+                ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
+                ApprovalMode::Supervised
+                | ApprovalMode::Ask
+                | ApprovalMode::Auto
+                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+            },
+        ),
+    }
+}
 
 struct PreparedExecution {
     events: crate::RuntimeStream,
@@ -210,6 +237,7 @@ async fn prepare_execution(
     // spawners. ClaimedRun clones after this point stay scalar/empty instead
     // of duplicating up to 4 MiB per tool call.
     let mut messages = std::mem::take(&mut claimed.messages);
+    let inherited_effects = std::mem::take(&mut claimed.message_effects);
     let input = std::mem::take(&mut claimed.input);
     let gate: Arc<dyn ToolGate> = if internal {
         Arc::new(CompactionRunGate)
@@ -319,13 +347,11 @@ async fn prepare_execution(
                 },
                 None,
             )
-            .without_tools()
-            .with_max_output_tokens(
-                loaded
-                    .resolved_model()
-                    .max_output_tokens
-                    .min(COMPACTION_OUTPUT_RESERVE_TOKENS),
-            )
+            .summarizer(session_prompt_prefix_key(claimed, loaded))
+            .with_max_output_tokens(context::summarizer_output_tokens(
+                loaded.resolved_model().max_output_tokens,
+                loaded.resolved_model().context_window,
+            ))
     } else {
         // A hard cost cap without pricing cannot be enforced. Reject it
         // before any provider work rather than pretend, exactly as the
@@ -386,6 +412,12 @@ async fn prepare_execution(
                 | ApprovalMode::Auto
                 | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
             })
+        } else if claimed.depth > 0
+            && !claimed.user_initiated
+            && claimed.purpose == SessionPurpose::Audit
+        {
+            // An auditor is bounded at a few turns already (ADR-0054 § 1).
+            base.stall_exempt()
         } else {
             base
         };
@@ -456,7 +488,8 @@ async fn prepare_execution(
     .with_literal_slash(claimed.literal_slash)
     .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
-    .with_output(claimed.output.clone());
+    .with_output(claimed.output.clone())
+    .with_inherited_effects(inherited_effects);
     if !internal {
         capabilities.routing_spend = loaded.routing_spend;
     }
@@ -891,6 +924,9 @@ pub(super) async fn execute_run(
     // prompt because earlier runs overflowed. After the fold is exhausted the
     // run starts from the latest summary alone (RR6).
     let mut summary_only_admission = false;
+    // The proactive-threshold seam runs at most once per run: it moves the
+    // prune watermark to the session's newest turn and reassembles.
+    let mut watermark_advanced = false;
     loop {
         let mut prepared = match prepare_execution(
             &inner,
@@ -1021,6 +1057,9 @@ pub(super) async fn execute_run(
                 Ok(summarizer) => {
                     bounded_manual_compaction = true;
                     claimed.messages = summarizer.messages;
+                    // A summarizer request is one turn with every call
+                    // rejected; nothing is live-pruned, so no effects.
+                    claimed.message_effects = Vec::new();
                     claimed.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
                 }
                 Err(error) => {
@@ -1168,6 +1207,59 @@ pub(super) async fn execute_run(
             context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
                 let audit = prepared.audit.clone();
                 drop(prepared);
+                // Stubbing stale reads is cheaper than a summarizer and is
+                // the seam where the watermark may move (ADR-0056 § 6). If
+                // the stubbed context fits, it is sent; otherwise the
+                // reassembled request compacts as before.
+                if !watermark_advanced {
+                    watermark_advanced = true;
+                    match inner
+                        .store
+                        .advance_prune_watermark_before_prompt(&claimed)
+                        .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => match inner.store.reload_reserved_messages(&claimed).await {
+                            Ok(Some((messages, effects, _))) => {
+                                // Occupancy reuse credits the stubbed
+                                // bytes at its ratio, as for any rewrite.
+                                claimed.messages = messages;
+                                claimed.message_effects = effects;
+                                continue;
+                            }
+                            Ok(None) => {
+                                clear_run_registration(&inner, claimed.identity.run_id);
+                                return;
+                            }
+                            Err(error) => {
+                                finish_prepared_run(
+                                    &inner,
+                                    &claimed,
+                                    &audit,
+                                    persistence_failure(
+                                        "failed to reload the reserved prompt after pruning",
+                                        &error,
+                                    ),
+                                )
+                                .await;
+                                return;
+                            }
+                        },
+                        Err(error) => {
+                            finish_prepared_run(
+                                &inner,
+                                &claimed,
+                                &audit,
+                                persistence_failure(
+                                    "failed to persist the prune watermark",
+                                    &error,
+                                ),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
                 if !run_auto_compaction(
                     &inner,
                     &mut claimed,
@@ -1240,7 +1332,7 @@ async fn admit_with_summary_only_history(
             return false;
         }
     };
-    let Ok(Some((messages, _))) = inner.store.reload_reserved_messages(claimed).await else {
+    let Ok(Some((messages, _, _))) = inner.store.reload_reserved_messages(claimed).await else {
         finish_reserved_run(
             inner,
             claimed,
@@ -1265,6 +1357,7 @@ async fn admit_with_summary_only_history(
         None => SUMMARY_ONLY_NOTICE.to_owned(),
     };
     claimed.messages = vec![Message::user(opening), prompt];
+    claimed.message_effects = Vec::new();
     true
 }
 
@@ -1323,10 +1416,10 @@ async fn run_auto_compaction(
             original.identity.session_id,
             context::summarizer_message_byte_budget(
                 loaded.resolved_model().context_window,
-                loaded
-                    .resolved_model()
-                    .max_output_tokens
-                    .min(COMPACTION_OUTPUT_RESERVE_TOKENS),
+                context::summarizer_output_tokens(
+                    loaded.resolved_model().max_output_tokens,
+                    loaded.resolved_model().context_window,
+                ),
                 original_audit.weight.system_bytes,
                 original_audit.weight.tool_schema_bytes,
             ),
@@ -1376,6 +1469,7 @@ async fn run_auto_compaction(
     candidate.user_initiated = false;
     candidate.literal_slash = false;
     candidate.messages = summarizer.messages;
+    candidate.message_effects = Vec::new();
     candidate.context_compaction_attempted =
         original.context_compaction_attempted.saturating_add(1);
     candidate.compaction_cutoff_ordinal = summarizer.cutoff_ordinal;
@@ -1549,8 +1643,9 @@ async fn run_auto_compaction(
         }
     };
     match inner.store.reload_reserved_messages(original).await {
-        Ok(Some((messages, progress))) => {
+        Ok(Some((messages, effects, progress))) => {
             original.messages = messages;
+            original.message_effects = effects;
             original.context_compaction_attempted = progress.steps;
             original.context_compaction_failed = progress.failed;
             original.context_compaction_remaining = progress.remaining;
@@ -1704,6 +1799,9 @@ async fn execute_started_run(
         .await;
         return;
     }
+    // A compaction run reported `compacting` in the transaction that
+    // started it and reports nothing else: the summarizer's own provider
+    // activity is not the session's.
     let internal = claimed.identity.kind == RunKind::Compaction;
     let mut pending_text = String::new();
     let mut pending_channel = None;
@@ -2433,16 +2531,24 @@ async fn execute_started_run(
                             .and_then(|pricing| run_cost(usage, pricing))
                     });
                     accounting.record_turn(usage);
-                    for block in message.content() {
-                        if let ContentBlock::Text { text } = block {
-                            if !summary_text.is_empty() && !summary_continues_truncated_turn {
-                                summary_text.push('\n');
+                    if calls.is_empty() {
+                        for block in message.content() {
+                            if let ContentBlock::Text { text } = block {
+                                if !summary_text.is_empty() && !summary_continues_truncated_turn {
+                                    summary_text.push('\n');
+                                }
+                                summary_text.push_str(text);
+                                summary_continues_truncated_turn = false;
                             }
-                            summary_text.push_str(text);
-                            summary_continues_truncated_turn = false;
                         }
+                        summary_continues_truncated_turn = truncated;
+                    } else {
+                        // The summarizer called a tool, which was rejected:
+                        // it abandoned its reply, and the next turn starts a
+                        // new one, so nothing written so far is kept.
+                        summary_text.clear();
+                        summary_continues_truncated_turn = false;
                     }
-                    summary_continues_truncated_turn = truncated;
                     current_turn = turn_ordinal.saturating_add(1);
                     match inner
                         .store
@@ -2937,6 +3043,34 @@ async fn execute_started_run(
                     flush_at = None;
                 }
             }
+            RunInput::Event(Some(RuntimeEvent::ContextPruned { turn_ordinal })) => {
+                // A summarizer's request is not a transcript: no prompt run
+                // replays or extends it, and it has no prompt row to anchor
+                // a watermark. Its live prune is not a seam.
+                if internal {
+                    continue;
+                }
+                // Durable before the pruned request is sent: the loop is not
+                // polled again until this commits.
+                if let Err(error) = inner
+                    .store
+                    .advance_prune_watermark(&claimed, turn_ordinal.saturating_sub(1))
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the prune watermark", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::InRunCompacted { .. })) => {
                 // The compactor committed the marker and settled its own run
                 // before the loop resumed; the run's measured occupancy is
@@ -3164,6 +3298,7 @@ async fn execute_started_run(
                             &claimed,
                             summary,
                             Some(accounting.snapshot()),
+                            record_budget(resolved_model.context_window),
                             teardown,
                         )
                         .await

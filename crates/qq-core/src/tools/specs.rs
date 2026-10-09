@@ -1,3 +1,5 @@
+#[cfg(feature = "tool-fetch")]
+use super::fetch::MAX_URL_BYTES;
 use std::sync::OnceLock;
 
 use qq_protocol::{ChildAuthority, DelegationRole, DelegationRoster};
@@ -8,7 +10,6 @@ use serde_json::json;
 use super::{
     ask::{MAX_OPTION_BYTES, MAX_OPTIONS, MAX_QUESTION_BYTES, MAX_QUESTIONS, MIN_OPTIONS},
     edit::MAX_EDITS,
-    fetch::MAX_URL_BYTES,
     read::MAX_READ_LINES,
     search::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
@@ -29,6 +30,14 @@ use crate::{
 /// that may spawn (never for child sessions), and it dispatches to the
 /// session layer rather than to a workspace execution.
 pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
+/// Waits for background sub-agents (ADR-0054 § 4). Declared with
+/// [`SPAWN_AGENT_TOOL`] and dispatched to the same spawner.
+const WAIT_AGENTS_TOOL: &str = "wait_agents";
+/// Cancels one background sub-agent (ADR-0054 § 4).
+const CANCEL_AGENT_TOOL: &str = "cancel_agent";
+/// The longest one `wait_agents` call blocks its turn: a shell command's
+/// own ceiling, so a wait is never the longest thing a turn can do.
+pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = MAX_SHELL_TIMEOUT_SECS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuiltInTool {
@@ -40,6 +49,7 @@ pub(super) enum BuiltInTool {
     Shell,
     Exec,
     AskUser,
+    #[cfg(feature = "tool-fetch")]
     Fetch,
     #[cfg(test)]
     TestDelay,
@@ -50,7 +60,7 @@ pub(super) enum BuiltInTool {
 }
 
 impl BuiltInTool {
-    const ALL: [Self; 9] = [
+    const ALL: &'static [Self] = &[
         Self::ReadFile,
         Self::Tree,
         Self::Search,
@@ -59,6 +69,7 @@ impl BuiltInTool {
         Self::Shell,
         Self::Exec,
         Self::AskUser,
+        #[cfg(feature = "tool-fetch")]
         Self::Fetch,
     ];
 
@@ -72,6 +83,7 @@ impl BuiltInTool {
             "shell" => Some(Self::Shell),
             "exec" => Some(Self::Exec),
             "ask_user" => Some(Self::AskUser),
+            #[cfg(feature = "tool-fetch")]
             "fetch" => Some(Self::Fetch),
             #[cfg(test)]
             "__test_delay" => Some(Self::TestDelay),
@@ -89,6 +101,7 @@ impl BuiltInTool {
             Self::EditFile | Self::WriteFile => EffectClass::Mutating,
             Self::Shell | Self::Exec => EffectClass::Shell,
             Self::AskUser => EffectClass::Interactive,
+            #[cfg(feature = "tool-fetch")]
             Self::Fetch => EffectClass::Network,
             #[cfg(test)]
             Self::TestDelay => EffectClass::ReadOnly,
@@ -287,6 +300,7 @@ impl BuiltInTool {
                     "additionalProperties": false
                 }),
             ),
+            #[cfg(feature = "tool-fetch")]
             Self::Fetch => ToolSpec::new(
                 "fetch",
                 "Fetch a public http(s) URL (GET, or method=HEAD for headers only). HTML is converted to markdown, JSON is formatted; the body is bounded and spills when long. Private, link-local, and managed-denied hosts are refused.",
@@ -358,7 +372,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             json!({
                 "type": "string",
                 "enum": ["read", "write"],
-                "description": "read (default): the sub-agent may only read the workspace. write: it may edit files and run commands, but every such action is held and adjudicated by the reviewer model before it runs, and only one write sub-agent runs at a time. Request write only when the task itself requires changing the workspace."
+                "description": "read (default): read-only workspace access. write: edit files and run commands under supervised approval. Requires reviewer_model; only one write sub-agent runs at a time. Choose write only for implementation."
             }),
         );
     }
@@ -386,23 +400,34 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
         );
     }
     let description = if has_roster {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace and receive \
-         only its final answer. Worth it when the raw evidence would dwarf the distilled answer \
-         and you will not need that evidence verbatim later; several independent questions can be \
-         delegated in parallel. Single reads, searches, and quick lookups are cheaper inline. The \
-         task brief must carry everything the sub-agent needs: it starts with no other context. \
-         Choose the sub-agent by role (see Delegation in the system prompt for each role's route \
+        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
+         final answer comes back, usually later as a runtime notice while you keep working. Worth \
+         it when the raw evidence would dwarf the distilled answer and you will not need that \
+         evidence verbatim later; several independent questions can be delegated in parallel. \
+         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+         everything the sub-agent needs: it starts with no other context. Choose the sub-agent \
+         by role (see Delegation in the system prompt for each role's route \
          and relative cost); omit role for the default. Set model only when the user explicitly \
          requests an exact roster route; never guess, translate, or invent a route."
     } else {
-        "Delegate one self-contained task to a read-only sub-agent in this workspace and receive \
-         only its final answer. Worth it when the raw evidence would dwarf the distilled answer \
-         and you will not need that evidence verbatim later; several independent questions can be \
-         delegated in parallel. Single reads, searches, and quick lookups are cheaper inline. The \
-         task brief must carry everything the sub-agent needs: it starts with no other context. \
-         Omit model by default so QQ uses its configured worker model or the current session's \
+        "Delegate one self-contained task to a read-only sub-agent in this workspace; only its \
+         final answer comes back, usually later as a runtime notice while you keep working. Worth \
+         it when the raw evidence would dwarf the distilled answer and you will not need that \
+         evidence verbatim later; several independent questions can be delegated in parallel. \
+         Single reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+         everything the sub-agent needs: it starts with no other context. Omit model by \
+         default so QQ uses its configured worker model or the current session's \
          selected model. Set model only when the user explicitly requests an exact provider/model \
          route listed by this tool; never guess, translate, or invent a route."
+    };
+    let description = if delegation.write_children {
+        format!(
+            "{} Read by default; authority: write enables edits and commands with reviewer_model, \
+             supervised approval and one write sub-agent at a time.",
+            description.replacen("to a read-only sub-agent", "to a sub-agent", 1)
+        )
+    } else {
+        description.to_owned()
     };
     ToolSpec::new(
         SPAWN_AGENT_TOOL,
@@ -417,6 +442,70 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             ("additionalProperties".to_owned(), json!(false)),
         ])),
     )
+}
+
+/// The declaration for [`WAIT_AGENTS_TOOL`].
+pub(crate) fn wait_agents_spec() -> ToolSpec {
+    ToolSpec::new(
+        WAIT_AGENTS_TOOL,
+        "Wait for background sub-agents you started with spawn_agent, when your next step needs \
+         their answers. Returns when every named sub-agent has finished (or, with no ids, when any \
+         one has), or when the timeout passes; the ones still working keep working. Each \
+         finished sub-agent's answer arrives as a runtime notice.",
+        json!({
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": crate::sessions::MAX_SPAWNED_CHILDREN_PER_RUN,
+                    "description": "Sub-agent ids from spawn_agent results. Omit to wait for any outstanding sub-agent."
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_WAIT_AGENTS_SECS,
+                    "description": "How long to wait at most."
+                }
+            },
+            "required": ["timeout_seconds"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+/// The declaration for [`CANCEL_AGENT_TOOL`].
+pub(crate) fn cancel_agent_spec() -> ToolSpec {
+    ToolSpec::new(
+        CANCEL_AGENT_TOOL,
+        "Cancel one background sub-agent whose answer you no longer need. What it reported so far \
+         arrives as a runtime notice.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The sub-agent id from its spawn_agent result."
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitAgentsArgs {
+    #[serde(default)]
+    pub(crate) ids: Option<Vec<String>>,
+    pub(crate) timeout_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelAgentArgs {
+    pub(crate) id: String,
 }
 
 #[derive(Deserialize)]
@@ -436,7 +525,8 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
     SPECS
         .get_or_init(|| {
             BuiltInTool::ALL
-                .into_iter()
+                .iter()
+                .copied()
                 .map(BuiltInTool::spec)
                 .collect()
         })

@@ -90,8 +90,15 @@ pub fn resolve_prompt(workspace_root: &Path, text: &str) -> ResolvedPrompt {
                 ));
             }
             MentionKind::Web { url } => {
-                // Network authority passes server policy: the model fetches.
-                rewritten.push_str(&format!("(fetch {url} and use its contents)"));
+                if cfg!(feature = "tool-fetch") {
+                    // Network authority passes server policy: the model fetches.
+                    rewritten.push_str(&format!("(fetch {url} and use its contents)"));
+                } else {
+                    rewritten.push_str(literal);
+                    out.notes.push(format!(
+                        "{literal}: web mentions require the tool-fetch feature"
+                    ));
+                }
             }
             MentionKind::Diff { reference } => match git_output(
                 workspace_root,
@@ -555,10 +562,19 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let resolved = resolve_prompt(&root, "@skill:review the change @web:https://x.test/doc");
         assert_eq!(resolved.skill.as_deref(), Some("review"));
-        assert_eq!(
-            text_of(&resolved),
-            " the change (fetch https://x.test/doc and use its contents)"
-        );
+        if cfg!(feature = "tool-fetch") {
+            assert_eq!(
+                text_of(&resolved),
+                " the change (fetch https://x.test/doc and use its contents)"
+            );
+            assert!(resolved.notes.is_empty());
+        } else {
+            assert_eq!(text_of(&resolved), " the change @web:https://x.test/doc");
+            assert_eq!(
+                resolved.notes,
+                vec!["@web:https://x.test/doc: web mentions require the tool-fetch feature"]
+            );
+        }
         // A clean isolated repository cannot inherit the caller's diff.
         let resolved = resolve_prompt(&root, "explain @diff");
         assert_eq!(

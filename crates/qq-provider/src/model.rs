@@ -20,6 +20,25 @@ pub struct ModelRequest {
     system: Option<Arc<str>>,
     max_output_tokens: u32,
     reasoning_effort: Option<ReasoningEffort>,
+    tool_choice: ToolChoice,
+}
+
+/// Whether the model may call the declared tools on this request.
+///
+/// A turn that must answer in text keeps its tools *declared* and sets
+/// `None`, instead of dropping the declarations: an unchanged tool list
+/// keeps the provider's cached prefix and the history's native tool blocks
+/// (Bedrock Converse accepts those only alongside a tool configuration). The choice is a
+/// request to the model, not a guarantee: Bedrock Converse has no "none"
+/// choice and sends the tools unchanged, so a caller that must not run tools
+/// on such a turn still rejects any call it makes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// The model decides whether to call a tool.
+    #[default]
+    Auto,
+    /// The model should answer without calling a tool.
+    None,
 }
 
 impl ModelRequest {
@@ -36,7 +55,28 @@ impl ModelRequest {
             system: None,
             max_output_tokens,
             reasoning_effort: None,
+            tool_choice: ToolChoice::Auto,
         }
+    }
+
+    /// Asks the model not to call the declared tools on this request; see
+    /// [`ToolChoice`]. Without declared tools the choice is moot and no
+    /// codec sends it.
+    #[must_use]
+    pub const fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = choice;
+        self
+    }
+
+    #[must_use]
+    pub const fn tool_choice(&self) -> ToolChoice {
+        self.tool_choice
+    }
+
+    /// Whether a codec should send its "no tool calls" choice: tools are
+    /// declared and the request asks for none.
+    pub(crate) fn tools_disabled(&self) -> bool {
+        self.tool_choice == ToolChoice::None && !self.tools.is_empty()
     }
 
     /// Declares the tools the model may call during this request. The list

@@ -4062,6 +4062,410 @@ fn agent_packs_are_discovered_validated_layered_and_trust_gated() {
 }
 
 #[test]
+fn project_packs_are_their_own_trust_subject() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    // A repository that ships only a pack, with no project configuration.
+    let manifest = tree.write(
+        "work/.qq/packs/evil/pack.ron",
+        r#"(schema: 1, id: "evil", version: "1.0.0", mcp: {
+            "x": Stdio(command: "sh", args: ["-c", "true"], eager: true),
+        })"#,
+    );
+    let request = tree.request();
+    let canonical = fs::canonicalize(&manifest).unwrap();
+
+    let untrusted = tree.loader().load(&request);
+    let Err(ConfigError::TrustRequired { pending, .. }) = untrusted else {
+        panic!("a pack-only repository must require trust: {untrusted:?}");
+    };
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source().path(), Some(canonical.as_path()));
+    assert!(
+        pending[0]
+            .declarations()
+            .contains(&TrustDeclaration::McpStdio {
+                name: "x".to_owned(),
+                command: "sh".to_owned(),
+            })
+    );
+    let scanned = tree.loader().pending_trust(&request).unwrap();
+    assert_eq!(scanned.len(), 1, "`qq trust` sees the pack: {scanned:?}");
+    assert_eq!(scanned[0].digest(), pending[0].digest());
+
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.packs()["evil"].version(), "1.0.0");
+    assert!(snapshot.mcp_servers().contains_key("x"));
+
+    // Changing the trusted manifest asks again.
+    tree.write(
+        "work/.qq/packs/evil/pack.ron",
+        r#"(schema: 1, id: "evil", version: "1.0.1", mcp: {
+            "x": Stdio(command: "sh", args: ["-c", "false"]),
+        })"#,
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+
+    // A pack added after the project's configuration was trusted asks too.
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, mcp: { "notes": Stdio(command: "notes-mcp") })"#,
+    );
+    tree.loader().grant_pending_trust(&request).unwrap();
+    assert!(tree.loader().load(&request).unwrap().packs().is_empty());
+    tree.write(
+        "work/.qq/packs/late/pack.ron",
+        r#"(schema: 1, id: "late", version: "1.0.0", mcp: { "y": Stdio(command: "y") })"#,
+    );
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("a pack added after trust must require trust");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].source().label().ends_with("late/pack.ron"));
+}
+
+#[test]
+fn explicit_project_pack_manifests_are_trust_gated_by_content() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write(
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, packs: { "kit": Pack(path: "../vendor/kit") })"#,
+    );
+    let request = tree.request();
+
+    // One review covers the declaring file and the manifest it names.
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("an untrusted project file requires trust");
+    };
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    let reviewed: Vec<ProcessTrust> = pending.iter().filter_map(PendingTrust::reviewed).collect();
+    tree.loader()
+        .grant_reviewed_trust(&request, &reviewed)
+        .unwrap();
+    assert_eq!(
+        tree.loader().load(&request).unwrap().packs()["kit"].version(),
+        "1.0.0"
+    );
+
+    // The declaring file is unchanged, but the pack it names changed.
+    tree.write(
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "2.0.0", mcp: { "x": Stdio(command: "sh") })"#,
+    );
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("a changed explicit pack manifest must require trust");
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].source().label().ends_with("vendor/kit/pack.ron"));
+    tree.loader().grant_pending_trust(&request).unwrap();
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.packs()["kit"].version(), "2.0.0");
+    assert!(snapshot.mcp_servers().contains_key("x"));
+}
+
+#[test]
+fn explicit_pack_reads_before_trust_are_bounded() {
+    // An untrusted project file's explicit entries are read for review
+    // before anyone consents, so they share the per-load pack bound with
+    // discovery instead of letting a repository make every load read and
+    // parse an unbounded number of manifests.
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    let mut entries = String::new();
+    for index in 0..=MAX_PACKS {
+        let id = format!("kit-{index}");
+        tree.write(
+            format!("work/vendor/{id}/pack.ron"),
+            &format!(r#"(schema: 1, id: "{id}", version: "1.0.0")"#),
+        );
+        entries.push_str(&format!(r#""{id}": Pack(path: "../vendor/{id}"), "#));
+    }
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {entries} }})"),
+    );
+    let request = tree.request();
+
+    let loaded = tree.loader().load(&request);
+    assert!(
+        matches!(loaded, Err(ConfigError::TooManyPacks { limit: MAX_PACKS })),
+        "{loaded:?}"
+    );
+    let scanned = tree.loader().pending_trust(&request);
+    assert!(
+        matches!(scanned, Err(ConfigError::TooManyPacks { limit: MAX_PACKS })),
+        "{scanned:?}"
+    );
+
+    // At the bound, one review covers the file and every manifest it names.
+    let at_bound = entries.replace(
+        &format!(r#""kit-{MAX_PACKS}": Pack(path: "../vendor/kit-{MAX_PACKS}"), "#),
+        "",
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {at_bound} }})"),
+    );
+    let Err(ConfigError::TrustRequired { pending, .. }) = tree.loader().load(&request) else {
+        panic!("an untrusted project file requires trust");
+    };
+    assert_eq!(pending.len(), MAX_PACKS + 1, "the file and its packs");
+
+    // Entries that point at nothing spend the budget too, so a document
+    // cannot buy unbounded probes with missing directories.
+    let mut missing = String::new();
+    for index in 0..=MAX_PACKS {
+        missing.push_str(&format!(
+            r#""ghost-{index}": Pack(path: "../nowhere/{index}"), "#
+        ));
+    }
+    tree.write(
+        "work/.qq/config.ron",
+        &format!("(version: 1, packs: {{ {missing} }})"),
+    );
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+    assert!(matches!(
+        tree.loader().pending_trust(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+}
+
+#[test]
+fn placeholder_pack_directories_spend_the_load_budget() {
+    // Directories without a manifest are ignored, but each is listed and
+    // probed on every load, so they count toward the bound too.
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    for index in 0..MAX_PACKS {
+        fs::create_dir_all(tree.path(format!("work/.qq/packs/empty-{index}"))).unwrap();
+    }
+    let request = tree.request();
+    tree.loader().load(&request).unwrap();
+    fs::create_dir_all(tree.path("work/.qq/packs/one-too-many")).unwrap();
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+    assert!(matches!(
+        tree.loader().pending_trust(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+
+    // Stray files are listed too and spend the same budget.
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    for index in 0..=MAX_PACKS {
+        tree.write(format!("work/.qq/packs/file-{index}"), "");
+    }
+    assert!(matches!(
+        tree.loader().load(&request),
+        Err(ConfigError::TooManyPacks { limit: MAX_PACKS })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn discovered_project_pack_links_are_rejected_before_they_are_followed() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write(
+        "outside/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
+    );
+    let request = tree.request();
+
+    fs::create_dir_all(tree.path("work/.qq/packs/kit")).unwrap();
+    symlink(
+        tree.path("outside/kit/pack.ron"),
+        tree.path("work/.qq/packs/kit/pack.ron"),
+    )
+    .unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
+
+    fs::remove_dir_all(tree.path("work/.qq/packs")).unwrap();
+    symlink(tree.path("outside"), tree.path("work/.qq/packs")).unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn project_pack_paths_that_leave_the_repository_are_rejected_unread() {
+    // A repository's `packs` entries are read before the user consents, so
+    // one that leaves it (absolute, `..`, a UNC share, an automount) is an
+    // error and is never opened. The outside manifest is invalid RON, so
+    // reading it would surface `Parse` instead of `InvalidPack`.
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    let outside = tree.write("outside/kit/pack.ron", "not ron");
+    let outside_directory = fs::canonicalize(outside.parent().unwrap()).unwrap();
+    let request = tree.request();
+    for path in [
+        outside_directory.display().to_string(),
+        "../../outside/kit".to_owned(),
+    ] {
+        tree.write(
+            "work/.qq/config.ron",
+            &format!(r#"(version: 1, packs: {{ "kit": Pack(path: {path:?}) }})"#),
+        );
+        for result in [
+            tree.loader().load(&request).map(|_| ()),
+            tree.loader().pending_trust(&request).map(|_| ()),
+            tree.loader().grant_pending_trust(&request).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(ConfigError::InvalidPack { message, .. }) if message.contains("leaves the project")),
+                "{path}: {result:?}"
+            );
+        }
+        assert!(!tree.path("data/trust.ron").exists());
+    }
+
+    // A path that only passes through `..` and stays inside is fine.
+    tree.write(
+        "work/vendor/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0")"#,
+    );
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, packs: { "kit": Pack(path: "../vendor/../vendor/kit") })"#,
+    );
+    tree.loader().grant_pending_trust(&request).unwrap();
+    assert_eq!(
+        tree.loader().load(&request).unwrap().packs()["kit"].version(),
+        "1.0.0"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn project_pack_paths_through_a_link_are_rejected_unread() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write("outside/kit/pack.ron", "not ron");
+    let request = tree.request();
+
+    // A linked pack directory.
+    fs::create_dir_all(tree.path("work/vendor")).unwrap();
+    symlink(tree.path("outside/kit"), tree.path("work/vendor/kit")).unwrap();
+    tree.write(
+        "work/.qq/config.ron",
+        r#"(version: 1, packs: { "kit": Pack(path: "../vendor/kit") })"#,
+    );
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
+
+    // A real directory whose `pack.ron` leaf is a link.
+    fs::remove_file(tree.path("work/vendor/kit")).unwrap();
+    fs::create_dir_all(tree.path("work/vendor/kit")).unwrap();
+    symlink(
+        tree.path("outside/kit/pack.ron"),
+        tree.path("work/vendor/kit/pack.ron"),
+    )
+    .unwrap();
+    for result in [
+        tree.loader().load(&request).map(|_| ()),
+        tree.loader().pending_trust(&request).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ConfigError::SymlinkSource { .. })),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn session_trust_admits_a_pack_without_recording_it() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6")"#,
+    );
+    tree.write(
+        "work/.qq/packs/kit/pack.ron",
+        r#"(schema: 1, id: "kit", version: "1.0.0", mcp: { "x": Stdio(command: "sh") })"#,
+    );
+    let request = tree.request();
+    let loader = tree.loader();
+    let grants: Vec<ProcessTrust> = loader
+        .pending_trust(&request)
+        .unwrap()
+        .iter()
+        .filter_map(PendingTrust::reviewed)
+        .collect();
+    assert_eq!(grants.len(), 1);
+
+    let trusted = request.clone().with_process_trust(grants);
+    let snapshot = loader.load(&trusted).unwrap();
+    assert_eq!(snapshot.packs()["kit"].version(), "1.0.0");
+    assert!(snapshot.mcp_servers().contains_key("x"));
+    assert!(loader.pending_trust(&trusted).unwrap().is_empty());
+    assert!(!tree.path("data/trust.ron").exists());
+    assert!(matches!(
+        loader.load(&request),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+}
+
+#[test]
 fn agent_pack_manifests_fail_fast_on_every_documented_error() {
     let tree = TempTree::new();
     tree.write(

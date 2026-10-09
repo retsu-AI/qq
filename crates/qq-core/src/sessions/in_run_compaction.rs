@@ -9,8 +9,9 @@
 //! which the prompt run holds. The marker it commits is scoped to the prompt
 //! run (`session_compactions.scope_run_id`, `turn_cutoff`), so replay renders
 //! the summary where the replaced turns stood and the between-run cutoff is
-//! untouched. The summarizer request is provider-direct: no tools, no
-//! steering, no audit, one turn.
+//! untouched. The summarizer request is provider-direct: no steering, no
+//! audit. It declares the run's tools and system prompt only so it shares the
+//! run's provider cache; a call is rejected, never run (ADR-0056 § 5).
 
 use super::{
     execution::{RunAccounting, cancellation_requested},
@@ -67,7 +68,6 @@ async fn compact_in_run(
     if *inner.failed.borrow() {
         return Err(Error::Unavailable("session runtime failed".to_owned()));
     }
-    let session_id = prompt_run.identity.session_id;
     let turn_cutoff = request.turn_cutoff;
     let started = inner
         .store
@@ -80,7 +80,7 @@ async fn compact_in_run(
                 "the prompt run is no longer running".to_owned(),
             ));
         }
-        Err(error) => return Err(Error::Unavailable(error.to_string())),
+        Err(error) => return Err(Error::Persistence(error.to_string())),
     };
     inner.notify(started_event.cursor);
     // Register for cancellation like any run, so a cancel of the prompt run
@@ -113,30 +113,34 @@ async fn compact_in_run(
         Ok(false) => {}
         Err(error) => {
             guard.disarm();
-            settle_failed(inner, &compaction, error.to_string()).await;
-            return Err(Error::Unavailable(error.to_string()));
+            settle_failed_with(
+                inner,
+                &compaction,
+                RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: format!("failed to read the cancellation request: {error}"),
+                },
+            )
+            .await;
+            return Err(Error::Persistence(error.to_string()));
         }
     }
-
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.
-    let instruction = match inner.store.compaction_instruction(session_id).await {
-        Ok(instruction) => instruction,
-        Err(error) => {
-            guard.disarm();
-            settle_failed(inner, &compaction, error.to_string()).await;
-            return Err(Error::Unavailable(error.to_string()));
-        }
-    };
     let mut messages = request.transcript;
     messages.push(Message::user(format!(
-        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{instruction}"
+        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}"
     )));
-    let max_output_tokens = resolved_model
-        .max_output_tokens
-        .min(super::execution::COMPACTION_OUTPUT_RESERVE_TOKENS);
-    let summarize = plan.runtime.summarize(messages, max_output_tokens);
+    let summarize = plan.runtime.summarize(
+        messages,
+        request.system,
+        request.tools,
+        super::context::summarizer_output_tokens(
+            resolved_model.max_output_tokens,
+            resolved_model.context_window,
+        ),
+    );
     let reply = tokio::select! {
         biased;
         changed = cancelled.changed() => {
@@ -185,16 +189,23 @@ async fn compact_in_run(
     });
     let committed = inner
         .store
-        .finish_in_run_compaction(&compaction, summary.clone(), accounting)
+        .finish_in_run_compaction(
+            &compaction,
+            summary,
+            accounting,
+            record_budget(resolved_model.context_window),
+        )
         .await;
     match committed {
-        Ok((events, true)) => {
+        // The splice uses the stored text, so the live request and replay
+        // render the same bytes.
+        Ok((events, Some(summary))) => {
             for event in events {
                 inner.notify(event.cursor);
             }
             Ok(crate::runtime::InRunCompaction { summary })
         }
-        Ok((events, false)) => {
+        Ok((events, None)) => {
             for event in events {
                 inner.notify(event.cursor);
             }
@@ -204,7 +215,7 @@ async fn compact_in_run(
         }
         Err(error) => {
             inner.failed.send_replace(true);
-            Err(Error::Unavailable(error.to_string()))
+            Err(Error::Persistence(error.to_string()))
         }
     }
 }
@@ -265,10 +276,26 @@ async fn settle_cancelled(inner: &Arc<SessionRuntimeInner>, compaction: &Claimed
 }
 
 async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun, message: String) {
+    settle_failed_with(
+        inner,
+        compaction,
+        RunFailure {
+            kind: RunFailureKind::ProviderResponse,
+            message,
+        },
+    )
+    .await;
+}
+
+async fn settle_failed_with(
+    inner: &Arc<SessionRuntimeInner>,
+    compaction: &ClaimedRun,
+    failure: RunFailure,
+) {
     let outcome = RunOutcome::Failed {
         failure: RunFailure {
-            kind: RunFailureKind::ProviderResponse,
-            message: truncate_utf8(message, MAX_FAILURE_MESSAGE_BYTES),
+            kind: failure.kind,
+            message: truncate_utf8(failure.message, MAX_FAILURE_MESSAGE_BYTES),
         },
     };
     match inner
@@ -290,6 +317,8 @@ async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun
 /// Prepended to the standard instruction so the summarizer knows the summary
 /// replaces the assistant's own earlier turns of a task still in progress.
 const IN_RUN_COMPACTION_INSTRUCTION_PREFIX: &str = "The task above is still in progress. The \
-messages after the first user message are your own earlier work on it; summarize that work so \
-it can replace those messages while you continue. Record exactly what was done, what each tool \
-returned that still matters, and what remains.";
+messages after its prompt (the last user message before your work began) are your own earlier \
+work on it; summarize that work so it can replace those messages while you continue. Earlier \
+session context before that prompt stays as it is; do not summarize it. Record what was done, what each tool \
+returned that still matters, and what remains. The task prompt stays verbatim above the \
+summary.";

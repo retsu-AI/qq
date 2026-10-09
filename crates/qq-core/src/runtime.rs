@@ -6,6 +6,7 @@ mod deadline;
 mod events;
 mod gate;
 mod history;
+mod progress;
 mod prompt;
 mod shell_policy;
 mod spill;
@@ -46,6 +47,9 @@ pub(crate) use history::{
     search_history_spec,
 };
 #[cfg(test)]
+pub(crate) use progress::STALL_REPORT_CALLS;
+pub(crate) use progress::{ReportDue, StallPolicy, StallScope, is_progress};
+#[cfg(test)]
 pub(crate) use prompt::agent_system_prompt;
 pub(crate) use prompt::{
     AGENT_PROMPT_VERSION, PromptPrefix, PromptSections, SubagentAuthority, ToolSchemaMeasurement,
@@ -63,6 +67,8 @@ pub(crate) use spill::{
 pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};
 pub(crate) use subagent::{
-    ChildCleanupError, ChildDrainFuture, SPAWN_UNAVAILABLE_RESULT, SpawnAgentFuture,
-    SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner,
+    CancelFuture, CancelOutcome, ChildCleanupError, ChildDrainFuture, ChildStatus, ChildWaitFuture,
+    DeliverFuture, DeliveredChild, DeliveryError, ReportDelivery, SPAWN_UNAVAILABLE_RESULT,
+    SpawnAgentFuture, SpawnAgentOutcome, SpawnAgentSpend, SpawnRequest, SubagentSpawner,
+    WaitFuture, WaitReport,
 };

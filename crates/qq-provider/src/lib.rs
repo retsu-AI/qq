@@ -34,7 +34,7 @@ pub use credentials::{SecretLiteral, SecretRef};
 pub use http::AttemptPolicy;
 pub use model::{
     ContentBlock, IncompleteReason, Message, ModelRequest, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderUsage, Role, ToolSpec,
+    ProviderEvent, ProviderUsage, Role, ToolChoice, ToolSpec,
 };
 pub use qq_reasoning::{ReasoningEffort, ReasoningKind};
 pub use request_auth::{

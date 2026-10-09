@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ConfigError, MAX_PROFILE_NAME_BYTES, ProfileApprovalMode, SourceIdentity, SourceKind,
+    TrustDeclaration,
     document::{McpServerPatch, UniqueMap},
     loader::Probes,
 };
@@ -254,18 +255,52 @@ impl AgentPack {
     pub(crate) const fn mcp(&self) -> &BTreeMap<String, McpServerPatch> {
         &self.mcp
     }
+
+    /// The sections and declarations a trust prompt lists for this
+    /// manifest: the pack id, its profiles, and each MCP server with its
+    /// command or URL.
+    pub(crate) fn trust_summary(&self) -> (Vec<&'static str>, Vec<TrustDeclaration>) {
+        let mut sections = vec!["packs"];
+        let mut declarations = vec![TrustDeclaration::Packs(vec![self.id.clone()])];
+        if !self.profiles.is_empty() {
+            sections.push("profiles");
+            declarations.push(TrustDeclaration::Other("profiles"));
+        }
+        if !self.mcp.is_empty() {
+            sections.push("mcp");
+        }
+        for (name, patch) in &self.mcp {
+            declarations.push(match patch {
+                McpServerPatch::Stdio { command, .. } => TrustDeclaration::McpStdio {
+                    name: name.clone(),
+                    command: command.clone(),
+                },
+                McpServerPatch::Http { url, .. } => TrustDeclaration::McpHttp {
+                    name: name.clone(),
+                    url: url.clone(),
+                },
+                McpServerPatch::Remove => TrustDeclaration::McpRemoved { name: name.clone() },
+            });
+        }
+        (sections, declarations)
+    }
 }
 
 /// Discovers packs under `directory/<id>/pack.ron`. Absent or empty
 /// directories contribute nothing; every path inspected is recorded.
+/// `loaded` counts every entry inspected in this load (packs admitted or
+/// withheld, directories without a manifest, stray files), so a repository
+/// cannot make every load list and probe an unbounded number of entries.
+/// Links are rejected before anything is recorded: recording follows a
+/// link's target, and project packs are read before the user consents.
 pub(crate) fn discover(
     directory: &Path,
     kind: SourceKind,
     probes: &mut Probes,
-    admitted: &mut usize,
+    loaded: &mut usize,
 ) -> Result<Vec<AgentPack>, ConfigError> {
-    probes.record(directory);
     crate::loader::reject_symlink_components(directory)?;
+    probes.record(directory);
     let listing = match fs::read_dir(directory) {
         Ok(listing) => listing,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -282,6 +317,10 @@ pub(crate) fn discover(
             path: directory.to_owned(),
             error,
         })?;
+        if *loaded >= MAX_PACKS {
+            return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
+        }
+        *loaded += 1;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -298,33 +337,51 @@ pub(crate) fn discover(
     for id in ids {
         let pack_directory = directory.join(&id);
         let manifest_path = pack_directory.join(PACK_MANIFEST_FILE);
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ConfigError::SymlinkSource {
+                    path: manifest_path,
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ConfigError::Io {
+                    path: manifest_path,
+                    error,
+                });
+            }
+        }
         probes.record(&manifest_path);
         if !manifest_path.is_file() {
             // A directory without a manifest is not a pack; ignore it so
             // unrelated content under `packs/` cannot fail configuration.
             continue;
         }
-        if *admitted >= MAX_PACKS {
-            return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
-        }
-        let pack = load_pack(&pack_directory, &id, kind)?;
-        *admitted += 1;
-        packs.push(pack);
+        packs.push(load_pack(&pack_directory, &id, kind)?);
     }
     Ok(packs)
 }
 
 /// Loads one explicitly declared pack directory. `expected_id` is the
-/// configuration key it was declared under.
+/// configuration key it was declared under. Explicit entries share the
+/// `loaded` bound with discovery: an untrusted project file's entries are
+/// read for review before consent, so their count must not be unbounded.
 pub(crate) fn load_explicit(
     directory: &Path,
     expected_id: &str,
     kind: SourceKind,
     probes: &mut Probes,
+    loaded: &mut usize,
 ) -> Result<AgentPack, ConfigError> {
     probes.record(directory);
     probes.record(&directory.join(PACK_MANIFEST_FILE));
-    load_pack(directory, expected_id, kind)
+    if *loaded >= MAX_PACKS {
+        return Err(ConfigError::TooManyPacks { limit: MAX_PACKS });
+    }
+    let pack = load_pack(directory, expected_id, kind)?;
+    *loaded += 1;
+    Ok(pack)
 }
 
 fn load_pack(

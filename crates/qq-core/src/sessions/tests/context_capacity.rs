@@ -120,6 +120,109 @@ fn pruning_stubs_keep_a_result_header_line() {
 }
 
 #[test]
+fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
+    // CX3: a live run prunes again on every overflowing turn. Its own stubs
+    // must stay as they are, or the stub names the previous stub's size and
+    // disagrees with replay. A real result is judged by what it is: a large
+    // one whose last line happens to read like a stub still prunes.
+    let call = |id: &str, name: &str| {
+        ContentBlock::tool_call(
+            id.to_owned(),
+            name.to_owned(),
+            &serde_json::json!({"query": "needle"}),
+        )
+    };
+    let result = |id: &str, content: String| {
+        Message::tool_results(vec![ContentBlock::ToolResult {
+            call_id: id.to_owned(),
+            content,
+            is_error: false,
+        }])
+    };
+    let with_header = format!(
+        "search \"needle\" matches=4/4 files=3 scanned=612\n{}",
+        "match\n".repeat(200)
+    );
+    let lookalike = format!(
+        "{}[pruned: search {{\"query\":\"needle\"}} returned 12 bytes; call it again if needed]",
+        "match\n".repeat(200)
+    );
+    // Two lines, the second a valid stub line, the first far past a
+    // header's bound: not a stub.
+    let long_first_line = format!(
+        "search {}\n[pruned: search {{\"query\":\"needle\"}} returned 1 bytes; call it again if needed]",
+        "m".repeat(4 * 1024)
+    );
+    // A stub line whose size is not a `u64`: not a stub.
+    let huge_size = format!(
+        "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+        "9".repeat(2 * 1024)
+    );
+    let mut context = vec![
+        Message::user("start"),
+        Message::new(Role::Assistant, vec![call("c1", "search")]),
+        result("c1", with_header.clone()),
+        Message::new(Role::Assistant, vec![call("c2", "search")]),
+        result("c2", "match\n".repeat(200)),
+        Message::new(Role::Assistant, vec![call("c3", "search")]),
+        result("c3", lookalike.clone()),
+        Message::new(Role::Assistant, vec![call("c4", "search")]),
+        result("c4", long_first_line.clone()),
+        Message::new(Role::Assistant, vec![call("c5", "search")]),
+        result("c5", huge_size.clone()),
+        Message::assistant("a"),
+        Message::assistant("b"),
+        Message::assistant("c"),
+        Message::assistant("d"),
+    ];
+    assert!(prune_stale_tool_results(&mut context, &HashMap::new()));
+    let results = |context: &[Message]| {
+        context
+            .iter()
+            .flat_map(Message::content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = results(&context);
+    assert_eq!(
+        first[0],
+        format!(
+            "search \"needle\" matches=4/4 files=3 scanned=612\n\
+             [pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+            with_header.len()
+        )
+    );
+    assert_eq!(
+        first[1],
+        "[pruned: search {\"query\":\"needle\"} returned 1200 bytes; call it again if needed]"
+    );
+    for (index, original) in [(2, &lookalike), (4, &huge_size)] {
+        assert_eq!(
+            first[index],
+            format!(
+                "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+                original.len()
+            ),
+            "result {index}"
+        );
+    }
+    // The long first line is not a header, so the stub carries none.
+    assert_eq!(
+        first[3],
+        format!(
+            "[pruned: search {{\"query\":\"needle\"}} returned {} bytes; call it again if needed]",
+            long_first_line.len()
+        )
+    );
+    // A second pass, as a later overflowing turn makes, changes nothing.
+    assert!(!prune_stale_tool_results(&mut context, &HashMap::new()));
+    assert_eq!(results(&context), first);
+}
+
+#[test]
 fn pruned_read_file_stubs_keep_the_window_drop_the_hash_and_name_the_reread() {
     // `read_file`'s header names the operation (`read`), not the tool. The
     // stub keeps the window and line count so the model can re-read only

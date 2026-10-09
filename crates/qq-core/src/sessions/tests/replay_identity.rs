@@ -572,6 +572,10 @@ async fn repeated_call_ids_keep_pruning_effects_and_arguments_local_to_each_turn
         "age three",
         "inspect",
     ] {
+        if prompt == "inspect" {
+            // A seam before the last prompt: assembly stubs up to it.
+            super::mark_prune_seam(&directory.path().join("sessions.sqlite3"), session_id);
+        }
         runtime
             .command(
                 CommandId::generate().unwrap(),

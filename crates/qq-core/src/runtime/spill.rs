@@ -143,8 +143,9 @@ pub(crate) fn render_tool_result(
     let mut body = String::with_capacity(body_budget.min(text.len() + total_lines * 8));
     let mut body_escaped = 0_usize;
 
-    if let Some(query) = arguments.query.as_deref() {
-        if query.is_empty() || query.len() > MAX_QUERY_BYTES {
+    // `""` beside offset/limit is a filled-in default: page, don't search.
+    if let Some(query) = arguments.query.as_deref().filter(|query| !query.is_empty()) {
+        if query.len() > MAX_QUERY_BYTES {
             return Err(format!(
                 "invalid_query: query must be 1 to {MAX_QUERY_BYTES} bytes"
             ));
@@ -249,6 +250,9 @@ pub(crate) fn render_tool_result(
     };
     let mut header =
         Header::new("read_tool_result", Some(handle)).token(format_args!("{window}/{total_lines}"));
+    if arguments.query.as_deref() == Some("") {
+        header = header.field("note", "empty_query_ignored");
+    }
     if stopped {
         header = header
             .field("truncated", "bytes")
@@ -322,6 +326,12 @@ mod tests {
             render_tool_result("h", &args(1, 0, None, false), &text)
                 .unwrap_err()
                 .starts_with("invalid_limit")
+        );
+        // D9: an empty query beside offset/limit pages instead of failing,
+        // and the header says the query was ignored.
+        assert_eq!(
+            render_tool_result("h", &args(49, 200, Some(""), false), &text).unwrap(),
+            tail.replacen('\n', " note=empty_query_ignored\n", 1)
         );
     }
 

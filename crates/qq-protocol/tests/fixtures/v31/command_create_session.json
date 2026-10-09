@@ -1,0 +1,17 @@
+{
+  "command_id": "10101010101010101010101010101010",
+  "command": {
+    "type": "create_session",
+    "workspace_id": "02020202020202020202020202020202",
+    "model": {
+      "model": "openai/gpt-5.6",
+      "max_output_tokens": 4096
+    },
+    "approval_mode": "ask",
+    "profile": "review",
+    "correlation": {
+      "channel": "c-9",
+      "thread": "t-1"
+    }
+  }
+}

@@ -177,6 +177,9 @@ pub(crate) async fn execute(
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
     // Fetch awaits sockets, not files: it runs on the async runtime like
     // shell, under the same task lease, never on a blocking permit.
+    #[cfg(not(feature = "tool-fetch"))]
+    let _ = network_policy;
+    #[cfg(feature = "tool-fetch")]
     if BuiltInTool::from_name(&name) == Some(BuiltInTool::Fetch) {
         let args: super::fetch::FetchArgs = match serde_json::from_str(&arguments) {
             Ok(args) => args,
@@ -417,7 +420,9 @@ pub(super) fn execute_blocking(
             .map_or_else(ToolOutput::error, |args| {
                 write_file(workspace, file_state, &args, cancelled)
             }),
-        Some(BuiltInTool::Shell | BuiltInTool::Exec | BuiltInTool::Fetch) => {
+        #[cfg(feature = "tool-fetch")]
+        Some(BuiltInTool::Fetch) => ToolOutput::error("network tools must execute asynchronously"),
+        Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
             ToolOutput::error("network and shell tools must execute asynchronously")
         }
         // A well-formed `ask_user` never reaches dispatch: the gate holds it

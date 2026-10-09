@@ -24,6 +24,7 @@ members = [
   "crates/qq-client",
   "crates/qq-config",
   "crates/qq-core",
+  "crates/qq-harness",
   "crates/qq-mcp",
   "crates/qq-provider",
   "crates/qq-protocol",
@@ -35,7 +36,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/retsu-AI/qq"
@@ -71,6 +72,7 @@ qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
 qq-config = { path = "crates/qq-config" }
 qq-core = { path = "crates/qq-core" }
+qq-harness = { path = "crates/qq-harness" }
 qq-mcp = { path = "crates/qq-mcp" }
 qq-provider = { path = "crates/qq-provider", default-features = false }
 qq-protocol = { path = "crates/qq-protocol" }
@@ -112,6 +114,7 @@ qq-auth.workspace = true
 qq-client.workspace = true
 qq-config.workspace = true
 qq-core.workspace = true
+qq-harness.workspace = true
 qq-mcp.workspace = true
 qq-provider.workspace = true
 qq-protocol.workspace = true

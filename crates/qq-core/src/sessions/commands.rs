@@ -63,6 +63,9 @@ pub(super) struct ChildAdmission {
     pub(super) limits: RunLimits,
     pub(super) approval_mode: ApprovalMode,
     pub(super) purpose: SessionPurpose,
+    /// The parent keeps working and receives the answer at a later turn
+    /// boundary (ADR-0054 § 4); the delivery row is admitted with the child.
+    pub(super) detached: bool,
 }
 
 /// Most sessions one root run's delegation tree may hold across every depth.
@@ -84,6 +87,7 @@ pub(super) fn create_child_run(
         limits,
         approval_mode,
         purpose,
+        detached,
     } = admission;
     // Children never hold more than Supervised authority; the spawner decides
     // between ReadOnly and Supervised and nothing else may reach here.
@@ -221,6 +225,15 @@ pub(super) fn create_child_run(
         ],
     )?;
 
+    if detached {
+        deliveries::insert_child_delivery(
+            &transaction,
+            run_id,
+            parent_session_id,
+            parent_run_id,
+            now,
+        )?;
+    }
     let session = load_session_summary(&transaction, session_id)?;
     let created = append_event(
         &transaction,
@@ -1842,6 +1855,8 @@ pub(super) fn delete_idle_session(
         "DELETE FROM attachment_blobs WHERE session_id = ?1",
         "DELETE FROM tool_calls WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
         "DELETE FROM model_turns WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?1)",
+        "DELETE FROM child_deliveries WHERE parent_session_id = ?1",
+        "DELETE FROM child_reports WHERE parent_session_id = ?1",
         "DELETE FROM messages WHERE session_id = ?1",
         "DELETE FROM runs WHERE session_id = ?1",
         "DELETE FROM session_grants WHERE session_id = ?1",

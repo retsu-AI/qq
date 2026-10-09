@@ -369,14 +369,18 @@ pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(Stri
         if let Some(tool) = &live.active_tool {
             return Some((tool_verb(tool).to_owned(), accent()));
         }
-        if !live.tail.is_empty() {
+        let activity = session.activity.map(|(_, activity)| activity);
+        // A compacting run has usually streamed text already; that tail is
+        // stale until the summary lands, so the activity wins over it.
+        if !live.tail.is_empty() && activity != Some(qq_protocol::RunActivity::Compacting) {
             return Some((live.tail.clone(), muted()));
         }
-        let label = match session.activity.map(|(_, activity)| activity) {
+        let label = match activity {
             Some(qq_protocol::RunActivity::WaitingForProvider) | None => "waiting for provider",
             Some(qq_protocol::RunActivity::Reasoning) => "reasoning",
             Some(qq_protocol::RunActivity::GeneratingResponse) => "responding",
             Some(qq_protocol::RunActivity::PreparingToolCall) => "preparing a tool call",
+            Some(qq_protocol::RunActivity::Compacting) => "compacting context",
         };
         return Some((label.to_owned(), muted().italic()));
     }
