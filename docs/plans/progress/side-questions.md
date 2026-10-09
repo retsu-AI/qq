@@ -202,3 +202,13 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   Earlier registry/documentation test failure fixed by matching exact title.
 - Independent review capacity is exhausted for this run; fixes from SQ1 review
   are evidenced, but fresh SQ2 reviewer approval is not claimed.
+
+### 2026-10-09 — SQ2 Codex review fixes (#270)
+
+- `View::SideQuestions` now carries its source session: model/profile/approval/
+  effort/delegate commands and rejected side submit/cancel notices stay on it.
+  Approvals stay modal only in the transcript that shows them.
+- `/btw-cancel` falls back to the receipt-acknowledged ID until a terminal update;
+  `/btw-new` autocomplete leaves `/btw-new ` for the question; side costs use
+  `format_cost`; the guide no longer promises settlement within 120 s.
+- Added 8 regression tests; qq-tui 348 + 6 goldens, qq-client 24, docs-truth 23 pass.
