@@ -1800,7 +1800,7 @@ impl RuntimeFactory {
                 .collect();
             profile = profile.with_exposed_tools(names);
         }
-        profile = profile.with_denied_tools(snapshot.policy().deny_tools().to_vec());
+        profile = profile.with_side_question_denies(snapshot.policy().deny_tools().to_vec());
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,

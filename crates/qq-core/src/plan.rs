@@ -131,7 +131,7 @@ pub struct AgentProfile {
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
     exposed_tools: Option<Vec<String>>,
-    denied_tools: Vec<String>,
+    side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
 }
@@ -177,7 +177,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
-            denied_tools: Vec::new(),
+            side_question_denies: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
         }
@@ -280,7 +280,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
-            denied_tools: Vec::new(),
+            side_question_denies: Vec::new(),
             context_sources: runtime
                 .context_sources
                 .iter()
@@ -323,11 +323,13 @@ impl AgentProfile {
         self
     }
 
-    /// Narrows a side question to built-in workspace inspection. Runtime
-    /// admission must also supply isolated context, capabilities and limits.
+    /// Managed hard denies a derived side-question plan must honor. Main
+    /// catalogs are unchanged: there managed denies filter grants, not
+    /// exposure (headless contract), so these apply only in
+    /// [`CompiledAgentPlan::side_question_plan`], which grants nothing.
     #[must_use]
-    pub fn with_denied_tools(mut self, names: Vec<String>) -> Self {
-        self.denied_tools = names;
+    pub fn with_side_question_denies(mut self, names: Vec<String>) -> Self {
+        self.side_question_denies = names;
         self
     }
 
@@ -522,6 +524,7 @@ pub struct CompiledAgentPlan {
     descriptor_json: Arc<str>,
     digest: AgentPlanDigest,
     credential_epoch: CredentialEpoch,
+    side_question_denies: Arc<[String]>,
     /// Instruction files plus skill root directories: everything a cache
     /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
@@ -611,12 +614,19 @@ impl CompiledAgentPlan {
         profile.credential_epoch = self.credential_epoch;
         profile.profile_id = self.descriptor.profile.clone();
         let mut profile = profile.for_side_question();
-        // Side authority is an intersection with the effective source catalog,
-        // never a way to restore a built-in removed by managed/profile policy.
+        // Side authority is an intersection with the effective source catalog
+        // minus managed hard denies: a side question has no grant path, so a
+        // denied built-in is removed outright rather than restored.
         profile.exposed_tools = Some(
             ["read_file", "search", "tree"]
                 .into_iter()
-                .filter(|name| self.catalog.lookup(name).is_some())
+                .filter(|name| {
+                    self.catalog.lookup(name).is_some()
+                        && !self
+                            .side_question_denies
+                            .iter()
+                            .any(|denied| denied == name)
+                })
                 .map(str::to_owned)
                 .collect(),
         );
@@ -672,7 +682,7 @@ impl CompiledAgentPlan {
             profile_id,
             pack,
             exposed_tools,
-            denied_tools,
+            side_question_denies,
             context_sources,
             context_cache,
         } = profile;
@@ -910,19 +920,6 @@ impl CompiledAgentPlan {
         {
             static_tools.retain(|tool| !follows_spawn(tool));
         }
-        static_tools.retain(|tool| !denied_tools.iter().any(|name| name == tool.spec.name()));
-        for contribution in &mut contributions {
-            contribution
-                .catalog
-                .tools
-                .retain(|tool| !denied_tools.iter().any(|name| name == tool.spec.name()));
-        }
-        if !static_tools
-            .iter()
-            .any(|tool| tool.host == ToolHost::SpawnAgent)
-        {
-            static_tools.retain(|tool| !follows_spawn(tool));
-        }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
         let descriptor = AgentPlanDescriptor {
@@ -1034,6 +1031,7 @@ impl CompiledAgentPlan {
             descriptor: Arc::new(descriptor),
             digest,
             credential_epoch,
+            side_question_denies: side_question_denies.into(),
             sources,
             estimated_bytes,
         }))
@@ -1366,12 +1364,22 @@ mod tests {
         let workspace = canonical_temp();
         let source = CompiledAgentPlan::compile(
             profile(workspace.path())
-                .with_denied_tools(vec!["read_file".to_owned(), "search".to_owned()]),
+                .with_side_question_denies(vec!["read_file".to_owned(), "search".to_owned()]),
         )
         .await
         .unwrap();
         let side = source.side_question_plan().await.unwrap();
         assert_eq!(side.catalog().names().collect::<Vec<_>>(), ["tree"]);
+        // Managed denies filter grants on the main run, not exposure: the
+        // main catalog and plan identity are exactly those without them.
+        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        assert!(source.catalog().lookup("read_file").is_some());
+        assert!(source.catalog().lookup("search").is_some());
+        assert_eq!(
+            source.catalog().names().collect::<Vec<_>>(),
+            plain.catalog().names().collect::<Vec<_>>()
+        );
+        assert_eq!(source.digest(), plain.digest());
     }
 
     #[test]
