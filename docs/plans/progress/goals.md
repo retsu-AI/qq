@@ -111,3 +111,9 @@ and accounting contracts; final consistency review and verification follow.
 - Full-PR relative links, fences, ledger status checks and `git diff --check`: passed.
 - No runtime/hot-path changes; provider minimal profile and performance benches not applicable.
 - ADR-0049 remains Proposed; lead decisions are in `decisions-needed.md` row 11.
+
+### 2026-10-06 — delivery stack planned
+
+- ENG-1011 tracks SQ0/SQ1/SQ2 before G0/G2/G3/G4/G5; no goal implementation claimed.
+- Immediate-parent PR bases, retarget after merge; G0 retains AC4 and one bump.
+- Side questions remain isolated from goal accounting and workspace check authority.

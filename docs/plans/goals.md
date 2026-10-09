@@ -10,6 +10,17 @@
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [`autonomous-core.md`](./autonomous-core.md). This plan replaces its AC7–AC9. AC4 (the loop guard) stays there and lands with G0 |
 
+## Delivery stack
+
+Tracking: [ENG-1011](https://linear.app/retsu-ai/issue/ENG-1011). ENG-982 delivered
+design only. Deliver [side-questions.md](side-questions.md) first: SQ0 planning,
+SQ1 isolated read-only runtime, SQ2 surfaces. Then stack **G0 → G2 → G3 → G4 → G5**.
+Each PR targets its immediate predecessor until merge, then rebases/retargets.
+This is delivery ordering, not a runtime dependency. G0 retains AC4 and one
+goal protocol bump; G1 stays dropped. G4 stays together after G3 initially.
+G5 requires ENG-809’s explicit evaluation budget. Side queries never steer,
+mutate or charge goals, or bypass check workspace exclusion.
+
 ## Goal
 
 A user gives QQ an objective, a way to check it, and a budget. QQ then works
