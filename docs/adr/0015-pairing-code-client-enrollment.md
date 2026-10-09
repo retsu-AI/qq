@@ -49,7 +49,8 @@ Concrete shape:
   memory only (bounded: 8 outstanding; minting a ninth fails). The CLI prints
   the code and a
   `qq://pair?base_url=<base_url>&server_id=<server_id>&code=<code>` URL / QR
-  for the shells' deep-link handler. `base_url` is selected from the validated
+  for the shells' deep-link handler. Native pairing may append the optional
+  algorithm-tagged `tls_pin=sha256:<DER-cert-fingerprint>` parameter. `base_url` is selected from the validated
   one-shot override or S6's `server.advertised_url`, in that order. It uses the
   same grammar as `ServerConnection`; the CLI never derives it from
   `listener.local_addr()`. If neither source exists, QR/deep-link minting
@@ -60,11 +61,16 @@ Concrete shape:
   `read`, `run`, `approve`, `session_admin`, and `client_admin`. No scope is
   implied by another except where a route explicitly also requires `read` to
   return state.
+- The optional pin is encoded exactly as `sha256:` followed by the lowercase
+  hexadecimal SHA-256 fingerprint of the DER certificate. Native self-signed
+  enrollment requires the pin before its first HTTPS exchange and rejects a
+  mismatch; browser clients use browser trust/installed CA validation and do
+  not consume the QR pin. No client makes an insecure first connection.
 - **Enrollment**: `POST /v1/enroll { pairing_code, client_name }` is the only
   unauthenticated data route; CORS preflight carries no application data.
   `/v1/health` remains authenticated by the loopback token or an enrolled
-  credential with `read`. Success returns `{ client_id,
-  credential, server_info }` exactly once; the code is consumed. Rate limit:
+  credential with `read`. Success returns `{ client_id, credential,
+  granted_scopes, server_info }` exactly once; the code is consumed. Rate limit:
   5 attempts per minute per peer address; a code with 3 failures is
   invalidated regardless. Responses for wrong/expired/unknown code are the
   same `403` body and take the same path (no oracle).
@@ -83,7 +89,17 @@ Concrete shape:
   bitset check. Scope bits are immutable for the credential: changing a grant
   revokes it and issues a new credential. Revocation invalidates the cache
   entry before it is acknowledged; the next request reloads the hash, scope
-  bitset, and revocation state together.
+  bitset, and revocation state together. Active SSE streams are registered by
+  `client_id`; revocation durably commits the revoked row and installs an
+  in-memory admission fence. Authentication rechecks that fence before a
+  previously-authenticated request may register a stream. Existing streams
+  are cancelled and joined before success is acknowledged, with a bounded 5 s
+  drain. If cleanup or persistence is unconfirmed, return typed
+  `RevocationPending` while retaining the revoked state; retry reconciles the
+  original operation and never reports false success or restores credentials.
+  No synchronous mutex is held across await. Already-transmitted bytes cannot
+  be recalled. Planned tests cover acknowledgement, retry, persistence
+  failure, concurrent authentication/open-stream races, and bounded drain.
 - **Authorization**: every route and session command checks the complete
   matrix in `docs/plans/fleet-clients.md` §5 after authentication. Observation
   requires `read`; run creation/control requires `run`; approval decisions
@@ -91,6 +107,12 @@ Concrete shape:
   enumeration, revocation, pairing-code minting, and server/CORS/root changes
   require `client_admin`. Missing scopes fail before dispatch with a typed
   forbidden response. The loopback token carries all scopes.
+- A run-only caller may create or fork with `ReadOnly` or `Ask` under the
+  server ceiling, and may tighten an existing mode. Selecting `Auto` or `Full`,
+  inheriting a more-permissive fork mode, or loosening a ceiling requires
+  `run`, `read`, and `approve`; `Supervised` remains child-only. Server-side
+  ceilings are authoritative. Planned fixtures cover caller-selected modes,
+  inherited forks, mode changes, and fail-closed missing-scope cases.
 - **Management**: `GET /v1/clients` and `POST /v1/clients/revoke { client_id }`
   require the loopback token or `client_admin`. CLI: `qq clients
   list`, `qq clients revoke <id|name>`. Revocation is immediate: the cache

@@ -17,11 +17,11 @@ dated entries appended below, newest last.
 | S6 | `server` configuration | Planned | | |
 | S7 | Server stream tiers, paging, approval previews, spill reads | Planned | | Added by fleet plan; strict wire changes only bump protocol |
 | TB | Tracer bullet gate | Planned | | Lead runs; `g-multi-surface-tb.md` |
-| W4 | Bounded durable fleet cache and dependent-command outbox | Planned | | `apps/fleet/` |
+| W4 | Bounded durable fleet cache and dependent-command outbox | Planned | | Inputs U1, W3, S7; `apps/fleet/` |
 | W5 | Incremental render model | Planned | | `apps/render/` |
-| U1–U7 | Web app | Planned | | ADR-0017, ADR-0018 |
+| U1–U7 | Web app | Planned | | U5 waits for U4 + W4; U6 waits for S7 + U5; ADR-0017, ADR-0018 |
 | D1–D3 | Desktop shell | Planned | | |
-| M1–M3 | Mobile | Planned | | |
+| M1–M3 | Mobile | Planned | | Shared `apps/shell/`; M3 includes background/local notification tests |
 | FG | Five-server browser/phone fleet acceptance | Planned | | Lead-run; `g-fleet-clients.md` |
 
 ## Entries
@@ -169,3 +169,17 @@ server-scoped SSE carries a per-workspace detail tier and tier-matched cursor;
 U2–U7 and M1 own the shared UI/mobile paths they must edit; and U4 consumes W5
 explicitly. This remains plan and ADR work only: no fleet runtime, remote
 listener, enrollment route, or UI was implemented or deployed.
+
+### 2026-10-09 — PR248 replacement review repairs
+
+Applied the 18 current review dispositions across the fleet plan, multi-surface
+plan, ADR-0015, and this ledger. Scope remains future planning only: summary
+approval resolution and tier-specific cursor recovery; U1/W3/S7 → W4 → U5 →
+U6 sequencing; one `apps/shell/` mobile path; M3 background/local notification
+tests; revocation fencing; fail-closed approval and workspace scopes; granted
+scope and QR TLS-pin contracts; bounded subscriptions/cache/projections;
+trusted endpoint sets; authoritative paged run summaries; and revisioned
+FleetPatch replacement. Documentary DAG and relative-link checks passed on
+2026-10-09; no runtime, provider, remote, or hosted checks ran. Decision #6
+credential storage remains open; decision 12 remote push remains held.
+Independent review and hosted CI remain pending; no slice is marked shipped.

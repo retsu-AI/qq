@@ -90,21 +90,21 @@ mobile. Phases 1 and 2 are independent and may run in parallel worktrees.
 | S6 | 2 | `server` configuration section and root translation | S2–S5 | `crates/qq-config/`, `src/` |
 | TB | gate | Tracer bullet: throwaway page streams a transcript from a remote server | W1, W2, S1, S2, S3 | none committed |
 | S7 | 2 | Server stream tiers, transcript paging, approval previews, spill reads | S2, S5 | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-client/` |
-| W4 | 3 | Bounded durable fleet cache and dependent-command outbox | W3, S7 | `apps/fleet/` |
+| W4 | 3 | Bounded durable fleet cache and dependent-command outbox | U1, W3, S7 | `apps/fleet/` |
 | W5 | 3 | Incremental render model with document-wide reference correctness | U1 | `apps/render/` |
 | U1 | 3 | ADR-0017 measured spike, then `apps/` workspace, CI, size gate, PWA | W1, W2 | `apps/`, `.github/workflows/` (root request) |
 | U2 | 3 | Servers screen: pair, list, connection state, overview | U1, W3, S2 | `apps/ui/`, `apps/web/` |
 | U3 | 3 | Workspaces and session tree | U2, S5 | `apps/ui/` |
 | U4 | 3 | Transcript: turn-ordered, virtualized, markdown, diffs | U3, W5 | `apps/ui/` |
-| U5 | 3 | Act: composer, steer, approvals, pickers, session commands | U4 | `apps/ui/` |
-| U6 | 3 | Attention view and notifications | U5 | `apps/ui/`, `apps/web/` |
+| U5 | 3 | Act: composer, steer, approvals, pickers, session commands | U4, W4 | `apps/ui/` |
+| U6 | 3 | Attention view and notifications | S7, U5 | `apps/ui/`, `apps/web/` |
 | U7 | 3 | Web resilience states and measured performance gates; hosting | U5 | `apps/ui/`, `apps/web/` |
 | D1 | 4 | Tauri shell, keychain credentials, deep-link pairing | U5 | `apps/shell/` |
 | D2 | 4 | Bundled `qq` sidecar local server | D1 | `apps/shell/`, `xtask/` |
 | D3 | 4 | Host-side HTTP for plain-HTTP LAN servers; installers | D1 | `apps/shell/`, `xtask/` |
-| M1 | 5 | Inbox-first mobile layout and measured mobile startup/frame gates | U5 | `apps/ui/`, `apps/mobile/` |
+| M1 | 5 | Inbox-first mobile layout and measured mobile startup/frame gates | D1, U5 | `apps/ui/`, `apps/shell/` |
 | M2 | 5 | Keystore credentials and QR pairing | D1 | `apps/shell/` |
-| M3 | 5 | Foreground notifications | M1 | `apps/shell/` |
+| M3 | 5 | Background fetch and local notifications | M1 | `apps/shell/` |
 | FG | gate | Five-server browser/phone fleet acceptance | S7, W4, W5, U6, U7, M2, M3 | `docs/plans/progress/g-fleet-clients.md` (evidence only) |
 
 ## Phase 1 — Client Core
@@ -126,14 +126,27 @@ Shipped in #19: the reducer and client model live in `qq-client::state`; the TUI
 **Gates:** none.
 **Acceptance:**
 
-- `ServerProfile { server_id, display_name, base_url, credential_ref }`;
+- `ServerProfile { server_id, display_name, base_url, endpoints, last_good,
+  credential_ref, immutable_granted_scopes }`; the cached profile keeps the
+  credential reference and granted scope bits for UI gating, while the server
+  remains authoritative for every request.
   `ServerSet` owns one bounded connection loop per profile (the generalized
   `TuiClient` loop) and an `Overview` projection: per server, connection
   state, needs-attention count, working count, last error.
+- `ServerProfile` keeps at most 8 independently trusted HTTPS endpoints. Each
+  endpoint is validated as HTTPS, tied to the `ServerId` and credential
+  audience, and, when supplied by pairing, its certificate pin; `base_url`
+  remains the compatibility/default endpoint.
+  Additional endpoints come only from the pairing contract or an explicit
+  operator action. Redirects and untrusted URL discovery never run with a
+  bearer credential, and address deduplication follows identity/trust
+  validation. Persist the last-good endpoint and ordering.
 - Bounds: at most 16 servers; per-server channels as today (64 requests, 256
   updates, 8 in-flight HTTP requests).
 - Tests with two in-process `qq-server` instances show independent reconnect
-  and a correct aggregated overview.
+  and a correct aggregated overview; endpoint fixtures reject untrusted URLs,
+  wrong ServerId/audience or pin, deduplicate only after identity checks, and
+  persist the last-good endpoint.
 
 **Docs:** `docs/design/architecture.md` (root request).
 
@@ -156,7 +169,7 @@ hash lookup per request; measure).
 - Store table `client_credentials { client_id, name, credential_hash, scope_bits,
   created_at, last_seen_at, revoked_at }`.
 - `POST /v1/enroll { pairing_code, client_name }` → `{ client_id, credential,
-  server_info }`, unauthenticated, rate-limited (5 attempts per minute per
+  granted_scopes, server_info }`, unauthenticated, rate-limited (5 attempts per minute per
   peer; a code is invalidated after 3 failures; codes expire after 5 minutes
   and are single-use).
 - The loopback credential has all scopes. Enrolled credentials carry only the
@@ -170,7 +183,8 @@ hash lookup per request; measure).
 - Auth middleware accepts the loopback token or an enrolled credential in
   constant time; revoked credentials fail immediately.
 - CLI: `qq pair` prints a code and a
-  `qq://pair?base_url=…&server_id=…&code=…` URL. The base URL is the
+  `qq://pair?base_url=…&server_id=…&code=…[&tls_pin=sha256:<DER-cert-fingerprint>]` URL.
+  The base URL is the
   validated `--advertised-url` override or `server.advertised_url`; it is
   never inferred from a listener bind. Without one, QR/deep-link minting fails
   with an actionable error. Until S6 persists the value, the S2 override is
@@ -216,8 +230,18 @@ Networking (root request); runbook.
   directly under configured `workspace_roots` (bounded at 256).
   `POST /v1/workspaces/browse { root, path }` lists one directory under a
   root (bounded).
-- Enrolled (remote) callers may `resolve` only paths under a root; loopback
-  callers are unchanged. Path traversal is refused with a typed error.
+- `GET /v1/workspaces/{workspace_id}/runs?limit=…&before=…` returns a
+  `read`-authorized page of `RunSummary { run_id, session_id, status,
+  started_at, finished_at, duration, token_totals, outcome }` plus an opaque,
+  stable `next_before` cursor. The server caps each page at 128 summaries and
+  256 KiB encoded response, includes running and retained terminal histories,
+  and owns bounded snapshot/pagination/deletion behavior; it does not promise
+  forever-retained history. Future fixtures cover a fresh client, pagination,
+  deletion, authorization, and bounded snapshots.
+- Enrolled (remote) callers with `run` plus `read` may `resolve` only paths
+  under a root; even a known path records a journaled mutation and is never
+  authorized by `read` alone. Loopback callers are unchanged. Path traversal
+  is refused with a typed error.
 - Provisioning (clone/init) is out of scope.
 
 **Docs:** `docs/design/protocol.md`.
@@ -248,12 +272,31 @@ credential handshake before UI investment. The lead records the result in
 CI job; size gate (initial budget 1.5 MiB gzipped, refined by the spike); PWA
 manifest. The UI pins a supported protocol range and refuses incompatible
 servers with a clear message.
+U1 owns the shared workspace and the IPC contract fixtures: every encoded
+`FleetPatch` frame is ≤1 MiB/256 operations including its envelope, oversized
+operations split before serialization, and replacement uses validated
+`begin { revision, total_bytes, total_chunks }` / `chunk` / `commit` frames,
+bounded to 8 MiB and 64 chunks. A complete revision is applied atomically;
+overflow requests a resnapshot and never drops authoritative events.
+
+### W4 — Durable cache and outbox
+
+**Inputs:** U1, W3, S7. W4 owns the bounded projection/cursor/approval-preview
+transaction, summary-page envelope (256 summaries or 1 MiB), byte LRU, and
+dependent-command outbox. Future crash, cursor-expiry, concurrent tier
+transition, and cache-write-failure tests prove a persisted cursor never gets
+ahead of its projection.
 
 ### U2 — Servers screen
 
 Add server (URL + pairing code or `qq://pair` link), list, connection state,
 overview counts, remove/re-pair. Credentials in IndexedDB pending
 `decisions-needed` #6; never in URLs or logs.
+U2 displays the immutable `granted_scopes` returned by enrollment alongside
+the credential reference. Pairing supplies only the initial `base_url`; any
+additional trusted endpoint requires explicit operator approval and is stored
+in the bounded W3 profile. The UI is informational; the server remains the
+authority.
 
 ### U3 — Workspaces and sessions
 
@@ -273,12 +316,18 @@ fold; 4 KiB tool-output tails.
 
 ### U5 — Act
 
+**Inputs:** U4, W4. The durable outbox and cache land before the composer
+exposes offline queueing or dependent create-then-submit actions.
+
 Composer with drafts and queue; submit, steer, interrupt, cancel; approval
 cards with previews, four decisions, and grants; approval mode, model, and
 profile pickers; new root/child session; delete, prune, compact, rollback;
 optimistic pending-intent tracking by `command_id`.
 
 ### U6 — Attention and notifications
+
+**Inputs:** S7, U5. The attention view consumes S7's summary-tier approval
+stream and U5's action state; it cannot be started from U5 alone.
 
 Cross-server needs-you view; Web Notifications when unfocused; unread markers.
 
@@ -292,7 +341,9 @@ Static hosting on Cloudflare Pages.
 ## Phase 4 — Desktop
 
 - **D1** Tauri v2 shell loading the same bundle; OS keychain plugin;
-  native notifications; `qq://pair` deep-link handler.
+  native notifications; `qq://pair` deep-link handler. D1 owns the bounded
+  FleetPatch reassembly (≤8 MiB, 64 chunks, complete-revision validation) and
+  applies only validated revisions atomically.
 - **D2** Bundled `qq` sidecar: spawn `qq serve` on launch or attach to an
   existing instance via `server.ron`, so the local machine appears as a
   server with no setup.
@@ -304,8 +355,10 @@ Static hosting on Cloudflare Pages.
 - **M1** Inbox-first mobile layout in the shared UI plus the `< 300 ms` warm
   startup and mobile frame gates, measured through the Tauri mobile shell.
 - **M2** Keychain/Keystore credentials; QR pairing.
-- **M3** Foreground notifications only. Push requires a relay and is out of
-  scope.
+- **M3** Platform background fetch and local notifications when the OS grants
+  time, with planned tests for denied notification grants, suspension, and
+  resume/replay. Remote push still requires a relay and remains held by
+  decision 12; no vendor credential or OS-run guarantee is implied.
 
 ## Non-Goals
 

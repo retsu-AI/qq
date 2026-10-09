@@ -124,7 +124,7 @@ apps/
   render/                 # qq-render: markdown → block model, highlight spans, diff model
   ui/                     # qq-ui: Leptos components + views (shared web/mobile)
   web/                    # wasm entry, service worker, SharedWorker bridge
-  mobile/                 # Tauri 2 shell (iOS/Android) hosting qq-ui
+  shell/                  # Tauri 2 desktop/mobile shell hosting qq-ui
 ```
 
 `qq-render` is pure logic (no DOM) so the TUI can adopt it later instead of
@@ -146,9 +146,15 @@ server, like `qq-client` today.
   renders. The native reducer emits a bounded, serializable `FleetPatch` view
   DTO over Tauri IPC (server/session summaries, transcript append/replace,
   pending approvals, reachability). `ClientUpdate` remains reducer input and
-  never crosses IPC; the webview does not run a second reducer. One patch is
-  capped at 256 operations/1 MiB; overflow replaces the affected bounded view
-  from the native projection instead of dropping an operation.
+  never crosses IPC; the webview does not run a second reducer. Every encoded
+  patch is capped at 256 operations/1 MiB. Replacement is revisioned:
+  `begin { revision, total_bytes, total_chunks }`, each `chunk { revision,
+  index, bytes }`, and `commit { revision }` are validated; reassembly is at
+  most 8 MiB and 64 chunks, and apply occurs only after a complete validated
+  revision. Oversized operation payloads split before serialization; every
+  encoded frame includes its envelope in the 1 MiB cap. A bounded delta-backlog
+  overflow requests a resnapshot and never silently drops operations.
+  Oversized views use bounded viewport/paging.
 
 Alternatives for the spike to measure, not to adopt by default:
 
@@ -207,8 +213,12 @@ policy changes do not bump the version unless their wire shape is incompatible.
    validated one-shot source before S6 lands. The command never infers remote
    reachability from a listener bind, so pairing fails with an actionable
    configuration error rather than encoding a loopback or wildcard address.
-   Native clients may also receive the configured certificate fingerprint;
-   browser clients do not. The client exchanges the code for a per-client
+   Native clients may also receive `tls_pin=sha256:` plus exactly 64 lowercase
+   hexadecimal characters for the DER certificate digest; query encoding is
+   percent-encoded. Missing pins for native self-signed URLs, wrong length or
+   algorithm, and mismatches are typed rejections before the first HTTPS
+   exchange, with no insecure fallback. Browser clients use browser trust and
+   ignore the QR pin. The client exchanges the code for a per-client
    credential; `qq clients list/revoke`.
    Credentials carry independent `read`, `run`, `approve`, `session_admin`,
    and `client_admin` scopes. The loopback credential has all scopes; pairing
@@ -239,16 +249,28 @@ policy changes do not bump the version unless their wire shape is incompatible.
    `summary`. Changing one entry reopens the same server connection with the
    updated map; it never creates a second per-workspace SSE. Events already
    carry workspace ids, and the server rejects duplicate workspace entries or
-   a cursor whose workspace/tier does not match its entry.
+   a cursor whose workspace/tier does not match its entry. The map is capped at
+   256 entries and 64 KiB encoded request size; duplicate entries, mismatches,
+   and either limit are rejected with typed `SubscriptionLimit` before stream
+   admission or allocation. No truncation is permitted. Each existing feed
+   ring remains capped at 256 KiB.
 6. **Per-workspace summary tier.** A `summary` subscription entry sends only
-   `SessionSummary` changes and approval requests for that workspace, not token
-   deltas. Phones and background tabs use it: the fleet overview costs bytes
-   per *state change*, not per token. Each workspace keeps independent summary
-   and full-detail cursor namespaces. Opening a session first fetches an
-   authoritative full snapshot and its full-detail cursor, then changes only
-   that workspace's subscription entry to `full`. Closing it restores that
-   entry to `summary` from its saved summary cursor. A summary cursor is never
-   advanced past unseen transcript events or reused for full detail.
+   `SessionSummary` changes, approval requests, and approval-resolution events
+   for that workspace, not token deltas. The summary snapshot includes pending
+   approval state so `ToolApprovalResolved` clears the same state the reducer
+   clears locally. Phones and background tabs use it: the fleet overview costs
+   bytes per *state change*, not per token. Each workspace keeps independent
+   summary and full-detail cursor namespaces and a bounded summary snapshot
+   envelope: at most 256 session summaries or 1 MiB encoded per page, including
+   pending tool calls and `ApprovalPreview`, with its own summary cursor.
+   Opening a session first fetches an authoritative
+   full snapshot and its full-detail cursor, then changes only that workspace's
+   subscription entry to `full`. Closing it restores that entry to `summary`
+   from its saved summary snapshot/cursor. A full-to-summary watermark is never
+   reused as a full cursor. Cursor expiry bootstraps a fresh summary snapshot
+   and summary cursor before replay; continuation pages bind to the same
+   durable watermark, and an incomplete projection resnapshots instead of
+   advancing its reusable cursor. It never loops through a full-only cursor.
 7. **History paging.** A bounded transcript-page request uses an opaque
    `before_record` cursor over the persisted order of both messages and tool
    calls. The response carries `next_before_record` plus independent completion
@@ -261,14 +283,26 @@ policy changes do not bump the version unless their wire shape is incompatible.
 9. **Spill reads.** S7 adds a session-scoped, `read`-authorized endpoint for a
    spill handle with a strict response cap and bounded range paging. U4/W5 do
    not offer "expand" until `qq-client` exposes this endpoint.
+10. **Authoritative jobs listing.** S5/protocol adds
+    `GET /v1/workspaces/{workspace_id}/runs?limit=…&before=…`, a `read`-
+    authorized opaque-cursor listing. `limit` is capped at 128 and the encoded
+    response at 256 KiB; each `RunSummary` carries run id, session id, status,
+    started/finished timestamps, duration, token totals, and outcome, plus a
+    stable `next_before` cursor. Running and retained terminal histories are
+    included; this is not an assertion of forever-retained history. A fresh
+    client can page without locally observed events; pagination, deletion,
+    authorization, and bounded-snapshot fixtures are required.
 
 Authorization is fail-closed at the route and command boundary:
 
 | Operation | Required scope |
 | --- | --- |
 | pairing-code exchange | none; pairing-code validation supplies its own rate-limited authority |
-| `/v1/health`, `/v1/capabilities`, `/v1/models`, workspace/session catalog, snapshots, event streams, transcript pages, bounded browse/resolve, spill reads | `read` |
-| create/fork a session; submit/queue/steer/cancel a run; `/v1/sessions/compact`; change model/profile/effort/approval mode | `run` plus `read` for returned state |
+| `/v1/health`, `/v1/capabilities`, `/v1/models`, workspace/session catalog, snapshots, event streams, transcript pages, bounded browse, spill reads | `read` |
+| create/fork a session; submit/queue/steer/cancel a run; `/v1/sessions/compact`; change model/profile/effort | `run` plus `read` for returned state |
+| workspace resolution, including a known path, | `run` plus `read`; it is a journaled mutation and is never authorized by `read` alone |
+| choose or tighten an approval mode | `run` plus `read`, bounded by the server ceiling; run-only callers may select only `ReadOnly` or `Ask` |
+| choose `Auto`/`Full`, loosen a ceiling, or inherit a more-permissive fork | `run` plus `read` and `approve`; `Supervised` remains child-only and server ceilings are enforced |
 | approve, deny, or grant an approval scope; `/v1/sessions/approval-delegate` | `approve` plus `read`; never implied by `run` |
 | archive, restore, delete, or rename sessions; `/v1/sessions/prune`; `/v1/sessions/compact/rollback` | `session_admin` plus `read` |
 | list/revoke clients, mint pairing codes, or change server/CORS roots | `client_admin`; pairing-code exchange is the only unauthenticated mutation |
@@ -312,18 +346,30 @@ workspace.
   chain explicitly. Terminal session/approval events retire stale controls.
 - **Cache.** `CacheStore` trait with two impls: IndexedDB (via `web-sys`/`idb`)
   and SQLite. Stores per-workspace snapshot + cursor, recently opened session
-  bodies (bounded: last 50 sessions, 2k live messages each, LRU), transcript
-  pages, outbox, and pairing records (web: credential encrypted with a
-  non-extractable WebCrypto key; mobile: OS keychain). Pending approvals are
-  cached atomically with their `ApprovalPreview` and cursor. Authoritative
-  snapshots also include the preview; bootstrap never offers an approval
-  action without it and resnapshots if a legacy cache lacks it. Writes are
-  batched per animation frame.
-- **Warm bootstrap:** paint from cache → connect → replay from cursor → the
-  reducer applies deltas. `InvalidCursor` → resnapshot that workspace only.
+  bodies (bounded: last 50 sessions, 2k live messages each, each body ≤2 MiB,
+  all bodies/page-cache ≤64 MiB, deterministic LRU), transcript pages, outbox,
+  and pairing records (web: credential encrypted with a non-extractable
+  WebCrypto key; mobile: OS keychain). Only four projections may be open at
+  once; an oversized cached projection is marked cold and refetched/paged
+  without advancing a reusable cursor or silently dropping history. Pending
+  approvals are cached atomically with the approval preview, projection, and
+  cursor in one IndexedDB/SQLite transaction, including batch writes.
+  Authoritative full and summary snapshots include pending approval state;
+  bootstrap never offers an approval action without it and resnapshots if a
+  legacy cache lacks it. Writes are batched per animation frame but each
+  projection/cursor/preview commit is transactional.
+- **Warm bootstrap:** paint from cache → connect → replay from the matching
+  full or summary cursor → the reducer applies deltas. `InvalidCursor` or an
+  expired summary cursor → a fresh tier-matched snapshot and cursor for that
+  workspace only. Planned crash-point tests cover before/after commit and
+  cache-write failure, proving a persisted cursor never acknowledges events
+  absent from the persisted projection; projection, cursor, and preview commit
+  atomically. Full and summary cursors remain distinct namespaces.
 - Tests: fake server with scripted events, network partitions, duplicate and
-  out-of-order acknowledgements, cursor expiry, 16 servers (W3's bound) × 50
-  sessions.
+  out-of-order acknowledgements, concurrent full↔summary transitions,
+  summary-cursor expiry, approval resolution, deterministic body-byte LRU,
+  atomic crash points, 16 servers (W3's bound) × 50 sessions, and the stated
+  <150 MB measurement gate.
 
 ## 7. Notifications
 
@@ -334,8 +380,10 @@ many servers. Until decision 12 is resolved, notification scope is:
 1. In-app: fleet inbox badge, tab title count, `Notification` API while the tab
    or app is alive.
 2. The mobile app uses platform background fetch and local notifications when
-   the OS grants time. U8 and native remote push remain unassigned and ship no
-   subscription route, VAPID key, relay, or vendor credential.
+   the OS grants time. M3 tests denied notification grants, OS suspension, and
+   resume/replay; it does not promise that the OS will run background work.
+   U8 and native remote push remain unassigned and ship no subscription route,
+   VAPID key, relay, or vendor credential until decision 12 is resolved.
 
 ## 8. Experience design
 
@@ -377,7 +425,9 @@ many servers. Until decision 12 is resolved, notification scope is:
   queue, compact, switch model/profile, approval mode — same commands the TUI
   uses (`ClientRequest`).
 - **Jobs view**: a table of all runs across the fleet (machine, workspace,
-  status, duration, tokens, outcome) for "kick off work and check back".
+  status, duration, tokens, outcome) for "kick off work and check back". It
+  pages the authoritative server run-summary listing from §5 rather than
+  claiming completeness from the local event cache.
 - **Transcript** follows `docs/design/transcript.md`: the turn is the unit;
   tool calls collapse to one line with status and duration and expand into the
   inspector; live tool output streams into a bounded tail.
@@ -459,7 +509,7 @@ new slice needs a plan amendment and a ledger row before it starts.
 | ADRs | S2/S4/U1 (ADR-0015 accept, 0016, 0017, 0018) | ADR-0017 records the §4.2 spike numbers; U1 owns the prerequisite |
 | Pairing | S2 | Add the §5 authorization matrix and the validated `--advertised-url` override; certificate fingerprints are native-only |
 | Exposure | S4 | Configure the client-reachable HTTPS proxy URL for `tailscale serve`; enable axum `http2` on TLS listeners |
-| Identity, catalog | S1 (done), S5, S6 | Add stable OS/arch and dynamic `ServerStatus`; configure `server.advertised_url`; add per-workspace group counts in the S5 catalog |
+| Identity, catalog, and runs | S1 (done), S5, S6 | Add stable OS/arch and dynamic `ServerStatus`; configure `server.advertised_url`; add per-workspace group counts and the bounded `/v1/workspaces/{workspace_id}/runs` listing in S5 |
 | Server stream, tier transition, paging, approval preview, spill reads | **new S7** | §5 items 5–9; strict-shape protocol bumps, fixtures, stream bench |
 | Connection set | W3 | Address probing, backoff policy, `Reachability` (§6) |
 | Durable outbox and cache | **new W4** | `qq-fleet` crate in `apps/`; partition/duplicate/cursor-expiry tests, native + wasm |
@@ -467,17 +517,18 @@ new slice needs a plan amendment and a ledger row before it starts.
 | Web shell | U1–U5 | Composer target chips, palette, SharedWorker, service worker (§4.3, §8.1) |
 | Fleet features | U6 (expanded) | Fleet inbox, split panes, fan-out, jobs view (§8.1) |
 | Perf gates | U7, M1 | U7 owns web budgets; M1 owns the `< 300 ms` mobile warm-start and mobile frame gates |
-| Mobile | D1, M1–M3 | M1 becomes the inbox-first layout (§8.2), not only a responsive pass; mobile runs `qq-fleet` in the native Tauri process (§4.4) |
+| Mobile | D1, M1–M3 | M1 becomes the inbox-first layout (§8.2), not only a responsive pass; D1/M2/M3 use the shared `apps/shell/` Tauri path and mobile runs `qq-fleet` in the native process (§4.4) |
 | Remote push | held (decision 12) | No U8 work starts until the lead chooses a fleet-compatible trust/key/relay model |
 | Fleet acceptance | **new FG** | Lead-owned final gate after S7/W4/W5/U6/U7/M2/M3; five real servers; evidence in `progress/g-fleet-clients.md` |
 
 The executable DAG keeps the owning plan's early risk gate: W1 + W2 + S1 +
 S2 + S3 → TB. S4 and S5 may proceed after their stated inputs; S6 waits for
-S2–S5. U1 begins with the ADR-0017 spike, then U2–U7 follow their existing
-dependencies, including W5 before U4. W3–W5 run when their inputs are ready.
-S7 must land before U6;
-D1 then M1–M3 follow U5. FG runs last after S7, W4, W5, U6, U7, M2, and M3. TB is not delayed
-behind S4–S6.
+S2–S5. U1 begins with the ADR-0017 spike and creates the `apps/` workspace;
+W4 therefore waits for U1, W3, and S7. U2–U4 follow their existing
+dependencies, including W5 before U4; U5 waits for U4 and W4; U6 waits for
+S7 and U5. W3–W5 run when their inputs are ready. D1 then M1–M3 follow U5.
+FG runs last after S7, W4, W5, U6, U7, M2, and M3. TB is not delayed behind
+S4–S6.
 
 ## 12. Decisions needed
 
