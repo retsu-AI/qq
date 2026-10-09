@@ -515,29 +515,10 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 
 ### 2026-10-09 — Rust quality skill replacement review
 
-- Replacement PR #247 carries the original Rust-quality skill scope from head
-  `c5fd4bd3ccb4565316e99914694bcab35b845ce1`. This repair updates only its
-  documented link routing, async example coordination, and state-construction
-  invariant. Runtime QQ code remains unchanged.
-- The retained original-head loader receipt is for `0bcf4c5c9bad67a296f43707cbae5cb715c7926b`.
-  Its independent focused test is
-  `tests::exact_pr243_rust_quality_skill_is_discovered_and_loaded`, passed 1/1
-  against the actual workspace discovery and `load_skill` path. The existing
-  raw harness, command, environment and stdout are retained in the manager's
-  `reviews/startup-chat-accounting-2026-10-03/pr-completion-20261003/qq243-review/`
-  packet (outside this repository), alongside its independent `REVIEW.md`.
-  That receipt covers the original skill subject and scope. The replacement
-  reuses that payload and path contract; it does not claim a fresh
-  provider-backed session or external model run.
-- The repaired examples were separately extracted from the replacement
-  chapters and compiled from their actual fences. This is source-based example
-  verification, distinct from the retained loader receipt.
-- Current-main integration is based on `03077dfaad966f6b69a5e1984ae7826c864126fa`.
-- Pinned Rust 1.97.1: actual fences from both edited chapters compiled; nine
-  repaired-example tests and two original-surface checks passed. The original
-  worker-first test's send-poll probe observed zero sink polls before shutdown;
-  removing only cancellation at the repaired blocked send failed on timeout.
-  Fmt, exact-filter guard and diff checks passed. Raw commands, extracted
-  sources and exit receipts are retained in the manager's
-  `reviews/qq-composition-20261004/pr247-repair-20261009/` packet. Fresh native
-  loading and non-author acceptance remain separate checks before publishing.
+- PR #247 continues the original skill at `c5fd4bd3ccb4565316e99914694bcab35b845ce1`; current main `03077dfaad966f6b69a5e1984ae7826c864126fa` was merged normally. All recent ledger entries are preserved.
+- Four review repairs: literal workspace read paths for all nine routed chapters, checked state restoration, deterministic blocked-send shutdown coverage, and this evidence receipt. No QQ runtime/configuration/dependency changes.
+- Retained non-author discovery/load verification at original head `0bcf4c5c9bad67a296f43707cbae5cb715c7926b`: `tests::exact_pr243_rust_quality_skill_is_discovered_and_loaded` passed 1/1. Raw harness, command, environment, stdout and independent review remain in the manager's `reviews/startup-chat-accounting-2026-10-03/pr-completion-20261003/qq243-review/` packet, outside this repository.
+- Pinned Rust 1.97.1: both edited chapters' actual Rust fences compiled; nine repaired-example tests and two original-surface checks passed. The actual worker-first original test observed zero output-send polls before cancellation; the repaired test proves a blocked send first. Removing only the blocked-send cancellation arm failed with `Elapsed(())`, exit 101.
+- Fresh actual QQ discovery and `load_skill` at `91f84175b6e589909544a69299fa76e8c1c60401`: `tests::exact_pr247_rust_quality_skill_is_discovered_and_loaded` passed exactly 1/1; the loaded body and filesystem contain all nine literal chapter paths. Local TurnScript only; no provider-backed assistant session or external model call is claimed.
+- Native-loader build used default core features with dev/test debug symbols disabled; this is a focused loader check, not a full workspace gate. Fmt, exact-test guard and diff checks passed. Raw extracted source, full logs, commands, exit and cleanup receipts are in the manager's `reviews/qq-composition-20261004/pr247-repair-20261009/` packet.
+- This final change only records the preceding verification; tested skill/runtime bytes are unchanged. Current-head hosted CI and non-author acceptance remain separate publishing checks.
