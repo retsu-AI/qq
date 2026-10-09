@@ -86,7 +86,7 @@ appended below, newest last.
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
-| AC1 | `RunState` extraction by reset scope | In progress | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) (draft, on #261) | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; parent acceptance pending |
+| AC1 | `RunState` extraction by reset scope | In review | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271), on main | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; quiet-host perf qualification pending |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
@@ -1211,3 +1211,11 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Turn A/B medians at 10/100/1k: 18.679/17.489/15.846 → 15.546/15.533/15.326 ms; A/A 18.351/17.094/15.897 → 15.809/16.116/15.278 ms. p95 A/B: 214.163/41.438/40.398 → 71.116/42.803/38.473 ms; A/A 45.783/42.055/71.537 → 70.234/70.059/70.390 ms. Non-repeatable host tails; quiet-host rerun required.
 - Dispatch 20-iteration A/B median 70.763 → 99.852 µs (+41%); A/A 97.734 → 97.554 µs. Follow-up with 10,000 iterations, 30 A/B+A/A pairs: A/B 56.756 → 57.450 µs (+1.22%), A/A 55.104 → 56.468 µs (+2.48%); p95 A/B 81.938 → 80.252 µs, A/A 75.944 → 82.932 µs. Initial dispatch slowdown not reproduced after warmup; original samples retained, host-pressure limitation remains.
 - AC1 implementation complete, acceptance pending controlled performance evidence and final independent code review. AC2/AC3 remain gated. Do not merge AC1 stack until qualification is resolved.
+
+### 2026-10-08 — AC1 stack restacked on main e317bdfe (ENG-1007)
+
+- #261 merged as `768cbdc8`; #263 rebased onto `origin/main` `e317bdfe` by redoing the move against main's `lib.rs`: the `lib.rs` diff is a pure 2,930-line deletion and `run_loop.rs` holds main's current `execute` byte for byte.
+- Main had changed `execute` under the stack (CX3 #254 inherited effects, CX4 #252 `ContextPruned`/`Compacting`, typed `InRunCompactionError`). Ported into AC1.2/AC1.3: `inherited_effects` is a `RunEnvironment` input; the prune and compaction events are emitted as `TurnStep::Emit` from the compaction phase. Line-set check: every main-added line is present modulo the `TurnStep::Emit`/`run.` wrapping.
+- Old #271 CI failure (`wall_clock_budget_settles_a_hanging_provider_without_a_final_response`, 0 vs 1 request) matches the load flake recorded in `compaction.md` and `latest-models.md`; it passes 4/4 locally in `qq-core --lib` runs.
+- Gates at stack top: `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy `-D warnings`, `cargo test --workspace -- --test-threads=4` (2,218 passed, 0 failed), `cargo build --workspace`, `git diff --check`. #263 alone: `cargo test -p qq-core` 913 lib passed.
+- Performance: not re-qualified. IO some avg10 ≈21% at restack time, so quiet-host A/B+A/A is still outstanding; no waiver.
