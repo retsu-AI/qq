@@ -48,7 +48,9 @@ and candidate-configuration fingerprint in its canonical identity; version 10
 adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 11 adds each delegation roster entry's `effort` (RR8.4); version 12 adds
 `approval_delegate`, the identity of the first delegate for held calls (Jev
-approval) when enabled (ADR-0052). None alters the wire envelope version or
+approval) when enabled (ADR-0052); version 13 changes the encoding for the
+`wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
+catalog (ADR-0054 § 4). None alters the wire envelope version or
 requires a database migration; historical descriptor JSON remains historical
 evidence.
 
@@ -64,6 +66,11 @@ Cancelling a question that already settled returns
 `side_question_already_finished` with its effective state and changes
 nothing; an unknown side-question id is a client error. These do not alter
 the main session transcript or accounting.
+
+Golden fixtures for the current version live under
+`crates/qq-protocol/tests/fixtures/v32/`; the `v17`–`v31` directories are
+retained decode-only, and `fixtures/headless/` holds the headless record
+streams.
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
 values (1–12) belonged to pre-release iterations and no released build
@@ -164,15 +171,29 @@ moves because `InputPart` and the previews are `deny_unknown_fields` and
 older peers would reject the new decision and resolution tags. Version 22
 added the network tool (ADR-0021): the `host` grant shape and an optional
 `fetch` preview (`url`, `host`, `method`) on `tool_approval_requested`; the
-`shell` preview is now boxed in memory, which is wire-identical. Golden
-fixtures live under `crates/qq-protocol/tests/fixtures/v22/`; the
-`v17`–`v21` directories are retained decode-only.
+`shell` preview is boxed in memory, which is wire-identical.
 
 Version 23 adds the durable `checkpoint_reviewed` session event. It correlates
 the pinned JEV outcome to a tool result or final candidate and carries bounded
 feedback plus basis-point confidence. Headless JSONL emits the event and text
-mode renders an explicit GREEN/RED notice; v22 fixtures remain historical wire
-evidence.
+mode renders an explicit GREEN/RED notice.
+
+Version 24 adds `checkpoint_started` and optional typed `spend` on
+`checkpoint_reviewed`. Start is durable before inference; pending spend is
+unknown. A settled receipt and updated run totals commit together. Cancellation
+settles a pending tool or final assessment as unavailable with unknown spend.
+Historical verdicts without `spend` decode as absent, never as a priced receipt.
+
+Version 25 adds `routing_started` and `routing_completed`. Routing occurs before
+`run_started`; a decision carries the selected or fallback model, effort, reason
+and typed usage/cost. Missing spend remains unknown. A cancelled pending request
+may have only `routing_started` followed by `run_finished`; this is not a free
+request or a successful decision. Version 25 also adds optional
+`model_is_fallback` (default false) on model selections and session summaries:
+true identifies a configured fallback eligible for independently opted-in
+routing; false preserves explicit and legacy choices as pins. Store schema 32
+persists the flag; model changes and reconnect snapshots retain it. A TUI model
+pick clears it. The field does not enable Jev or grant access to any model.
 
 Version 26 adds turn recovery (ADR-0040): the `run_turn_retrying` event
 (`run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message`) after a
@@ -185,8 +206,7 @@ Version 27 adds a per-session reasoning-effort pin: optional
 `SessionSummary.reasoning_effort`, and `session_effort_set`. Omission keeps the
 compiled plan's configured or profile choice; an explicit value is applied at
 the next claim. Older clients reject the new command, outcome, and summary
-field. Golden fixtures live under `crates/qq-protocol/tests/fixtures/v27/`;
-`v23`–`v26` are retained decode-only.
+field.
 
 Also in 27, additively: `ModelDescriptor.reasoning_efforts` lists the effort
 values a catalog route advertises, lowest to highest, and is omitted when empty.
@@ -205,25 +225,15 @@ optional `SessionSummary.approval_delegate` that carries the override. Every
 field is optional and omitted when absent; the version moves because older
 clients reject the new command, outcome, and summary field.
 
-Version 29 adds the `max` reasoning effort (above `xhigh`, for routes that
-advertise it). Version 29 and 30 values are accepted in every field of type
-`ReasoningEffort`, which is exactly: `create_session.reasoning_effort`,
+Version 29 adds `max` to the reasoning-effort vocabulary, for models whose top
+rung is above `xhigh`. Version 29 and 30 values are accepted in every field of
+type `ReasoningEffort`, which is exactly: `create_session.reasoning_effort`,
 `set_session_effort.effort`, the `session_effort_set` receipt's `effort`,
 `SessionSummary.reasoning_effort`, `RoutingDecision.reasoning_effort`,
 `ModelDescriptor.reasoning_efforts`, and the capability document's
-`DelegationRosterEntry.effort`. Version 30 adds
-`default`, an explicit "let the provider choose" pin that overrides configured
-effort and is never sent on a provider wire, distinct from an absent pin
-(inherit). Neither adds a field; each moves the version because older decoders
-reject the new enum value. Store schema 37 and 39 gate the same values on disk.
-Golden fixtures live under `crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30`
-are retained decode-only.
-
-Version 29 adds `max` to the reasoning-effort vocabulary (every
-`reasoning_effort` / `effort` field and `ModelDescriptor.reasoning_efforts`),
-for models whose top rung is above `xhigh`. No field was added or renamed;
-the version moves because an older client rejects the new value. Store
-schema 37 persists it.
+`DelegationRosterEntry.effort`. No field was added or renamed; the version
+moves because an older client rejects the new value. Store schema 37 persists
+it.
 
 Version 30 adds `default` to the same vocabulary: an explicit pin meaning
 "override the configured effort and send none", distinct from the absent
@@ -246,9 +256,6 @@ and `SessionSummary.activity`). A compaction run reports it once, when it
 starts, and nothing else for its life; a prompt run reports it before it
 summarizes its own earlier turns and reports `waiting_for_provider` again at
 its next turn. No field was added; older clients reject the new value.
-Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30` are retained
-decode-only.
 
 Clients and servers must agree on this value.
 
@@ -2127,21 +2134,3 @@ reset by an audit revision or steering. The run then settles `completed` with
 No verdict is published for a cancelled, failed, or budget-exhausted run
 (including a repair turn that became the reserved budget-final response). A
 valid document is not a correct answer; the caller still verifies it.
-
-Protocol 24 adds `checkpoint_started` and optional typed `spend` on
-`checkpoint_reviewed`. Start is durable before inference; pending spend is
-unknown. A settled receipt and updated run totals commit together. Cancellation
-settles a pending tool or final assessment as unavailable with unknown spend.
-Historical verdicts without `spend` decode as absent, never as a priced receipt.
-
-Protocol 25 adds `routing_started` and `routing_completed`. Routing occurs before
-`run_started`; a decision carries the selected or fallback model, effort, reason
-and typed usage/cost. Missing spend remains unknown. A cancelled pending request
-may have only `routing_started` followed by `run_finished`; this is not a free
-request or a successful decision. Older versioned event fixtures remain readable.
-
-Model selections and session summaries carry optional `model_is_fallback`
-(default false). True identifies a configured fallback eligible for independently
-opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
-persists the flag; model changes and reconnect snapshots retain it. A TUI model
-pick clears it. This field does not enable Jev or grant access to any model.

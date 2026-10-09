@@ -108,7 +108,7 @@ contract and a platform threat model defines the isolation boundary. This
 document does not redefine the search, edit, terminal, sub-agent, scheduling,
 or warm-runtime contracts.
 
-Acceptance: the readiness plan records completion evidence for each R6–R8
+Acceptance: the Terminal-Bench plan (`terminal-bench.md`) records completion evidence for each R6–R8
 milestone a shipped extension requires; sandbox tests prove filesystem,
 network, process, and secret boundaries; local and sandbox adapters pass one
 shared process contract suite; sandbox failure never silently falls back to

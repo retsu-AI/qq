@@ -5,9 +5,7 @@ supervisor consumes when it runs `qq` non-interactively, and the boundary
 between what belongs in this repository and what belongs to a product that
 hosts it. Companion to [`architecture.md`](./architecture.md), which owns crate
 boundaries, and [`protocol.md`](./protocol.md), which owns the HTTP/SSE wire
-contract. Where this document describes current behavior it cites source; where
-it describes intended additions it labels them as such and points at the
-owning plan task.
+contract. Where this document describes behavior it cites source.
 
 ## Why This Document Exists
 
@@ -22,9 +20,7 @@ The second consumer is how QQ scales beyond one machine. It is also where the
 public/private boundary is most likely to blur: a hosted product needs
 tenancy, money, isolation, and orchestration, and none of that belongs in a
 local-first harness. This document fixes the contract the supervisor relies
-on, lists what the supervisor must own itself, and records the gaps a
-supervisor currently works around so they can be closed in product-neutral
-form.
+on and lists what the supervisor must own itself.
 
 ## The Boundary
 
@@ -70,15 +66,15 @@ Consequences:
 
 ## The Contract Today
 
-Verified against the working tree at the date above. Line references are
-approximate anchors, not stable identifiers.
+Line references are approximate anchors, not stable identifiers.
 
 ### Invocation
 
 ```sh
 qq run [--workspace PATH] [--session ID]
        [--approval read-only|auto|full] [--profile NAME]
-       [--allow-tool NAME]... [--allow-shell PREFIX]... [--steer-stdin]
+       [--allow-tool NAME]... [--allow-shell PREFIX]... [--allow-host HOST]...
+       [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
        [--correlation KEY=VALUE]... [--output-schema PATH] [--output-repair-turns N]
        [--format text|jsonl] [--trace PATH]
@@ -103,6 +99,28 @@ exits `2` naming the path. `--output-repair-turns N` (0–8, default 2, requires
 answer fails validation. The model sees the schema in its system prompt from
 the first turn. In text format a valid answer prints as the pretty-printed
 validated document rather than the raw model text.
+
+The schema is at most 64 KiB of JSON, 32 nesting levels, and 4096 JSON
+values, including enum values. Unsupported keywords and all references are
+rejected before session creation; compilation and validation perform no
+network discovery or external-reference fetches. The supported keywords are
+`type`, `enum`, `const`, `properties`, `required`, `additionalProperties`,
+`items`, `minItems`/`maxItems`/`uniqueItems`, `minLength`/`maxLength`,
+`minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`,
+`minProperties`/`maxProperties`, `anyOf`/`oneOf`/`allOf`/`not`, and the
+annotations `$schema`, `$id`, `$comment`, `title`, `description`, `default`,
+`examples`. The repair allowance covers the entire run. Each
+validation-error payload, including its rendered feedback or durable result,
+is at most 8 KiB (at most 16 errors). Repairs consume ordinary run budgets (a
+repair that becomes the reserved budget-final turn settles as
+`budget_exhausted` with no verdict), support cancellation and steering, and
+do not reset their allowance after an audit revision or steering. The final
+answer, including any bounded audit revision, is what the contract judges. A
+single ```` ```json ```` fence around the document is tolerated. The contract
+is persisted on the run row and re-enforced after restart. Valid JSON is not a
+correct answer; the supervisor still verifies. Measured on the recording host:
+compile ≈37 µs and validate ≈11 µs for a 64-property schema and a 7 KiB
+answer; the schema-less default path is unchanged.
 
 `--session ID` submits into an existing session instead of creating one. The
 session must be a root session of the workspace (a spawned sub-agent session
@@ -153,9 +171,14 @@ a model gateway with an environment-backed credential reference:
 a plain-HTTP gateway inside an isolated network is accepted. Secrets are
 referenced, never inlined.
 
+`qq config check` accepts a document that is valid apart from the model
+selection (for example `(version: 1)`) and names the missing model; `qq run`
+and every other run-time path still require one.
+
 ### State Location
 
-`qq run` always creates a new session in `<data_dir>/sessions.sqlite3`, where
+`qq run` creates a new session (or, with `--session ID`, submits into an
+existing one) in `<data_dir>/sessions.sqlite3`, where
 `data_dir` honors `XDG_DATA_HOME` on Linux (`crates/qq-config/src/loader.rs`).
 A supervisor that wants the session store as an artifact redirects
 `XDG_DATA_HOME` to a run-scoped directory.
@@ -311,47 +334,21 @@ These are not gaps. They are deliberately outside QQ and should stay there.
 | Independent verification | Running checks in a fresh environment the agent never touched is the supervisor's evidence, not QQ's |
 | Artifact storage, retention, tenancy, billing, identity | Product concerns |
 
-## Gaps A Supervisor Currently Works Around
+## Supervisor Boundary Notes
 
-Each of these was a generic QQ improvement that local, CI, and evaluation
-users also benefit from. All four shipped (HC1 #30, HC2 `893e582`, HC3 #33,
-HC4 #34); the table below records what each closed. CLI parsing and schema
-compilation stay off the run hot path; HC3's validation and repair turns are
-opt-in, bounded, and measured.
+Every headless capability above (correlation, resume, `u32` turn limits, the
+minimal configuration check, narrowed exposure, typed final output, and the
+pinned record streams) is generic: local, CI, and evaluation users benefit
+from it equally. CLI parsing and schema compilation stay off the run hot path;
+typed-output validation and repair turns are opt-in and bounded.
 
-| Gap | Today | Intended | Task |
-| --- | --- | --- | --- |
-| Correlation from the CLI | **Shipped** 2026-09-11 (`f0b7dd3`). `--correlation KEY=VALUE` (repeatable) is validated as one set against the protocol bounds before configuration loads, stamped on the session and the run, and echoed on `trial` (omitted when empty) and every session snapshot | — | HC1 |
-| Resume into an existing session | **Shipped** 2026-09-11 (`63cb256`, `63032ab`; ADR-0022). Every store open takes an advisory owner lock before SQLite is opened and before recovery; a busy store is refused as `StoreBusy` without database I/O. `qq run --session ID` then submits into an idle root session of the workspace, applying the invocation's model, profile, and approval first; an interrupted earlier run is already settled by recovery and is never re-executed | — | HC1 |
-| `--max-turns` width | **Shipped** 2026-09-11 (`d079e21`). `RunLimits.max_model_turns`, every `turn_ordinal`, the core turn loop, the budget meter, and the CLI are `u32`; `PROTOCOL_VERSION` 17 → 18 with `v18/` goldens and `v17/` retained decode-only; boundary tests pin 65 536 and `u32::MAX` on the wire and drive the meter past 65 535 without a provider | — | HC1 |
-| Minimal configuration check | **Shipped** 2026-09-11 (`95c6e3d`). `ConfigLoader::check` validates every rule and treats only `ModelRequired` as "valid apart from the selection"; `config check` with `(version: 1)` passes and names the missing model. `load()` and every run-time path still require one | — | HC1 |
-| Narrowing tool exposure | **Shipped** 2026-09-06 (`93ef6b8`). Optional `policy.exposed_tools` narrows the catalog by intersection across layers and existing profile/pack exposure. An absent field adds no restriction; an empty list exposes no tools. Existing grants and managed grant denies retain their meaning. Static names and MCP name syntax validate during `config check`; profile-admitted MCP membership validates during plan compilation without discovery in `config check`; ordinary catalog bounds remain authoritative | — | HC2 |
-| Typed final output | **Shipped** 2026-09-12 (`feat/hc3-typed-final-output`; ADR-0014). `--output-schema PATH` and `--output-repair-turns N` compile a bounded, reference-free JSON Schema subset before configuration loads; the contract rides `submit_prompt.output`, is persisted on the run row and re-enforced after restart; core validates the answer that survived audit and steering, repairs within the allowance, and settles `Completed` with `final_output` (`valid` with the parsed value, or `invalid` with bounded `<pointer>: <message>` errors) written in the settlement transaction and published on `run_finished` and `outcome`. `PROTOCOL_VERSION` 18 → 19, store schema 26 → 27. Valid JSON is not a correct answer; the supervisor still verifies | — | HC3 |
-| Pinning the contract | **Shipped** 2026-09-13 (`feat/hc4-headless-goldens`; ADR-0023). The record shapes moved into `qq-protocol` as `HeadlessRecord`/`HeadlessTrial`/`HeadlessOutcome`/`HeadlessStatus`; the binary emits through a borrowing view whose encoding a test pins to the owned type. `crates/qq-protocol/tests/fixtures/headless/v19/` holds ten complete streams (every exit status, the default payload, every optional trial field, both `final_output` verdicts) checked byte-for-byte and for framing; `v18/` holds the default-path streams decode-only. The binary's own tests decode every stdout line strictly and require it to re-encode identically | — | HC4 |
-| Exit code `3` ambiguity | Shared by `timed_out` and `budget_exhausted` | Keep the codes; the status field is authoritative and the fixtures pin that. Splitting the code is a breaking change with no consumer asking for it. Revisit only with a real request | none |
-| Static binary | **Shipped**: the release workflow builds `x86_64`/`aarch64-unknown-linux-musl` (`.github/workflows/release.yml`) | — | release runbook |
+Exit code `3` is deliberately shared by `timed_out` and `budget_exhausted`.
+The `status` field is authoritative and the golden streams pin that; splitting
+the code would be a breaking change with no consumer asking for it.
 
-HC3 accepts at most 64 KiB of schema JSON, 32 nesting levels, and 4096 JSON
-values, including enum values. It rejects unsupported keywords and all
-references before session creation; compilation and validation perform no
-network discovery or external-reference fetches. The supported keywords are
-`type`, `enum`, `const`, `properties`, `required`, `additionalProperties`,
-`items`, `minItems`/`maxItems`/`uniqueItems`, `minLength`/`maxLength`,
-`minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`,
-`minProperties`/`maxProperties`, `anyOf`/`oneOf`/`allOf`/`not`, and the
-annotations `$schema`, `$id`, `$comment`, `title`, `description`, `default`,
-`examples`. `--output-repair-turns` is bounded to 0–8 (default 2) for the
-entire run. Each validation-error payload, including its rendered feedback or
-durable result, is at most 8 KiB (at most 16 errors); the repair bound limits
-repeated feedback. Repairs consume ordinary run budgets (a repair that becomes
-the reserved budget-final turn settles as `budget_exhausted` with no verdict),
-support cancellation and steering, and do not reset their allowance after an
-audit revision or steering. The final answer, including any bounded audit
-revision, is what the contract judges. HC3 retains the audit's existing
-revision bound. A single ```` ```json ```` fence around the document is
-tolerated. Measured on the recording host: compile ≈37 µs and validate ≈11 µs
-for a 64-property schema and a 7 KiB answer; the schema-less default path is
-unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
+The release workflow builds static `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl` binaries (`.github/workflows/release.yml`), so a
+supervisor can drop `qq` into a minimal container image.
 
 ## Compatibility Policy
 
@@ -359,21 +356,13 @@ unchanged (`read_tool_loop` median 54.8 → 52.2 µs, within noise).
   and event vocabulary. The JSONL record shapes above are part of that
   contract and bump with it (ADR-0023); their golden streams live under
   `crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/` and
-  every retained earlier directory must still decode (`protocol.md`
-  § Versioning is the per-version changelog). Version 19 added the optional
-  `submit_prompt.output`, `run_finished.final_output`, and the trial/outcome
-  fields above; every default-path version-18 stream is byte-identical after
-  the version field changes, and `capabilities.limits` gained four declared
-  bounds. Version 21 added the `needs_input` status (exit code 5) for a run
-  that stopped at an unanswered `ask_user` question.
+  every retained earlier directory must still decode
+  ([`protocol.md` § Protocol Version](protocol.md#protocol-version) is the
+  per-version changelog).
 - New fields are additive and optional and are omitted, never `null`, when
   absent. A supervisor may ignore unknown fields and must fail closed on
   unknown `type` or `status` values; `qq_protocol::HeadlessRecord` itself
   rejects both.
-- Widening the shared model-turn limit to `u32` changes the accepted wire
-  range and requires a protocol-version bump. Existing `u16`-range records
-  remain decodable; tests cover values above that range without executing
-  tens of thousands of turns.
 - Each fixture version pins its exact `protocol_version`. Cross-version
   default-path comparisons permit declared version-field changes after
   normalizing run identity, timestamps, and build metadata; they require

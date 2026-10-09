@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-13
 **Deciders:** speed-first plan HC4 (headless contract)
-**Implements:** [`headless-contract.md` § Gaps](../design/headless-contract.md#gaps-a-supervisor-currently-works-around)
+**Implements:** [`headless-contract.md` § Supervisor Boundary Notes](../design/headless-contract.md#supervisor-boundary-notes)
 (pinning the contract), [`headless-contract.md` § Compatibility Policy](../design/headless-contract.md#compatibility-policy)
 
 ## Context

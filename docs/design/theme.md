@@ -369,7 +369,7 @@ A theme file that fails to parse is skipped by discovery so one broken
 experiment does not hide the picker; selecting it in `tui.ron` still fails
 fast.
 
-## Out Of Scope (v1)
+## Out Of Scope
 
 - Per-role light/dark dual maps
 - Terminal background clear / full chrome skinning beyond `surface`
@@ -378,23 +378,8 @@ fast.
 - Importing foreign theme file formats
 - Inline theme bodies embedded inside `tui.ron`
 
-These can extend the same role model later without changing selection or
+Each would extend the same role model without changing selection or
 discovery.
-
-## Implementation Sketch
-
-1. Add `Theme` to `qq-tui` and thread it through `TuiOptions` / settings.
-2. Replace hardcoded palette helpers in the view with theme-backed styles.
-3. Extend `tui.ron` loading with an optional `theme` field.
-4. Resolve theme files from compiled, global, and project locations.
-5. Ship the compiled `terminal` theme and document the custom-theme workflow.
-6. Tests: default resolution, layered name override, `defs` aliases, unknown
-   name, incomplete theme, bad hex, and a render smoke path with a non-default
-   palette.
-7. Syntax roles on `Palette` with derived defaults, an optional `syntax`
-   block per document, and shipped blocks where the upstream defines them.
-8. `ink` as the truecolor default with `terminal` as the fallback and `qq` as
-   the alias for the rule (ADR 0036).
 
 ## Design Constraints
 
@@ -403,4 +388,4 @@ discovery.
 - Fail fast at load time rather than falling back silently to partial palettes.
 - Do not leak configuration document types into the render hot path; pass one
   resolved `Theme`.
-- Measure nothing exotic for v1: theme resolution runs once at startup.
+- Theme resolution runs once at startup, so it needs no dedicated benchmark.
