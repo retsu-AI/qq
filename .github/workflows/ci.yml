@@ -28,6 +28,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Public core embedding lifecycle
+        run: cargo run --locked -p qq-core --example embed
+      - name: Minimal core profile
+        run: |
+          cargo test --locked -p qq-core --no-default-features
+          cargo clippy --locked -p qq-core --no-default-features --all-targets -- -D warnings
+          if cargo tree -p qq-core --no-default-features --edges normal | grep -q 'htmd v'; then
+            echo 'minimal core unexpectedly depends on htmd' >&2
+            exit 1
+          fi
 
   client-wasm:
     name: qq-client on wasm32

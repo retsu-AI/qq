@@ -979,7 +979,8 @@ impl Store {
     pub(super) async fn reload_reserved_messages(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
+    ) -> Result<Option<(Vec<Message>, ResultEffects, CompactionProgress)>, SessionRuntimeError>
+    {
         #[cfg(test)]
         if let Some(failure) =
             take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
@@ -1148,6 +1149,34 @@ impl Store {
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
             persist_model_turn(connection, store_id, &claimed, &turn)
+        })
+        .await
+    }
+
+    /// Moves the session's prune watermark to `through_turn` of the claimed
+    /// prompt run, the live overflow-prune seam. Never moves it backwards.
+    pub(super) async fn advance_prune_watermark(
+        &self,
+        claimed: &ClaimedRun,
+        through_turn: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            transcript::advance_prune_watermark(connection, identity, through_turn)
+        })
+        .await
+    }
+
+    /// Moves the session's prune watermark to the newest committed turn
+    /// before the reserved prompt, the proactive-threshold seam. Returns
+    /// whether it moved; when it did, the prompt must be reassembled.
+    pub(super) async fn advance_prune_watermark_before_prompt(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<bool, SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::AwaitControl, move |connection| {
+            transcript::advance_prune_watermark_before_prompt(connection, identity)
         })
         .await
     }
@@ -1641,32 +1670,28 @@ impl Store {
         .await
     }
 
-    /// The summarizer's fixed instruction with the session's seeded file
-    /// list, for a request built outside the run loop.
-    pub(super) async fn compaction_instruction(
-        &self,
-        session_id: SessionId,
-    ) -> Result<String, SessionRuntimeError> {
-        self.call(Priority::AwaitControl, move |connection| {
-            compaction_instruction(connection, session_id)
-        })
-        .await
-    }
-
     /// Commits an in-run summary as a marker scoped to the prompt run and
     /// settles the internal run. The internal run ran no tools and owned no
-    /// children, so no teardown proof is needed. Returns the events and
-    /// whether the marker stands.
+    /// children, so no teardown proof is needed. Returns the events and, when
+    /// the marker stands, the stored summary (narrative plus record).
     pub(super) async fn finish_in_run_compaction(
         &self,
         claimed: &ClaimedRun,
         summary: String,
         accounting: Option<RunAccounting>,
-    ) -> Result<(Vec<SessionEventEnvelope>, bool), SessionRuntimeError> {
+        record_budget: usize,
+    ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_in_run_compaction(connection, store_id, &claimed, summary, accounting)
+            complete_in_run_compaction(
+                connection,
+                store_id,
+                &claimed,
+                summary,
+                accounting,
+                record_budget,
+            )
         })
         .await
     }
@@ -1694,12 +1719,20 @@ impl Store {
         claimed: &ClaimedRun,
         summary: String,
         accounting: Option<RunAccounting>,
+        record_budget: usize,
         _teardown: TeardownComplete,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_compaction(connection, store_id, &claimed, summary, accounting)
+            complete_compaction(
+                connection,
+                store_id,
+                &claimed,
+                summary,
+                accounting,
+                record_budget,
+            )
         })
         .await
     }
@@ -1729,135 +1762,29 @@ impl Store {
             }
         };
         let read = self.call(Priority::AwaitControl, move |connection| {
-            let (outcome, usage, _cost, session_id) = connection
+            let (outcome, usage) = connection
                 .query_row(
-                    "SELECT outcome_json, usage_json, estimated_cost_usd_nanos, session_id
-                     FROM runs WHERE id = ?1",
+                    "SELECT outcome_json, usage_json FROM runs WHERE id = ?1",
                     [run_id.to_string()],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<u64>>(2)?,
-                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
-                .optional()
-                ?
+                .optional()?
                 .ok_or(SessionRuntimeError::RunNotFound)?;
             let Some(encoded) = outcome else {
                 // A malformed live accounting row is already a hard read
                 // failure; do not wait for a hanging child to settle first.
                 if let Some(encoded) = usage {
-                    serde_json::from_str::<TokenUsage>(&encoded)
-                        ?;
+                    serde_json::from_str::<TokenUsage>(&encoded)?;
                 }
                 return Ok(None);
             };
-            let outcome = serde_json::from_str::<RunOutcome>(&encoded)
-                ?;
-            let workspace_id: String = connection
-                .query_row(
-                    "SELECT workspace_id FROM sessions WHERE id = ?1",
-                    [session_id],
-                    |row| row.get(0),
-                )
-                ?;
-            // Child creation atomically stores its original user message at
-            // ordinal one; compaction retains that row. Follow owner run ids
-            // and this message's exact run, not all runs in a child session.
-            // Left joins keep missing identities visible as hard failures.
-            // Materialize the bounded workspace candidates once so recursion
-            // does not rescan every session for each owned run.
-            let mut statement = connection
-                .prepare_cached(
-                    "WITH RECURSIVE candidates AS MATERIALIZED (
-                         SELECT id, owner_run_id FROM sessions
-                         WHERE workspace_id = ?2 AND owner_run_id IS NOT NULL
-                     ), owned(run_id, depth) AS (
-                         VALUES (?1, 0)
-                         UNION ALL
-                         SELECT initial.id, owned.depth + 1
-                         FROM owned
-                         JOIN candidates child ON child.owner_run_id = owned.run_id
-                         LEFT JOIN messages first ON first.session_id = child.id
-                             AND first.ordinal = 1 AND first.role = 'user'
-                         LEFT JOIN runs initial ON initial.id = first.run_id
-                             AND initial.session_id = child.id
-                             AND initial.user_message_id = first.id
-                         WHERE owned.depth < ?3
-                         LIMIT ?4
-                     )
-                     SELECT r.id,
-                            r.outcome_json IS NOT NULL AND r.status IN
-                                ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused'),
-                            r.usage_json, r.estimated_cost_usd_nanos,
-                            r.status = 'cancelled' AND r.started_at_ms IS NULL AND r.routing_json IS NULL
-                                AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),
-                            owned.depth = ?3 AND EXISTS(
-                                SELECT 1 FROM candidates child
-                                WHERE child.owner_run_id = owned.run_id
-                            )
-                     FROM owned LEFT JOIN runs r ON r.id = owned.run_id",
-                )
-                ?;
-            let rows = statement
-                .query_map(
-                    params![
-                        run_id.to_string(),
-                        workspace_id,
-                        MAX_CHILD_DEPTH,
-                        usize::from(MAX_DESCENDANTS_PER_ROOT) + 2,
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, bool>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<u64>>(3)?,
-                            row.get::<_, Option<bool>>(4)?.unwrap_or(false),
-                            row.get::<_, bool>(5)?,
-                        ))
-                    },
-                )
-                ?;
-            let mut spend = SpawnAgentSpend::NONE;
-            for (index, row) in rows.enumerate() {
-                let (id, settled, encoded_usage, cost, never_started, too_deep) =
-                    row?;
-                if id.is_none()
-                    || !settled
-                    || too_deep
-                    || index > usize::from(MAX_DESCENDANTS_PER_ROOT)
-                {
-                    return Err(SessionRuntimeError::AccountingUnavailable);
-                }
-                let usage = match encoded_usage {
-                    Some(encoded) => Some(
-                        serde_json::from_str::<TokenUsage>(&encoded)
-                            ?,
-                    ),
-                    None if never_started => SpawnAgentSpend::NONE.usage,
-                    None => None,
-                };
-                spend.usage = match (spend.usage, usage) {
-                    (Some(total), Some(usage)) => Some(
-                        add_usage(total, usage)
-                            .ok_or(SessionRuntimeError::AccountingUnavailable)?,
-                    ),
-                    _ => None,
-                };
-                let cost = cost.or(never_started.then_some(0));
-                spend.cost_usd_nanos = match (spend.cost_usd_nanos, cost) {
-                    (Some(total), Some(cost)) => Some(
-                        total
-                            .checked_add(cost)
-                            .ok_or(SessionRuntimeError::AccountingUnavailable)?,
-                    ),
-                    _ => None,
-                };
-            }
+            let outcome = serde_json::from_str::<RunOutcome>(&encoded)?;
+            let spend = deliveries::owned_run_spend(connection, run_id)?;
             Ok(Some((outcome, spend)))
         });
         #[cfg(test)]
@@ -1875,55 +1802,72 @@ impl Store {
         read.await
     }
 
-    /// The final committed model turn's text/refusal. Earlier assistant turns
-    /// remain in the child transcript but never enter the parent's tool
-    /// result.
-    pub(super) async fn run_final_text(
+    /// Delivers up to `limit` settled detached children of the running
+    /// parent into its next request (turn `turn_ordinal`), then, as
+    /// `reports` says, the newest closed report of each child still running,
+    /// in one transaction.
+    /// Nothing for a parent that is no longer running: its settlement
+    /// delivers the answers instead, and reports from children that are
+    /// about to answer are moot.
+    pub(super) async fn deliver_children(
+        &self,
+        claimed: &ClaimedRun,
+        turn_ordinal: u32,
+        limit: usize,
+        reports: crate::runtime::ReportDelivery,
+    ) -> Result<Vec<deliveries::DeliveredAnswer>, SessionRuntimeError> {
+        let run_id = claimed.identity.run_id;
+        self.call(Priority::Output, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let running = transaction
+                .query_row(
+                    "SELECT outcome_json IS NULL FROM runs WHERE id = ?1",
+                    [run_id.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !running {
+                return Ok(Vec::new());
+            }
+            let now = now_ms();
+            let mut delivered = deliveries::deliver_settled_children(
+                &transaction,
+                run_id,
+                Some(turn_ordinal),
+                limit,
+                now,
+            )?;
+            let with_reports = match reports {
+                crate::runtime::ReportDelivery::Always => true,
+                crate::runtime::ReportDelivery::WithAnswers => !delivered.is_empty(),
+            };
+            if with_reports {
+                let spent = delivered.iter().map(|answer| answer.notice.len()).sum();
+                delivered.extend(deliveries::deliver_interim_reports(
+                    &transaction,
+                    run_id,
+                    turn_ordinal,
+                    spent,
+                    limit,
+                    now,
+                )?);
+            }
+            transaction.commit()?;
+            Ok(delivered)
+        })
+        .await
+    }
+
+    /// What a settled child left its parent: the same answer a delivered
+    /// notice carries (`deliveries::child_answer`).
+    pub(super) async fn child_answer(
         &self,
         run_id: RunId,
-    ) -> Result<String, SessionRuntimeError> {
+        outcome: RunOutcome,
+    ) -> Result<deliveries::ChildAnswer, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            let final_turn_message = connection
-                .query_row(
-                    "SELECT m.id
-                     FROM model_turns t
-                     LEFT JOIN messages m
-                       ON m.run_id = t.run_id
-                      AND m.turn_ordinal = t.turn_ordinal
-                      AND m.role = 'assistant'
-                      AND m.state = 'complete'
-                     WHERE t.run_id = ?1
-                     ORDER BY t.turn_ordinal DESC, m.ordinal DESC
-                     LIMIT 1",
-                    [run_id.to_string()],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?;
-            let message_id = match final_turn_message {
-                Some(message_id) => message_id,
-                None => connection
-                    .query_row(
-                        "SELECT id FROM messages
-                         WHERE run_id = ?1 AND role = 'assistant' AND state = 'complete'
-                         ORDER BY turn_ordinal DESC, ordinal DESC LIMIT 1",
-                        [run_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?,
-            };
-            let Some(message_id) = message_id else {
-                return Ok(String::new());
-            };
-            let message = load_message(connection, parse_id(&message_id)?)?;
-            let output = message.output;
-            let refusal = message.refusal;
-            if output.is_empty() {
-                return Ok(refusal);
-            }
-            if refusal.is_empty() {
-                return Ok(output);
-            }
-            Ok(format!("{output}\n{refusal}"))
+            deliveries::child_answer(connection, run_id, &outcome)
         })
         .await
     }

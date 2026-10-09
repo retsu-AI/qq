@@ -121,6 +121,9 @@ impl ToolGate for SessionToolGate {
                     conclude(&inner, &claimed, call.id, timed_out, None).await
                 }
                 approval::PolicyDecision::RequireApproval => {
+                    #[cfg(not(feature = "tool-fetch"))]
+                    let fetch = None;
+                    #[cfg(feature = "tool-fetch")]
                     let fetch = match &class {
                         approval::ToolClass::Network {
                             host: Some(host), ..

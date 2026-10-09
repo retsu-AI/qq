@@ -95,6 +95,7 @@ pub(crate) fn builtin_alternative(command: &str) -> Option<(&'static str, &'stat
             ("sed -n", "read_file ranges")
         }
         "ls" | "tree" | "exa" | "eza" => (if program == "ls" { "ls" } else { "tree" }, "tree"),
+        #[cfg(feature = "tool-fetch")]
         "curl" | "wget" => (if program == "curl" { "curl" } else { "wget" }, "fetch"),
         _ => return None,
     })
@@ -144,6 +145,7 @@ mod tests {
         );
         assert_eq!(builtin_alternative("cargo test | grep ok"), None);
         assert_eq!(builtin_alternative("ls -la"), Some(("ls", "tree")));
+        #[cfg(feature = "tool-fetch")]
         assert_eq!(
             builtin_alternative("curl https://x"),
             Some(("curl", "fetch"))

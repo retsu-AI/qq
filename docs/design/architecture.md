@@ -83,6 +83,9 @@ leaves no metadata behind.
 
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
+`qq-harness` owns the bounded plan cache and configured MCP bridge; the binary
+re-exports them while runtime/model loading and headless outcome driving are
+still being extracted. Core does not depend on harness or application configuration.
 
 The workspace is:
 
@@ -110,6 +113,11 @@ crates/
   qq-core/
     Cargo.toml
     src/lib.rs
+  qq-harness/
+    Cargo.toml
+    src/lib.rs
+    src/plan.rs
+    src/mcp.rs
   qq-mcp/
     Cargo.toml
     src/lib.rs
@@ -389,7 +397,7 @@ rather than discarding the measurement, and a code-heavy transcript that
 tokenizes near three bytes per token is no longer under-charged by a quarter
 on every turn. Within a run the same rule is applied per
 request component (system text, tool schemas, messages), so the budget-final
-turn, which changes the system text and drops the schemas, keeps a
+turn, which changes only the system text, keeps a
 measurement-derived estimate; the slice checkpoint and continuation turns
 change only the messages. Pricing-only refreshes are
 compatible; missing usage, model changes, successful compaction, malformed or
@@ -630,10 +638,21 @@ An agent pack is a directory with a `pack.ron` manifest (`PACK_SCHEMA_VERSION
 = 1`) declaring an identifier, version, optional persona file, skill and
 command roots, a tool allow/deny policy, per-profile MCP subsets, and the
 minimum protocol version it requires. `qq-config` discovers packs from
-`<global>/packs/<id>/` and, when the project is trusted, `.qq/packs/<id>/`
-root-to-leaf, plus explicit `packs:` entries; at most 32 are admitted, later
-layers win by identifier, and every manifest error is a typed configuration
-failure that names the pack. Pack profiles merge beneath the configuration's
+`<global>/packs/<id>/` and `.qq/packs/<id>/` root-to-leaf, plus explicit
+`packs:` entries; at most 32 manifests are read per load, later layers win
+by identifier, and every manifest error is a typed configuration failure
+that names the pack. A project pack (discovered under `.qq/packs/` or named
+by a project file) is its own trust subject: it is admitted only when a
+trust record covers its canonical manifest path and the SHA-256 of its
+bytes, independent of whether the directory's configuration is trusted.
+Manifests named by a still-pending project file are listed in the same
+pending set, so one review covers both. Because those manifests are read
+before consent, a project entry must resolve lexically beneath the VCS root
+(else `cwd`) through no symbolic link, manifest leaf included; any other
+path is `InvalidPack` or `SymlinkSource` and is never opened. The 32-entry
+bound counts every entry inspected (packs, directories without a
+manifest, stray files), and discovery rejects a linked `packs/` directory
+or `pack.ron` before recording it. Pack profiles merge beneath the configuration's
 own `profiles` in the same flat namespace and a name declared by both is a
 conflict, not a silent override.
 
@@ -833,12 +852,15 @@ One durable run follows a guarded loop:
    ratio otherwise — so the loop cannot judge a request as fitting that the
    guard then refuses. If that still does not fit, the run compacts
    *itself* at the boundary — every tool result durable, nothing in flight,
-   steering applied: it hands its prompt and every turn but the last
-   `CONTEXT_PRUNE_KEEP_TURNS` to an in-run compactor
+   steering applied: it hands its live request cut before the last
+   `CONTEXT_PRUNE_KEEP_TURNS` turns (session context, prompt, replaced turns,
+   with the run's system prompt and tools) to an in-run compactor
    (`runtime::InRunCompactor`, installed only on session prompt runs), which
    runs the summarizer as an internal `compaction` run owned by the prompt
    run (no session slot taken, own usage/cost/events) and commits a marker
    scoped to that run (`session_compactions.scope_run_id`, `turn_cutoff`).
+   The commit appends the run-scoped compaction record (ADR-0056) and returns
+   the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
    with the next turns. Each in-run step counts against the same
@@ -846,7 +868,12 @@ One durable run follows a guarded loop:
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.
-   Direct `qq ask` runs have no compactor and fail as before.
+   Direct `qq ask` runs have no compactor and fail as before. The prompt
+   run reports `RunActivity::Compacting` before it asks and
+   `WaitingForProvider` at its next turn; every compaction run, between-run
+   or in-run, reports `Compacting` once, in the transaction that starts it
+   (right after its `RunStarted`), and never publishes its summarizer's
+   provider activity.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction
@@ -954,7 +981,11 @@ settlement. The wall-clock bound therefore remains a cancellation request plus
 owned drain, not a promise that an uninterruptible platform operation ends at the
 deadline. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
-spent the last permitted turn becomes a tool-free final status response; an
+spent the last permitted turn becomes a final status response that asks for
+no tool calls. The tools stay declared with `ToolChoice::None` (OpenAI and
+Anthropic `tool_choice: none`, Gemini `mode: NONE`; Bedrock Converse has no
+such choice, so it sends the tools unchanged). A call the model makes anyway
+settles the run as `budget_exhausted` without running; an
 elapsed wall clock or a provider turn that omits usage under a cost cap grants
 no further provider turn. Every bound produces the typed `budget_exhausted` outcome, never a
 provider failure, so the TUI, server, and headless adapter observe one
@@ -962,6 +993,22 @@ contract. Each sequential child admission, including an auditor, derives fresh
 remaining cost and token bounds after charging earlier children. A turn containing
 children executes sequentially when the parent has any finite cost or token
 bound; unbounded and duration-only read fanout keep their existing concurrency.
+
+A compaction summarizer request is cache-aligned (ADR-0056 § 5): it carries
+the system prompt and tool list of the session's prompt runs, built from the
+same `PromptPrefixKey` (`execution::session_prompt_prefix_key`), with no
+context sources or output contract, and the session's reasoning effort, so
+it shares the tool block those runs cached, and the system prompt and
+message prefix when no per-run suffix or prune seam separates them.
+Its tools are declared, never run: every call is answered with a rejection
+result, everything the summarizer wrote up to that turn is discarded, and a
+summarizer that calls a tool on a second turn fails the step.
+
+A request that genuinely declares no tools still carries tool history. Bedrock Converse rejects
+tool-use and tool-result blocks without a tool configuration, so the Bedrock
+codec renders them as text (`[tool call: name {args}]`, `[tool result from
+name]`); every other codec sends them as tool blocks, which those APIs accept
+(checked live on Bedrock Mantle's Anthropic Messages path).
 These are observed-spend limits: a provider turn or reserved final response can
 still overshoot; there is no prepaid reservation or estimated audit minimum.
 
@@ -987,8 +1034,9 @@ carries the report notice as a runtime message at the end of the
 conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
 cached prefix survives the seam. Each notice is stored on the first turn
-row whose request carried it, as `model_turns.notice` (`report` or
-`continuation`), and replayed before that turn, so a later run assembles
+row whose request carried it, as `model_turns.notice` (`report`,
+`stall_report`, `continuation`, or `final_answer`), and replayed before that
+turn, so a later run assembles
 exactly the messages the live run sent (ADR-0054 § 2). The column records
 where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and
@@ -1003,6 +1051,33 @@ it. An empty reply that reports usage is a missed report, not a failure. The
 live context fills it with the same placeholder assembly inserts, and the run
 continues. An empty reply with no usage after fresh tool results is treated
 like any swallowed gateway failure: it is retried as a transient fault.
+
+A run that stops producing output reports too (ADR-0054 § 1–2). The stall
+scope counts settled calls since the last *progress event*: a successful
+mutating call or external call its server does not mark read-only, a
+non-read-only shell command that ran (any exit
+status, timeouts included), a successful blocking `spawn_agent` result or a
+delivered answer from a child that answered (a failed, cancelled, paused, or
+budget-exhausted child is not progress, blocking or detached), an
+applied steer, an answered `ask_user`, or a report. Reads, searches, and
+read-only shell commands are never progress; denied calls count, runtime
+rejections do not. After `STALL_REPORT_CALLS = 64` such calls the next turn
+is a stall report: the same kind of turn as the slice checkpoint, with its
+own notice and rejection text, and the run continues. Root runs are never
+ended by this rule. A model-spawned task child that reports
+`MAX_CHILD_REPORTS_WITHOUT_WORK = 3` times without other progress gets a
+final-answer turn instead of its fourth report: its tools stay declared with
+`ToolChoice::None`, any call it makes is admitted with a not-executed result,
+and the run completes with the turn whatever it returned, bypassing Jev
+final review and the audit hook. An interrupting steer resends the turn
+under the same notice: a placed report or final-answer notice pins the
+turn's kind until it settles. When that reply is empty the parent's
+`spawn_agent` result is the child's latest report with text, under an
+interim-report label. A report continued after an output cut, a mid-stream
+fault, or an interrupt is its attempts joined in order. With no report text
+either, it is the existing "completed without producing any text" error.
+Audit children are exempt; they are bounded at a few turns already. The
+budget-final turn outranks both report kinds.
 Steering that arrives during the report is applied before the continuation
 notice. Clients observe no terminal run event at the slice seam. Genuine completion,
 explicit caller budgets, cancellation, and failures remain the only user-level
@@ -1061,8 +1136,80 @@ owned and claimable; it cannot survive a failed submission as an idle orphan.
 If the process stops before a queued child is claimed, recovery cancels that
 child when it interrupts the owning parent. Parent cancellation uses the same
 durable ownership link for in-process children. Once a child completes, only
-its final committed model turn's text or refusal is returned to the parent;
-earlier turns remain visible in the child's authoritative transcript.
+its final committed model turn's text or refusal reaches the parent; earlier
+turns remain visible in the child's authoritative transcript.
+
+A read `spawn_agent` does not block the parent (ADR-0054 § 4). The call
+returns as soon as the child is durably admitted, with its session id, and
+the parent keeps working; a spawn beyond the per-run concurrency cap still
+waits for a slot. The admission transaction also inserts the child's
+`child_deliveries` row. When the child settles, its answer (the same text a
+blocking spawn returns: the final reply, the latest report labelled as
+interim, or the outcome as an error with any report) is delivered at the
+parent's next turn boundary, after that boundary's steering, as a runtime
+notice naming the child session. One transaction stamps the row with the
+notice text and the parent turn whose request first carries it; the notice
+joins the live context only after that commit, and assembly replays it from
+the row before that turn, so live and restart context match. The stamp
+happens once: a parent that settles first (cancelled, interrupted, failed)
+gets every settled child's answer committed with its own settlement, after
+its run, and recovery delivers answers whose parent was settled before the
+child; the session's next run assembles them either way. An answer whose
+spend is not yet readable (a grandchild still settling) waits, and is
+delivered the moment that descendant settles. Each answer is bounded like a
+tool result, and the answers delivered at one boundary share one turn's
+tool-output budget and count against `max_tool_output_bytes`. The child's
+spend is charged to the parent at delivery, exactly once. A delivered answer
+from a child that answered is a progress event; a notice that the child
+failed or was cancelled is not, exactly as a blocking spawn's error result is
+not, so a parent cannot stay out of its stall report by spawning children
+that fail. The admission receipt is not progress either. A parent reply without tool
+calls while children are outstanding does not settle the run: the loop waits
+for the next settled child or steering, delivers or applies it, and runs
+another turn. Cancellation and the run deadline end the wait from outside,
+and a budget-final turn still settles: teardown cancels the children and the
+settlement delivers their answers. An interrupting steer stops only the
+turn's blocking work; detached children keep running, and the audit hook's
+drain stops only the auditor. Write children, audits, and every spawn of a
+run with a finite token or cost bound stay blocking: each child of such a
+run is granted the parent's whole remainder, so overlapping children could
+overspend it.
+
+The parent controls its background children with two tools, declared exactly
+when `spawn_agent` is: they follow it through `exposed_tools` and a pack's
+tool policy and are not policy names of their own, so the three come and go
+together. Both name a child by the session id its receipt gave,
+run in request order after the spawns before them in a turn, and return no
+answer themselves: answers reach the parent only through the delivery above,
+so each stays exactly-once whichever path settles it.
+
+- **`wait_agents { ids?, timeout_seconds }`** blocks its call until every
+  named child has settled (with no ids, until any outstanding child has), or
+  the timeout passes (at most 600 s, a shell command's ceiling). The result
+  names each child as finished, still working, or unknown (never one, or
+  already delivered); finished answers follow it at the next boundary.
+- **`cancel_agent { id }`** cancels one child through the ordinary child
+  cancellation path and returns once it has settled. Its answer, the
+  cancellation with its latest report, arrives at the next boundary and its
+  spend is charged there once.
+
+A child still working sends its newest closed report (a report or stall
+report a later turn of its run has ended, so the text cannot grow) at the
+parent's boundaries, as a labelled interim notice: partial findings the
+parent can act on, or a reason to cancel early. Schema 42's `child_reports`
+row records each delivered report by the child's report turn, so a report is
+sent once, an older undelivered one is superseded by the newer, and a child
+that has settled is answered instead. Interim reports share the boundary's
+tool-output budget after the answers, carry no spend, and are never
+progress: only a child's answer restarts the parent's stall count. The
+turn-top boundary takes reports; the tool-free wait takes them only in the
+same transaction as an answer, which ends the wait. So the wait delivers at
+most once per boundary, with one budget, and nothing it delivers can land
+between the waiting reply and steering that replay places first. Answers
+and reports share one delivery ordinal per parent run, so assembly replays
+them in the order the live run applied them. A child whose answer the store delivered before its
+owner task finished stays in the run's child registry, no longer
+outstanding, until that task ends, so teardown still awaits it.
 
 A model-spawned task run's system prompt carries a `Sub-agent:` section
 (ADR-0054 § 5). It says that a parent is waiting and receives only the final

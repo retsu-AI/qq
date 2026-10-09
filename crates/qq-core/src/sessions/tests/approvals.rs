@@ -1415,6 +1415,7 @@ async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() 
 }
 
 #[tokio::test]
+#[cfg(feature = "tool-fetch")]
 async fn a_delegate_host_grant_covers_the_exact_host_only() {
     // `invalid.` never resolves, so the approved fetches fail at resolution;
     // everything asserted here happens at the gate.
@@ -3615,6 +3616,7 @@ async fn malformed_ask_user_arguments_are_a_tool_error_without_a_hold() {
 }
 
 #[tokio::test]
+#[cfg(feature = "tool-fetch")]
 async fn fetch_holds_with_a_host_preview_and_a_host_grant_covers_the_next_call() {
     // `invalid.` is reserved (RFC 6761) and never resolves, so the approved
     // call fails at resolution — a tool error, not a policy event — while
@@ -3692,6 +3694,7 @@ async fn fetch_holds_with_a_host_preview_and_a_host_grant_covers_the_next_call()
 }
 
 #[tokio::test]
+#[cfg(feature = "tool-fetch")]
 async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
     let mut harness = approval_harness(
         ApprovalMode::Full,
@@ -3718,6 +3721,7 @@ async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
 }
 
 #[tokio::test]
+#[cfg(feature = "tool-fetch")]
 async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve() {
     // Plan acceptance 2, host half: under `auto` an ungranted host is exactly
     // the kind of call the delegate settles, so this is where a permissive

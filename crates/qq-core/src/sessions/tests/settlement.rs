@@ -187,7 +187,13 @@ async fn a_committed_compaction_is_not_resettled_by_the_prompts_teardown() {
         .unwrap();
     let summary = "## Summary\n\nThe user asked for a long prompt.".to_owned();
     let committed = store
-        .finish_compaction_run(&compaction, summary, None, TeardownComplete::nothing_ran())
+        .finish_compaction_run(
+            &compaction,
+            summary,
+            None,
+            context::COMPACTION_RECORD_BYTES,
+            TeardownComplete::nothing_ran(),
+        )
         .await
         .unwrap();
     let compaction_outcome = committed

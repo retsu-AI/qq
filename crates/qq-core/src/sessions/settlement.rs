@@ -315,6 +315,18 @@ pub(super) fn settle_run(
             pending_context_overflow_basis,
         ],
     )?;
+    // Answers the run never received at a turn boundary are committed into
+    // its session now, after its own turns; and a detached child that
+    // outlived its parent's settlement goes to that parent the same way
+    // (ADR-0054 § 4).
+    deliveries::deliver_settled_children(
+        transaction,
+        claimed.identity.run_id,
+        None,
+        usize::from(MAX_SPAWNED_CHILDREN_PER_RUN),
+        now,
+    )?;
+    deliveries::deliver_to_settled_parent(transaction, claimed.identity.run_id, now)?;
     let summary = load_session_summary(transaction, claimed.identity.session_id)?;
     let context = EventContext::for_run(store_id, claimed.identity, now);
     let context = match cause {
@@ -379,6 +391,7 @@ pub(super) fn finish_queued_run_with_outcome(
     if settled != 1 {
         return Ok(None);
     }
+    deliveries::deliver_to_settled_parent(transaction, run_id, now)?;
     transaction.execute(
         "UPDATE messages SET state = ?2 WHERE run_id = ?1 AND state = 'queued'",
         params![run_id.to_string(), message_state],
@@ -625,6 +638,7 @@ pub(super) fn settle_panicked_execution(
                 session_model: original.session_model.clone(),
                 model: original.model.clone(),
                 messages: Vec::new(),
+                message_effects: Vec::new(),
                 context_compaction_attempted: original.context_compaction_attempted,
                 context_compaction_failed: false,
                 context_compaction_remaining: false,
@@ -1077,6 +1091,7 @@ pub(super) fn recover_interrupted_runs(
             session_model: ModelSelection::default(),
             model: ModelSelection::default(),
             messages: Vec::new(),
+            message_effects: Vec::new(),
             context_compaction_attempted: 0,
             context_compaction_failed: false,
             context_compaction_remaining: false,
@@ -1109,6 +1124,9 @@ pub(super) fn recover_interrupted_runs(
         )?)?;
         cursors.push(event.cursor);
     }
+    // Runs settle above in no particular order, so a child whose descendants
+    // settled after it could not be delivered then; now every run is settled.
+    deliveries::deliver_orphaned_answers(&transaction, now_ms())?;
     transaction.commit()?;
     Ok(cursors)
 }

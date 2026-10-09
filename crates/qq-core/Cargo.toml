@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["tool-fetch"]
+tool-fetch = ["dep:htmd"]
+
 [dependencies]
 async-stream.workspace = true
 base64.workspace = true
@@ -14,7 +18,7 @@ cap-primitives.workspace = true
 crossbeam-channel.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-htmd.workspace = true
+htmd = { workspace = true, optional = true }
 ignore.workspace = true
 ipnet.workspace = true
 qq-provider.workspace = true
@@ -35,6 +39,7 @@ url.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+qq-provider = { workspace = true, features = ["test-support"] }
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
