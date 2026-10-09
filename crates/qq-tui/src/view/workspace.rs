@@ -209,7 +209,7 @@ pub(super) fn inspector_pane(
     match pane.view {
         View::Attention => rows = attention_body(app, inner),
         View::Changes => rows = changes_body(app, inner),
-        View::SideQuestions => {
+        View::SideQuestions(_) => {
             rows.push(Line::styled(
                 "Side answers scroll in the main pane.",
                 muted(),
@@ -295,16 +295,13 @@ pub(super) fn inspector_pane(
 }
 
 /// Separate projection: side text is never rendered as main-agent messages.
-pub(super) fn side_questions_body(app: &App, width: usize) -> Vec<Line> {
+pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
     let mut rows = vec![
         section("SIDE QUESTIONS", "main agent continues"),
         Line::default(),
         Line::styled("/btw QUESTION · /btw-new QUESTION · /btw-cancel", muted()),
     ];
-    let session = app
-        .focused()
-        .or(app.view_return())
-        .and_then(|id| app.sessions.get(&id));
+    let session = app.sessions.get(&session_id);
     let items = session.map(|session| &session.side_questions);
     let Some(items) = items.filter(|items| !items.is_empty()) else {
         rows.push(Line::styled(
@@ -323,7 +320,7 @@ pub(super) fn side_questions_body(app: &App, width: usize) -> Vec<Line> {
                 item.state,
                 item.model_turns,
                 item.estimated_cost_usd_nanos
-                    .map(|cost| format!("${:.4}", cost as f64 / 1_000_000_000.0))
+                    .map(format_cost)
                     .unwrap_or_else(|| "unknown".to_owned())
             ),
             muted(),

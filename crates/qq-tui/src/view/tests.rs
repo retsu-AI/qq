@@ -5697,7 +5697,7 @@ fn side_view_wraps_answers_without_injecting_main_messages() {
     });
     app.apply_client_update(ClientUpdate::Snapshot(initial));
     app.execute(Command::ShowSideQuestions);
-    let rows = super::workspace::side_questions_body(&app, 20);
+    let rows = super::workspace::side_questions_body(&app, SESSION, 20);
     assert!(rows.iter().all(|row| {
         row.width() <= 20
             || row
@@ -5724,4 +5724,38 @@ fn side_view_wraps_answers_without_injecting_main_messages() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(text.contains("preserved-tail"));
+}
+
+#[test]
+fn side_view_keeps_small_nonzero_costs_visible() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let summary = fixtures::session_summary(SESSION);
+    initial.sessions = vec![summary.clone()];
+    initial.focused = Some(fixtures::session_snapshot(summary));
+    let body = initial.focused.as_mut().unwrap();
+    for (byte, nanos) in [(1, 12_000), (2, 1_234_567_000)] {
+        let id = RunId::from_bytes([byte; 16]);
+        body.side_questions.push(qq_protocol::SideQuestionSnapshot {
+            id,
+            thread_id: id,
+            session_id: SESSION,
+            question: "q".to_owned(),
+            answer: String::new(),
+            state: qq_protocol::SideQuestionState::Completed,
+            usage: None,
+            estimated_cost_usd_nanos: Some(nanos),
+            model_turns: 1,
+            created_at_ms: 0,
+            finished_at_ms: Some(1),
+        });
+    }
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    let text: String = super::workspace::side_questions_body(&app, SESSION, 80)
+        .iter()
+        .flat_map(|row| row.spans.iter().map(|span| span.text.as_str()))
+        .collect();
+    // $0.000012 would have rendered as $0.0000 with four float decimals.
+    assert!(text.contains("cost $0.000012"), "{text}");
+    assert!(text.contains("cost $1.234567"), "{text}");
 }

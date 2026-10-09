@@ -15,9 +15,9 @@ use qq_client::state::{
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
     ApprovalResolution, CommandId, CommandOutcome, CommandRequest, ModelSelection, QuestionPreview,
-    ReasoningEffort, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
-    SessionId, SessionStatus, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
-    WorkspaceSnapshot,
+    ReasoningEffort, RunId, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, SessionStatus, SideQuestionState, SteeringCapabilities, ToolCallSnapshot,
+    ToolCallState, WorkspaceId, WorkspaceSnapshot,
 };
 use thiserror::Error;
 
@@ -289,9 +289,14 @@ fn has_mention_syntax(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum PendingIntent {
+    /// A side question in flight; `text` returns to the composer if the
+    /// server refuses it.
     Side {
         session_id: SessionId,
         text: String,
+    },
+    CancelSide {
+        session_id: SessionId,
     },
     Create,
     Prompt {
@@ -455,6 +460,10 @@ pub(crate) struct App {
     recent_events: VecDeque<SessionEventEnvelope>,
     pending: HashMap<CommandId, PendingIntent>,
     answered_approvals: std::collections::HashSet<qq_protocol::ToolCallId>,
+    /// The side question each session's submission receipt acknowledged, so
+    /// `/btw-cancel` can target it before its first update is reduced. At
+    /// most one per session; dropped when a terminal update for it arrives.
+    acknowledged_side_questions: HashMap<SessionId, RunId>,
 }
 
 impl App {
@@ -515,6 +524,7 @@ impl App {
             recent_events: VecDeque::new(),
             pending: HashMap::new(),
             answered_approvals: std::collections::HashSet::new(),
+            acknowledged_side_questions: HashMap::new(),
         }
     }
 
@@ -677,6 +687,13 @@ impl App {
                         {
                             self.adopt_created_session(session_id);
                         }
+                        if let CommandOutcome::SideQuestionSubmitted {
+                            side_question_id, ..
+                        } = receipt.outcome
+                            && let Some(PendingIntent::Side { session_id, .. }) = intent.as_ref()
+                        {
+                            self.acknowledge_side_question(*session_id, side_question_id);
+                        }
                         if let Some(PendingIntent::Cancel { session_id }) = intent.as_ref() {
                             self.set_info_for(
                                 Some(*session_id),
@@ -727,6 +744,10 @@ impl App {
                             }
                         }
                         match &receipt.outcome {
+                            CommandOutcome::SideQuestionCancelled { side_question_id } => {
+                                self.acknowledged_side_questions
+                                    .retain(|_, id| id != side_question_id);
+                            }
                             CommandOutcome::CompactionQueued { session_id, .. } => {
                                 self.set_info_for(
                                     Some(*session_id),
@@ -878,7 +899,11 @@ impl App {
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
-            if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
+            // A side view over this session keeps showing side questions.
+            let side_view = self.view() == View::SideQuestions(focused_id);
+            if !side_view
+                && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
+            {
                 self.set_focus(focused_id);
             } else {
                 self.set_focus_clock(focused_id);
@@ -919,7 +944,9 @@ impl App {
         let reduced = self.sessions.reduce_event(
             envelope,
             ReduceContext {
-                focused: self.focused(),
+                // Only a shown transcript reads its events; a side view
+                // leaves the source session's arrivals unread.
+                focused: self.view().transcript(),
                 attentive: self.terminal_focused,
                 workspace_id: self.workspace_id,
                 capabilities: self.capabilities.as_ref(),
@@ -948,6 +975,12 @@ impl App {
                     session_id,
                     tool_call_ids,
                 } => {
+                    self.acknowledged_side_questions.remove(&session_id);
+                    // The reducer only refocuses a shown transcript; a side
+                    // view over the deleted session gives way here.
+                    if self.view() == View::SideQuestions(session_id) {
+                        effects.extend(self.leave_workspace_view());
+                    }
                     for call in tool_call_ids {
                         self.answered_approvals.remove(&call);
                     }
@@ -964,6 +997,16 @@ impl App {
                     }
                 }
             }
+        }
+        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
+            && side_question.state != SideQuestionState::Running
+            && self
+                .acknowledged_side_questions
+                .get(&side_question.session_id)
+                == Some(&side_question.id)
+        {
+            self.acknowledged_side_questions
+                .remove(&side_question.session_id);
         }
         // Summaries and deletions reshape the tree the picker lists.
         if matches!(
@@ -1173,6 +1216,7 @@ impl App {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
             Some(PendingIntent::Side { session_id, .. })
+            | Some(PendingIntent::CancelSide { session_id })
             | Some(PendingIntent::Prompt { session_id, .. })
             | Some(PendingIntent::Cancel { session_id })
             | Some(PendingIntent::Steer { session_id, .. })
@@ -1196,8 +1240,7 @@ impl App {
             Some(PendingIntent::Side { session_id, text })
             | Some(PendingIntent::Prompt { session_id, text })
             | Some(PendingIntent::Steer { session_id, text })
-                if self.focused().or(self.view_return) == Some(session_id)
-                    && self.composer.text.is_empty() =>
+                if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
             {
                 self.composer.replace(text);
             }
@@ -1303,7 +1346,7 @@ impl App {
                 // A workspace view returns to the session it replaced.
                 if matches!(
                     self.view(),
-                    View::Attention | View::Changes | View::SideQuestions
+                    View::Attention | View::Changes | View::SideQuestions(_)
                 ) {
                     return self.leave_workspace_view();
                 }
@@ -1584,30 +1627,18 @@ impl App {
     /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
-            Command::ShowSideQuestions => self.show_workspace_view(View::SideQuestions),
-            Command::CancelSideQuestion => {
-                let session_id = self.focused().or(self.view_return);
-                let running = session_id
-                    .and_then(|id| self.sessions.get(&id))
-                    .map(|session| &session.side_questions)
-                    .and_then(|items| {
-                        items
-                            .iter()
-                            .find(|item| item.state == qq_protocol::SideQuestionState::Running)
-                    });
-                let Some(id) = running.map(|item| item.id) else {
-                    return Effects::none();
-                };
-                self.send(
-                    PendingIntent::Side {
-                        session_id: session_id.unwrap(),
-                        text: String::new(),
-                    },
-                    SessionCommand::CancelSideQuestion {
-                        side_question_id: id,
-                    },
-                )
+            Command::ShowSideQuestions => match self.focused().or(self.view_return) {
+                Some(session_id) => self.show_workspace_view(View::SideQuestions(session_id)),
+                None => {
+                    self.set_warning("create a session before asking a side question".to_owned());
+                    Effects::redraw(Redraw::Immediate)
+                }
+            },
+            Command::NewSideThread => {
+                self.composer.replace("/btw-new ".to_owned());
+                Effects::redraw(Redraw::Immediate)
             }
+            Command::CancelSideQuestion => self.cancel_side_question(),
             Command::OpenHelp => self.open_commands(true),
             Command::OpenCommands => self.open_commands(false),
             Command::SearchHistory => self.open_history(),
@@ -1869,7 +1900,10 @@ impl App {
 
     fn submit_prompt(&mut self) -> Effects {
         let mut prompt = self.composer.expanded().trim().to_owned();
-        if self.view() == View::SideQuestions && !prompt.is_empty() && !prompt.starts_with('/') {
+        if matches!(self.view(), View::SideQuestions(_))
+            && !prompt.is_empty()
+            && !prompt.starts_with('/')
+        {
             prompt = format!("/btw {prompt}");
         }
         if prompt.is_empty() {
@@ -1884,6 +1918,12 @@ impl App {
                 return Effects::redraw(Redraw::Immediate);
             };
             let question = question.trim();
+            // A bare `/btw-new` has nothing to start the thread with; opening
+            // the view would let the next question continue the old thread.
+            if question.is_empty() && name == "/btw-new" {
+                self.set_warning("use /btw-new QUESTION to start a new side thread".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            }
             if question.is_empty() {
                 self.composer.clear();
                 return self.execute(Command::ShowSideQuestions);
@@ -1893,8 +1933,8 @@ impl App {
                 return Effects::redraw(Redraw::Immediate);
             }
             self.composer.clear();
-            if self.view() != View::SideQuestions {
-                self.show_workspace_view(View::SideQuestions);
+            if self.view() != View::SideQuestions(session_id) {
+                self.show_workspace_view(View::SideQuestions(session_id));
             }
             return self.send(
                 PendingIntent::Side {
@@ -2296,6 +2336,58 @@ impl App {
         )
     }
 
+    /// Remember the side question a submission receipt acknowledged, unless
+    /// its terminal update already arrived (events may precede receipts).
+    fn acknowledge_side_question(&mut self, session_id: SessionId, side_question_id: RunId) {
+        let settled = self.sessions.get(&session_id).is_some_and(|session| {
+            session
+                .side_questions
+                .iter()
+                .any(|item| item.id == side_question_id && item.state != SideQuestionState::Running)
+        });
+        if !settled {
+            self.acknowledged_side_questions
+                .insert(session_id, side_question_id);
+        }
+    }
+
+    /// Cancel the focused session's running side question: the newest one the
+    /// reduced projection shows running, else the one a receipt acknowledged
+    /// before its update arrived (SSE lag or a reconnect).
+    fn cancel_side_question(&mut self) -> Effects {
+        let Some(session_id) = self.focused().or(self.view_return) else {
+            self.set_warning("create a session before cancelling a side question".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let items = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.side_questions.as_slice())
+            .unwrap_or_default();
+        let running = items
+            .iter()
+            .rev()
+            .find(|item| item.state == SideQuestionState::Running)
+            .map(|item| item.id);
+        let acknowledged = self
+            .acknowledged_side_questions
+            .get(&session_id)
+            .copied()
+            .filter(|id| {
+                !items
+                    .iter()
+                    .any(|item| item.id == *id && item.state != SideQuestionState::Running)
+            });
+        let Some(side_question_id) = running.or(acknowledged) else {
+            self.set_info("no side question is running".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        self.send(
+            PendingIntent::CancelSide { session_id },
+            SessionCommand::CancelSideQuestion { side_question_id },
+        )
+    }
+
     fn cancel_run(&mut self) -> Effects {
         let Some(session_id) = self.focused() else {
             self.set_warning("focused session has no active run".to_owned());
@@ -2315,9 +2407,11 @@ impl App {
         )
     }
 
-    /// The focused session's oldest unanswered tool approval, if any.
+    /// The shown transcript's oldest unanswered tool approval, if any. A side
+    /// view does not render the approval block, so it never captures input
+    /// there; the banner and background chords answer it instead.
     pub(crate) fn pending_approval(&self) -> Option<&ToolCallSnapshot> {
-        let session = self.sessions.get(&self.focused()?)?;
+        let session = self.sessions.get(&self.view().transcript()?)?;
         session.tool_calls.as_ref()?.iter().find(|tool_call| {
             tool_call.state == ToolCallState::AwaitingApproval
                 && !self.answered_approvals.contains(&tool_call.id)
@@ -2400,7 +2494,8 @@ impl App {
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
         let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
-            Some(*id) != self.focused() && !self.sessions[id].live.awaiting_approval.is_empty()
+            Some(*id) != self.view().transcript()
+                && !self.sessions[id].live.awaiting_approval.is_empty()
         }) else {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);
@@ -2839,6 +2934,7 @@ impl App {
                 | PendingIntent::SetDelegate { .. }
                 | PendingIntent::Delete { .. }
                 | PendingIntent::Side { .. }
+                | PendingIntent::CancelSide { .. }
                 | PendingIntent::Prune => None,
             })
     }
@@ -2881,19 +2977,20 @@ impl App {
     /// Ctrl-G always lands on the most urgent thing.
     fn next_session_needing_attention(&self) -> Option<SessionId> {
         let waiting = self.sessions_needing_attention();
+        // A side view does not show its source's transcript, so that
+        // session is a valid jump target from there.
+        let shown = self.view().transcript();
         let others: Vec<SessionId> = waiting
             .iter()
             .copied()
-            .filter(|id| Some(*id) != self.focused())
+            .filter(|id| Some(*id) != shown)
             .collect();
         if others.is_empty() {
             return None;
         }
-        // Cycle: the item after the focused one in the priority list, or the
-        // first when the focused session is not in the list.
-        let position = self
-            .focused()
-            .and_then(|focused| waiting.iter().position(|id| *id == focused));
+        // Cycle: the item after the shown one in the priority list, or the
+        // first when the shown session is not in the list.
+        let position = shown.and_then(|shown| waiting.iter().position(|id| *id == shown));
         match position {
             Some(index) => waiting
                 .iter()
@@ -2901,7 +2998,7 @@ impl App {
                 .skip(index + 1)
                 .take(waiting.len())
                 .copied()
-                .find(|id| Some(*id) != self.focused()),
+                .find(|id| Some(*id) != shown),
             None => others.first().copied(),
         }
     }
@@ -3038,7 +3135,11 @@ impl App {
     /// session in transcript order (the order the server persisted them).
     /// From no selection, up starts at the newest call and down at the oldest.
     fn move_transcript_cursor(&mut self, down: bool) -> bool {
-        let Some(session) = self.focused().and_then(|id| self.sessions.get(&id)) else {
+        let Some(session) = self
+            .view()
+            .transcript()
+            .and_then(|id| self.sessions.get(&id))
+        else {
             return false;
         };
         let Some(calls) = session.tool_calls.as_ref() else {
@@ -3072,6 +3173,10 @@ impl App {
         }
         if self.pending_approval().is_some() {
             return ComposerMode::Approval;
+        }
+        // Enter in the side view asks a side question, whatever the run does.
+        if matches!(self.view(), View::SideQuestions(_)) {
+            return ComposerMode::Send;
         }
         let running = self
             .focused()

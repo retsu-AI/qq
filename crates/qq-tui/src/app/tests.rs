@@ -4712,7 +4712,7 @@ fn empty_side_command_opens_separate_view_and_escape_returns() {
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .split();
     assert!(requests.is_empty());
-    assert_eq!(app.view(), View::SideQuestions);
+    assert_eq!(app.view(), View::SideQuestions(id));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.focused(), Some(id));
 }
@@ -4745,4 +4745,279 @@ fn side_cancel_targets_side_id_and_not_main_run() {
         command: SessionCommand::CancelSideQuestion { side_question_id }, ..
     })] if *side_question_id == id)
     );
+}
+
+fn side_item(
+    session_id: SessionId,
+    id: RunId,
+    state: qq_protocol::SideQuestionState,
+) -> qq_protocol::SideQuestionSnapshot {
+    qq_protocol::SideQuestionSnapshot {
+        id,
+        thread_id: id,
+        session_id,
+        question: "why?".to_owned(),
+        answer: String::new(),
+        state,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 0,
+        created_at_ms: 0,
+        finished_at_ms: None,
+    }
+}
+
+fn side_update(sequence: u64, item: qq_protocol::SideQuestionSnapshot) -> ClientUpdate {
+    ClientUpdate::Event(fixtures::envelope(
+        sequence,
+        item.session_id,
+        SessionEvent::SideQuestionUpdated {
+            side_question: Box::new(item),
+        },
+    ))
+}
+
+fn submitted_receipt(command_id: CommandId, side_question_id: RunId) -> ClientUpdate {
+    ClientUpdate::CommandResult {
+        command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id,
+            outcome: CommandOutcome::SideQuestionSubmitted {
+                side_question_id,
+                thread_id: side_question_id,
+            },
+            committed_through: fixtures::cursor(1),
+        }),
+    }
+}
+
+fn only_command(effects: Effects) -> CommandRequest {
+    let (_, requests) = effects.split();
+    let [ClientRequest::Command(request)] = <[ClientRequest; 1]>::try_from(requests)
+        .unwrap_or_else(|requests| panic!("expected one command, got {requests:?}"))
+    else {
+        panic!("expected a command request")
+    };
+    request
+}
+
+fn press(app: &mut App, code: KeyCode) -> Effects {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+#[test]
+fn rejected_side_commands_stay_visible_in_the_side_view() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw what changed?".to_owned();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert_eq!(app.view(), View::SideQuestions(id));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("a side question is already running")),
+    });
+    assert_eq!(app.composer.text, "/btw what changed?");
+    assert_eq!(
+        app.visible_status(),
+        Some(("a side question is already running", NoticeLevel::Error))
+    );
+
+    app.composer.clear();
+    let running = RunId::generate().unwrap();
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, running, qq_protocol::SideQuestionState::Running),
+    ));
+    let request = only_command(app.execute(Command::CancelSideQuestion));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("server unavailable")),
+    });
+    assert_eq!(app.view(), View::SideQuestions(id));
+    assert_eq!(
+        app.visible_status(),
+        Some(("server unavailable", NoticeLevel::Error))
+    );
+}
+
+#[test]
+fn side_view_keeps_session_commands_on_its_source_session() {
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some("anthropic/claude-sonnet-5".to_owned()),
+        max_output_tokens: Some(8_192),
+        organization: None,
+    };
+    let mut app = App::new(TuiOptions {
+        models: vec![ModelOption {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            name: None,
+            context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
+            selection: selection.clone(),
+        }],
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.apply_client_update(ClientUpdate::Capabilities(capabilities_with_profiles()));
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    assert_eq!(app.view(), View::SideQuestions(id));
+    assert_eq!(app.focused(), Some(id));
+
+    // `/models` repoints the source session instead of creating a root.
+    app.open_models();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SetSessionModel { session_id, .. } if session_id == id
+    ));
+
+    // `/approval` changes the source session, not the next-session default.
+    app.open_approval_modes();
+    press(&mut app, KeyCode::Char('r'));
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SetApprovalMode { session_id, mode: ApprovalMode::ReadOnly }
+            if session_id == id
+    ));
+    // Still on the side view; Esc returns to the unchanged transcript.
+    assert_eq!(app.view(), View::SideQuestions(id));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view(), View::Transcript(Some(id)));
+}
+
+#[test]
+fn side_view_does_not_capture_input_for_its_sources_approval() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(ToolCallId::from_bytes([7; 16]), id, "write_file")
+    });
+    assert_eq!(app.mode(), Mode::Approval);
+    app.execute(Command::ShowSideQuestions);
+    // The side view never renders the approval block, so typing asks a
+    // side question rather than answering an approval the user cannot see.
+    assert_eq!(app.mode(), Mode::Compose);
+    app.composer.text = "why?".to_owned();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SubmitSideQuestion { session_id, .. } if session_id == id
+    ));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode(), Mode::Approval);
+}
+
+#[test]
+fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw slow?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    // The receipt beats the SSE update: the reduced list is still empty.
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    assert!(app.sessions[&id].side_questions.is_empty());
+    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    assert!(matches!(
+        cancel.command,
+        SessionCommand::CancelSideQuestion { side_question_id } if side_question_id == side
+    ));
+
+    // The running update then its terminal update arrive late; the terminal
+    // one releases the acknowledged id so nothing stale is cancelled.
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, side, qq_protocol::SideQuestionState::Running),
+    ));
+    app.apply_client_update(side_update(
+        3,
+        side_item(id, side, qq_protocol::SideQuestionState::Cancelled),
+    ));
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.visible_status(),
+        Some(("no side question is running", NoticeLevel::Info))
+    );
+}
+
+#[test]
+fn a_receipt_after_the_terminal_update_is_not_retained_for_cancel() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw quick?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    // Replayed events land first; the receipt follows a finished question.
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, side, qq_protocol::SideQuestionState::Running),
+    ));
+    app.apply_client_update(side_update(
+        3,
+        side_item(id, side, qq_protocol::SideQuestionState::Completed),
+    ));
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn btw_new_autocomplete_leaves_the_command_for_its_question() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    for accept in [KeyCode::Tab, KeyCode::Enter] {
+        app.composer.replace("/btw-n".to_owned());
+        let (_, requests) = press(&mut app, accept).split();
+        assert!(requests.is_empty());
+        assert_eq!(app.composer.text, "/btw-new ");
+        assert_eq!(app.view(), View::Transcript(Some(id)));
+    }
+    app.composer.text.push_str("fresh start?");
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SubmitSideQuestion { new_thread: true, ref question, .. }
+            if question == "fresh start?"
+    ));
+
+    // A bare `/btw-new` never opens a view that would continue the thread.
+    press(&mut app, KeyCode::Esc);
+    app.composer.replace("/btw-new".to_owned());
+    let (_, requests) = app.submit_prompt().split();
+    assert!(requests.is_empty());
+    assert_eq!(app.view(), View::Transcript(Some(id)));
+
+    // `/btw` and `/ask` still open the side view on accept.
+    for alias in ["/btw", "/as"] {
+        press(&mut app, KeyCode::Esc);
+        app.composer.replace(alias.to_owned());
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view(), View::SideQuestions(id), "{alias}");
+        assert!(app.composer.text.is_empty());
+    }
+}
+
+#[test]
+fn deleting_the_side_views_source_leaves_the_view() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        id,
+        SessionEvent::SessionDeleted { session_id: id },
+    )));
+    assert_eq!(app.view(), View::Transcript(None));
 }
