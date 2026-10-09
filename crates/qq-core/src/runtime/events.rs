@@ -215,6 +215,13 @@ pub(crate) enum RuntimeEvent {
         usage: Option<TokenUsage>,
         cost_usd_nanos: Option<u64>,
     },
+    /// The run stubbed stale read-only results in its live messages before
+    /// preparing `turn_ordinal`: a prune seam. The session layer moves the
+    /// durable watermark to the turn before it, so assembly replays the
+    /// same stubs and the next run extends this one (ADR-0056 § 6).
+    ContextPruned {
+        turn_ordinal: u32,
+    },
     /// The run summarized its own turns through `turn_cutoff` before
     /// preparing `turn_ordinal`; the compactor already committed the marker.
     /// Informational for the session layer (occupancy is unknown again).

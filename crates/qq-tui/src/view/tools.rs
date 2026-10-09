@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use super::*;
 use markdown::{CODE_PANEL_INSET, panel_content_width, panel_rows, panel_rows_at};
 use qq_client::state::{ApprovalSettlement, ToolCallTiming};
-use qq_protocol::{ApprovalResolution, DelegateIdentity};
+use qq_protocol::{ApprovalResolution, DelegateIdentity, ToolErrorKind};
 
 /// Runs with more than this many quiet tool calls fold into one summary row.
 pub(super) const TOOL_FOLD_THRESHOLD: usize = 3;
@@ -340,10 +340,17 @@ fn strip_header<'a>(result: &'a str, tool: &str) -> &'a str {
     let Some(header) = result.lines().next() else {
         return result;
     };
-    if !header
+    let Some(rest) = header
         .strip_prefix(tool)
-        .is_some_and(|rest| rest.starts_with(' '))
-    {
+        .filter(|rest| rest.starts_with(' '))
+    else {
+        return result;
+    };
+    // `edit <n>: <code>: …` is a batch-edit error, not a header: keep it so
+    // the reason survives.
+    if rest[1..].split_once(": ").is_some_and(|(index, _)| {
+        !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
         return result;
     }
     result.get(header.len() + 1..).unwrap_or_default()
@@ -622,6 +629,27 @@ pub(super) fn render_tool_calls(
     children: ChildRows<'_>,
     approval: ApprovalRows<'_>,
 ) -> Vec<Line> {
+    // A corrected argument the model then retried successfully is routine:
+    // the retry's row is the record. Expanding or selecting the corrected
+    // call (the cursor still visits it) shows it again. Most blocks hold no
+    // error at all, so they skip the copy.
+    let shown: Vec<&ToolCallSnapshot>;
+    let calls = if calls.iter().any(|call| call.is_error) {
+        shown = calls
+            .iter()
+            .enumerate()
+            .filter(|&(index, call)| {
+                !absorbed_correction(calls, index) || {
+                    let context = lookup(call);
+                    context.expanded || context.selected || !children(call.id, width).is_empty()
+                }
+            })
+            .map(|(_, call)| *call)
+            .collect();
+        shown.as_slice()
+    } else {
+        calls
+    };
     let quiet = |call: &ToolCallSnapshot| {
         call.state == ToolCallState::Completed
             && !call.is_error
@@ -638,13 +666,31 @@ pub(super) fn render_tool_calls(
         let context = lookup(call);
         lines.push(tool_summary_line(call, context, tick, width));
         lines.extend(approval(call.id, width));
-        if call.is_error
-            && let Some(result) = call.result.as_deref()
-        {
-            lines.extend(tool_error_lines(
-                strip_header(result, header_word(&call.name)),
-                width,
-            ));
+        if let Some(result) = call.result.as_deref() {
+            // Only a failure opens its panel by default; a correction keeps
+            // its text for the expanded body, and an outcome shows the one
+            // line that says why (the expanded body shows all of it). A
+            // denied or interrupted call has no grade but is still an error:
+            // its reason is the panel, as before grading existed.
+            let panel = match (call.error_kind(), call.is_error) {
+                (Some(ToolErrorKind::Failure), _) | (None, true) => {
+                    Some((MAX_TOOL_ERROR_ROWS, failure()))
+                }
+                (Some(ToolErrorKind::Outcome), _) if context.expanded && context.inline_detail => {
+                    None
+                }
+                (Some(ToolErrorKind::Outcome), _) => Some((1, warning())),
+                (Some(ToolErrorKind::Correction), _) | (None, false) => None,
+            };
+            if let Some((rows, style)) = panel {
+                lines.extend(tool_error_lines(
+                    strip_header(result, header_word(&call.name)),
+                    rows,
+                    MAX_TOOL_ERROR_BYTES,
+                    style,
+                    width,
+                ));
+            }
         }
         if context.expanded && context.inline_detail {
             lines.extend(tool_expanded_lines(call, context, width));
@@ -748,33 +794,50 @@ pub(super) fn tool_summary_line(
                 0
             }
     });
-    let state = (call.state != ToolCallState::Completed).then(|| {
-        (
-            // A delegate's denial says who denied it; the human's and the
-            // timeout's read as before.
-            match (call.state, context.clock.timing.settled) {
+    // A command outcome's metric already reads `exit 101`: while the metric
+    // shows, the label would only repeat it; once layout drops the metric,
+    // the label is the only place the exit code remains.
+    let exit_in_metric = call.error_kind() == Some(ToolErrorKind::Outcome)
+        && metric.is_some()
+        && call
+            .result
+            .as_deref()
+            .and_then(|result| header_field(result, &call.name, "exit"))
+            .is_some();
+    let state = match call.error_kind() {
+        Some(kind @ (ToolErrorKind::Correction | ToolErrorKind::Outcome)) => {
+            Some(tool_error_label(call, kind))
+        }
+        Some(ToolErrorKind::Failure) | None => {
+            (call.state != ToolCallState::Completed).then(|| {
                 (
-                    ToolCallState::Denied,
-                    Some(ApprovalSettlement {
-                        resolution: ApprovalResolution::DeniedByReviewer,
-                        delegate,
-                    }),
-                ) => match delegate.unwrap_or_default() {
-                    DelegateIdentity::Jev => "denied by jev",
-                    DelegateIdentity::Reviewer => "denied by reviewer",
-                },
-                _ => tool_state_label(call.state),
-            },
-            match call.state {
-                ToolCallState::Failed | ToolCallState::Denied => failure(),
-                ToolCallState::AwaitingApproval => warning(),
-                ToolCallState::Running => info(),
-                ToolCallState::Requested
-                | ToolCallState::Interrupted
-                | ToolCallState::Completed => muted(),
-            },
-        )
-    });
+                    // A delegate's denial says who denied it; the human's and the
+                    // timeout's read as before.
+                    match (call.state, context.clock.timing.settled) {
+                        (
+                            ToolCallState::Denied,
+                            Some(ApprovalSettlement {
+                                resolution: ApprovalResolution::DeniedByReviewer,
+                                delegate,
+                            }),
+                        ) => match delegate.unwrap_or_default() {
+                            DelegateIdentity::Jev => "denied by jev",
+                            DelegateIdentity::Reviewer => "denied by reviewer",
+                        },
+                        _ => tool_state_label(call.state),
+                    },
+                    match call.state {
+                        ToolCallState::Failed | ToolCallState::Denied => failure(),
+                        ToolCallState::AwaitingApproval => warning(),
+                        ToolCallState::Running => info(),
+                        ToolCallState::Requested
+                        | ToolCallState::Interrupted
+                        | ToolCallState::Completed => muted(),
+                    },
+                )
+            })
+        }
+    };
     let state_width = state.map_or(0, |(label, _)| label.len());
     let duration = context.clock.duration(running).map(format_duration_ms);
     let duration_width = duration.as_deref().map_or(0, |text| text.len() + 2);
@@ -784,7 +847,7 @@ pub(super) fn tool_summary_line(
     let mut show_metric = metric.is_some();
     let right_width = |show_metric: bool, show_duration: bool| {
         let mut total = if show_metric { metric_width } else { 0 };
-        if state.is_some() {
+        if state.is_some() && !(exit_in_metric && show_metric) {
             total += if show_metric { 3 } else { 0 } + state_width;
         }
         if show_duration {
@@ -829,7 +892,7 @@ pub(super) fn tool_summary_line(
                 line.push(TRUNCATED_SUFFIX, muted());
             }
         }
-        if let Some((label, style)) = state {
+        if let Some((label, style)) = state.filter(|_| !(exit_in_metric && show_metric)) {
             if show_metric {
                 line.push(" · ", muted());
             }
@@ -848,32 +911,95 @@ pub(super) fn tool_state_glyph(call: &ToolCallSnapshot, tick: usize) -> (&'stati
     match call.state {
         ToolCallState::Running => (spinner(tick), info()),
         ToolCallState::Requested => ("○", muted()),
-        ToolCallState::Completed => {
-            if call.is_error {
-                ("✕", failure())
-            } else {
-                ("●", muted())
-            }
-        }
-        ToolCallState::Failed | ToolCallState::Denied => ("✕", failure()),
+        ToolCallState::Completed | ToolCallState::Failed => match call.error_kind() {
+            None => ("●", muted()),
+            Some(ToolErrorKind::Correction) => ("↻", muted()),
+            Some(ToolErrorKind::Outcome) => ("!", warning()),
+            Some(ToolErrorKind::Failure) => ("✕", failure()),
+        },
+        ToolCallState::Denied => ("✕", failure()),
         ToolCallState::AwaitingApproval => ("◇", warning()),
         ToolCallState::Interrupted => ("◌", muted()),
     }
 }
 
+/// The right-side state label and style of a settled correction or outcome:
+/// a corrected argument is routine, and an outcome names its code
+/// (`path_not_found`) as a warning. Failures keep the state label.
+fn tool_error_label(call: &ToolCallSnapshot, kind: ToolErrorKind) -> (&str, Style) {
+    match kind {
+        ToolErrorKind::Correction => ("corrected", muted()),
+        ToolErrorKind::Outcome => {
+            let result = call.result.as_deref().unwrap_or_default();
+            let result = result
+                .strip_prefix("edit ")
+                .and_then(|rest| rest.split_once(": "))
+                .filter(|(index, _)| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .map_or(result, |(_, rest)| rest);
+            // `exec exit=101 …`: shown only when layout dropped the metric.
+            let result = result
+                .strip_prefix("shell ")
+                .or_else(|| result.strip_prefix("exec "))
+                .unwrap_or(result);
+            // `fetch <url> status=404`: the status is the answer, not the URL.
+            let fetch_status = result
+                .strip_prefix("fetch ")
+                .and_then(|rest| rest.lines().next())
+                .and_then(|header| {
+                    header
+                        .split_whitespace()
+                        .find(|token| token.starts_with("status="))
+                });
+            let code = fetch_status.unwrap_or_else(|| {
+                result
+                    .split([':', ' ', '\n'])
+                    .next()
+                    .filter(|code| !code.is_empty() && code.len() <= 24)
+                    .unwrap_or("no result")
+            });
+            (code, warning())
+        }
+        ToolErrorKind::Failure => (tool_state_label(call.state), failure()),
+    }
+}
+
+/// A self-corrected call that the model followed with a successful call to
+/// the same tool later in `calls`: its row folds into that call's.
+fn absorbed_correction(calls: &[&ToolCallSnapshot], index: usize) -> bool {
+    let call = calls[index];
+    call.error_kind() == Some(ToolErrorKind::Correction)
+        && calls[index + 1..].iter().any(|later| {
+            // Only a later turn can be a retry: the model cannot see a
+            // result within the turn that issued the call.
+            later.name == call.name
+                && later.turn_ordinal > call.turn_ordinal
+                && later.state == ToolCallState::Completed
+                && !later.is_error
+        })
+}
+
 /// Errors are the one case where content matters by default: show a bounded
-/// tail of the error text in a detail panel under the summary row, in the
-/// `error` color on the panel surface. Empty when the error has no text.
-pub(super) fn tool_error_lines(result: &str, width: usize) -> Vec<Line> {
-    let text = bounded_tail(result, MAX_TOOL_ERROR_BYTES);
+/// tail of the error text in a detail panel under the summary row, in
+/// `style` on the panel surface, at most `max_rows` rows. Empty when the
+/// error has no text.
+pub(super) fn tool_error_lines(
+    result: &str,
+    max_rows: usize,
+    max_bytes: usize,
+    style: Style,
+    width: usize,
+) -> Vec<Line> {
+    let text = bounded_tail(result, max_bytes);
     let total = text.lines().count();
     let content_width = tool_panel_content_width(width);
-    let mut body = Vec::with_capacity(MAX_TOOL_ERROR_ROWS + 1);
-    if total > MAX_TOOL_ERROR_ROWS || text.len() < result.len() {
+    let mut body = Vec::with_capacity(max_rows + 1);
+    if total > max_rows || text.len() < result.len() {
         body.push(Line::styled("…", muted()));
     }
-    for line in text.lines().skip(total.saturating_sub(MAX_TOOL_ERROR_ROWS)) {
-        body.push(truncate_line(Line::styled(line, failure()), content_width));
+    for line in text.lines().skip(total.saturating_sub(max_rows)) {
+        body.push(truncate_line(Line::styled(line, style), content_width));
     }
     if body.is_empty() {
         return body;
@@ -928,6 +1054,29 @@ pub(super) fn tool_expanded_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let row = context.row;
+    // Corrections and outcomes keep their text for here, under the timing
+    // line and with the same budget as any expanded result; a failure already
+    // showed its panel. An outcome drops its tool header (the row says it).
+    let graded = match call.error_kind() {
+        Some(ToolErrorKind::Correction) => tool_error_lines(
+            call.result.as_deref().unwrap_or_default(),
+            MAX_TOOL_RESULT_ROWS,
+            MAX_TOOL_DETAIL_BYTES,
+            muted(),
+            width,
+        ),
+        Some(ToolErrorKind::Outcome) => tool_error_lines(
+            strip_header(
+                call.result.as_deref().unwrap_or_default(),
+                header_word(&call.name),
+            ),
+            MAX_TOOL_RESULT_ROWS,
+            MAX_TOOL_DETAIL_BYTES,
+            warning(),
+            width,
+        ),
+        Some(ToolErrorKind::Failure) | None => Vec::new(),
+    };
     let timing = context.clock.timing;
     let running = call.state == ToolCallState::Running;
     // The timing line answers "is this new, or am I still waiting on the
@@ -959,6 +1108,7 @@ pub(super) fn tool_expanded_lines(
         when.push(fields.join(" · "), muted());
         lines.push(truncate_line(when, width));
     }
+    lines.extend(graded);
     let mut cached = row.panel.borrow_mut();
     if !cached
         .as_ref()

@@ -80,7 +80,7 @@ async fn compact_in_run(
                 "the prompt run is no longer running".to_owned(),
             ));
         }
-        Err(error) => return Err(Error::Unavailable(error.to_string())),
+        Err(error) => return Err(Error::Persistence(error.to_string())),
     };
     inner.notify(started_event.cursor);
     // Register for cancellation like any run, so a cancel of the prompt run
@@ -113,11 +113,18 @@ async fn compact_in_run(
         Ok(false) => {}
         Err(error) => {
             guard.disarm();
-            settle_failed(inner, &compaction, error.to_string()).await;
-            return Err(Error::Unavailable(error.to_string()));
+            settle_failed_with(
+                inner,
+                &compaction,
+                RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: format!("failed to read the cancellation request: {error}"),
+                },
+            )
+            .await;
+            return Err(Error::Persistence(error.to_string()));
         }
     }
-
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.
@@ -208,7 +215,7 @@ async fn compact_in_run(
         }
         Err(error) => {
             inner.failed.send_replace(true);
-            Err(Error::Unavailable(error.to_string()))
+            Err(Error::Persistence(error.to_string()))
         }
     }
 }
@@ -269,10 +276,26 @@ async fn settle_cancelled(inner: &Arc<SessionRuntimeInner>, compaction: &Claimed
 }
 
 async fn settle_failed(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun, message: String) {
+    settle_failed_with(
+        inner,
+        compaction,
+        RunFailure {
+            kind: RunFailureKind::ProviderResponse,
+            message,
+        },
+    )
+    .await;
+}
+
+async fn settle_failed_with(
+    inner: &Arc<SessionRuntimeInner>,
+    compaction: &ClaimedRun,
+    failure: RunFailure,
+) {
     let outcome = RunOutcome::Failed {
         failure: RunFailure {
-            kind: RunFailureKind::ProviderResponse,
-            message: truncate_utf8(message, MAX_FAILURE_MESSAGE_BYTES),
+            kind: failure.kind,
+            message: truncate_utf8(failure.message, MAX_FAILURE_MESSAGE_BYTES),
         },
     };
     match inner

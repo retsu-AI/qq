@@ -599,7 +599,7 @@ fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
 
 pub(super) fn search(
     workspace: &Workspace,
-    arguments: SearchArgs,
+    mut arguments: SearchArgs,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     let started = Instant::now();
@@ -618,18 +618,27 @@ pub(super) fn search(
             "invalid_max_per_file: max_per_file must be between 1 and {MAX_PER_FILE}"
         ));
     }
-    if arguments.context > MAX_CONTEXT {
-        return ToolOutput::error(format!(
-            "invalid_context: context must be at most {MAX_CONTEXT}"
-        ));
+    // Above the bound is a request for "more context": give the most there
+    // is and say so rather than refusing the search.
+    let context_clamped = arguments.context > MAX_CONTEXT;
+    if context_clamped {
+        arguments.context = MAX_CONTEXT;
     }
+    // `""` is a filled-in default for "no filter", not a pattern.
+    let empty_globs = arguments
+        .include
+        .iter()
+        .chain(&arguments.exclude)
+        .any(String::is_empty);
+    arguments.include.retain(|glob| !glob.is_empty());
+    arguments.exclude.retain(|glob| !glob.is_empty());
     if arguments.include.len() > MAX_GLOBS
         || arguments.exclude.len() > MAX_GLOBS
         || arguments
             .include
             .iter()
             .chain(&arguments.exclude)
-            .any(|glob| glob.is_empty() || glob.len() > MAX_GLOB_BYTES)
+            .any(|glob| glob.len() > MAX_GLOB_BYTES)
     {
         return ToolOutput::error(format!(
             "bad_glob: at most {MAX_GLOBS} include and {MAX_GLOBS} exclude globs of 1 to {MAX_GLOB_BYTES} bytes"
@@ -811,6 +820,19 @@ pub(super) fn search(
         walker.budget.skipped_large + walker.budget.skipped_binary + walker.budget.unreadable;
     if skipped > 0 {
         header = header.field("skipped", skipped);
+    }
+    match (context_clamped, empty_globs) {
+        (true, true) => {
+            header = header.field(
+                "note",
+                format_args!("context_clamped={MAX_CONTEXT},empty_glob_ignored"),
+            );
+        }
+        (true, false) => {
+            header = header.field("note", format_args!("context_clamped={MAX_CONTEXT}"));
+        }
+        (false, true) => header = header.field("note", "empty_glob_ignored"),
+        (false, false) => {}
     }
     let next = match walker.stop {
         None | Some(Stop::Cancelled) => None,

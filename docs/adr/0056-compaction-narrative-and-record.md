@@ -120,16 +120,22 @@ On the lead's store, a compaction takes 110–390 s (`progress/compaction.md`,
 - What is cached. The tool block always matches the prompt runs'. The
   system prompt matches when the session uses no context sources, skill
   invocation or output contract, which are per-run suffixes a summarizer
-  does not send. The messages extend the prompt run's last request only
-  when assembly pruned nothing since that run; today assembly stubs
-  read-only results older than four turns, and CX3 removes that
-  divergence. In-run, the messages are a prefix of the run's own last
-  request.
+  does not send. The messages extend the prompt run's last request unless
+  a seam moved the prune watermark in between (§ 6). In-run, the messages
+  are a prefix of the run's own last request.
 - An in-run summarizer whose full prefix would not fit the window, judged
   on the loop's own estimate, or that runs right after the provider rejected
   that estimate, drops the session context before the prompt, as before
   CX2: a cache miss, not an oversized request.
-- CX3 needs a schema bump and is recorded in the ledger when it lands.
+- Pruning at seams (CX3, schema 42 → 43) adds one row read per assembly
+  and one write per seam. A live run stubs its transcript only on
+  overflow, and it records the watermark before it sends, so assembly
+  replays the same stubs. A stub is never stubbed again, live or in
+  replay, because the second stub would name the first's size. Between
+  seams, read-only results older than four turns stay verbatim and the
+  context grows by their bytes until the proactive threshold, which now
+  tries stubbing before a summarizer. A session upgraded to 42 starts at
+  its newest turn and assembles as before.
 
 ## Alternatives considered
 

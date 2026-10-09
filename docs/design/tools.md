@@ -155,7 +155,8 @@ Agent packs add a third source: a pack selected by the session's profile
 contributes its declared skill and command roots as `pack:<id>/...` between
 the native and compatibility tiers, and prepends its persona to the system
 prompt. Packs are directories with a `pack.ron` manifest discovered from the
-global configuration directory and, for trusted projects, `.qq/packs/`; see
+global configuration directory and `.qq/packs/` (each project manifest
+admitted only once its exact content is trusted); see
 `docs/design/architecture.md`.
 
 User-home, administrator-managed, and bundled roots are reserved follow-up
@@ -308,7 +309,8 @@ handle." `offset`/`limit` page it line-numbered like `read_file`
 (`read_tool_result <handle> L<a>-<b>/<total> [next=<n>]`); `query`
 (optionally `regex`) returns matching lines as `L<n>: text`
 (`… query="…" matches=<shown>/<total> lines=<n> [next=]`). A page stops
-on a whole line at 32 KiB and names the next offset. Explicit reads
+on a whole line at 32 KiB and names the next offset. An empty `query`
+pages instead of searching. Explicit reads
 return **exact, unmasked bytes**: the model asked for a specific range of
 something it already produced, and masking there would make `.env`
 debugging impossible; the inline preview stays masked so secrets do not
@@ -344,14 +346,36 @@ fixed per-session cap (4 MiB), and a persist that would exceed it fails
 the run. That is the backstop against unbounded growth, not window
 management.
 
-Result pruning is the first shedding mechanism: during assembly, read-only
-built-in results older than the last four model turns
-(`CONTEXT_PRUNE_KEEP_TURNS`) are replaced by stubs naming the tool, arguments,
-and size (preceded by the result's header line when it has one), because the
-agent can re-derive them on demand. Mutating, shell, and MCP outputs are never
-pruned — they are not re-derivable. The stored rows are untouched; pruning is
-a property of assembly alone, and a run that would overflow the model window
-mid-run applies the same stubbing to its live transcript before failing.
+Result pruning is the first shedding mechanism: read-only built-in results
+older than the last four model turns (`CONTEXT_PRUNE_KEEP_TURNS`) are
+replaced by stubs naming the tool, arguments, and size (preceded by the
+result's header line when it has one), because the agent can re-derive them
+on demand. Mutating, shell, and MCP outputs are never pruned — they are not
+re-derivable. A stub is never stubbed again. The stored rows are untouched.
+
+Pruning moves only at seams, so between seams each request extends the last
+one byte for byte and the provider prefix cache keeps hitting (ADR-0056 § 6).
+The session stores a durable watermark (`sessions.prune_through_ordinal`,
+`prune_through_turn`: a prompt and one of its run's turns). Assembly stubs
+as if the context ended at that turn: results within the four turns before
+it stay verbatim, as does everything after it. Two seams move the
+watermark, and neither moves it backwards:
+
+- **Live overflow prune.** A run whose next request would overflow the
+  window stubs its live transcript first. It records the watermark at its
+  newest committed turn (`RuntimeEvent::ContextPruned`) before the stubbed
+  request is sent, so the next run assembles the same stubs.
+- **Proactive threshold.** A prompt planned to compact
+  (`ContextPlan::Compact`: inside the last tenth of the window, or over the
+  4 MiB storage backstop) first moves the watermark to the newest turn
+  before it and reassembles, at most once per run. When the stubbed
+  context fits, it is sent without a summarizer; otherwise it compacts as
+  before. The backstop makes this seam reachable for a model with no
+  declared window, which never overflows live.
+
+A session upgraded to schema 43 starts with its watermark at its newest
+turn, so it assembles exactly as before. A new session has no watermark
+until its first seam and stubs nothing.
 
 Compaction is the second. The summarizer writes a short narrative in five
 sections (Intent, Decisions and constraints, Work state, Open problems, Next
@@ -546,6 +570,11 @@ description and the `cursor` schema property say the same.
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
 `hint=case_insensitive_matches=N` so the model need not retry blind.
+`context` above 5 clamps to 5 with `note=context_clamped=5`, and an empty
+string in `include`/`exclude` (or `tree`'s `glob`) means no filter rather
+than `bad_glob`, with `note=empty_glob_ignored`. An empty `read_tool_result`
+`query` pages and carries `note=empty_query_ignored`; an `edit_file` call with
+an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
@@ -607,8 +636,12 @@ columns align across ranges; CR is stripped from CRLF files (the hash is of
 the bytes, so the guard is unaffected); lines over 2 000 bytes clip with
 `…+N` and the header counts them in `clipped=`. `ranges` (`"12"`,
 `"40-80"`, `"400-"`) are merged when they overlap or touch, emitted
-ascending, and separated by `--`; `offset`/`limit` is the one-range form
-and the two are mutually exclusive. A read is never cut mid-line: the 32
+ascending, and separated by `--`; `offset`/`limit` is the one-range form.
+When both are given, `ranges` wins and the header carries
+`note=offset_ignored`; a comma inside one range (`"370,470"`) reads as
+`-`. Models that fill every optional field send both, nearly always with
+`offset` equal to the first range's start, so refusing cost a turn for
+nothing (tool-layer D9). A read is never cut mid-line: the 32
 KiB default budget stops on a whole row, the header says
 `truncated=bytes`, and the marker names `offset=<next>` to continue from.
 The gutter is deliberate — dropping it saves tokens and costs edit
@@ -743,7 +776,9 @@ per-session grant, off by default.
 
 `edit_file` takes a batch of edits, each an exact `old`/`new` pair or an
 insertion relative to an anchor (`insert_before`/`insert_after` + `new`),
-rather than a unified diff. Exact strings are what models produce most
+rather than a unified diff. An empty string in an unused form is absent, so
+`{"old":"","insert_after":"x",…}` is an insertion; an empty string that is
+the only form given still fails. Exact strings are what models produce most
 reliably, validation is trivial, and a failed match returns a precise,
 retryable error instead of a mis-applied hunk. Rejected on the way here:
 unified-diff input (models mis-count hunks), line-range edits (numbers

@@ -8421,6 +8421,12 @@ mod tests {
                 profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
         )
         .unwrap();
+        // The edited manifest is new content and is reviewed again first.
+        assert!(matches!(
+            factory.plan_for_profile(&request, &reviewer),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+        factory.inner.config.grant_pending_trust(&request).unwrap();
         let error = factory.plan_for_profile(&request, &reviewer).unwrap_err();
         assert!(matches!(
             error,

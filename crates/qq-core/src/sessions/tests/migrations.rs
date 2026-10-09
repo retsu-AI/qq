@@ -3294,3 +3294,107 @@ fn version_forty_one_gains_the_child_report_table_and_rejects_a_bad_shape() {
         Err(SessionRuntimeError::CONSTRAINT)
     ));
 }
+
+/// Schema 43 adds the prune watermark (ADR-0056 § 6). A schema-42 session
+/// with history upgrades with the watermark at its newest committed turn, so
+/// it assembles exactly as it did at 42 (everything stale stubbed); a
+/// session without turns stays unset. A column with the wrong shape is
+/// refused.
+#[test]
+fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    let workspace = WorkspaceId::from_bytes([0x42; 16]).to_string();
+    let with_history = SessionId::from_bytes([0x43; 16]).to_string();
+    let empty = SessionId::from_bytes([0x44; 16]).to_string();
+    connection
+        .execute(
+            "INSERT INTO workspaces(id, path) VALUES (?1, '/v42-watermark')",
+            [&workspace],
+        )
+        .unwrap();
+    for session in [&with_history, &empty] {
+        connection
+            .execute(
+                "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 't', 'idle', 1, 1)",
+                [session, &workspace],
+            )
+            .unwrap();
+    }
+    for (run, ordinal, turns) in [(0x51_u8, 1_u64, 2_u32), (0x52, 3, 3)] {
+        let run_id = RunId::from_bytes([run; 16]).to_string();
+        let message_id = MessageId::from_bytes([run; 16]).to_string();
+        connection
+            .execute(
+                "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                  assistant_message_id, status, created_at_ms)
+                 VALUES (?1, ?2, ?1, ?3, ?3, 'completed', 1)",
+                params![run_id, with_history, message_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages(id, session_id, run_id, ordinal, role, state, output,
+                                      created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 'user', 'complete', 'p', 1)",
+                params![message_id, with_history, run_id, ordinal],
+            )
+            .unwrap();
+        for turn in 1..=turns {
+            connection
+                .execute(
+                    "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json)
+                     VALUES (?1, ?2, '[]')",
+                    params![run_id, turn],
+                )
+                .unwrap();
+        }
+    }
+    for statement in [
+        "ALTER TABLE sessions DROP COLUMN prune_through_ordinal",
+        "ALTER TABLE sessions DROP COLUMN prune_through_turn",
+        "UPDATE metadata SET value = '42' WHERE key = 'schema_version'",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        STORE_SCHEMA_VERSION.to_string()
+    );
+    let watermark = |session: &str| -> (Option<u64>, Option<u32>) {
+        connection
+            .query_row(
+                "SELECT prune_through_ordinal, prune_through_turn FROM sessions WHERE id = ?1",
+                [session],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(watermark(&with_history), (Some(3), Some(3)));
+    assert_eq!(watermark(&empty), (None, None));
+    drop(connection);
+
+    let (connection, _) = open_database(&path).unwrap();
+    for statement in [
+        "ALTER TABLE sessions DROP COLUMN prune_through_turn",
+        "ALTER TABLE sessions ADD COLUMN prune_through_turn TEXT",
+    ] {
+        connection.execute(statement, []).unwrap();
+    }
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+}

@@ -112,7 +112,8 @@ top-level configuration. Not to be confused with a
 
 A directory with a `pack.ron` that bundles profiles, a persona prompt,
 skills, commands, and MCP servers, so a setup can be shared. A project's
-packs load only once you [trust](#trust) it. See [`packs`](configuration.md#packs).
+packs load only once you [trust](#trust) each `pack.ron`; editing one asks
+again. See [`packs`](configuration.md#packs).
 
 ### Roster
 

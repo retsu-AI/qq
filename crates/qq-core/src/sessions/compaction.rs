@@ -145,10 +145,11 @@ pub(super) fn start_auto_compaction(
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  prompt_identity_json,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
-                 created_at_ms, started_at_ms, plan_identity_json, plan_descriptor_json
+                 created_at_ms, started_at_ms, plan_identity_json, plan_descriptor_json,
+                 activity
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7,
-                 ?8, ?9, 0, ?10, ?10, ?11, ?12
+                 ?8, ?9, 0, ?10, ?10, ?11, ?12, 'compacting'
              )",
         params![
             run_id.to_string(),
@@ -195,6 +196,24 @@ pub(super) fn start_auto_compaction(
             plan: Some(Box::new(audit.plan_identity.clone())),
         },
     )?;
+    // A compaction run reports `compacting` for its whole life, from the
+    // transaction that starts it, so even a run cancelled before its first
+    // poll said what it was.
+    append_event(
+        &transaction,
+        EventContext::for_run_ids(
+            store_id,
+            original.identity.workspace_id,
+            original.identity.session_id,
+            run_id,
+            None,
+            now,
+        ),
+        SessionEvent::RunActivityChanged {
+            run_id,
+            activity: RunActivity::Compacting,
+        },
+    )?;
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
@@ -215,6 +234,7 @@ pub(super) fn start_auto_compaction(
             session_model: original.session_model.clone(),
             model: original.model.clone(),
             messages: Vec::new(),
+            message_effects: Vec::new(),
             context_compaction_attempted: original.context_compaction_attempted.saturating_add(1),
             context_compaction_failed: false,
             context_compaction_remaining: false,
@@ -655,9 +675,10 @@ pub(super) fn start_in_run_compaction(
                  id, session_id, command_id, user_message_id, assistant_message_id,
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
-                 created_at_ms, started_at_ms
+                 created_at_ms, started_at_ms, activity
              ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8
+                 ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8,
+                 'compacting'
              )",
         params![
             run_id.to_string(),
@@ -685,6 +706,22 @@ pub(super) fn start_in_run_compaction(
             session: Box::new(summary),
             run_id,
             plan: None,
+        },
+    )?;
+    // Reported from the start transaction, as for a between-run step.
+    append_event(
+        &transaction,
+        EventContext::for_run_ids(
+            store_id,
+            prompt_run.identity.workspace_id,
+            prompt_run.identity.session_id,
+            run_id,
+            None,
+            now,
+        ),
+        SessionEvent::RunActivityChanged {
+            run_id,
+            activity: RunActivity::Compacting,
         },
     )?;
     transaction.commit()?;

@@ -329,7 +329,15 @@ pub(crate) fn edit_preview(name: &str, arguments: &str) -> Option<EditPreview> {
                     diff.push('\n');
                     current_path = Some(&edit.path);
                 }
-                match (&edit.old, &edit.insert_before, &edit.insert_after) {
+                match (
+                    edit.old.as_deref().filter(|value| !value.is_empty()),
+                    edit.insert_before
+                        .as_deref()
+                        .filter(|value| !value.is_empty()),
+                    edit.insert_after
+                        .as_deref()
+                        .filter(|value| !value.is_empty()),
+                ) {
                     (Some(old), None, None) => {
                         push_diff_lines(&mut diff, '-', old, MAX_PREVIEW_SIDE_BYTES);
                         push_diff_lines(&mut diff, '+', new, MAX_PREVIEW_SIDE_BYTES);
@@ -1231,6 +1239,44 @@ mod tests {
             "git diff | head -n 250",
             "git diff | head -n 250 --extra"
         ));
+    }
+
+    #[test]
+    fn edit_preview_normalizes_empty_unused_forms() {
+        for (fields, diff) in [
+            (
+                r#""old":"","insert_before":"","insert_after":"anchor","new":"text""#,
+                "  anchor\n+ text\n",
+            ),
+            (
+                r#""old":"","insert_before":"anchor","insert_after":"","new":"text""#,
+                "+ text\n  anchor\n",
+            ),
+            (
+                r#""old":"old","insert_before":"","insert_after":"","new":"text""#,
+                "- old\n+ text\n",
+            ),
+        ] {
+            let preview = edit_preview(
+                "edit_file",
+                &format!(r#"{{"edits":[{{"path":"a.rs",{fields}}}]}}"#),
+            )
+            .unwrap();
+            assert_eq!(preview.path, "a.rs");
+            assert_eq!(preview.diff, diff);
+        }
+        for fields in [
+            r#""old":"","insert_before":"","insert_after":"","new":"text""#,
+            r#""old":"old","insert_after":"anchor","new":"text""#,
+        ] {
+            assert!(
+                edit_preview(
+                    "edit_file",
+                    &format!(r#"{{"edits":[{{"path":"a.rs",{fields}}}]}}"#)
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]
