@@ -61,11 +61,12 @@ Concrete shape:
   `read`, `run`, `approve`, `session_admin`, and `client_admin`. No scope is
   implied by another except where a route explicitly also requires `read` to
   return state.
-- The optional pin is encoded exactly as `sha256:` followed by the lowercase
-  hexadecimal SHA-256 fingerprint of the DER certificate. Native self-signed
-  enrollment requires the pin before its first HTTPS exchange and rejects a
-  mismatch; browser clients use browser trust/installed CA validation and do
-  not consume the QR pin. No client makes an insecure first connection.
+- The optional pin is encoded exactly as `sha256:` followed by 64 lowercase
+  hexadecimal characters of the DER certificate's SHA-256 digest, with the
+  query value percent-encoded. Native self-signed enrollment rejects a missing
+  pin, wrong algorithm/length, or mismatch before its first HTTPS exchange.
+  Browser clients use browser trust/installed CA validation and do not consume
+  the QR pin. No client makes an insecure first connection.
 - **Enrollment**: `POST /v1/enroll { pairing_code, client_name }` is the only
   unauthenticated data route; CORS preflight carries no application data.
   `/v1/health` remains authenticated by the loopback token or an enrolled
@@ -90,13 +91,16 @@ Concrete shape:
   revokes it and issues a new credential. Revocation invalidates the cache
   entry before it is acknowledged; the next request reloads the hash, scope
   bitset, and revocation state together. Active SSE streams are registered by
-  `client_id`; revocation durably commits the revoked row and installs an
-  in-memory admission fence. Authentication rechecks that fence before a
-  previously-authenticated request may register a stream. Existing streams
+  `client_id`; revocation first installs an in-memory admission fence and
+  increments its epoch under the stream-registry lock, then durably commits
+  the revoked row. Registration rechecks the fence/epoch under that same lock
+  so a previously-authenticated request cannot register after the fence.
+  Existing streams
   are cancelled and joined before success is acknowledged, with a bounded 5 s
   drain. If cleanup or persistence is unconfirmed, return typed
-  `RevocationPending` while retaining the revoked state; retry reconciles the
-  original operation and never reports false success or restores credentials.
+  `RevocationPending` while retaining the fence and any committed revoked row;
+  retry reconciles the original operation and uncertain durable write, never
+  reports false success, and never restores credentials.
   No synchronous mutex is held across await. Already-transmitted bytes cannot
   be recalled. Planned tests cover acknowledgement, retry, persistence
   failure, concurrent authentication/open-stream races, and bounded drain.

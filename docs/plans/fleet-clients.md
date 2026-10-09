@@ -152,8 +152,9 @@ server, like `qq-client` today.
   index, bytes }`, and `commit { revision }` are validated; reassembly is at
   most 8 MiB and 64 chunks, and apply occurs only after a complete validated
   revision. Oversized operation payloads split before serialization; every
-  encoded frame includes its envelope in the 1 MiB cap. A bounded delta-backlog
-  overflow requests a resnapshot and never silently drops operations.
+  encoded frame includes its envelope in the 1 MiB cap. Each view's pending
+  delta backlog is capped at 256 operations and 1 MiB encoded; overflow
+  requests a resnapshot and never silently drops operations.
   Oversized views use bounded viewport/paging.
 
 Alternatives for the spike to measure, not to adopt by default:
@@ -261,7 +262,7 @@ policy changes do not bump the version unless their wire shape is incompatible.
    clears locally. Phones and background tabs use it: the fleet overview costs
    bytes per *state change*, not per token. Each workspace keeps independent
    summary and full-detail cursor namespaces and a bounded summary snapshot
-   envelope: at most 256 session summaries or 1 MiB encoded per page, including
+   envelope: at most 256 session summaries and 1 MiB encoded per page, including
    pending tool calls and `ApprovalPreview`, with its own summary cursor.
    Opening a session first fetches an authoritative
    full snapshot and its full-detail cursor, then changes only that workspace's
@@ -300,7 +301,7 @@ Authorization is fail-closed at the route and command boundary:
 | pairing-code exchange | none; pairing-code validation supplies its own rate-limited authority |
 | `/v1/health`, `/v1/capabilities`, `/v1/models`, workspace/session catalog, snapshots, event streams, transcript pages, bounded browse, spill reads | `read` |
 | create/fork a session; submit/queue/steer/cancel a run; `/v1/sessions/compact`; change model/profile/effort | `run` plus `read` for returned state |
-| workspace resolution, including a known path, | `run` plus `read`; it is a journaled mutation and is never authorized by `read` alone |
+| workspace resolution, including a known path | `run` plus `read`; it is a journaled mutation and is never authorized by `read` alone |
 | choose or tighten an approval mode | `run` plus `read`, bounded by the server ceiling; run-only callers may select only `ReadOnly` or `Ask` |
 | choose `Auto`/`Full`, loosen a ceiling, or inherit a more-permissive fork | `run` plus `read` and `approve`; `Supervised` remains child-only and server ceilings are enforced |
 | approve, deny, or grant an approval scope; `/v1/sessions/approval-delegate` | `approve` plus `read`; never implied by `run` |

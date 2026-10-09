@@ -179,7 +179,7 @@ U6 sequencing; one `apps/shell/` mobile path; M3 background/local notification
 tests; revocation fencing; fail-closed approval and workspace scopes; granted
 scope and QR TLS-pin contracts; bounded subscriptions/cache/projections;
 trusted endpoint sets; authoritative paged run summaries; and revisioned
-FleetPatch replacement. Documentary DAG and relative-link checks passed on
+FleetPatch replacement. Parsed full task DAG and relative-link checks passed on
 2026-10-09; no runtime, provider, remote, or hosted checks ran. Decision #6
 credential storage remains open; decision 12 remote push remains held.
 Independent review and hosted CI remain pending; no slice is marked shipped.

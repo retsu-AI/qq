@@ -86,7 +86,7 @@ mobile. Phases 1 and 2 are independent and may run in parallel worktrees.
 | S2 | 2 | Client enrollment: scoped credentials, pairing, revocation, CLI | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `src/cli.rs`, `src/main.rs` |
 | S3 | 2 | CORS layer, off by default | — | `crates/qq-server/` |
 | S4 | 2 | Explicit non-loopback bind with TLS, gated on enrollment | S2 | `crates/qq-server/`, `crates/qq-protocol/src/local.rs`, `src/main.rs`, `docs/runbooks/remote-server.md` |
-| S5 | 2 | Workspace catalog and bounded browse under configured roots | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `crates/qq-protocol/` |
+| S5 | 2 | Workspace catalog, bounded browse and authoritative run listing | S1 | `crates/qq-server/`, `crates/qq-core/src/store*`, `crates/qq-protocol/` |
 | S6 | 2 | `server` configuration section and root translation | S2–S5 | `crates/qq-config/`, `src/` |
 | TB | gate | Tracer bullet: throwaway page streams a transcript from a remote server | W1, W2, S1, S2, S3 | none committed |
 | S7 | 2 | Server stream tiers, transcript paging, approval previews, spill reads | S2, S5 | `crates/qq-server/`, `crates/qq-protocol/`, `crates/qq-client/` |
@@ -137,8 +137,8 @@ Shipped in #19: the reducer and client model live in `qq-client::state`; the TUI
   endpoint is validated as HTTPS, tied to the `ServerId` and credential
   audience, and, when supplied by pairing, its certificate pin; `base_url`
   remains the compatibility/default endpoint.
-  Additional endpoints come only from the pairing contract or an explicit
-  operator action. Redirects and untrusted URL discovery never run with a
+  Pairing supplies only the initial URL; additional endpoints require an
+  explicit operator approval. Redirects and untrusted URL discovery never run with a
   bearer credential, and address deduplication follows identity/trust
   validation. Persist the last-good endpoint and ordering.
 - Bounds: at most 16 servers; per-server channels as today (64 requests, 256
@@ -182,6 +182,17 @@ hash lookup per request; measure).
   `POST /v1/clients/revoke` require loopback or `client_admin`.
 - Auth middleware accepts the loopback token or an enrolled credential in
   constant time; revoked credentials fail immediately.
+- S2 tests run-only `ReadOnly`/`Ask` creation/fork/tightening under the server
+  ceiling, and rejects `Auto`/`Full`, more-permissive inherited forks, or ceiling
+  loosening without `run`/`read`/`approve`. `Supervised` remains child-only.
+- Revocation installs the registry fence/epoch before the durable write;
+  stream registration revalidates both under the same lock. Existing SSE
+  streams are cancelled and joined before acknowledgement within a 5 s drain.
+  Unconfirmed persistence or cleanup returns `RevocationPending`, retains the
+  fence and any committed revoked row, and retries reconcile the original
+  write. Future tests cover acknowledged close, concurrent authentication and
+  stream opening, persistence failure, drain timeout, and retry; no mutex spans
+  await and no unconfirmed operation is reported successful.
 - CLI: `qq pair` prints a code and a
   `qq://pair?base_url=…&server_id=…&code=…[&tls_pin=sha256:<DER-cert-fingerprint>]` URL.
   The base URL is the
@@ -189,6 +200,10 @@ hash lookup per request; measure).
   never inferred from a listener bind. Without one, QR/deep-link minting fails
   with an actionable error. Until S6 persists the value, the S2 override is
   required. `qq clients list|revoke` manages credentials.
+- S2's QR query value is percent-encoded `sha256:` plus exactly 64 lowercase
+  hexadecimal characters of the DER certificate digest. S2/S4/U2 fixtures
+  reject missing native self-signed pins, wrong algorithm/length and mismatch
+  before the first HTTPS exchange, while browsers retain CA trust validation.
 - Independent second review (auth surface). Security review on the PR.
 
 **Docs:** ADR-0015; `docs/design/protocol.md` auth section.
@@ -276,16 +291,22 @@ U1 owns the shared workspace and the IPC contract fixtures: every encoded
 `FleetPatch` frame is ≤1 MiB/256 operations including its envelope, oversized
 operations split before serialization, and replacement uses validated
 `begin { revision, total_bytes, total_chunks }` / `chunk` / `commit` frames,
-bounded to 8 MiB and 64 chunks. A complete revision is applied atomically;
-overflow requests a resnapshot and never drops authoritative events.
+bounded to 8 MiB and 64 chunks. Each view's backlog is ≤256 operations/1 MiB.
+A complete revision is applied atomically; overflow requests a resnapshot
+and never drops authoritative events. Fixtures reject incomplete, duplicate,
+wrong-revision or oversized chunks without rendering a partial replacement.
 
 ### W4 — Durable cache and outbox
 
 **Inputs:** U1, W3, S7. W4 owns the bounded projection/cursor/approval-preview
-transaction, summary-page envelope (256 summaries or 1 MiB), byte LRU, and
+transaction, summary-page envelope (≤256 summaries and ≤1 MiB), byte LRU, and
 dependent-command outbox. Future crash, cursor-expiry, concurrent tier
 transition, and cache-write-failure tests prove a persisted cursor never gets
-ahead of its projection.
+ahead of its projection. Summary pages include pending tool calls and
+`ApprovalPreview`, bind all continuation pages to one durable watermark, and
+resnapshot rather than advance an incomplete projection's cursor. W4 also
+owns the per-view IPC backlog limit (256 operations/1 MiB) and overflow
+resnapshot fixtures; D1 owns the bounded replacement reassembly.
 
 ### U2 — Servers screen
 
@@ -354,6 +375,7 @@ Static hosting on Cloudflare Pages.
 
 - **M1** Inbox-first mobile layout in the shared UI plus the `< 300 ms` warm
   startup and mobile frame gates, measured through the Tauri mobile shell.
+  **Inputs:** D1, U5.
 - **M2** Keychain/Keystore credentials; QR pairing.
 - **M3** Platform background fetch and local notifications when the OS grants
   time, with planned tests for denied notification grants, suspension, and
