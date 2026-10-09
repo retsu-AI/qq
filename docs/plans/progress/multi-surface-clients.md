@@ -16,6 +16,7 @@ dated entries appended below, newest last.
 | S5 | Workspace catalog | Planned | | |
 | S6 | `server` configuration | Planned | | |
 | TB | Tracer bullet gate | Planned | | Lead runs; `g-multi-surface-tb.md` |
+| ADR-0017/0018 | UI stack spike + ADRs | In review | `devin/*-adr-0017-ui-stack-spike` | Leptos accepted by founder 2026-09-24 |
 | U1–U7 | Web app | Planned | | ADR-0017, ADR-0018 |
 | D1–D3 | Desktop shell | Planned | | |
 | M1–M3 | Mobile | Planned | | |
@@ -127,3 +128,30 @@ Open: `ClientPort: Send` bound (port.rs) is still native-only shaped; W3.
 W2 merged as #19 (`e0c8121`) on 2026-09-10; the row above had stayed at "In
 review". Phase A (W1, S1, S3) and W2 are the shipped set; S2 and S4 wait on
 ADR-0015/0016 and the rustls root request. No slice in progress.
+
+### 2026-09-24 — ADR-0017 spike and ADR-0018 drafted
+
+Spike in `benchmarks/wasm-ui-spike/` (own workspace, not a root member):
+`baseline` (no framework), `leptos` (0.8.20 CSR), `dioxus` (0.7.10 web) on
+one shared `spike-common` (health probe, `ServerConnection`, `SessionClient`,
+snapshot, `fetch` SSE with reconnect, `SessionStore`, frame monitor), plus a
+framework-free ES-module host that loads both as remotes. Measured against a
+real `qq serve` fed by a deterministic OpenAI-compatible fake model, in Chrome
+over CDP.
+
+Gates: bundle (gzip wasm) baseline 348 KB, Leptos 379 KB, Dioxus 461 KB; JS
+glue 34 / 37 / 86 KB raw. Live SSE 300–600 events/s: apply mean ≤ 0.005 ms,
+no sustained long frames on any candidate. Host: Leptos import 5 ms / init 8
+ms / mount ≤ 3 ms; Dioxus 12 / 10 / ≤ 0.4 ms; both unmount to zero nodes.
+Recommendation: Leptos, with the remote contract (`default()`, `mount(root,
+configJson)`, `unmount()`) framework-neutral at the ES-module boundary; U1
+size gate 600 KB gzip per artifact. Founder decision requested in the PR.
+Deviations: the plan said "W1 spike"; W1 shipped without it (see its
+receipt), so the spike is its own PR ahead of U1. Dioxus needed Trunk's
+pinned `wasm-opt` (system Binaryen 105 cannot parse its output) and has no
+unmount API — the spike aborts the renderer future. ADR-0018 written now
+because U1 cannot start without the workspace layout.
+Docs: `docs/adr/0017-client-ui-stack.md`, `docs/adr/0018-apps-workspace.md`,
+ADR index, `root.md` allocation rows.
+Open: founder accept/override of ADR-0017; W3 (`qq-client::servers`) is the
+next slice and unblocks U1's shell Overview.
