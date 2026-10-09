@@ -980,6 +980,7 @@ impl SessionView {
     pub fn evict_body(&mut self) {
         self.messages = None;
         self.tool_calls = None;
+        self.side_questions = Vec::new();
         self.live_tool_output.clear();
         self.approval_previews.clear();
         self.tool_timing.clear();

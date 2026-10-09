@@ -898,3 +898,48 @@ fn side_projection_is_separate_and_repeated_updates_replace_by_id() {
     assert!(view.prompt_history.is_empty());
     assert_eq!(view.summary, summary(session));
 }
+
+#[test]
+fn side_questions_are_evicted_with_the_body_and_ignored_while_cold() {
+    let session = SessionId::from_bytes([3; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session), &[], 0);
+    let item = |byte: u8| qq_protocol::SideQuestionSnapshot {
+        id: RunId::from_bytes([byte; 16]),
+        thread_id: RunId::from_bytes([9; 16]),
+        session_id: session,
+        question: "side only".to_owned(),
+        answer: "a".repeat(1024),
+        state: qq_protocol::SideQuestionState::Running,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 0,
+        created_at_ms: 1,
+        finished_at_ms: None,
+    };
+    let update = |sequence: u64, byte: u8| {
+        envelope(
+            sequence,
+            session,
+            SessionEvent::SideQuestionUpdated {
+                side_question: Box::new(item(byte)),
+            },
+        )
+    };
+    // Summary-only: nothing accumulates.
+    for byte in 0..80 {
+        store.reduce_event(&update(u64::from(byte) + 1, byte), context(&[]));
+    }
+    assert!(store.get(&session).unwrap().side_questions.is_empty());
+
+    store.warm_empty(session);
+    store.reduce_event(&update(100, 100), context(&[]));
+    assert_eq!(store.get(&session).unwrap().side_questions.len(), 1);
+
+    store.get_mut(&session).unwrap().evict_body();
+    let view = store.get(&session).unwrap();
+    assert!(!view.is_warm());
+    assert!(view.side_questions.is_empty());
+    store.reduce_event(&update(101, 101), context(&[]));
+    assert!(store.get(&session).unwrap().side_questions.is_empty());
+}
