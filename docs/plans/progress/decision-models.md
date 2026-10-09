@@ -14,7 +14,7 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
 | DM5 | OpenAI Decisions adapter | Blocked (no published API reference as of 2026-09-30) | — | |
 | DM6 | `decision_models` configuration and aliases | Planned | — | Owner decision 2 |
-| DM7 | Calibration table, shadow-only rule for `(provider, model, rubric, effect)` | Planned | — | After JV6; D7 only, JV7 owns A7 |
+| DM7 | Calibration table, shadow-only rule for `(provider, model id, rubric id, effect class)` | Planned | — | After JV6; D7 only, JV7 owns A7 |
 | DM8 | Neutral names in core and protocol | Planned | — | With JV5's protocol bump |
 | DM9 | OpenAI vs Jev paired shadow comparison | Planned | — | ENG-809 spend approval |
 | JV0 | Consolidate Jev docs | Shipped (`08694a3`, #210) | [#210](https://github.com/retsu-AI/qq/pull/210) | |
@@ -23,7 +23,7 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 | JV1b | Reliable Off remainder child | Planned | — | A1 remainder: env/runtime-off and trust-change tests, revocation racing a result, server-side Off (JV9). |
 | JV2 | Headless waits for the delegate | Shipped (`0e2eb64`, #215) | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
 | JV3 | Precision-safe parsing | Planned | — | Lands in DM4 |
-| JV4 | Effective task context | Planned | — | After JV1 |
+| JV4 | Effective task context | Planned | — | After JV1a |
 | JV5 | Durable hold lifecycle (ADR-0047) | Planned | — | After JV2 |
 | JV6 | Per-attempt receipts, spend admission | Planned | — | After JV5 |
 | JV7 | Shadow calibration | Planned | — | Needs ENG-809 spend approval |
