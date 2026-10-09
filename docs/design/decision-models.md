@@ -3,8 +3,7 @@
 This is the single design document for QQ's optional **decision models**:
 models that answer a bounded, typed question with a probability
 distribution instead of generating text. TypeSafe Jev is the only one QQ
-ships today. OpenAI's Decisions API is the second, and it will not be the
-last.
+ships today. Additional vendors belong to the future decision-model plan.
 
 This document covers the built Jev integration, findings, and historical
 provenance: what decision models are and what each vendor offers (§ 1), what
@@ -167,8 +166,8 @@ and consumers that can settle holds.
 
 ### 1.4 What QQ may rely on across vendors
 
-Only what a provider **declares** in its capabilities (planned §5.2) and QQ
-has **verified** with fixtures:
+Only what a provider **declares** in its capabilities ([planned §5.2](../plans/decision-models.md#52-layers-and-ownership))
+and QQ has **verified** with fixtures:
 
 - the question kinds it supports;
 - the maximum number of labels, anchors and questions, and the maximum

@@ -121,17 +121,17 @@ parser" mean the `qq-decision` consumers.
 | Slice | Goal | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- |
 | JV0 | Consolidate Jev docs | — | `docs/**` | Shipped (`08694a3`, #210) |
-| JV1 | Effective activation and reliable Off aggregate (finding 5) | JV0 | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1; Planned until both child slices are proven |
-| JV1a | Effective activation child | JV1 | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1 (activation); Shipped (`a944be8`, #214, ADR-0052) |
-| JV1b | Reliable Off remainder child | JV1 | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1 (remainder); Planned: env/runtime-off and trust-change tests, revocation racing a result, and server-side Off (JV9) |
+| JV1 | Effective activation and reliable Off aggregate (finding 5) | JV1a, JV1b | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1; Planned until both child slices are proven |
+| JV1a | Effective activation child | JV0 | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1 (activation); Shipped (`a944be8`, #214, ADR-0052) |
+| JV1b | Reliable Off remainder child | JV1a, JV9 | `src/runtime.rs`, `src/plan.rs`, `qq-config` | A1 (remainder); Planned: env/runtime-off and trust-change tests, revocation racing a result, and server-side Off (JV9) |
 | JV2 | Headless waits for the delegate (finding 4). **Shipped (#215)** | JV0 | `src/main.rs`, `src/headless.rs` | A2 |
 | JV3 | Precision-safe parsing (finding 6), done once in DM4 | DM3 | `qq-decision` validator | A3 |
-| JV4 | Effective task context in approval requests (finding 2) | JV1 | `qq-core/src/sessions/{runtime,tool_calls}.rs`, approval consumer | A4 |
+| JV4 | Effective task context in approval requests (finding 2) | JV1a | `qq-core/src/sessions/{runtime,tool_calls}.rs`, approval consumer | A4 |
 | JV5 | Durable hold lifecycle ([ADR-0047](../adr/0047-jev-approval-hold-lifecycle.md), finding 3) | JV2 | `qq-core/src/sessions/approvals.rs`, tool-call persistence, `qq-protocol`, `qq-client`, `qq-tui`, `src/headless.rs` | A5 |
 | JV6 | Per-attempt receipts and pre-dispatch spend admission (finding 7), using `DecisionError`'s dispatch split | JV5, DM4 | Approval gate, core budget, session store, protocol accounting, `qq-decision` receipt builder | A6 |
 | JV7 | Shadow calibration | JV4, JV6, DM7 | `qq-decision` shadow consumer, evaluation projection | A7 |
 | JV8 | Layered approval pilot: effect classes, narrow parallel questions, per-turn batching (findings 1, 7) | JV7, owner scope decision | Approval consumer and composition, pilot fixtures | A8 |
-| JV9 | `/decisions` panel (was `/jev`), explained preset, one server-side Off | JV1, JV6, DM6 | `qq-tui`, `qq-client`, `qq-protocol` session command | A9 |
+| JV9 | `/decisions` panel (was `/jev`), explained preset, one server-side Off | JV1a, JV6, DM6 | `qq-tui`, `qq-client`, `qq-protocol` session command | A9 |
 | JV10 | Routing by adequacy (finding 8) | JV3, JV6 | Routing consumer, candidate metadata | A10 |
 | JV11 | One further acceleration experiment; now drawn from § DX | JV6, JV10 result | That seam only | A11 |
 | JV12 | `enforce`: batch and parallelize, or relabel it as a high-assurance profile | JV6 | `qq-core/src/lib.rs` checkpoint path, `runtime/checkpoint.rs` | A12 |
@@ -159,8 +159,9 @@ are not experiments. They are the product of JV6, JV7 and JV9.
 
 ### Ordering
 
-- JV1's remainder, JV4 and DM1 are independent. Each can run on its own
-  worktree.
+- JV4 and DM1 can start from the shipped JV1a activation under their stated
+  inputs. JV1b's remaining Off proof waits for JV9's server-side Off;
+  aggregate JV1 closes only after both child slices, not before they start.
 - DM2 → DM3 → DM4 is one writer at a time, because it touches the same root
   files as JV1 and JV4. Coordinate through the ledger.
 - JV4 and JV5 touch shared session files, so they also take one writer at a

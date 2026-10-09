@@ -167,13 +167,18 @@ its qualification procedure to § Qualification procedure.
 - QQ readiness chat `01a0d95e-d2ce-7350-9a9a-125f78a1be6a` owns this bounded PR231 documentation repair; original accepted decision and planned DM1–DM9 scope are preserved.
 - Independent docs review accepted architecture/authority/calibration separation and identified one stale plan-index clause. The index now requires only plan acceptance; ADR0055 was already accepted by the owner. PR description will match that settled decision and the current ADR allocation. No runtime, configuration, protocol or schema changed.
 
+- Focused pinned Rust 1.97.1 verification: `cargo test --locked -p qq --bin qq docs_truth -- --test-threads=2` passed **23 tests**, none ignored (the older five-test author receipt is historical). All 247 relative links in changed Markdown resolve; `git diff --check` passed. Rust/config/build inputs are unchanged by this two-file correction, so unchanged runtime/benchmark gates are reused rather than repeated. Exact new-head hosted checks remain a separate follow-through; backlog root `01a1050a-2286-7392-a390-147f132c9d68` owns integration.
+
 ### 2026-10-09 — PR249 replacement repair
 
 Moved future architecture §§4–7 into the plan and retained built design
 findings/provenance. Repaired `/decisions` A9, DM1 approval gate, complete
 calibration key, JV1a/JV1b statuses, DM7 D7-only acceptance, D2 bounds, and
 DM1/DM5 module ownership. Preserved ADR-0055 acceptance, ADR-0056/main
-entries, decision #6 open, and remote-push decision 12 held. Documentary
-dependency/link checks pass; runtime/provider/paid/CI/independent review remain
-pending. No slice is marked shipped by this entry.
-- Focused pinned Rust 1.97.1 verification: `cargo test --locked -p qq --bin qq docs_truth -- --test-threads=2` passed **23 tests**, none ignored (the older five-test author receipt is historical). All 247 relative links in changed Markdown resolve; `git diff --check` passed. Rust/config/build inputs are unchanged by this two-file correction, so unchanged runtime/benchmark gates are reused rather than repeated. Exact new-head hosted checks remain a separate follow-through; backlog root `01a1050a-2286-7392-a390-147f132c9d68` owns integration.
+entries and the DM0/DM1 shared-file requests. DM5 still waits for its published
+contract; config naming/Off/pilot scope and paid evaluation remain reserved,
+and #166/#170 remain held. Source-parsed26-node/45-edge DAG has no cycles;
+89 local links/15 heading fragments resolve in eight files. These are doc
+consistency checks, with the original23-test receipt retained under October4;
+independent review, publication and hosted CI remain pending. No future
+runtime/provider work ran and no slice is marked shipped by this entry.
