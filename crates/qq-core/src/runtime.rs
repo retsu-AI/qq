@@ -8,6 +8,7 @@ mod gate;
 mod history;
 mod progress;
 mod prompt;
+mod run_loop;
 mod shell_policy;
 mod spill;
 mod steering;
