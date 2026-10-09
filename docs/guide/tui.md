@@ -251,7 +251,8 @@ searchable palette that runs the highlighted command on `Enter`.
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
-| ask or view side questions | `/btw`, `/ask`, `/btw-new` |  |
+| ask or view side questions | `/btw`, `/ask` |  |
+| ask in a new side thread | `/btw-new` |  |
 | cancel only the side question | `/btw-cancel` |  |
 | edit the draft in $EDITOR | `/editor` | `Alt-E` |
 | search prompt history |  | `Ctrl-R` |
@@ -312,8 +313,9 @@ exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
 file inspection is not a consistent filesystem snapshot. Side questions,
 answers, and usage never become main-agent prompts, steering, or goal budget.
 
-One query per session may run, for at most 120 seconds including waits and
-8 model turns. Questions are limited to 8 KiB. Partial answers and independent
+One query per session may run, for at most 8 model turns. Its execution,
+including waits, is cut off at 120 seconds; the final state appears once the
+server has recorded it, which can take a moment longer under heavy load. Questions are limited to 8 KiB. Partial answers and independent
 cost/status are durable and restored after reconnect; interrupted queries are
 not restarted automatically. The same typed submit/cancel commands and side
 projection are available through the session API to embedded and remote clients.
