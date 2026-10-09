@@ -19,7 +19,7 @@ Accepted by every command:
 | --- | --- |
 | `qq` | open the TUI in the current directory; start a new session |
 | `qq --session ID` | open the TUI on an existing session of this workspace |
-| `qq --tui-qa-root DIR` | isolated, credential-free diagnostic fixture ([`../runbooks/tui-qa.md`](../runbooks/tui-qa.md)) |
+| `qq --tui-qa-root PATH` | isolated, credential-free diagnostic fixture ([`../runbooks/tui-qa.md`](../runbooks/tui-qa.md)) |
 
 Requires a terminal on stdin and stdout; in a pipe use `qq ask` or `qq run`.
 

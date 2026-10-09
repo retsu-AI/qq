@@ -325,8 +325,9 @@ without it, `fast` children run at `low` and `balanced` at `medium`, never above
 the parent's own effort, fitted to what the route's catalog entry advertises
 (a model without reasoning is sent none), while `strong` children inherit the
 parent's. The deprecated `worker_model` counts as a `balanced` entry.
-Design: [`../design/architecture.md`](../design/architecture.md) and
-[`../plans/supervised-delegation.md`](../plans/supervised-delegation.md).
+Design: [`../design/architecture.md`](../design/architecture.md)
+(§ Concurrency And Multiple Agents and the `spawn_agent` description under
+§ Structured Input And Steering).
 
 ## `audit`
 

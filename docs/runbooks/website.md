@@ -1,4 +1,4 @@
-# Website
+# Runbook: website
 
 The documentation site at <https://retsu-ai.github.io/qq/> is built from
 `website/` and deployed by `.github/workflows/website.yml`. Its
@@ -35,10 +35,16 @@ binary on those surfaces.
 
 ## Build locally
 
+[nub](https://nubjs.com) and Node 24; `nix develop` provides both. nub reads
+the pnpm-format lockfile and `pnpm-workspace.yaml` as they are, so plain pnpm
+works too, but the lockfile is maintained with nub. How the build generates
+pages from the guide is described in
+[`website/README.md`](../../website/README.md).
+
 ```sh
 nix develop            # node 24 + nub
 cd website
-nub ci
+nub ci                 # strict install from the lockfile
 nub run build          # sync-docs, astro check, astro build, pagefind, check-links
 nub run preview        # http://localhost:4321/qq/
 ```

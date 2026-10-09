@@ -19,11 +19,19 @@ Repository automation for QQ is available through `cargo xtask`.
 - `cargo xtask perf check ...` rejects compatible candidate reports that exceed
   the checked-in regression budgets.
   (`perf` also has hidden `load-worker`, `r4-worker`, and `feed-worker`
-  subcommands that `baseline` spawns as isolated processes; they are not
-  entry points.)
-- `cargo xtask release X.Y.Z` bumps the workspace version and commits it for a
-  PR; `cargo xtask release --tag` tags the merged `main`
-  (`docs/runbooks/release.md`).
+  subcommands that `baseline` spawns as isolated processes. They run only as
+  an optimized build on Linux, so invoke them directly through
+  `cargo run --release --package xtask -- perf <worker> ...`, not the debug
+  `cargo xtask` alias; `docs/runbooks/perf-recording.md` lists the focused
+  cases.)
+- `cargo xtask release X.Y.Z` bumps the workspace version, writes the
+  `CHANGELOG.md` section, and commits it for a PR (`--no-commit` writes the
+  files without committing); `cargo xtask release --tag` tags the merged
+  `main`; `cargo xtask release --docs` moves the guide's and README's version
+  pins once the release's assets are published (`docs/runbooks/release.md`).
+- `cargo xtask homebrew-formula --version X.Y.Z --sums SHA256SUMS` renders the
+  Homebrew tap formula from a release's checksum file
+  (`docs/runbooks/release.md` § Homebrew tap).
 
 See `benchmarks/harbor/README.md` for the reproducible evaluation workflow and
 `benchmarks/perf/README.md` for the performance protocol and metric inventory.

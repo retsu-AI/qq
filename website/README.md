@@ -4,6 +4,10 @@ The landing page and the user guide at <https://retsu-ai.github.io/qq/>.
 A static [Astro](https://astro.build) 5 + [Starlight](https://starlight.astro.build)
 site; no server, client framework, analytics, or third-party scripts.
 
+To change, add, build, preview, or deploy pages, follow
+[`docs/runbooks/website.md`](../docs/runbooks/website.md). This file records
+how the site is put together.
+
 ## The guide is generated, not copied
 
 `docs/guide/*.md` is the only source for the documentation pages.
@@ -26,41 +30,12 @@ guide, or a guide links to a guide that does not exist. Do not edit files under
 `scripts/check-links.mjs` runs after the build and fails on any internal link
 or fragment that does not resolve in `dist/`.
 
-## Add a guide page
-
-1. Write `docs/guide/<name>.md` with one H1.
-2. Add `{ "page": "<name>", "label": …, "description": … }` to the right group
-   in `sidebar.json`.
-3. `nub run build`.
-
-## Develop
-
-[nub](https://nubjs.com) and Node 24; `nix develop` provides both. nub reads
-the pnpm-format lockfile and `pnpm-workspace.yaml` as they are, so plain
-pnpm works too, but the lockfile is maintained with nub.
-
-```sh
-cd website
-nub ci               # strict install from the lockfile
-nub run dev          # http://localhost:4321/qq/  (search needs a production build)
-nub run build        # sync, type-check, build, index search, check links
-nub run preview
-```
-
-## Deploy
-
-`.github/workflows/website.yml` builds on every pull request that touches the
-site or the guide, and deploys to GitHub Pages on push to `main`. Nothing is
-deployed from a PR. `site.config.mjs` is the one place the URL, base path, and
-GitHub link live; moving to a custom domain is two lines there plus
-`public/CNAME`.
-
 ## Layout
 
 ```text
 website/
   astro.config.mjs         Starlight config; sidebar is read from sidebar.json
-  site.config.mjs          URL, base, GitHub link, install commands
+  site.config.mjs          the one place for URL, base, GitHub link, install commands
   sidebar.json             page order, labels, descriptions
   scripts/sync-docs.mjs    docs/guide -> src/content/docs/docs (generated)
   scripts/check-links.mjs  post-build internal link check

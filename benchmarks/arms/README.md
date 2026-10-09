@@ -21,8 +21,9 @@ routes) before running, keeping the *same* primary `--model` for every arm
 | T1 | (no overlay) | continuation: compare a build before and after D1 |
 
 Every arm turns the audit off except B1, so audit spend never confounds a
-delegation comparison. A0, A1, A2, A3, and C1 must be compared against A0; B1
-against A0. T1 has no configuration knob (continuation has no off switch); it
+delegation comparison. A1, A2, A3, B1, and C1 are each compared against the
+A0 baseline, and A3 also against A2 (does depth add anything over one level).
+T1 has no configuration knob (continuation has no off switch); it
 is a build-to-build comparison on the long-output task subset, and `compare`
 tolerates the differing `qq_source_revision`.
 

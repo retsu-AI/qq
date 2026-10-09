@@ -76,7 +76,8 @@ pub enum Command {
     /// The task runs through the same durable session runtime as the TUI and
     /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
-    /// persistence failure, 130 interrupted by Ctrl-C.
+    /// persistence failure, 5 needs input (the model asked a question no
+    /// client could answer), 130 interrupted by Ctrl-C.
     Run(RunArgs),
 
     /// Run the user-scoped QQ server in the foreground.
@@ -343,8 +344,11 @@ pub enum ConfigCommand {
     Show,
     /// Explain the source of one effective field.
     Explain {
-        /// Field name: model, organization, max_output_tokens, provider.NAME,
-        /// grant.tool.NAME, or grant.shell.PREFIX.
+        /// Field name: model, worker_model, organization, delegation, audit,
+        /// jev_review, jev_routing, jev_approval, approval_delegate,
+        /// approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
+        /// profile.NAME, provider.NAME, grant.tool.NAME, grant.shell.PREFIX,
+        /// tui.theme, or tui.bindings.ACTION.
         field: String,
     },
 }
