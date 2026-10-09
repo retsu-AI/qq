@@ -73,6 +73,11 @@ pub(super) fn read_file(
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
+    // Models that fill every optional field send `offset`/`limit` beside
+    // `ranges` (usually offset = the first range's start). `ranges` is the
+    // more specific request, so it wins and the header says so.
+    let offset_ignored =
+        !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some());
     let ranges = match parse_ranges(&arguments) {
         Ok(ranges) => ranges,
         Err(error) => return ToolOutput::error(error),
@@ -120,10 +125,13 @@ pub(super) fn read_file(
             if loaded.size > MAX_READ_SCAN_BYTES {
                 header = header.field("scanned", MAX_READ_SCAN_BYTES);
             }
+            if offset_ignored {
+                header = header.field("note", "offset_ignored");
+            }
             ToolOutput::success(header.into_line())
         }
         _ if image => {
-            let header = Header::new("read", Some(&loaded.path))
+            let mut header = Header::new("read", Some(&loaded.path))
                 .token("info")
                 .field("size", loaded.size)
                 .token(format_args!("h:{short}"))
@@ -136,24 +144,37 @@ pub(super) fn read_file(
                         "image_unsupported_by_model"
                     },
                 );
+            if offset_ignored {
+                header = header.field("note", "offset_ignored");
+            }
             ToolOutput::success(header.into_line())
         }
         _ if binary => ToolOutput::error(format!(
             "not_text: {} is binary ({} bytes); use mode=info",
             loaded.path, loaded.size
         )),
-        ReadMode::Outline => outline(&loaded, short, total_lines),
+        ReadMode::Outline => outline(&loaded, short, total_lines, offset_ignored),
         ReadMode::Lines => {
             if let (Some(since), Some(hash)) = (&arguments.if_changed_since, &loaded.hash)
                 && since[2..] == hash[..SHORT_HASH_LEN]
             {
-                let header = Header::new("read", Some(&loaded.path))
+                let mut header = Header::new("read", Some(&loaded.path))
                     .token("unchanged")
                     .token(format_args!("h:{short}"))
                     .field("lines", total_lines);
+                if offset_ignored {
+                    header = header.field("note", "offset_ignored");
+                }
                 ToolOutput::success(header.into_line())
             } else {
-                lines(&loaded, short, total_lines, &ranges, cancelled)
+                lines(
+                    &loaded,
+                    short,
+                    total_lines,
+                    &ranges,
+                    offset_ignored,
+                    cancelled,
+                )
             }
         }
     };
@@ -177,9 +198,6 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
     if arguments.ranges.len() > MAX_RANGES {
         return Err(format!("invalid_ranges: at most {MAX_RANGES} ranges"));
     }
-    if !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some()) {
-        return Err("invalid_ranges: pass either ranges or offset/limit, not both".to_owned());
-    }
     let mut ranges = Vec::with_capacity(arguments.ranges.len().max(1));
     if arguments.ranges.is_empty() {
         let offset = arguments.offset.unwrap_or(1);
@@ -201,7 +219,9 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
         return Ok(ranges);
     }
     for text in &arguments.ranges {
-        let (start, end) = match text.split_once('-') {
+        // `"370,470"` is a range written with the wrong separator; a
+        // second range would be its own array element.
+        let (start, end) = match text.split_once(['-', ',']) {
             Some((start, end)) => (start, Some(end)),
             None => (text.as_str(), None),
         };
@@ -295,6 +315,7 @@ fn lines(
     short: &str,
     total_lines: usize,
     ranges: &[Range],
+    offset_ignored: bool,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
@@ -418,6 +439,10 @@ fn lines(
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
     }
+    // In the header before bounding, so a spilled result stores it too.
+    if offset_ignored {
+        header = header.field("note", "offset_ignored");
+    }
     let mut out = header.into_line();
     out.push_str(&body);
     if stopped {
@@ -442,7 +467,7 @@ fn lines(
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the
 /// defining line's indentation, ≤ [`MAX_OUTLINE_ITEMS`] rows.
-fn outline(loaded: &Loaded, short: &str, total_lines: usize) -> ToolOutput {
+fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: bool) -> ToolOutput {
     let language = Language::from_path(&loaded.path);
     let Some(items) = language.outline(&loaded.bytes) else {
         return ToolOutput::error(format!(
@@ -494,6 +519,9 @@ fn outline(loaded: &Loaded, short: &str, total_lines: usize) -> ToolOutput {
         .token(format_args!("h:{short}"));
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
+    }
+    if offset_ignored {
+        header = header.field("note", "offset_ignored");
     }
     let mut out = header.into_line();
     out.push_str(&body);

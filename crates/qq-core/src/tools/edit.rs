@@ -94,8 +94,10 @@ enum Form<'a> {
 impl Edit {
     fn form(&self) -> Result<Form<'_>, String> {
         let new = self.new.as_deref();
+        // An empty string in an unused form is a filled-in default, not a
+        // second form: models that send every optional field send `""`.
         match (
-            self.old.as_deref(),
+            self.old.as_deref().filter(|old| !old.is_empty()),
             self.insert_before
                 .as_deref()
                 .filter(|anchor| !anchor.is_empty()),
@@ -104,9 +106,6 @@ impl Edit {
                 .filter(|anchor| !anchor.is_empty()),
         ) {
             (Some(old), None, None) => {
-                if old.is_empty() {
-                    return Err("invalid_edit: old must not be empty".to_owned());
-                }
                 let new = new.ok_or("invalid_edit: old requires new")?;
                 if old == new {
                     return Err(
@@ -117,9 +116,6 @@ impl Edit {
                 Ok(Form::Replace { old, new })
             }
             (None, Some(anchor), None) => {
-                if anchor.is_empty() {
-                    return Err("invalid_edit: insert_before must not be empty".to_owned());
-                }
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
@@ -127,14 +123,21 @@ impl Edit {
                 Ok(Form::InsertBefore { anchor, new })
             }
             (None, None, Some(anchor)) => {
-                if anchor.is_empty() {
-                    return Err("invalid_edit: insert_after must not be empty".to_owned());
-                }
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
                 let new = new.ok_or("invalid_edit: insert_after requires new")?;
                 Ok(Form::InsertAfter { anchor, new })
+            }
+            // Every form empty: the only one given has no reading.
+            (None, None, None) if self.old.is_some() => {
+                Err("invalid_edit: old must not be empty".to_owned())
+            }
+            (None, None, None) if self.insert_before.is_some() => {
+                Err("invalid_edit: insert_before must not be empty".to_owned())
+            }
+            (None, None, None) if self.insert_after.is_some() => {
+                Err("invalid_edit: insert_after must not be empty".to_owned())
             }
             _ => Err(
                 "invalid_edit: give exactly one of old/new, insert_before/new, insert_after/new"
@@ -286,6 +289,17 @@ pub(super) fn edit_file(
     }
 
     let edits_total: usize = planned.values().map(|file| file.changes.len()).sum();
+    // `form()` succeeded for every edit, so an empty string left in any form
+    // field was an unused filled-in default.
+    let note = if arguments.edits.iter().any(|edit| {
+        [&edit.old, &edit.insert_before, &edit.insert_after]
+            .into_iter()
+            .any(|form| form.as_deref() == Some(""))
+    }) {
+        " note=empty_form_ignored"
+    } else {
+        ""
+    };
     let mut diff = String::new();
     for file in planned.values() {
         let before = std::str::from_utf8(&file.original.bytes).unwrap_or("");
@@ -294,7 +308,10 @@ pub(super) fn edit_file(
     let first_path = planned.keys().next().cloned().unwrap_or_default();
 
     if arguments.dry_run {
-        let mut text = format!("edit dry_run files={} edits={edits_total}\n", planned.len());
+        let mut text = format!(
+            "edit dry_run files={} edits={edits_total}{note}\n",
+            planned.len()
+        );
         for file in planned.values() {
             push_file_line(&mut text, file, &content_hash(file.text.as_bytes()));
         }
@@ -329,7 +346,10 @@ pub(super) fn edit_file(
     }
     let mut applied: Vec<String> = Vec::with_capacity(planned.len());
     let mut updates: Vec<FileStateUpdate> = Vec::with_capacity(planned.len());
-    let mut text = format!("edit ok files={} edits={edits_total}\n", planned.len());
+    let mut text = format!(
+        "edit ok files={} edits={edits_total}{note}\n",
+        planned.len()
+    );
     for file in planned.values() {
         if let Err(error) = apply_atomically(
             workspace,
@@ -820,5 +840,48 @@ mod tests {
                 new: "after"
             })
         ));
+    }
+
+    #[test]
+    fn empty_old_does_not_conflict_with_an_insert() {
+        let edit: Edit = serde_json::from_value(serde_json::json!({
+            "path": "README.md",
+            "old": "",
+            "new": "line\n",
+            "insert_before": "",
+            "insert_after": "anchor\n"
+        }))
+        .expect("valid edit arguments");
+
+        assert!(matches!(
+            edit.form(),
+            Ok(Form::InsertAfter {
+                anchor: "anchor\n",
+                new: "line\n"
+            })
+        ));
+    }
+
+    #[test]
+    fn an_empty_only_form_still_fails() {
+        for (field, message) in [
+            ("old", "invalid_edit: old must not be empty"),
+            (
+                "insert_before",
+                "invalid_edit: insert_before must not be empty",
+            ),
+            (
+                "insert_after",
+                "invalid_edit: insert_after must not be empty",
+            ),
+        ] {
+            let edit: Edit = serde_json::from_value(serde_json::json!({
+                "path": "README.md",
+                field: "",
+                "new": "after"
+            }))
+            .expect("valid edit arguments");
+            assert_eq!(edit.form().err().as_deref(), Some(message), "{field}");
+        }
     }
 }

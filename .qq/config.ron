@@ -11,7 +11,12 @@
         ],
     ),
     version: 1,
-    model: "xai/grok-4.6",
+    model: "xai/grok-4.7",
+    delegation: (
+        // Write children are serialized and supervised by reviewer_model,
+        // configured in the machine-local fragment.
+        write_children: true,
+    ),
     // Anything referencing a `Stored(...)` credential (providers, MCP
     // servers, reviewer/worker models) is personal to one machine and belongs
     // in a gitignored `.qq/config.d/*-local.ron` fragment, not here. Built-in

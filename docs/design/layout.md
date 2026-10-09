@@ -186,7 +186,7 @@ Density follows the tier the rail's width follows; height never changes it:
 | Tier | Rail | Rows per session |
 | --- | --- | --- |
 | Compact | Hidden unless pinned; the agent strip lists counts | Glyph, title, badge; a live status row while running or waiting |
-| Regular | 20–28 columns | The same one row, plus the live status row (approval, tool verb, streamed tail, or activity) while the session has one |
+| Regular | 20–28 columns | The same one row, plus the live status row (approval, tool verb, streamed tail, or activity; `compacting context` outranks the tail, see transcript.md § Run Activity) while the session has one |
 | Wide, Ultra | 28 columns | The same, plus a second muted row for any session with a live status or a reported spend: the tail on the left, `$0.12` right-aligned |
 
 A session with nothing to say (idle, no spend reported) takes one row at

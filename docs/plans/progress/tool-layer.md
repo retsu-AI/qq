@@ -21,6 +21,9 @@ newest last.
 | T12 | `@` mentions: grammar, `range` field, dirs/globs, `@diff`/`@sha`, completion | Shipped (#45, `896ea93`) | [#45](https://github.com/retsu-AI/qq/pull/45) | Evidence `target/qq-perf/t12-2026-09-14/`; protocol bump folded into T8 |
 | T13 | Ablation harness A0–A5 | Planned | | Runs after T7 and after T12 |
 | T14 | `select_tools` lexical index | Planned | | |
+| T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
+| T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
+| T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 
 ## Entries
 
@@ -252,3 +255,188 @@ placeholders, the digest fixture, this entry, and the `tools.md` update;
 declined checking the cursor length before trimming — tool arguments are
 already capped at 64 KiB in dispatch and a whitespace cursor costs exactly
 what omitting it costs. The general lenient decode stays RR10 (ENG-872).
+
+
+### 2026-10-06 — tool-failure audit (plan § D9)
+
+Read-only `sqlite3` over `~/.local/share/qq/sessions.sqlite3` (store schema
+42, 605 MiB): `tool_calls` (`name`, `is_error`, `result`, `arguments_json`)
+joined to `runs.resolved_model_json` `$.route`. Lifetime 30,326 calls, 3,654
+errors. The largest classes were `search cursor_invalid` 1,637 (939 in one
+run; fixed by T2.1), `read_file invalid_ranges` 447, `read_file` `{}` 162,
+and `search` stringified `include` 104 (RR10). Since 2026-09-26: 9,940 calls,
+926 errors. Read/search/tree/edit/spill errors were 753, broken down as
+ranges+offset 252, empty `{}` 234 (Codex routes only; 60 turns, 286 empty vs
+18 non-empty siblings), `edit_file` empty-string forms 63, `path_not_found`
+42, `context`>5 36, `not executed` 26, empty glob 16, empty spill `query` 11.
+After a contract error, the next call to the same tool failed 434 times and
+succeeded 127 times. `if_changed_since: "h:000000000000"` appeared on 6,293
+reads (harmless). No code change; T15–T17 opened.
+
+### 2026-10-06 — T15 in progress → in review
+
+Branch `fix/eng-1012-t15-tolerant-defaults` (worktree
+`.worktrees/tool-defaults`), stacked on the audit branch (#265). Each audit
+class now has its one reading: `read_file` `ranges` wins over
+`offset`/`limit` with `note=offset_ignored`, and `"a,b"` reads as `a-b`;
+`edit_file` treats an empty `old`/`insert_before`/`insert_after` as absent
+(an empty only-form still fails with its old message); `tree.glob` and
+`search.include`/`exclude` drop `""`; `read_tool_result` pages on an empty
+`query`; `search.context` above 5 clamps with `note=context_clamped=5`.
+RR10 had not landed, so the clamp lands here and RR10 keeps type coercion.
+Schemas are unchanged (schema hash fixture holds). `path_not_found` and
+`range_out_of_bounds` stay errors. Gates: fmt, clippy `-D warnings` on
+`qq-core`, `cargo test -p qq-core` green (858 lib tests), `tool_dispatch`
+smoke test green. Bench not re-run: each rule is a `match` on arguments
+before any I/O, as with T2.1. Docs: `design/tools.md` read, search, spill
+and edit sections.
+
+### 2026-10-06 — T17 in progress → in review
+
+Branch `feat/eng-1012-t17-tool-error-kind` (worktree
+`.worktrees/tool-error-kind`), stacked on T15 (#267). Design change from
+the plan: no `error_kind` wire field. Every tool error already leads with a
+stable code, so `qq_protocol::ToolErrorKind::of` classifies the result text
+and `ToolCallSnapshot::error_kind()` applies it to completed/failed error
+rows. That grades history and old servers the same way, and avoids a store
+migration and a `PROTOCOL_VERSION` bump (the snapshot is
+`deny_unknown_fields`). Unlisted codes are `Failure`. TUI: `↻ corrected`
+muted with no panel, `! <code>` warning with a one-row tail, `✕` and the
+panel unchanged for failures; a correction followed by a successful call to
+the same tool in the block folds away (the cursor and expand still reach
+it), so a corrected block still folds to one summary. Gates: fmt, clippy
+`-D warnings` on `qq-protocol` and `qq-tui`, both test suites green (332 TUI
+lib tests plus goldens; failure-row goldens unchanged). Render bench, base
+vs branch back to back: `tool_calls_32_rows` 23.9/24.8 vs 24.4/25.3 µs,
+`folded` 12.3/12.9 vs 12.4/12.3 µs, `expanded` 53.4/55.6 vs 54.1/53.8 µs
+(noise); blocks with no error skip the filter copy. Docs:
+`design/transcript.md` § Tool Rows.
+
+### 2026-10-06 — T16 captured, in progress → in review
+
+Capture first, in a throwaway worktree (`.worktrees/t16-capture`, never
+pushed): the OpenAI stream loop appended every SSE `data:` line to a file,
+and the session database went to a temp path so the user's store was
+untouched. `qq --model openai-codex/<model> run --approval read-only` in a
+scratch directory under `/tmp`, asking for a 12+ call parallel batch:
+`gpt-5.5` 13/13 calls streamed deltas; `gpt-6.1-sol` 5/5; `gpt-6-astra` and
+`gpt-6-sol` 1/16 each — the other 15 sent `output_item.added` (empty
+`arguments`), then `function_call_arguments.done` and `output_item.done`
+with identical complete `arguments`, and no delta. The hypothesis held: those
+15 calls would have run as `{}`. Where deltas existed, both done payloads
+matched them byte for byte (34 calls).
+
+Fix on branch `fix/eng-1012-t16-responses-done-arguments` (worktree
+`.worktrees/responses-args`), stacked on T17: the decoder reads `arguments`
+from both done events and emits it once, as one `ToolCallArgumentsDelta`
+before `ToolCallCompleted`, for a call that had no delta; done payloads
+after deltas are ignored, not compared (see the plan's T16). A call with no
+arguments anywhere still completes empty. Regression test
+`parallel_calls_without_deltas_take_their_arguments_from_the_done_events`
+mirrors the captured shape (`obfuscation`, `status`, spaced JSON). Gates:
+`cargo test -p qq-provider` (241 lib + 19), minimal profile
+`--no-default-features --features test-support` (192 + 19), workspace
+clippy `-D warnings`, fmt. `sse_decode` bench, base vs branch: allocations
+identical; `openai_responses` frame+parse 105/838/1683 vs 99/809/1617 µs
+(64 KiB / 512 KiB / 1 MiB; noise). Not re-run end to end with the fixed
+binary against Codex: the approval reviewer declined a second live model
+call.
+
+### 2026-10-07 — T15 review repairs
+
+- Isolated `.worktrees/tool-stack-review`; owner repairs #267, no changes to #245.
+- Added failing-first regressions for empty edit forms in approval previews and ignored-offset notes on unchanged/info/outline/image reads; both now pass.
+- Approval previews normalize the same empty unused forms as execution; ambiguous and empty-only forms remain rejected.
+- `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy, workspace tests (full rerun), and workspace build passed.
+- Initial workspace run timed out in two existing headless budget tests; both isolated reruns and the full workspace rerun passed. No root-cause claim.
+- `tool_dispatch`: 30 alternating release A/B pairs, #265 f7ecfb83 baseline versus T15+repairs: median 74,890 → 66,261 ns (no observed regression).
+- I/O pressure 37–38%; diagnostic median only, no speedup or tail qualification claim. Raw samples: `target/qq-perf/t15-review-2026-10-07/tool-dispatch.json`.
+- This measurement supersedes the initial receipt's decision not to benchmark. Independent read-only approval-path review: Approve, no blockers; reviewer did not run tests.
+
+### 2026-10-07 — T17 review repairs
+
+- Inherited T15 repairs without rewriting published history; #272 remains stacked on #267.
+- Classifier requires a QQ built-in name; external error text defaults to Failure. `invalid credentials` is not a correction even on built-ins.
+- Expanded correction detail follows inline/inspector placement; batch-edit and command outcomes label `stale_file` / `exit=N` rather than the tool name.
+- Protocol and TUI suites/goldens pass (333 TUI unit tests, 6 goldens); workspace fmt/Clippy/tests (full rerun)/build pass.
+- Initial build exhausted disk; removed only this worktree's generated incremental cache and disabled incremental compilation. Initial workspace test hit the existing headless child-cost timeout; full rerun passed.
+- 30 release A/B render pairs against original T17 117f8f94: rows median 24.45→25.30 µs, folded 12.60→13.10, expanded 53.80→55.80, inspector 38.95→39.75 (<5% each).
+- Median per-run p95 rows 25.85→25.90, folded 13.30→13.60, expanded 57.85→58.05, inspector 41.35→41.25 µs; same-binary A/A recorded. I/O pressure ~25–31%; no speedup or quiet-host qualification claim.
+- Raw evidence `target/qq-perf/t17-review-2026-10-07/render{,-aa}.json`; independent review found an empty batch-index normalization gap; required a nonempty index and added its regression. Final workspace gates passed again.
+
+### 2026-10-07 — T16 review repair and final stack verification
+
+- Inherited T15/T17 repairs with merge commits, preserving published branch history.
+- Empty argument deltas validate the item ID but do not mark arguments emitted; complete done payloads remain available. Extended parallel-call regression failed before repair and passes after it.
+- Final independent read-only review: Approve for T16 and the T17 nonempty-index correction; no blockers, reviewer did not run tests.
+- Final stack workspace fmt, all-target/all-feature Clippy, default-parallel workspace tests, and build passed; provider minimal-profile Clippy/tests passed.
+- Earlier workspace attempts failed in existing deadline/progress/headless timing tests under load; isolated reruns passed, and a final full default-parallel rerun passed. Four-thread attempt also failed one budget assertion; no harmlessness/root-cause claim.
+- Logs `target/t16-{clippy,tests-final,build,minimal-clippy,minimal-tests}.log`; no live-provider retest or paid calls.
+- Existing T16 SSE decode measurement retained; repair adds only an empty-payload guard, with bounded output accounting and no schema/wire changes.
+
+### 2026-10-08 — T15 review repair: notes for every ignored default
+
+- Codex (#267) pointed out that only `offset_ignored` and `context_clamped` had a `note=`, while the plan promises one per rule. Empty `include`/`exclude` and `tree.glob` now add `note=empty_glob_ignored`, an empty `read_tool_result` `query` adds `note=empty_query_ignored`, and an `edit_file` call with an empty unused form adds `note=empty_form_ignored` on `edit ok` and `edit dry_run`. Errors are unchanged. Notes combine with a comma in `search` (`context_clamped=5,empty_glob_ignored`).
+- Regressions: updated the search, tree, spill, and dry-run edit tests to assert the notes; added an empty-glob-only search case.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, and `cargo test -p qq-core` (860 lib tests) pass.
+
+### 2026-10-08 — T17 review repair: all QQ-owned tools are graded
+
+- Codex (#272) pointed out that `select_tools`, `search_history`, `load_skill`, `spawn_agent`, `wait_agents`, and `cancel_agent` return `query must not be empty` / `invalid arguments:` but sat outside the built-in allowlist, so those corrections stayed red failures and could not fold into a retry. They are now in `ToolErrorKind::of`'s allowlist. External tools still cannot match: the catalog admits only `mcp__`/`ext__` names.
+- Regression: each new name grades both corrections as `Correction` and `invalid credentials` as `Failure`.
+- Merged #267 `4688477f` (ignored-default notes) first; the only conflict was the ledger, kept both entries.
+
+### 2026-10-08 — T15 review repair: read note before bounding
+
+- Codex (#267) pointed out that `note=offset_ignored` was inserted into `model_text` after `ToolOutput::bounded` had already taken its spill copy, so a spilled outline or long read stored a header without the note and `read_tool_result` returned something different from what was published. The note is now a header field built in `read_file`'s info, image, unchanged, `lines()` and `outline()` paths before bounding.
+- Regression: `a_spilled_read_stores_the_ignored_offset_note` forces an outline spill and asserts both the stored copy and the published text carry the note.
+- `cargo fmt --all -- --check`, `cargo clippy -p qq-core --all-targets -- -D warnings`, `cargo test -p qq-core --lib` (861, three runs) pass. CI's one failure on 4688477f was `sessions::tests::nonblocking::an_interim_report_does_not_end_a_tool_free_wait` (message order in a sub-agent report); not touched by this PR, passed on the prior head and locally, treated as a flake.
+
+### 2026-10-08 — T17 review repairs, round 3
+
+Seven Codex findings on 966d93a5, all valid:
+
+- Policy refusals stay failures: `env_not_allowed:`, `use_builtin:`, and `path_escapes_workspace` are in neither list (I had also reintroduced the escape code in the outcome list while merging the earlier repair).
+- Only a numeric nonzero `shell`/`exec` exit is an `Outcome`; `exit=timeout`, `signal:N`, `unknown`, and `exit=0` stay failures.
+- `fetch` with HTTP 404/410 is an `Outcome` (labelled `status=404`); 401/403/429/5xx stay failures.
+- Semantic argument errors are corrections: `ask_user needs …`/`question N …`, `invalid url:`, `task must not be empty`, `id must be a sub-agent id …`.
+- Pre-dispatch rejections keep provenance under any requested name: `unknown tool "…"` and `not executed: this …` grade as corrections, while other `not executed:`/`unknown tool` text from an external name stays a failure.
+- The TUI no longer strips a batch-edit outcome (`edit 1: stale_file: …`) as if it were a header, so its one-line reason survives.
+- Regressions for each in `qq-protocol` and `qq-tui`.
+
+### 2026-10-08 — T17 review repairs, round 4
+
+Five more Codex findings on 4c8cb067, all valid (two were regressions from round 3):
+
+- Denied and interrupted calls have no grade but are errors; the round-3 panel match dropped their reason. An ungraded error again opens the failure panel, as before T17.
+- An expanded outcome (`exec exit=101` plus compiler output) now shows its full text in the warning style, inline and in the inspector; collapsed it still shows one tail line.
+- Pre-dispatch text (`unknown tool "…"`, `not executed: this …`) is trusted only under names that cannot be external; under `mcp__`/`ext__` it stays a `Failure`, since MCP text passes through verbatim.
+- `wait_agents` plural validation errors (`ids may name at most …`, `ids must be sub-agent ids …`) are corrections.
+- `load_skill` `unknown command or skill /…` and the `Sub-agent … is not a background sub-agent …` result of `cancel_agent`/`wait_agents` are outcomes.
+- Regressions in `qq-protocol` (all of the above, including the spoof cases) and `qq-tui` (denied/interrupted panels, expanded outcome).
+
+### 2026-10-08 — T17 review repairs, round 5
+
+Four more Codex findings on 3207f528, all valid. This round audited every error string the QQ-owned tools can return instead of fixing one at a time:
+
+- `spawn_agent` routing the model can change (`no delegation roster is configured`, `model … is not on the delegation roster`, `no roster entry declares the … role`) are corrections. `load_skill` never returns ambiguous or reserved names (`resolve_disclosed` folds both into `unknown command or skill /…`), so that text is not classified. A spent budget, an unavailable spawner, `handle_foreign_session`, and guidance I/O errors stay failures.
+- An expanded correction or outcome uses the normal expanded result budget (12 rows, 4 KiB), not the 6-row, 2 KiB failure panel, and renders under the timing line.
+- A command outcome's label no longer repeats the exit status the row metric already shows (`exit 101`).
+- Regressions in `qq-protocol` (routing and refusal cases) and `qq-tui` (budget, ordering, no duplicate exit).
+
+### 2026-10-08 — T17 review repairs, round 6
+
+Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/`bounded_result`/`spawn_error` string in `qq-core` against both lists:
+
+- `too_deep:` and oversized *content* (`too_large: content exceeds`, `too_large: the edited …`) are corrections. An existing oversized file stays an outcome. `not_utf8:` is an outcome, like `not_text:`.
+- A correction folds only into a successful same-name call from a later turn (`turn_ordinal`). A sibling in the same turn is not a retry.
+- The exit label is suppressed only while the `exit N` metric is actually rendered. A narrow row keeps `exit=N`.
+
+### 2026-10-08 — v0.1.6 release reconciliation
+
+- Audit #265 merged `87c81cdd`; T15 #267 `409dd758`, T17 #272 `6d46e257`, T16 #273 `1844b434` are shipped on main.
+- Release branch inherits the final review repairs, including normalization notes and conservative error grading; no unpushed review-worktree changes were imported.
+- D9's week-of-use correction/error-rate qualification remains open; fixtures and review receipts do not establish the <1% live target.
+- Release upgrade notes name protocol 31, descriptor 13, schema 43, and the new exact-content project-pack trust requirement; guide version pins intentionally remain v0.1.5 until assets publish.
+- Release docs verification: docs-truth 23/23, fmt, workspace all-target/all-feature Clippy, build, and final default-parallel workspace tests passed; `git diff --check` passed.
+- Two earlier workspace runs hit existing headless/progress timeout failures; the headless isolated rerun passed. Serial run was declined and not retried; final normal workspace run passed. Logs `target/release-0.1.6-{clippy,tests,tests-rerun,tests-final}.log`; no root-cause claim.

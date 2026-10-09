@@ -740,7 +740,8 @@ impl BenchHarness {
 
     /// Seven more sessions beside the focused one so every rail group has
     /// members: `Deploy helper` (a child of session 0) holds a `shell`
-    /// approval; `Survey callers` and `Write tests` stream text; `Refactor`
+    /// approval; `Survey callers` streams text and `Write tests` streamed
+    /// text, then started compacting its context; `Refactor`
     /// finished unseen with spend recorded; `Notes` and `Scratch` are idle;
     /// `Migrate` finished and was seen. Titles and spend are fixed so the
     /// frame is the same every run.
@@ -817,6 +818,15 @@ impl BenchHarness {
             self.apply(index, SessionEvent::AssistantMessageStarted { message });
             self.append(index, message_id, text);
         }
+        // Session 3 then compacts its context: the rail shows that, not the
+        // tail it streamed before.
+        self.apply(
+            3,
+            SessionEvent::RunActivityChanged {
+                run_id: run_id(3),
+                activity: RunActivity::Compacting,
+            },
+        );
         // Session 4 finished while unfocused: one unread finish, with spend.
         let mut finished = refactor;
         finished.status = SessionStatus::Idle;

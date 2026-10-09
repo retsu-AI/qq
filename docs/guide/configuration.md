@@ -33,7 +33,7 @@ Sections `delegation` and `audit` replace as a whole.
 | 2 | global packs | `<global>/packs/<id>/pack.ron` |
 | 3 | organization manifest | cached from `qq org enroll` |
 | 4 | **your global config** | `<global>/config.ron`, then `<global>/config.d/*.ron` sorted |
-| 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (trusted only), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
+| 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (each manifest trusted on its own), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
 | 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING`, `QQ_JEV_APPROVAL`, `QQ_APPROVAL_DELEGATE` |
@@ -249,8 +249,11 @@ profiles (below) add prompts, skills, and tool filters.
 
 A pack is a directory with `pack.ron` that bundles profiles, a persona
 prompt, skills, commands, and MCP declarations. Packs are discovered from
-`<global>/packs/<id>/` and, once the project is trusted, `.qq/packs/<id>/`;
-or declared explicitly:
+`<global>/packs/<id>/` and `.qq/packs/<id>/`, or declared explicitly. A
+project pack (discovered under `.qq/packs/` or named by a project file) loads
+only once you have trusted that exact `pack.ron`; editing it asks again. A
+project file's `path` must stay inside the repository (no path that leads
+out of it, and no symbolic link):
 
 ```ron
 packs: {
@@ -282,8 +285,9 @@ packs: {
 )
 ```
 
-Limits: 32 packs per load, 16 profiles per pack, 64 KiB manifest. A pack
-profile shadows nothing: a profile of the same name in your config wins.
+Limits: 32 entries across `packs/` directories per load (including
+directories without a `pack.ron` and stray files), 16 profiles per pack, 64 KiB manifest. A pack profile shadows
+nothing: a profile of the same name in your config wins.
 
 ## `delegation`
 
