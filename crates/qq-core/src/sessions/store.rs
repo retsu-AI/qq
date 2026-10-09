@@ -1162,7 +1162,8 @@ impl Store {
     pub(super) async fn reload_reserved_messages(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<(Vec<Message>, CompactionProgress)>, SessionRuntimeError> {
+    ) -> Result<Option<(Vec<Message>, ResultEffects, CompactionProgress)>, SessionRuntimeError>
+    {
         #[cfg(test)]
         if let Some(failure) =
             take_targeted_failure(&RESERVED_RELOAD_FAILURES, claimed.identity.run_id)
@@ -1331,6 +1332,34 @@ impl Store {
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
             persist_model_turn(connection, store_id, &claimed, &turn)
+        })
+        .await
+    }
+
+    /// Moves the session's prune watermark to `through_turn` of the claimed
+    /// prompt run, the live overflow-prune seam. Never moves it backwards.
+    pub(super) async fn advance_prune_watermark(
+        &self,
+        claimed: &ClaimedRun,
+        through_turn: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            transcript::advance_prune_watermark(connection, identity, through_turn)
+        })
+        .await
+    }
+
+    /// Moves the session's prune watermark to the newest committed turn
+    /// before the reserved prompt, the proactive-threshold seam. Returns
+    /// whether it moved; when it did, the prompt must be reassembled.
+    pub(super) async fn advance_prune_watermark_before_prompt(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<bool, SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::AwaitControl, move |connection| {
+            transcript::advance_prune_watermark_before_prompt(connection, identity)
         })
         .await
     }

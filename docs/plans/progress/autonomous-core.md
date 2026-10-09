@@ -83,8 +83,8 @@ appended below, newest last.
 | AP3a | Report turns as persisted turns | Shipped | [ENG-990](https://linear.app/retsu-ai/issue/ENG-990) | #237 (`2a672fe`) | Store schema 39 → 40 |
 | AP3b | Stall report and child answer | Shipped | [ENG-1000](https://linear.app/retsu-ai/issue/ENG-1000) | #240 (`594b29c`) | With ENG-1001 (#238, tool choice none); ADR-0054 § 3 amended |
 | AP4.1 | Non-blocking read spawns, exactly-once delivery, tool-free wait | Shipped | [ENG-1004](https://linear.app/retsu-ai/issue/ENG-1004) | #244 (`fc97fab`) | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16 |
-| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | In review | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
-| AP5 | Evidence after AP3b and AP4 | Planned | | | Goal 6; 7-day windows |
+| AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
+| AP5 | Evidence after AP3b and AP4 | In progress | | `docs/eng-978-ap5-window` | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Planned | | | No behaviour change; independent review; after AP3b |
 | AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
@@ -95,9 +95,9 @@ appended below, newest last.
 | AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
 | AC8 | Completion audit | Dropped (moved to goals G3) | | | Now `goals.md` G3 |
 | AC9 | Continue-if-idle | Dropped (moved to goals G2) | | | Now `goals.md` G2 |
-| AC10 | `qq-core` embedding surface + example | In review | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
-| AC11 | `tool-fetch` feature; minimal profile CI | In review | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | `feat/eng-1008-ac11-tool-fetch` stacked on #253 | Minimal tests and Clippy pass; htmd absent; measured default size +128 bytes; receipt below |
-| AC12 | `qq-harness` crate (three mechanical moves) | AC12.1 In review; .2/.3 Planned | [ENG-1009](https://linear.app/retsu-ai/issue/ENG-1009) | `refactor/eng-1009-ac12-1-harness-mcp` stacked on #256 | Plan cache/MCP bridge moved; measured relative budgets pass; pressured-host caveat |
+| AC10 | `qq-core` embedding surface + example | Shipped (6d55e00b) | [ENG-1006](https://linear.app/retsu-ai/issue/ENG-1006) | [#253](https://github.com/retsu-AI/qq/pull/253) | Public async constructors; final verification receipt below; ADR-0050 § 1 |
+| AC11 | `tool-fetch` feature; minimal profile CI | Shipped (3fdc7a83) | [ENG-1008](https://linear.app/retsu-ai/issue/ENG-1008) | #256 | Minimal tests and Clippy pass; htmd absent; measured default size +128 bytes; receipt below |
+| AC12 | `qq-harness` crate (three mechanical moves) | AC12.1 Shipped (18e6953e); .2/.3 Planned | [ENG-1009](https://linear.app/retsu-ai/issue/ENG-1009) | #258 | Plan cache/MCP bridge moved; measured relative budgets pass; pressured-host caveat |
 | AC13 | Public-surface hygiene (`!`) | Planned | | | ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
@@ -1176,3 +1176,11 @@ The finding is right; fixed.
 ### 2026-10-06 — AC12.1 stack conflict resolution
 
 Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only autonomous-core ledger conflict, preserving both AP4.2 and embedding receipts. AC10/AC11 Codex corrections now present on their own branches and inherited here.
+
+### 2026-10-06 — main reconciliation and AP5 window opened (ENG-978)
+
+- Anchor `a0caa722` on synced `origin/main`: AP4.2 #257, AC10 #253, AC11 #256 and AC12.1 #258 merged. Current rows corrected; historical receipts preserved.
+- AP5: **2026-10-06T17:42:25Z → 2026-10-13T17:42:25Z** minimum. Post-AP4 window; no reconstructed AP3b-only attribution claimed.
+- Read-only lead store: schema **42**, **480 runs**, **14,608 model turns**, **29,630 tool calls**. Baseline: 2026-09-30 AP0 in `root.md`; no session content committed.
+- Close with progress-report §§ 1–4, replacing its default 30-day lower bound with the exact opening timestamp. Record total/window counts, all four Goal 6 results, and deployed revisions. Confirm normal-use binaries include AP3b/AP4; extend if older or insufficient usage. Merged source is not deployment evidence.
+- No seven-day acceptance or tuning claimed. AC1 → AC2/AC3 → AC5/AC6 stack proceeds during observation per lead instruction; record runtime revisions as confounders. AC4 stays paired with goals G0.

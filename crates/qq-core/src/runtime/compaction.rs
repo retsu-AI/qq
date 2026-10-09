@@ -42,16 +42,22 @@ pub(crate) type InRunCompactionFuture =
     Pin<Box<dyn Future<Output = Result<InRunCompaction, InRunCompactionError>> + Send + 'static>>;
 
 /// Why an in-run compaction did not commit. The loop fails the run with the
-/// context diagnosis either way; the variant only shapes the message.
+/// context diagnosis for a summarizer or availability failure, and as a
+/// server failure when the store could not record the compaction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum InRunCompactionError {
     /// The summarizer ran and settled failed (rejected, malformed, did not
     /// shrink). Its outcome is durable on its own run.
     #[error("the summarizer failed: {0}")]
     SummarizerFailed(String),
-    /// The session layer could not start or record the compaction.
+    /// The session layer could not start the compaction (the prompt run
+    /// ended, it was cancelled, or the runtime has failed).
     #[error("compaction could not run: {0}")]
     Unavailable(String),
+    /// The store failed to start, record, or commit the compaction. Not a
+    /// context problem: `/compact` would not help.
+    #[error("compaction could not be persisted: {0}")]
+    Persistence(String),
 }
 
 pub(crate) trait InRunCompactor: Send + Sync {

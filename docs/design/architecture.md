@@ -638,10 +638,21 @@ An agent pack is a directory with a `pack.ron` manifest (`PACK_SCHEMA_VERSION
 = 1`) declaring an identifier, version, optional persona file, skill and
 command roots, a tool allow/deny policy, per-profile MCP subsets, and the
 minimum protocol version it requires. `qq-config` discovers packs from
-`<global>/packs/<id>/` and, when the project is trusted, `.qq/packs/<id>/`
-root-to-leaf, plus explicit `packs:` entries; at most 32 are admitted, later
-layers win by identifier, and every manifest error is a typed configuration
-failure that names the pack. Pack profiles merge beneath the configuration's
+`<global>/packs/<id>/` and `.qq/packs/<id>/` root-to-leaf, plus explicit
+`packs:` entries; at most 32 manifests are read per load, later layers win
+by identifier, and every manifest error is a typed configuration failure
+that names the pack. A project pack (discovered under `.qq/packs/` or named
+by a project file) is its own trust subject: it is admitted only when a
+trust record covers its canonical manifest path and the SHA-256 of its
+bytes, independent of whether the directory's configuration is trusted.
+Manifests named by a still-pending project file are listed in the same
+pending set, so one review covers both. Because those manifests are read
+before consent, a project entry must resolve lexically beneath the VCS root
+(else `cwd`) through no symbolic link, manifest leaf included; any other
+path is `InvalidPack` or `SymlinkSource` and is never opened. The 32-entry
+bound counts every entry inspected (packs, directories without a
+manifest, stray files), and discovery rejects a linked `packs/` directory
+or `pack.ron` before recording it. Pack profiles merge beneath the configuration's
 own `profiles` in the same flat namespace and a name declared by both is a
 conflict, not a silent override.
 
@@ -857,7 +868,12 @@ One durable run follows a guarded loop:
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.
-   Direct `qq ask` runs have no compactor and fail as before.
+   Direct `qq ask` runs have no compactor and fail as before. The prompt
+   run reports `RunActivity::Compacting` before it asks and
+   `WaitingForProvider` at its next turn; every compaction run, between-run
+   or in-run, reports `Compacting` once, in the transaction that starts it
+   (right after its `RunStarted`), and never publishes its summarizer's
+   provider activity.
 4. In one guarded transaction, persist the resolved model, prompt identity,
    exact request measurement, running/session/message state, and `RunStarted`.
 5. Re-read cancellation, then poll the provider only after that transaction
@@ -983,7 +999,7 @@ the system prompt and tool list of the session's prompt runs, built from the
 same `PromptPrefixKey` (`execution::session_prompt_prefix_key`), with no
 context sources or output contract, and the session's reasoning effort, so
 it shares the tool block those runs cached, and the system prompt and
-message prefix when no per-run suffix or assembly pruning separates them.
+message prefix when no per-run suffix or prune seam separates them.
 Its tools are declared, never run: every call is answered with a rejection
 result, everything the summarizer wrote up to that turn is discarded, and a
 summarizer that calls a tool on a second turn fails the step.

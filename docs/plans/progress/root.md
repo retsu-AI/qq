@@ -174,6 +174,8 @@ Next free number: 0057. Reserve here before opening a PR that adds an ADR.
 | 2026-10-01 | autonomous-core AP3a (ENG-990) | `docs/design/architecture.md` § run loop slices and the measured-token paragraph; `docs/design/protocol.md` version history (store schema 40); guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 39 → 40 (`model_turns.notice`); the slice seam no longer changes the system prompt | Done in the AP3a PR |
 | 2026-10-02 | autonomous-core AP4.1 (ENG-1004) | `docs/design/architecture.md` § sub-agents and the stall paragraph; `docs/design/protocol.md` store schema history; guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; no protocol change | Done in the AP4.1 PR |
 | 2026-10-04 | autonomous-core AP4.2 (ENG-1005) | `docs/design/architecture.md` § sub-agents (`wait_agents`, `cancel_agent`, interim reports); `docs/design/protocol.md` and `tools.md`; guide `troubleshooting.md` / `providers.md` version mentions | `DESCRIPTOR_VERSION` 12 → 13; store schema 41 → 42 (`child_reports`); prompt 16 → 17; no protocol change | Done in the AP4.2 PR |
+| 2026-10-05 | compaction CX4 (ENG-997) | `crates/qq-protocol` `PROTOCOL_VERSION` 30 → 31 (`RunActivity::Compacting`); `docs/design/protocol.md` version history; `docs/design/architecture.md` run loop step 3; guide `troubleshooting.md` / `providers.md` protocol mentions; Harbor trace fixtures | Clients must show that a run is compacting (compaction plan Goal 4); takes AC14's in-run compaction-activity item | Done in the CX4 PR |
+| 2026-10-05 | compaction CX3 (ENG-996) | `crates/qq-core` store schema 42 → 43 (`sessions.prune_through_ordinal`, `prune_through_turn`); `docs/design/protocol.md` store schema history; `docs/design/architecture.md` summarizer paragraph; guide `troubleshooting.md` / `providers.md` schema mentions | Assembly stubs only up to a durable watermark so cross-run requests extend each other (ADR-0056 § 6) | Done in the CX3 PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -476,3 +478,11 @@ slice is on `main`.
 User authorized publishing regression and merging AC10 forward through AC11/AC12.1 without force pushes.
 Shared manifest/CI/map extraction remains limited to #253 → #256 → #258; AP4.2 untouched.
 Relative performance/size evidence in autonomous-core ledger; inherited 48 MB absolute size failure and high host pressure explicitly retained, not waived.
+
+### 2026-10-08 — v0.1.6 post-publication follow-up
+
+- Release workflow 37833036979 succeeded at tag commit `fef41a46`; published release has all five target archives and SHA256SUMS.
+- Unpinned install.sh smoke installed into `target/qq-release-check-0.1.6/bin`, verified the archive checksum, and printed `qq 0.1.6 (fef41a4 2026-10-08)`; `qq version` reports 31/1/13/43.
+- Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
+- `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
+- Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.

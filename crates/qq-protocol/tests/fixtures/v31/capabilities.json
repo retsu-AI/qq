@@ -7,8 +7,6 @@
     "workspace_file"
   ],
   "commands": [
-    "cancel_side_question",
-    "submit_side_question",
     "resolve_workspace",
     "create_session",
     "submit_prompt",

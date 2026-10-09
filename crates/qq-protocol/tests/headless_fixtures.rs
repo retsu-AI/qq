@@ -327,7 +327,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -597,6 +597,104 @@ fn current_version_streams_match_their_goldens() {
                 prompt_identity: None,
                 ..outcome(HeadlessStatus::NeedsInput)
             },
+        ),
+    );
+
+    // Version 31: the run compacted its own earlier turns mid-run. The
+    // prompt run reports `compacting`, the compaction run starts, finishes
+    // and records the compaction inside it, and the prompt run's next turn
+    // waits again.
+    check(
+        "completed_after_in_run_compaction",
+        &stream(
+            trial(),
+            {
+                const COMPACTION: RunId = RunId::from_bytes([0xaf; 16]);
+                let mut events = run_events(RunOutcome::Completed, None);
+                // The session's active run is the prompt run, which already
+                // reports `compacting`, so the compaction run's summaries do.
+                let compacting = || SessionSummary {
+                    activity: Some(RunActivity::Compacting),
+                    ..summary(SessionStatus::Running, true)
+                };
+                let compaction =
+                    |sequence: u64, run_id: RunId, event: SessionEvent| HeadlessRecord::Event {
+                        envelope: Box::new(SessionEventEnvelope {
+                            run_id: Some(run_id),
+                            ..envelope(sequence, event)
+                        }),
+                    };
+                let middle = [
+                    compaction(
+                        2,
+                        RUN,
+                        SessionEvent::RunActivityChanged {
+                            run_id: RUN,
+                            activity: RunActivity::Compacting,
+                        },
+                    ),
+                    compaction(
+                        3,
+                        COMPACTION,
+                        SessionEvent::RunStarted {
+                            session: Box::new(compacting()),
+                            run_id: COMPACTION,
+                            plan: None,
+                        },
+                    ),
+                    compaction(
+                        4,
+                        COMPACTION,
+                        SessionEvent::RunActivityChanged {
+                            run_id: COMPACTION,
+                            activity: RunActivity::Compacting,
+                        },
+                    ),
+                    compaction(
+                        5,
+                        COMPACTION,
+                        SessionEvent::RunFinished {
+                            session: Box::new(compacting()),
+                            run_id: COMPACTION,
+                            outcome: RunOutcome::Completed,
+                            usage: Some(usage()),
+                            context_tokens: None,
+                            final_output: None,
+                        },
+                    ),
+                    compaction(
+                        6,
+                        COMPACTION,
+                        SessionEvent::SessionCompacted {
+                            session: Box::new(compacting()),
+                            summary: Some(
+                                "Read the login flow; the redirect drops the return path."
+                                    .to_owned(),
+                            ),
+                            before_bytes: 48_000,
+                            after_bytes: 9_000,
+                        },
+                    ),
+                    compaction(
+                        7,
+                        RUN,
+                        SessionEvent::RunActivityChanged {
+                            run_id: RUN,
+                            activity: RunActivity::WaitingForProvider,
+                        },
+                    ),
+                ];
+                events.splice(1..1, middle);
+                // Renumber the shared tail after the inserted records.
+                for (index, record) in events.iter_mut().enumerate() {
+                    if let HeadlessRecord::Event { envelope } = record {
+                        envelope.cursor.sequence = index as u64 + 1;
+                        envelope.occurred_at_ms = 1_700_000_000_000 + index as u64 + 1;
+                    }
+                }
+                events
+            },
+            outcome(HeadlessStatus::Completed),
         ),
     );
 

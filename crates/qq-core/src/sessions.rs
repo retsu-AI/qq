@@ -239,6 +239,19 @@ pub mod bench_support {
                 )
                 .expect("compaction row");
         }
+        // A seam at the newest turn: assembly stubs every stale read, the
+        // most work it can do (schema 42).
+        transaction
+            .execute(
+                "UPDATE sessions SET (prune_through_ordinal, prune_through_turn) = (
+                     SELECT m.ordinal, t.turn_ordinal
+                     FROM messages m JOIN model_turns t ON t.run_id = m.run_id
+                     WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0
+                     ORDER BY m.ordinal DESC, t.turn_ordinal DESC LIMIT 1)
+                 WHERE id = ?1",
+                [session_id.to_string()],
+            )
+            .expect("prune watermark");
         transaction.commit().expect("bench seed commits");
         (connection, session_id)
     }
