@@ -60,6 +60,11 @@ pub(crate) enum Command {
     /// the focused pane.
     ShowAttention,
     ShowChanges,
+    ShowSideQuestions,
+    /// Leave `/btw-new ` in the composer: the question starts a new side
+    /// thread, so the command never runs without one.
+    NewSideThread,
+    CancelSideQuestion,
     FocusParent,
     FocusFirstChild,
     FocusNextSibling,
@@ -149,7 +154,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 41] = [
+pub(crate) const COMMANDS: [CommandSpec; 44] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -399,6 +404,27 @@ pub(crate) const COMMANDS: [CommandSpec; 41] = [
         ["Ctrl-R"]
     ),
     spec!(Quit, "exit QQ", System, ["/quit", "/exit"], ["Ctrl-C"]),
+    spec!(
+        ShowSideQuestions,
+        "ask or view side questions",
+        View,
+        ["/btw", "/ask"],
+        []
+    ),
+    spec!(
+        NewSideThread,
+        "ask in a new side thread",
+        View,
+        ["/btw-new"],
+        []
+    ),
+    spec!(
+        CancelSideQuestion,
+        "cancel only the side question",
+        Run,
+        ["/btw-cancel"],
+        []
+    ),
 ];
 
 /// What accepting a slash entry does.

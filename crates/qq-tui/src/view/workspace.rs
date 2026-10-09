@@ -209,6 +209,16 @@ pub(super) fn inspector_pane(
     match pane.view {
         View::Attention => rows = attention_body(app, inner),
         View::Changes => rows = changes_body(app, inner),
+        View::SideQuestions(_) => {
+            rows.push(Line::styled(
+                "Side answers scroll in the main pane.",
+                muted(),
+            ));
+            rows.push(Line::styled(
+                "Esc returns to the unchanged main transcript.",
+                muted(),
+            ));
+        }
         View::Transcript(session_id) => {
             let calls = session_id
                 .and_then(|session_id| app.sessions.get(&session_id))
@@ -282,4 +292,46 @@ pub(super) fn inspector_pane(
     }
     lines.truncate(height);
     lines
+}
+
+/// Separate projection: side text is never rendered as main-agent messages.
+pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
+    let mut rows = vec![
+        section("SIDE QUESTIONS", "main agent continues"),
+        Line::default(),
+        Line::styled("/btw QUESTION · /btw-new QUESTION · /btw-cancel", muted()),
+    ];
+    let session = app.sessions.get(&session_id);
+    let items = session.map(|session| &session.side_questions);
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        rows.push(Line::styled(
+            "No side questions yet. Captured context; live reads are not a snapshot.",
+            muted(),
+        ));
+        return rows
+            .into_iter()
+            .flat_map(|row| wrap_line(row, width.max(1)))
+            .collect();
+    };
+    for item in items.iter() {
+        rows.push(Line::styled(
+            format!(
+                "{:?} · {} turns · cost {}",
+                item.state,
+                item.model_turns,
+                item.estimated_cost_usd_nanos
+                    .map(format_cost)
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ),
+            muted(),
+        ));
+        rows.extend(wrap_line(Line::styled(&item.question, accent()), width));
+        for line in item.answer.lines() {
+            rows.extend(wrap_line(Line::styled(line, normal()), width));
+        }
+        rows.push(Line::default());
+    }
+    rows.into_iter()
+        .flat_map(|row| wrap_line(row, width.max(1)))
+        .collect()
 }

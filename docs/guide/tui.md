@@ -251,6 +251,9 @@ searchable palette that runs the highlighted command on `Enter`.
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
+| ask or view side questions | `/btw`, `/ask` |  |
+| ask in a new side thread | `/btw-new` |  |
+| cancel only the side question | `/btw-cancel` |  |
 | edit the draft in $EDITOR | `/editor` | `Alt-E` |
 | search prompt history |  | `Ctrl-R` |
 | exit QQ | `/quit`, `/exit` | `Ctrl-C` |
@@ -295,3 +298,24 @@ What happens to running work depends on who owns the server:
 
 To keep long runs alive while you close the terminal, start `qq serve` in
 another terminal (or a multiplexer) first, then open `qq`.
+
+## Side questions without interrupting work
+
+Use `/btw QUESTION` or `/ask QUESTION` while the main agent works. Answers
+appear in a separate scrollable side-question view; `Esc` returns to the main
+transcript. `/btw` without a question reopens the view. `/btw-new QUESTION`
+starts a new side thread; otherwise questions continue the existing thread.
+`/btw-cancel` cancels only the active side question, not the main agent.
+
+Each question captures bounded committed session context. Unfinished tool
+exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
+`tree` are available, further restricted by the session's tool policy. Live
+file inspection is not a consistent filesystem snapshot. Side questions,
+answers, and usage never become main-agent prompts, steering, or goal budget.
+
+One query per session may run, for at most 8 model turns. Its execution,
+including waits, is cut off at 120 seconds; the final state appears once the
+server has recorded it, which can take a moment longer under heavy load. Questions are limited to 8 KiB. Partial answers and independent
+cost/status are durable and restored after reconnect; interrupted queries are
+not restarted automatically. The same typed submit/cancel commands and side
+projection are available through the session API to embedded and remote clients.

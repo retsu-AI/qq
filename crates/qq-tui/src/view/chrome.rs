@@ -226,7 +226,8 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     let waiting: Vec<&str> = app
         .sessions_awaiting_approval()
         .into_iter()
-        .filter(|id| Some(*id) != app.focused())
+        // A side view hides its source transcript's approval block.
+        .filter(|id| Some(*id) != app.view().transcript())
         .filter_map(|id| app.sessions.get(&id))
         .map(|session| session.summary.title.as_str())
         .collect();

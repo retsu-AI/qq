@@ -5,8 +5,8 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | SQ0 | Agree behavior and delivery stack | In review | [#262](https://github.com/retsu-AI/qq/pull/262) | Isolated worktree `.worktrees/btw-goals` |
-| SQ1 | Isolated read-only runtime | In progress | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
-| SQ2 | Aliases and side pane | Planned | | Depends on SQ1 |
+| SQ1 | Isolated read-only runtime | In review | [#266](https://github.com/retsu-AI/qq/pull/266) | Depends on SQ0; independent authority/session review required |
+| SQ2 | Aliases and side pane | In review | [#270](https://github.com/retsu-AI/qq/pull/270) | Depends on SQ1 |
 
 ## Entries
 
@@ -212,3 +212,28 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
 - Evidence: 15 new focused tests; side filter 48 passed; `qq-core` 913 passed
   (3 ignored); workspace 2,204 passed, 0 failed, 13 ignored; fmt and all-target
   all-feature Clippy clean.
+
+### 2026-10-07 — SQ2 aliases and separate side view
+
+- Added `/btw` and `/ask`, `/btw-new QUESTION` explicit thread reset and
+  `/btw-cancel` targeting only the side ID. Empty `/btw` opens the side view;
+  ordinary text there continues the thread. Escape returns to the main transcript.
+- Separate scrollable projection wraps complete answers; no side text enters
+  main messages. Status, independent cost and turn counts are visible.
+- Reserved names are shared with protocol, command palette/help/autocomplete;
+  guide explains capture omissions, live reads, limits and reconnect semantics.
+- Alias/non-steering, reset, cancellation-target and wrapping regression tests
+  pass. Workspace tests with four threads passed (241.2 s); Clippy/build passed.
+  Earlier registry/documentation test failure fixed by matching exact title.
+- Independent review capacity is exhausted for this run; fixes from SQ1 review
+  are evidenced, but fresh SQ2 reviewer approval is not claimed.
+
+### 2026-10-09 — SQ2 Codex review fixes (#270)
+
+- `View::SideQuestions` now carries its source session: model/profile/approval/
+  effort/delegate commands and rejected side submit/cancel notices stay on it.
+  Approvals stay modal only in the transcript that shows them.
+- `/btw-cancel` falls back to the receipt-acknowledged ID until a terminal update;
+  `/btw-new` autocomplete leaves `/btw-new ` for the question; side costs use
+  `format_cost`; the guide no longer promises settlement within 120 s.
+- Added 8 regression tests; qq-tui 348 + 6 goldens, qq-client 24, docs-truth 23 pass.

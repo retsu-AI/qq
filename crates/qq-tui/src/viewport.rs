@@ -23,6 +23,9 @@ pub(crate) enum View {
     Transcript(Option<SessionId>),
     /// Every approval, failure, and unread finish across the workspace.
     Attention,
+    /// One session's side questions. Carries its source session so every
+    /// focus-dependent command keeps acting on that session.
+    SideQuestions(SessionId),
     /// Every file edited by any agent, grouped by path.
     Changes,
 }
@@ -38,7 +41,17 @@ impl View {
     pub(crate) const fn session(self) -> Option<SessionId> {
         match self {
             Self::Transcript(session) => session,
+            Self::SideQuestions(session) => Some(session),
             Self::Attention | Self::Changes => None,
+        }
+    }
+
+    /// The session whose transcript this view puts on screen, if any. A side
+    /// view follows a session without showing its transcript.
+    pub(crate) const fn transcript(self) -> Option<SessionId> {
+        match self {
+            Self::Transcript(session) => session,
+            Self::SideQuestions(_) | Self::Attention | Self::Changes => None,
         }
     }
 }
@@ -160,5 +173,16 @@ mod tests {
         assert_eq!(viewport.offset(), 0);
         viewport.update(View::Attention, 50, 10, false);
         assert_eq!(viewport.offset(), 0);
+    }
+
+    #[test]
+    fn side_view_follows_its_source_session_without_showing_its_transcript() {
+        let view = View::SideQuestions(session(4));
+        assert_eq!(view.session(), Some(session(4)));
+        assert_eq!(view.transcript(), None);
+        assert_eq!(
+            View::Transcript(Some(session(4))).transcript(),
+            Some(session(4))
+        );
     }
 }
