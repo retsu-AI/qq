@@ -1,6 +1,6 @@
 # ADR-0028 — Mandatory typed JEV checkpoints after tool results and final candidates
 
-**Status:** Accepted
+**Status:** Accepted; activation superseded by [ADR-0030](0030-optional-jev-decisions.md)
 **Date:** 2026-09-18
 **Deciders:** JEV runtime checkpoint slice
 **Implements:** enforced TypeSafe JEV review profile

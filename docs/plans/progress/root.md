@@ -52,14 +52,14 @@ may append a **request** row; only root changes a request's status.
 | 0025 | SSE framing per chunk, parse once (D10) | speed-first H19 | Accepted (merged in #39) |
 | 0026 | Run cancellation token replaces polled flag (D8 remainder) | speed-first H22.2 | Accepted (merged in #47) |
 | 0027 | `qq-core` is a public embedding API | docs cleanup 2026-09-16 | Accepted (merged in #52) |
-| 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted locally; unpushed candidate |
-| 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Reserved; no accepted decision document yet |
+| 0028 | Mandatory typed JEV checkpoints after tool results and final candidates | JEV runtime checkpoint slice | Accepted (merged) |
+| 0029 | Native JEV model-and-effort routing and durable selection identity | Startup Manager / ENG-791 | Unused: decided as ADR-0031–0034 |
 | 0030 | Default-off independent Jev review/routing and bounded evidence | Stacked Jev implementation / user direction 2026-09-18 | Accepted in stacked work; supersedes ADR-0028 credential activation |
-| 0031 | Explicit reasoning effort in immutable plan identity | J6a optional routing foundation | Accepted locally; descriptor 8 |
-| 0032 | Durable optional routing before run preparation | J6b stacked Jev implementation | Accepted locally; protocol 25, schema 31 |
-| 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted locally; schema 32 |
-| 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted locally; descriptor 9 |
-| 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted locally; `docs/adr/0035-global-leaf-config-symlinks.md` |
+| 0031 | Explicit reasoning effort in immutable plan identity | J6a optional routing foundation | Accepted (merged) |
+| 0032 | Durable optional routing before run preparation | J6b stacked Jev implementation | Accepted (merged) |
+| 0033 | Preserve explicit model choices during optional routing | J6b stacked Jev implementation | Accepted (merged) |
+| 0034 | Bounded concrete Jev routing and inherited activation | J6b stacked Jev implementation | Accepted (merged) |
+| 0035 | Allow regular-file leaf targets for global configuration sources | GitHub #83 / Home Manager global config | Accepted (merged) |
 | 0036 | Designed truecolor default theme `ink` with `terminal` ANSI fallback | tui-redesign U5 | Accepted 2026-09-21: `docs/adr/0036-truecolor-default-theme.md` |
 | 0037 | Responsive TUI layout: width-selected tiers and panes, never features | tui-redesign U8 (L1–L4) | Reserved 2026-09-20 |
 | 0038 | Session retention: archive by session, never by row; receipts and cursors outlive their sessions | ENG-803 (F20 + F07 retention remainder) | Proposed: `docs/adr/0038-session-retention.md` |
@@ -68,7 +68,7 @@ may append a **request** row; only root changes a request's status.
 | 0041 | Jev as an approval delegate for held calls only; supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane | delegated-approval DA5 (ENG-862) | Accepted 2026-09-23: `docs/adr/0041-jev-delegated-approval.md`; no protocol or schema change |
 | 0042 | In-TUI trust prompt: client-side, root-resolved, no protocol change | onboarding-ux OB7 | Accepted 2026-09-24: `docs/adr/0042-in-tui-trust-prompt.md` |
 | 0043 | Verified root-task efficiency and evidence-gated defaults | token-efficiency TE0 | Reserved 2026-09-23; Proposed ADR-0043 |
-| 0044, 0045 | Session mode and strict verification | ENG-791 strict-verification stack (#187) | Reserved |
+| 0044, 0045 | Session mode and strict verification | ENG-791 strict-verification stack (#187) | Unused (#187 closed unmerged) |
 | 0046 | MCP tool-set pinning in configuration and plan identity, enforced at dispatch; `DESCRIPTOR_VERSION` 9 → 10 | ENG-939 (supersedes contributed #163/#165/#171) | Accepted 2026-09-25: `docs/adr/0046-mcp-tool-set-pinning.md` |
 | 0047 | Durable held-approval lifecycle: delegate-pending and human-required phases; clients follow server phase | Jev plan JV5 (ENG-791) | Proposed 2026-09-28 (`0047-jev-approval-hold-lifecycle.md`); replaces draft #193's colliding "0046" proposal |
 | 0048 | Run bounds reset at seams; `ContinueRun` and opt-in auto-continue of paused/interrupted runs | autonomous-core AC2–AC6 | Proposed 2026-09-28: `docs/adr/0048-run-bounds-reset-at-seams-and-continuation.md` |
@@ -76,6 +76,7 @@ may append a **request** row; only root changes a request's status.
 | 0050 | `qq-harness` composition library; `qq-core` tool features, embedding example and surface hygiene | autonomous-core AC10–AC13 | Proposed 2026-09-28: `docs/adr/0050-qq-harness-composition-library.md` |
 | 0051 | 0ver product versioning; compatibility carried by contract versions | v0.1.5 release (ENG-969), PR #212 | Accepted 2026-09-28: `docs/adr/0051-zerover-product-versioning.md` |
 | 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
+| 0053 | (reserved for #231's ADR, renumbered ADR-0055 before #231 was reverted) | compaction / decision models | Unused |
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 | 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
