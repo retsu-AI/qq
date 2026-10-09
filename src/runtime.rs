@@ -2988,26 +2988,7 @@ fn credential_reference(reference: &SecretRef) -> CredentialReference {
 /// An endpoint reduced to scheme, host, port, and path. Userinfo, query, and
 /// fragment can carry credentials and are dropped; an unparseable endpoint is
 /// described only by its scheme so no raw bytes leak into a descriptor.
-pub(crate) fn describe_endpoint(endpoint: &str) -> String {
-    match reqwest::Url::parse(endpoint) {
-        Ok(url) => {
-            let mut described = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                described.push_str(host);
-            }
-            if let Some(port) = url.port() {
-                described.push(':');
-                described.push_str(&port.to_string());
-            }
-            described.push_str(url.path());
-            described
-        }
-        Err(_) => endpoint.split_once("://").map_or_else(
-            || "unparseable".to_owned(),
-            |(scheme, _)| format!("{scheme}://<unparseable>"),
-        ),
-    }
-}
+pub(crate) use qq_harness::describe_endpoint;
 
 impl ResolvedAuth {
     fn into_http(self) -> Result<HttpAuth, AuthError> {
@@ -3902,6 +3883,8 @@ pub enum RuntimeBuildError {
         limit: u32,
     },
     #[error(transparent)]
+    McpBridge(#[from] qq_harness::McpBuildError),
+    #[error(transparent)]
     Mcp(#[from] qq_mcp::McpConfigError),
     #[error("runtime cache is unavailable")]
     CacheUnavailable,
@@ -3982,6 +3965,7 @@ impl RuntimeBuildError {
                 qq_provider::ProviderErrorKind::Protocol => RunFailureKind::ProviderProtocol,
             },
             Self::Mcp(_)
+            | Self::McpBridge(qq_harness::McpBuildError::Configuration(_))
             | Self::UnknownModel { .. }
             | Self::UnknownProfile(_)
             | Self::PackRequiresNewerProtocol { .. }
@@ -4001,7 +3985,8 @@ impl RuntimeBuildError {
             | Self::UnsupportedApi { .. }
             | Self::UnrepresentableOutputLimit { .. } => RunFailureKind::ProviderConfiguration,
             Self::Plan(_) => RunFailureKind::Configuration,
-            Self::CacheUnavailable
+            Self::McpBridge(qq_harness::McpBuildError::CacheUnavailable)
+            | Self::CacheUnavailable
             | Self::PlanCacheFull
             | Self::PlanCacheShutDown
             | Self::CatalogClientUnavailable(_) => RunFailureKind::Server,
@@ -4011,6 +3996,13 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extracted_mcp_cache_failure_keeps_its_server_classification() {
+        let error = super::RuntimeBuildError::from(qq_harness::McpBuildError::CacheUnavailable);
+        assert_eq!(error.failure_kind(), qq_protocol::RunFailureKind::Server);
+        assert_eq!(error.to_string(), "runtime cache is unavailable");
+    }
+
     use std::{
         collections::BTreeMap,
         fs,
@@ -7920,8 +7912,16 @@ mod tests {
         };
         let factory = fixture.factory();
         let default = factory.plan_for(&fixture.request(document(""))).unwrap();
-        let names: Vec<_> = default.catalog().names().map(str::to_owned).collect();
+        // wait_agents and cancel_agent follow spawn_agent and are not policy
+        // names: exposing spawn_agent exposes them.
+        let names: Vec<_> = default
+            .catalog()
+            .names()
+            .filter(|name| !matches!(*name, "wait_agents" | "cancel_agent"))
+            .map(str::to_owned)
+            .collect();
         assert!(names.iter().any(|name| name == "load_skill"));
+        assert!(names.iter().any(|name| name == "spawn_agent"));
         for name in &names {
             let request = fixture.request(document(&format!("exposed_tools: [{name:?}]")));
             let snapshot = factory.load(&request).unwrap();
@@ -8421,6 +8421,12 @@ mod tests {
                 profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
         )
         .unwrap();
+        // The edited manifest is new content and is reviewed again first.
+        assert!(matches!(
+            factory.plan_for_profile(&request, &reviewer),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+        factory.inner.config.grant_pending_trust(&request).unwrap();
         let error = factory.plan_for_profile(&request, &reviewer).unwrap_err();
         assert!(matches!(
             error,
@@ -8565,7 +8571,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v12\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v13\0{"));
     }
 
     #[test]

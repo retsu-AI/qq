@@ -76,6 +76,7 @@ may append a **request** row; only root changes a request's status.
 | 0052 | Jev approval activation from the compiled plan; supersedes ADR-0041 decision 5's activation | v0.1.5 release (ENG-971), PR #214 | Accepted 2026-09-28: `docs/adr/0052-jev-approval-activation-from-plan.md` |
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 | 0055 | Decision-model provider seam in `qq-provider` and a `qq-decision` crate; reverses the Jev plan's no-new-crate non-goal | decision-models DM0 (ENG-985) | Accepted 2026-09-30 (owner, PR #231): `docs/adr/0055-decision-model-seam-and-crate.md` |
+| 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -147,7 +148,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0056. Reserve here before opening a PR that adds an ADR.
+Next free number: 0057. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -169,10 +170,14 @@ Next free number: 0056. Reserve here before opening a PR that adds an ADR.
 | 2026-09-25 | mcp-pinning MP1 (ENG-939) | `Cargo.lock` (`sha2` for `qq-mcp`, already locked via other crates); `crates/qq-core/src/plan/descriptor.rs` `DESCRIPTOR_VERSION` 9 → 10 (`McpServerDescriptor.pin`); `docs/adr/README.md` (ADR-0046 row); `docs/design/architecture.md` § compiled plan identity; `docs/design/protocol.md` descriptor note; `docs/guide/cli.md` (`qq mcp inspect`) | The configured pin must be in durable plan identity or pinned and unpinned plans share a digest | Done in the ENG-939 PR |
 | 2026-09-28 | release v0.1.5 (ENG-968) | `docs/runbooks/release.md` § Versioning; `docs/design/architecture.md` § run loop and reasoning effort; root `Cargo.toml` / `Cargo.lock` version bump (release PR) | Adopt 0ver (contract bumps no longer force MINOR) and correct post-v0.1.4 drift before tagging | In review (stack ENG-969 … ENG-977) |
 | 2026-09-30 | decision-models DM0 (ENG-985) | `docs/design/architecture.md` (line 65 link only), `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md`, `docs/adr/README.md` (ADR-0055 row) | Rename the Jev docs to `decision-models.md` and keep every link resolving | Done in the DM0 PR |
-| 2026-09-30 | decision-models DM1 | root `Cargo.toml` (`crates/qq-decision` member and workspace dependency), `AGENTS.md` § Repository Map, `docs/design/architecture.md` § Repository Layout and § Extension Contract (owner table: `qq-decision`; lanes: decision providers) | ADR-0055's new crate | Open; ADR-0055 accepted 2026-09-30, lands with DM1 |
+| 2026-09-30 | decision-models DM1 | root `Cargo.toml` (`crates/qq-decision` member and workspace dependency), `AGENTS.md` § Repository Map, `docs/design/architecture.md` § Repository Layout and § Extension Contract (owner table: `qq-decision`; lanes: decision providers) | ADR-0055's new crate | Open; requires explicit owner scope/implementation approval after DM0 |
 | 2026-09-30 | autonomous-core AC0 (ENG-986) | `benchmarks/perf/README.md`, future `benchmarks/perf/budgets-v1.json` / `xtask/src/perf.rs` | Register standalone soak / `turn_overhead` boundaries now; qualify and register new H0 metrics together in AC0.2, never add budgets for absent metrics or widen existing gates | Open; standalone inventory amendment proposed in AC0.1 |
 | 2026-10-01 | autonomous-core AP1 (ENG-989) | `docs/design/architecture.md` § compiled plan prompt prefix (key gains the sub-agent state) and § child sessions (the `Sub-agent:` prompt section) | The prompt-prefix key and the child prompt changed; architecture must describe them as built | Done in the AP1 PR |
 | 2026-10-01 | autonomous-core AP3a (ENG-990) | `docs/design/architecture.md` § run loop slices and the measured-token paragraph; `docs/design/protocol.md` version history (store schema 40); guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 39 → 40 (`model_turns.notice`); the slice seam no longer changes the system prompt | Done in the AP3a PR |
+| 2026-10-02 | autonomous-core AP4.1 (ENG-1004) | `docs/design/architecture.md` § sub-agents and the stall paragraph; `docs/design/protocol.md` store schema history; guide `troubleshooting.md` / `providers.md` schema mentions | Store schema 40 → 41 (`child_deliveries`); prompt 15 → 16; no protocol change | Done in the AP4.1 PR |
+| 2026-10-04 | autonomous-core AP4.2 (ENG-1005) | `docs/design/architecture.md` § sub-agents (`wait_agents`, `cancel_agent`, interim reports); `docs/design/protocol.md` and `tools.md`; guide `troubleshooting.md` / `providers.md` version mentions | `DESCRIPTOR_VERSION` 12 → 13; store schema 41 → 42 (`child_reports`); prompt 16 → 17; no protocol change | Done in the AP4.2 PR |
+| 2026-10-05 | compaction CX4 (ENG-997) | `crates/qq-protocol` `PROTOCOL_VERSION` 30 → 31 (`RunActivity::Compacting`); `docs/design/protocol.md` version history; `docs/design/architecture.md` run loop step 3; guide `troubleshooting.md` / `providers.md` protocol mentions; Harbor trace fixtures | Clients must show that a run is compacting (compaction plan Goal 4); takes AC14's in-run compaction-activity item | Done in the CX4 PR |
+| 2026-10-05 | compaction CX3 (ENG-996) | `crates/qq-core` store schema 42 → 43 (`sessions.prune_through_ordinal`, `prune_through_turn`); `docs/design/protocol.md` store schema history; `docs/design/architecture.md` summarizer paragraph; guide `troubleshooting.md` / `providers.md` schema mentions | Assembly stubs only up to a durable watermark so cross-run requests extend each other (ADR-0056 § 6) | Done in the CX3 PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -469,3 +474,17 @@ slice is on `main`.
 - Delegating runs: 41 runs, 4 351 wall minutes, 1 722 minutes (40 %) with a
   `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
   error, 12 of them children over their context limit.
+
+### 2026-10-05 — embedding stack review readiness
+
+User authorized publishing regression and merging AC10 forward through AC11/AC12.1 without force pushes.
+Shared manifest/CI/map extraction remains limited to #253 → #256 → #258; AP4.2 untouched.
+Relative performance/size evidence in autonomous-core ledger; inherited 48 MB absolute size failure and high host pressure explicitly retained, not waived.
+
+### 2026-10-08 — v0.1.6 post-publication follow-up
+
+- Release workflow 37833036979 succeeded at tag commit `fef41a46`; published release has all five target archives and SHA256SUMS.
+- Unpinned install.sh smoke installed into `target/qq-release-check-0.1.6/bin`, verified the archive checksum, and printed `qq 0.1.6 (fef41a4 2026-10-08)`; `qq version` reports 31/1/13/43.
+- Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
+- `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
+- Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.

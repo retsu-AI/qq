@@ -1,24 +1,26 @@
 # Ledger — decision models
 
-Plan: [`../decision-models.md`](../decision-models.md). Design:
-[`../../design/decision-models.md`](../../design/decision-models.md).
+Plan: [`../decision-models.md`](../decision-models.md). Built design findings:
+[`../../design/decision-models.md`](../../design/decision-models.md) §§1–3.
 One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 2026-09-30.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | DM0 | Decision-model plan, design, ADR-0055, doc rename | In review | ENG-985 | This PR |
-| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | ADR-0055 accepted; root request for `Cargo.toml` |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | DM0 accepted, ADR-0055 settled, explicit owner scope/implementation approval required; root request for `Cargo.toml` |
 | DM2 | System One adapter on `HttpExchange` | Planned | — | |
 | DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
 | DM5 | OpenAI Decisions adapter | Blocked (no published API reference as of 2026-09-30) | — | |
 | DM6 | `decision_models` configuration and aliases | Planned | — | Owner decision 2 |
-| DM7 | Calibration table, shadow-only rule | Planned | — | After JV6 |
+| DM7 | Calibration table, shadow-only rule for `(provider, model, rubric, effect)` | Planned | — | After JV6; D7 only, JV7 owns A7 |
 | DM8 | Neutral names in core and protocol | Planned | — | With JV5's protocol bump |
 | DM9 | OpenAI vs Jev paired shadow comparison | Planned | — | ENG-809 spend approval |
 | JV0 | Consolidate Jev docs | Shipped (`08694a3`, #210) | [#210](https://github.com/retsu-AI/qq/pull/210) | |
-| JV1 | Effective activation, reliable Off | Activation shipped (`a944be8`, #214) | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | Plan-carried activation, off wins, edit replaces cached plan, bounded client cache (ADR-0052). Still open from A1: env/runtime-off and trust-change cases as named tests, revocation racing a result, server-side Off (JV9) |
+| JV1 | Effective activation and reliable Off aggregate | Planned | — | A1 remains open until both child slices are proven. |
+| JV1a | Effective activation child | Shipped (`a944be8`, #214) | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | A1 activation; plan-carried activation, off wins (ADR-0052). |
+| JV1b | Reliable Off remainder child | Planned | — | A1 remainder: env/runtime-off and trust-change tests, revocation racing a result, server-side Off (JV9). |
 | JV2 | Headless waits for the delegate | Shipped (`0e2eb64`, #215) | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
 | JV3 | Precision-safe parsing | Planned | — | Lands in DM4 |
 | JV4 | Effective task context | Planned | — | After JV1 |
@@ -164,4 +166,14 @@ its qualification procedure to § Qualification procedure.
 
 - QQ readiness chat `01a0d95e-d2ce-7350-9a9a-125f78a1be6a` owns this bounded PR231 documentation repair; original accepted decision and planned DM1–DM9 scope are preserved.
 - Independent docs review accepted architecture/authority/calibration separation and identified one stale plan-index clause. The index now requires only plan acceptance; ADR0055 was already accepted by the owner. PR description will match that settled decision and the current ADR allocation. No runtime, configuration, protocol or schema changed.
+
+### 2026-10-09 — PR249 replacement repair
+
+Moved future architecture §§4–7 into the plan and retained built design
+findings/provenance. Repaired `/decisions` A9, DM1 approval gate, complete
+calibration key, JV1a/JV1b statuses, DM7 D7-only acceptance, D2 bounds, and
+DM1/DM5 module ownership. Preserved ADR-0055 acceptance, ADR-0056/main
+entries, decision #6 open, and remote-push decision 12 held. Documentary
+dependency/link checks pass; runtime/provider/paid/CI/independent review remain
+pending. No slice is marked shipped by this entry.
 - Focused pinned Rust 1.97.1 verification: `cargo test --locked -p qq --bin qq docs_truth -- --test-threads=2` passed **23 tests**, none ignored (the older five-test author receipt is historical). All 247 relative links in changed Markdown resolve; `git diff --check` passed. Rust/config/build inputs are unchanged by this two-file correction, so unchanged runtime/benchmark gates are reused rather than repeated. Exact new-head hosted checks remain a separate follow-through; backlog root `01a1050a-2286-7392-a390-147f132c9d68` owns integration.

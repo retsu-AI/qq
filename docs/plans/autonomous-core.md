@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | AP0 (#232), AP2 (#233), AP1 (#235), AC0.1 (#236) and AP3a (#237) in review as one stack; AP3b next. **The progress track AP0–AP5 runs first** (revised 2026-09-30). ADRs 0048–0050 and 0054 Proposed |
+| Now | AP0–AP4.2, AC0.1, AC10, AC11 and AC12.1 shipped on `main` through `a0caa722` (2026-10-06). AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**; evidence pending. AC1 next, then AC2/AC3 and AC5/AC6 as dependent PRs while AP5 collects normal-use evidence. AC0.2 and AC12.2/.3 remain planned. ADRs 0048–0050 and 0054 Proposed |
 | Research | [`../design/core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) (findings 1–10); session-store evidence for the progress track in ADR-0054 § Context |
 | Ledger | [`progress/autonomous-core.md`](./progress/autonomous-core.md) |
 | Linear | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) (plan). One issue per slice is filed when the plan is accepted |

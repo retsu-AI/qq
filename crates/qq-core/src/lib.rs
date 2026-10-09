@@ -1,4 +1,22 @@
 //! Agent runtime, session behavior, tools, and persistence.
+//!
+//! # Embedding lifecycle
+//!
+//! Construct a [`Runtime`] from a [`qq_provider::Provider`], attach external
+//! tools with [`Runtime::with_tool_host`], then asynchronously compile it with
+//! [`LoadedRuntime::from_runtime`]. A [`RuntimeLoader`] supplies this immutable
+//! plan to [`SessionRuntime::open`]. The host need not depend on a configuration
+//! crate; [`Runtime::resolved_model`] records only capabilities it can establish.
+//!
+//! Resolve the workspace and create a session with [`qq_protocol::SessionCommand`],
+//! subscribe before submitting a prompt, and consume committed [`qq_protocol::SessionEvent`]
+//! values. In ask mode, respond to tool approvals through the same command lane.
+//! A `RunFinished` event records the typed outcome; silence is not completion.
+//! Call [`SessionRuntime::shutdown`] to cancel and drain owned work before closing
+//! the store. The credential-free `examples/embed.rs` runs this entire lifecycle.
+//! Compilation performs blocking filesystem/catalog work on bounded Tokio
+//! blocking tasks. Cancellation of a compilation future does not stop work that
+//! has already started; compilation is not a run and produces no tool side effects.
 
 #![forbid(unsafe_code)]
 
@@ -122,6 +140,30 @@ one next action. QQ keeps this report and continues the same run with tools avai
 const SLICE_CHECKPOINT_REJECTION: &str = "not executed: this reply was the slice checkpoint, \
 which records progress without running tools; the run continues and tools are available on \
 the next turn, so re-issue this call then";
+/// The stall report (ADR-0054 § 2) is the same kind of turn as the slice
+/// checkpoint, under its own wording: it fires after calls that changed
+/// nothing, not at a fixed slice boundary. It asks for the same report.
+pub(crate) const STALL_REPORT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+The last 64 tool calls changed nothing and produced no answer. Do not call tools in this reply. \
+Write a short report: what is established (with path:line evidence), what is still unknown, and \
+the one next action. QQ keeps this report and continues the same run with tools available \
+again.";
+const STALL_REPORT_REJECTION: &str = "not executed: this reply was a progress report, which \
+records what is established without running tools; the run continues and tools are available \
+on the next turn, so re-issue this call then";
+/// A sub-agent's last turn (ADR-0054 § 3). Its tools stay declared with
+/// `ToolChoice::None`; the turn ends the run whatever it returns.
+pub(crate) const SUBAGENT_FINAL_ANSWER_NOTICE: &str = "[QQ runtime notice; not a user \
+instruction]\nYou have reported several times without new results, so this reply ends your \
+run and is returned to the parent as your answer. Do not call tools; none will run. Answer the \
+brief from what you have: the answer first, then the evidence as path:line, then what is still \
+unknown.";
+const SUBAGENT_FINAL_ANSWER_REJECTION: &str = "not executed: this reply was the sub-agent's \
+final answer, which ends the run without running tools";
+/// A compaction summarizer declares the session's tools only so its request
+/// shares the provider cache; it never runs one (ADR-0056 § 5).
+const SUMMARIZER_TOOL_REJECTION: &str = "not executed: this is a compaction request and tools \
+are unavailable; reply with the summary only";
 pub(crate) const SLICE_CONTINUATION_NOTICE: &str = "[QQ runtime notice; not a user \
 instruction]\nContinue the task from the report above. Tools are available again. Do not stop \
 at a progress summary: complete the user's request unless an explicit overall budget, \
@@ -214,7 +256,7 @@ impl TurnRecoveryPolicy {
 /// Sent after a partial turn is committed when the provider fault cut the
 /// model off mid-reply. Alternation holds because the partial assistant
 /// message precedes it.
-const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
+pub(crate) const TURN_RETRY_CONTINUE_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThe \
 previous response was cut off by a transient provider error and QQ is retrying. Continue \
 exactly from where it stopped; do not repeat what was already written.";
 /// Fills a skipped empty assistant turn so the follow-up user message does
@@ -243,6 +285,109 @@ async fn interrupt_requested(steering: &mut Option<runtime::SteeringReceiver>, h
     }
 }
 
+/// How long a parent waiting for answers first pauses before retrying a
+/// settled child whose spend is not yet readable (its descendants are
+/// settling); the pause doubles up to `SUBAGENT_DELIVERY_RETRY_MAX`.
+const SUBAGENT_DELIVERY_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+const SUBAGENT_DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Resolves when steering arrives (the message is kept for the next
+/// boundary) or an interrupt newer than `handled` is requested; pending
+/// forever for runs without steering.
+async fn steering_arrived(steering: &mut Option<runtime::SteeringReceiver>, handled: u64) {
+    let Some(steering) = steering else {
+        return std::future::pending().await;
+    };
+    if steering.peeked.is_some() || *steering.interrupts.borrow() > handled {
+        return;
+    }
+    let runtime::SteeringReceiver {
+        messages,
+        interrupts,
+        peeked,
+    } = steering;
+    tokio::select! {
+        message = messages.recv() => match message {
+            Some(message) => *peeked = Some(message),
+            None => std::future::pending::<()>().await,
+        },
+        () = async {
+            loop {
+                if *interrupts.borrow() > handled {
+                    return;
+                }
+                if interrupts.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {}
+    }
+}
+
+/// Commits every settled detached child's answer for the parent's turn
+/// `turn_ordinal` and appends each as a runtime notice, after the boundary's
+/// steering (ADR-0054 § 4). The store commits before the message joins
+/// context; each answer is charged once here. Only a child that answered is
+/// progress (ADR-0054 § 1): a failed or cancelled child's notice is evidence
+/// for the parent, not output, exactly as a blocking spawn's error result is
+/// not progress, and neither is an interim report. Returns how many answers
+/// and how many interim reports were delivered.
+async fn deliver_children(
+    spawner: &Arc<dyn SubagentSpawner>,
+    boundary: Boundary,
+    messages: &mut Vec<Message>,
+    irreducible_message_bytes: &mut u64,
+    budget: &mut BudgetMeter,
+    stall: &mut runtime::StallScope,
+    checkpoint: Option<&mut runtime::CheckpointContext>,
+) -> Result<Delivered, runtime::DeliveryError> {
+    let delivered = spawner
+        .deliver(boundary.turn_ordinal, boundary.reports)
+        .await?;
+    let mut checkpoint = checkpoint;
+    let mut count = Delivered::default();
+    for child in &delivered {
+        if child.interim {
+            count.reports += 1;
+        } else {
+            count.answers += 1;
+        }
+        budget.charge_child(child.spend.usage, child.spend.cost_usd_nanos);
+        // Answers are output the parent asked for, like tool results: they
+        // count against its tool-output bound. The store bounded each
+        // boundary's notices together.
+        budget.charge_tool_output(child.notice.len());
+        if child.answered {
+            stall.progress();
+        }
+        // A delivered answer is evidence the final review weighs, exactly
+        // as a blocking spawn's result was.
+        if let Some(context) = checkpoint.as_deref_mut() {
+            context.record(child.notice.clone());
+        }
+        let notice = Message::user(child.notice.clone());
+        *irreducible_message_bytes =
+            irreducible_message_bytes.saturating_add(measure_message(&notice));
+        messages.push(notice);
+    }
+    Ok(count)
+}
+
+/// The boundary a delivery is for: the parent turn whose request carries
+/// it, and whether running children's reports come with it.
+#[derive(Debug, Clone, Copy)]
+struct Boundary {
+    turn_ordinal: u32,
+    reports: runtime::ReportDelivery,
+}
+
+/// What one boundary delivery added to the parent's context.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Delivered {
+    answers: usize,
+    reports: usize,
+}
+
 /// One steering message the loop has injected: its id and the files it read.
 struct AppliedSteering {
     message_id: qq_protocol::MessageId,
@@ -250,15 +395,17 @@ struct AppliedSteering {
 }
 
 /// Drains every steering message that is ready and appends each as a user
-/// message. Returns what was applied, in order, or `None` when nothing was
-/// pending. Never waits for more steering: messages that arrive after the
-/// drain wait for the next boundary. A message with file parts reads them
+/// message; applying any restarts the stall count. Returns what was
+/// applied, in order, or `None` when nothing was pending. Never waits for
+/// more steering: messages that arrive after the drain wait for the next
+/// boundary. A message with file parts reads them
 /// here — off the executor, through the plan's workspace — so the model sees
 /// the bytes as they are at the boundary and the store can keep them as
 /// this message's attachments. A file that cannot be read is reported to the
 /// model in place of the attachment rather than failing the run: the user's
 /// text still lands, and the message names what was missing.
 async fn apply_steering(
+    stall: &mut runtime::StallScope,
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
@@ -268,7 +415,11 @@ async fn apply_steering(
 ) -> Option<Vec<AppliedSteering>> {
     let steering = steering.as_mut()?;
     let mut applied = Vec::new();
-    while let Ok(message) = steering.messages.try_recv() {
+    while let Some(message) = steering
+        .peeked
+        .take()
+        .or_else(|| steering.messages.try_recv().ok())
+    {
         let has_files = message
             .input
             .iter()
@@ -317,7 +468,13 @@ async fn apply_steering(
             attachments,
         });
     }
-    (!applied.is_empty()).then_some(applied)
+    if applied.is_empty() {
+        return None;
+    }
+    // An applied steer is a progress event: the user just gave the run
+    // something new to act on (ADR-0054 § 1).
+    stall.progress();
+    Some(applied)
 }
 
 /// Executes one `select_tools` call against the run's pin set. Returns the
@@ -603,6 +760,20 @@ pub(crate) struct RunCapabilities {
     /// Set for a model-spawned child task: its prompt says a parent is
     /// waiting on it (ADR-0054 § 5).
     subagent: Option<runtime::SubagentAuthority>,
+    /// Audit children keep no stall count: they are already bounded at a
+    /// few turns (ADR-0054 § 1).
+    stall_exempt: bool,
+    /// Set for a compaction summarizer: the prompt prefix of the session's
+    /// prompt runs. The request declares that tool list under that system
+    /// prompt, so it reads the provider cache those runs wrote; every call is
+    /// rejected unexecuted (ADR-0056 § 5).
+    summarizer: Option<plan::PromptPrefixKey>,
+    /// The stored effect of each tool result in the messages the run starts
+    /// with, in block order (`None` for rows that predate the effect
+    /// column). The live overflow prune classifies inherited results by
+    /// these, exactly as assembly does, so a prune seam replays byte for
+    /// byte. Direct runs have none and fall back to the built-in names.
+    inherited_effects: Vec<Option<catalog::EffectClass>>,
 }
 
 impl RunCapabilities {
@@ -626,6 +797,9 @@ impl RunCapabilities {
             tool_tasks: None,
             output: None,
             subagent: None,
+            stall_exempt: false,
+            summarizer: None,
+            inherited_effects: Vec::new(),
         }
     }
 
@@ -637,6 +811,7 @@ impl RunCapabilities {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn without_tools(mut self) -> Self {
         self.allow_tools = false;
         self
@@ -706,6 +881,31 @@ impl RunCapabilities {
         self
     }
 
+    /// Exempts the run from stall reports: an audit child, bounded already.
+    pub(crate) fn stall_exempt(mut self) -> Self {
+        self.stall_exempt = true;
+        self
+    }
+
+    /// Makes the run a compaction summarizer whose request carries the
+    /// prompt prefix `key`: the same system prompt and tool list as the
+    /// session's prompt runs. Context sources and an output contract are
+    /// never applied to it, it keeps no stall count, and every call it makes
+    /// is rejected unexecuted; a second turn that calls a tool fails the run.
+    pub(crate) fn with_inherited_effects(
+        mut self,
+        effects: Vec<Option<catalog::EffectClass>>,
+    ) -> Self {
+        self.inherited_effects = effects;
+        self
+    }
+
+    pub(crate) fn summarizer(mut self, key: plan::PromptPrefixKey) -> Self {
+        self.summarizer = Some(key);
+        self.output = None;
+        self
+    }
+
     /// Installs a spawner on a restricted run: a model-authored child task at a
     /// depth the roster still permits to delegate.
     pub(crate) fn with_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
@@ -744,6 +944,9 @@ impl RunCapabilities {
             tool_tasks: None,
             output: None,
             subagent: None,
+            stall_exempt: false,
+            summarizer: None,
+            inherited_effects: Vec::new(),
         }
     }
 }
@@ -897,26 +1100,41 @@ impl Runtime {
         self
     }
 
-    /// The summarizer request of an in-run compaction: provider turns with no
-    /// tools, continued up to `MAX_OUTPUT_CONTINUATIONS` times when the reply
-    /// is cut at the output limit, exactly as the run loop and the
-    /// between-run path do. A cut turn resumes mid-token, so its continuation
-    /// is appended verbatim. Returns the joined text and the summed usage. A
-    /// tool call, refusal, protocol violation, or transport failure is an
-    /// error naming it; the caller settles the compaction run failed. The
-    /// provider owns retries exactly as for any other request.
+    /// The summarizer request of an in-run compaction, under the run's own
+    /// system prompt and tools (ADR-0056 § 5). It is continued up to
+    /// `MAX_OUTPUT_CONTINUATIONS` times when the reply is cut at the output
+    /// limit, exactly as the run loop and the between-run path do; a cut turn
+    /// resumes mid-token, so its continuation is appended verbatim. A turn
+    /// that calls tools gets a rejection result for each call and is asked
+    /// again once, dropping what it wrote; a second such turn, a refusal, a
+    /// protocol violation, or a transport failure is an error naming it, and
+    /// the caller settles the compaction run failed. Returns the joined text
+    /// and the summed usage. The provider owns retries as for any request.
     pub(crate) async fn summarize(
         &self,
         messages: Vec<Message>,
+        system: Arc<str>,
+        tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
     ) -> Result<(String, Option<TokenUsage>), String> {
         let mut messages = messages;
         let mut summary = String::new();
         let mut total_usage: Option<TokenUsage> = None;
         let mut continuations: u16 = 0;
+        // One turn of calls is answered with rejections so the model can
+        // still write the summary; a second fails the step.
+        let mut rejected_call_turn = false;
         loop {
+            // The run's own system prompt and tools, so this request shares
+            // the run's provider cache (ADR-0056 § 5). Calls are never run.
             let request =
-                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens);
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
+                    .with_system(Arc::clone(&system));
+            let request = if tools.is_empty() {
+                request
+            } else {
+                request.with_tools(Arc::clone(&tools))
+            };
             let request = match self.reasoning_effort {
                 Some(effort) => request.with_reasoning_effort(effort),
                 None => request,
@@ -925,12 +1143,21 @@ impl Runtime {
             let mut text = String::new();
             let mut truncated = None;
             let mut usage = None;
+            // Calls in this turn, in order, and the turn's replay data: a
+            // rejected-call turn is sent back exactly as it was produced.
+            struct SummarizerCall {
+                id: String,
+                name: String,
+                arguments: String,
+            }
+            let mut calls: Vec<SummarizerCall> = Vec::new();
+            let mut replay = None;
             loop {
                 let Some(event) = events.next().await else {
                     return Err("summarizer stream ended without completing".to_owned());
                 };
                 match event {
-                    Ok(ProviderEvent::Replay { .. }) => {} // Summaries have no provider continuation.
+                    Ok(ProviderEvent::Replay { data }) => replay = Some(data),
                     Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
                         if summary
                             .len()
@@ -950,13 +1177,38 @@ impl Runtime {
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
                         return Err("summarizer refused".to_owned());
                     }
-                    Ok(
-                        ProviderEvent::ToolCallStarted { .. }
-                        | ProviderEvent::ToolCallArgumentsDelta { .. }
-                        | ProviderEvent::ToolCallCompleted { .. },
-                    ) => {
-                        return Err("summarizer attempted a tool call".to_owned());
+                    Ok(ProviderEvent::ToolCallStarted { id, name }) => {
+                        if rejected_call_turn {
+                            return Err("summarizer called a tool on two turns".to_owned());
+                        }
+                        if calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN
+                            || id.is_empty()
+                            || id.len() > MAX_TOOL_CALL_ID_BYTES
+                            || name.is_empty()
+                            || name.len() > MAX_TOOL_NAME_BYTES
+                            || calls.iter().any(|call| call.id == id)
+                        {
+                            return Err("summarizer streamed a malformed tool call".to_owned());
+                        }
+                        calls.push(SummarizerCall {
+                            id,
+                            name,
+                            arguments: String::new(),
+                        });
                     }
+                    Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
+                        let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
+                            return Err(
+                                "summarizer streamed arguments for an unknown call".to_owned()
+                            );
+                        };
+                        if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES
+                        {
+                            return Err("summarizer tool arguments exceeded their bound".to_owned());
+                        }
+                        call.arguments.push_str(&json);
+                    }
+                    Ok(ProviderEvent::ToolCallCompleted { .. }) => {}
                     Ok(ProviderEvent::Completed { usage: reported }) => {
                         usage = reported.map(provider_usage);
                         break;
@@ -968,7 +1220,6 @@ impl Runtime {
                     Err(error) => return Err(error.to_string()),
                 }
             }
-            summary.push_str(&text);
             // Overflowing the sum is a provider protocol fault; fail the
             // compaction rather than persist an understated total.
             total_usage = match (total_usage, usage) {
@@ -979,6 +1230,59 @@ impl Runtime {
                 (Some(total), None) | (None, Some(total)) => Some(total),
                 (None, None) => None,
             };
+            if !calls.is_empty() {
+                // Answer each call with a rejection and ask again. The model
+                // abandoned its reply, so nothing written so far is kept. A
+                // cut turn's calls are incomplete and cannot be answered.
+                if truncated.is_some() {
+                    return Err("summarizer called a tool and was cut off".to_owned());
+                }
+                rejected_call_turn = true;
+                summary.clear();
+                continuations = 0;
+                let mut blocks = Vec::with_capacity(calls.len() + 1);
+                if !text.is_empty() {
+                    blocks.push(ContentBlock::Text { text });
+                }
+                let mut results = Vec::with_capacity(calls.len());
+                for SummarizerCall {
+                    id,
+                    name,
+                    arguments,
+                } in calls
+                {
+                    let arguments = if arguments.trim().is_empty() {
+                        "{}".to_owned()
+                    } else {
+                        arguments
+                    };
+                    let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
+                        return Err(
+                            "summarizer streamed tool arguments that are not JSON".to_owned()
+                        );
+                    };
+                    blocks.push(ContentBlock::ToolCall {
+                        id: id.clone(),
+                        name,
+                        arguments,
+                    });
+                    results.push(ContentBlock::ToolResult {
+                        call_id: id,
+                        content: SUMMARIZER_TOOL_REJECTION.to_owned(),
+                        is_error: true,
+                    });
+                }
+                // Reasoning providers (Anthropic thinking) require the turn's
+                // replay data alongside its tool calls.
+                let assistant = Message::new(Role::Assistant, blocks);
+                messages.push(match replay {
+                    Some(data) => assistant.with_replay(data),
+                    None => assistant,
+                });
+                messages.push(Message::tool_results(results));
+                continue;
+            }
+            summary.push_str(&text);
             let Some(reason) = truncated else {
                 return Ok((summary, total_usage));
             };
@@ -1039,6 +1343,11 @@ impl Runtime {
     /// configuration: identity comes from the runtime itself, and every
     /// capability the embedder did not declare is recorded as unsupported or
     /// unknown rather than guessed.
+    #[must_use]
+    pub fn resolved_model(&self) -> qq_protocol::ResolvedModel {
+        self.embedded_resolved_model()
+    }
+
     pub(crate) fn embedded_resolved_model(&self) -> qq_protocol::ResolvedModel {
         qq_protocol::ResolvedModel {
             version: qq_protocol::ResolvedModelVersion::new(1)
@@ -1438,6 +1747,9 @@ impl plan::CompiledAgentPlan {
                 tool_tasks,
                 output,
                 subagent,
+                stall_exempt,
+                summarizer,
+                inherited_effects,
             } = capabilities;
             let tool_tasks = tool_tasks.unwrap_or_default();
             let mut steering = steering;
@@ -1532,7 +1844,10 @@ impl plan::CompiledAgentPlan {
             // changes. A fail-closed failure settles the run here.
             let mut context_blocks = String::new();
             let mut context_records = Vec::new();
-            if !context_sources.is_empty() {
+            // A summarizer reads no context sources: its system prompt is the
+            // session's plan-constant prefix, which is what the provider
+            // cached (ADR-0056 § 5).
+            if !context_sources.is_empty() && summarizer.is_none() {
                 let latest_user_text = messages
                     .last()
                     .filter(|message| message.role() == Role::User)
@@ -1583,13 +1898,22 @@ impl plan::CompiledAgentPlan {
             // for durable session runs) plus every external tool under full
             // exposure. Under progressive exposure the model pins external
             // tools with `select_tools`; pins extend this base list.
-            let static_filter = allow_tools.then_some(catalog::StaticFilter {
-                spawn_agent: spawner.is_some(),
-                search_history: history.is_some(),
-                read_tool_result: spills.is_some(),
-                load_skill: allow_guidance,
-                read_only,
-            });
+            let prefix_key = match summarizer {
+                Some(key) => key,
+                None => plan::PromptPrefixKey {
+                    tools: allow_tools.then_some(catalog::StaticFilter {
+                        spawn_agent: spawner.is_some(),
+                        search_history: history.is_some(),
+                        read_tool_result: spills.is_some(),
+                        load_skill: allow_guidance,
+                        read_only,
+                    }),
+                    guidance: allow_guidance,
+                    subagent,
+                },
+            };
+            let static_filter = prefix_key.tools;
+            let allow_tools = static_filter.is_some();
             let base_specs: Arc<[ToolSpec]> = match &static_filter {
                 Some(filter) => catalog.base_specs(filter),
                 None => Arc::from([]),
@@ -1608,14 +1932,7 @@ impl plan::CompiledAgentPlan {
             // The plan-constant prefix is built once per capability set and
             // its SHA-256 state continued over this run's suffix, so neither
             // the prompt body nor its hash is recomputed per run.
-            let prompt_prefix = plan.prompt_prefix(
-                plan::PromptPrefixKey {
-                    tools: static_filter,
-                    guidance: allow_guidance,
-                    subagent,
-                },
-                &base_specs,
-            );
+            let prompt_prefix = plan.prompt_prefix(prefix_key, &base_specs);
             let (system, system_prompt_hash) = {
                 let mut suffix = String::new();
                 if let Some(guidance) = &selected_guidance {
@@ -1656,18 +1973,26 @@ impl plan::CompiledAgentPlan {
             // The last provider-measured request as (system bytes, tool
             // schema bytes, message bytes, measured input tokens). The next
             // request's estimate starts from the measurement and follows each
-            // component's byte delta, so a checkpoint notice, a tool-free
+            // component's byte delta, so a checkpoint notice, a budget-final
             // turn, or an in-run prune adjusts the chain instead of dropping
             // it back to the raw byte estimate.
             let mut compatible_request: Option<(u64, u64, u64, u64)> = None;
             // Effects of this run's admitted calls by provider call id, so a
             // turn that would overflow the window can stub the stale
-            // read-only results in memory before failing. Between runs
-            // assembly does the same from the stored effect column; within a
-            // run this is the only record.
+            // read-only results in memory before failing. Results the run
+            // inherited carry their stored effects (`inherited_effects`).
             let mut call_effects = HashMap::<String, catalog::EffectClass>::new();
 
             let mut slice_tool_calls = 0_usize;
+            // Calls since the run last produced output (ADR-0054 § 1). Only
+            // a run that can call tools has anything to report.
+            let mut stall = runtime::StallScope::new(if stall_exempt || !allow_tools || summarizer.is_some() {
+                runtime::StallPolicy::Exempt
+            } else if subagent.is_some() {
+                runtime::StallPolicy::Subagent
+            } else {
+                runtime::StallPolicy::Root
+            });
             let mut output_continuations = 0_u16;
             // Retries spent on the current turn's transient provider faults;
             // a completed turn resets it.
@@ -1694,9 +2019,12 @@ impl plan::CompiledAgentPlan {
                 .unwrap_or_default();
             let mut model_text_bytes = 0_usize;
             let mut continuing_slice = false;
-            // The slice's report notice is in the conversation; a retried,
-            // truncated, or interrupted checkpoint attempt reuses it.
-            let mut checkpoint_noticed = false;
+            // The report or final-answer notice already in the conversation
+            // and not yet answered. It pins the turn's kind: a retried,
+            // truncated, or interrupted attempt is the same report under the
+            // same notice, even when an applied steer has since reset the
+            // stall count, and a final-answer turn stays final.
+            let mut placed_report: Option<runtime::TurnNotice> = None;
             // The notice placed before the next turn's request, persisted with
             // the first turn row that request produces.
             let mut pending_notice: Option<runtime::TurnNotice> = None;
@@ -1711,10 +2039,42 @@ impl plan::CompiledAgentPlan {
             // second rejection of the same turn fails the run as before.
             let mut provider_overflowed = false;
             let mut reactive_compaction_turn: Option<u32> = None;
+            // A summarizer gets one turn of rejected calls to recover with a
+            // summary; a second fails closed.
+            let mut summarizer_rejected_turns = 0_u8;
+            // The turn a wait for sub-agent answers already delivered for.
+            let mut wait_delivered_for: Option<u32> = None;
             'turns: for turn_ordinal in 1..=u32::MAX {
+                // Settled detached children answer here, at the one boundary
+                // every turn passes: after the previous turn's results and
+                // steering, before this request is built (ADR-0054 § 4); a
+                // child still working may send its newest report. The store
+                // commits the delivery before the notice joins context. A run
+                // with no background child makes no store call.
+                // A wait that just delivered for this turn used its boundary;
+                // anything settling since waits for the next one, so one
+                // boundary spends one turn's tool-output budget.
+                let delivered_by_wait = std::mem::take(&mut wait_delivered_for) == Some(turn_ordinal);
+                if let Some(spawner) = &spawner
+                    && !delivered_by_wait
+                    && spawner.outstanding_detached() > 0
+                    && let Err(error) = deliver_children(
+                        spawner,
+                        Boundary { turn_ordinal, reports: runtime::ReportDelivery::Always },
+                        Arc::make_mut(&mut messages),
+                        &mut irreducible_message_bytes,
+                        &mut budget,
+                        &mut stall,
+                        checkpoint_context.as_mut(),
+                    )
+                    .await
+                {
+                    yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
+                    return;
+                }
                 // Caller budgets are decided at the turn boundary, before any
-                // provider request. A spent work budget grants one tool-free
-                // final response; a second spent check, an elapsed wall
+                // provider request. A spent work budget grants one final
+                // response that asks for no tool calls; a second spent check, an elapsed wall
                 // clock, or unmeasurable cost settles the run here.
                 let budget_final_turn = match budget.before_turn(
                     tokio::time::Instant::now(),
@@ -1735,22 +2095,52 @@ impl plan::CompiledAgentPlan {
                 // terminal outcome; the next turn starts a new slice. Tools
                 // stay declared so a model that calls one anyway gets a
                 // rejection result rather than a protocol failure.
-                let checkpoint_turn = !budget_final_turn
+                let slice_checkpoint = !budget_final_turn
                     && slice_tool_calls
                         .saturating_add(MAX_TOOL_CALLS_PER_TURN)
                         > MAX_TOOL_CALLS_PER_SLICE;
+                // A report turn is due at the slice boundary, or after
+                // `STALL_REPORT_CALLS` calls that produced nothing. A
+                // sub-agent's report turn after enough of them without work
+                // is its final answer. The budget-final turn outranks both.
+                let report_due = match (budget_final_turn, placed_report) {
+                    (true, _) => runtime::ReportDue::None,
+                    (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
+                    (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport)) => {
+                        runtime::ReportDue::Report
+                    }
+                    (false, Some(runtime::TurnNotice::Continuation) | None) => {
+                        stall.due(slice_checkpoint)
+                    }
+                };
+                let final_answer_turn = report_due == runtime::ReportDue::FinalAnswer;
+                let checkpoint_turn = report_due == runtime::ReportDue::Report;
+                // Which report this is: a pinned one keeps the kind it was
+                // asked as; a new one is the slice checkpoint when the slice
+                // is full, else a stall report.
+                let slice_report = match placed_report {
+                    Some(placed) => placed == runtime::TurnNotice::Report,
+                    None => slice_checkpoint,
+                };
                 let continuation_turn = std::mem::take(&mut continuing_slice);
                 // The checkpoint and continuation notices join the
                 // conversation as runtime messages, so the system prompt and
                 // its cached prefix stay the run's own (ADR-0054 § 2).
                 // A checkpoint resets the slice, so the next turn is never a
-                // checkpoint too; a budget-final turn has no tools, so it is
-                // not told that tools are available again.
+                // checkpoint too; a budget-final turn asks for no tool calls,
+                // so it is not told that tools are available again.
                 debug_assert!(!(checkpoint_turn && continuation_turn));
-                let notice = if checkpoint_turn && !checkpoint_noticed {
-                    checkpoint_noticed = true;
-                    Some(runtime::TurnNotice::Report)
-                } else if continuation_turn && !budget_final_turn {
+                let notice = if (checkpoint_turn || final_answer_turn) && placed_report.is_none() {
+                    let notice = if final_answer_turn {
+                        runtime::TurnNotice::FinalAnswer
+                    } else if slice_report {
+                        runtime::TurnNotice::Report
+                    } else {
+                        runtime::TurnNotice::StallReport
+                    };
+                    placed_report = Some(notice);
+                    Some(notice)
+                } else if continuation_turn && !budget_final_turn && !final_answer_turn {
                     Some(runtime::TurnNotice::Continuation)
                 } else {
                     None
@@ -1767,7 +2157,12 @@ impl plan::CompiledAgentPlan {
                 } else {
                     Arc::clone(&system)
                 };
-                let request_has_tools = allow_tools && !budget_final_turn;
+                // A budget-final turn keeps its tools declared and asks for
+                // none: dropping them is rejected by Bedrock once history
+                // holds tool calls, and an unchanged tool block keeps its
+                // cache entry. A call the model makes anyway still settles
+                // the run (below), so the choice is advice, not the bound.
+                let request_has_tools = allow_tools;
                 let request_system_hash = if budget_final_turn {
                     ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
                 } else {
@@ -1850,26 +2245,33 @@ impl plan::CompiledAgentPlan {
                         irreducible_message_bytes,
                     ));
                 if would_overflow && {
-                    // Results loaded from the store carry no effect here and
-                    // fall back to the built-in read-only names, exactly as
-                    // assembly treats rows that predate the effect column.
-                    let call_effects = &call_effects;
-                    let effects = messages
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(message_index, message)| {
-                            message.content().iter().enumerate().filter_map(
-                                move |(block_index, block)| match block {
-                                    ContentBlock::ToolResult { call_id, .. } => call_effects
-                                        .get(call_id)
-                                        .map(|effect| ((message_index, block_index), *effect)),
-                                    ContentBlock::Text { .. } | ContentBlock::ToolCall { .. } => {
-                                        None
-                                    }
-                                },
-                            )
-                        })
-                        .collect::<HashMap<_, _>>();
+                    // Results the run inherited are classified by their
+                    // stored effects, in block order, exactly as assembly
+                    // classifies them, so this prune seam replays byte for
+                    // byte; a row without one falls back to the built-in
+                    // read-only names in both. The run's own results use
+                    // the effect each call was admitted under.
+                    let mut effects = HashMap::new();
+                    let mut inherited = 0_usize;
+                    for (message_index, message) in messages.iter().enumerate() {
+                        for (block_index, block) in message.content().iter().enumerate() {
+                            let ContentBlock::ToolResult { call_id, .. } = block else {
+                                continue;
+                            };
+                            let effect = if message_index < reducible_messages {
+                                inherited += 1;
+                                inherited_effects
+                                    .get(inherited - 1)
+                                    .copied()
+                                    .unwrap_or_else(|| call_effects.get(call_id).copied())
+                            } else {
+                                call_effects.get(call_id).copied()
+                            };
+                            if let Some(effect) = effect {
+                                effects.insert((message_index, block_index), effect);
+                            }
+                        }
+                    }
                     sessions::prune_stale_tool_results(
                         Arc::make_mut(&mut messages).as_mut_slice(),
                         &effects,
@@ -1877,6 +2279,7 @@ impl plan::CompiledAgentPlan {
                 } {
                     reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                     irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                    yield RuntimeEvent::ContextPruned { turn_ordinal };
                 }
                 // Still over the window after stubbing, or the provider said
                 // so itself: summarize this run's own earlier turns and
@@ -1888,6 +2291,7 @@ impl plan::CompiledAgentPlan {
                 // the prompt and the session context before it stay. A
                 // failure here is the same context failure the session layer
                 // would have raised, with the compactor's reason attached.
+                let provider_rejected_window = provider_overflowed;
                 let still_overflows = std::mem::take(&mut provider_overflowed)
                     || over_window(estimate_input_tokens(
                         compatible_request,
@@ -1902,9 +2306,49 @@ impl plan::CompiledAgentPlan {
                     );
                     if let Some((replace_through, replaced_turns)) = boundary {
                         let turn_cutoff = compacted_turns.saturating_add(replaced_turns);
-                        let transcript = messages[reducible_messages..run_start + replace_through].to_vec();
+                        // The summarizer sends the request this turn would
+                        // have sent, cut at the boundary: the same system
+                        // prompt, tools, and message prefix, so it reads the
+                        // provider cache the run's own turns wrote. It is
+                        // judged on the same estimate as every decision in
+                        // this loop. When that says it would not fit with the
+                        // summarizer's reserve, or the provider has just
+                        // rejected the estimate, the session context before
+                        // the prompt is dropped: a cache miss, not a request
+                        // over the window.
+                        let cut = run_start + replace_through;
+                        let summarizer_fits = !provider_rejected_window
+                            && plan.runtime.context_window.is_none_or(|window| {
+                                estimate_input_tokens(
+                                    compatible_request,
+                                    reducible_message_bytes,
+                                    measure_messages(&messages[reducible_messages..cut]),
+                                )
+                                .saturating_add(u64::from(
+                                    sessions::context::summarizer_output_tokens(
+                                        model_max_output_tokens,
+                                        Some(window),
+                                    ),
+                                ))
+                                    <= u64::from(window)
+                            });
+                        let transcript = if summarizer_fits {
+                            messages[..cut].to_vec()
+                        } else {
+                            messages[reducible_messages..cut].to_vec()
+                        };
+                        // The summarizer is one silent provider turn; this
+                        // run's next turn reports `WaitingForProvider` again.
+                        yield RuntimeEvent::ActivityChanged {
+                            activity: RunActivity::Compacting,
+                        };
                         match compactor
-                            .compact(runtime::InRunCompactionRequest { transcript, turn_cutoff })
+                            .compact(runtime::InRunCompactionRequest {
+                                transcript,
+                                turn_cutoff,
+                                system: Arc::clone(&system),
+                                tools: Arc::clone(&tool_specs),
+                            })
                             .await
                         {
                             Ok(summary) => {
@@ -1922,11 +2366,18 @@ impl plan::CompiledAgentPlan {
                                 yield RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff };
                             }
                             Err(error) => {
-                                yield RuntimeEvent::Failed {
-                                    kind: RunFailureKind::Policy,
-                                    message: format!(
-                                        "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
-                                    ),
+                                yield match error {
+                                    runtime::InRunCompactionError::Persistence(_) => RuntimeEvent::Failed {
+                                        kind: RunFailureKind::Server,
+                                        message: format!("in-run compaction failed: {error}"),
+                                    },
+                                    runtime::InRunCompactionError::SummarizerFailed(_)
+                                    | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
+                                        kind: RunFailureKind::Policy,
+                                        message: format!(
+                                            "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
+                                        ),
+                                    },
                                 };
                                 return;
                             }
@@ -1971,9 +2422,14 @@ impl plan::CompiledAgentPlan {
                     None => request,
                 };
                 let request = if request_has_tools {
-                    request
+                    let request = request
                         .with_tools(Arc::clone(&tool_specs))
-                        .with_system(Arc::clone(&request_system))
+                        .with_system(Arc::clone(&request_system));
+                    if budget_final_turn || final_answer_turn {
+                        request.with_tool_choice(qq_provider::ToolChoice::None)
+                    } else {
+                        request
+                    }
                 } else {
                     request.with_system(Arc::clone(&request_system))
                 };
@@ -2121,8 +2577,9 @@ impl plan::CompiledAgentPlan {
                         }
                         Ok(ProviderEvent::ToolCallStarted { id, name }) => {
                             if budget_final_turn {
-                                // The model ignored the tool-free final
-                                // response request. The budget still settles
+                                // The model called a tool on the final
+                                // response anyway (Bedrock Converse cannot
+                                // ask for none). The budget still settles
                                 // the run: exhaustion is never a provider
                                 // failure, and no more work may be spent.
                                 let BudgetDecision::Exhausted(mut exhaustion) = budget
@@ -2174,8 +2631,14 @@ impl plan::CompiledAgentPlan {
                             // so they do not count against the slice or the
                             // run's tool-call budget.
                             let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
-                            let rejection = if checkpoint_turn {
+                            let rejection = if summarizer.is_some() {
+                                Some(SUMMARIZER_TOOL_REJECTION.to_owned())
+                            } else if final_answer_turn {
+                                Some(SUBAGENT_FINAL_ANSWER_REJECTION.to_owned())
+                            } else if checkpoint_turn && slice_report {
                                 Some(SLICE_CHECKPOINT_REJECTION.to_owned())
+                            } else if checkpoint_turn {
+                                Some(STALL_REPORT_REJECTION.to_owned())
                             } else if over_cap {
                                 Some(format!(
                                     "not executed: this turn requested more than \
@@ -2201,7 +2664,7 @@ impl plan::CompiledAgentPlan {
                                 completed: false,
                                 rejection,
                             });
-                            if !over_cap && !checkpoint_turn {
+                            if !over_cap && !checkpoint_turn && !final_answer_turn {
                                 slice_tool_calls += 1;
                             }
                             blocks.push(TurnBlock::ToolCall(index));
@@ -2530,6 +2993,16 @@ impl plan::CompiledAgentPlan {
                 };
                 budget.charge_turn(terminal_usage);
                 budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
+                if summarizer.is_some() && !calls.is_empty() {
+                    summarizer_rejected_turns += 1;
+                    if summarizer_rejected_turns > 1 {
+                        yield RuntimeEvent::Failed {
+                            kind: RunFailureKind::ProviderProtocol,
+                            message: "the compaction summarizer called a tool on two turns; tools are unavailable during compaction".to_owned(),
+                        };
+                        return;
+                    }
+                }
 
                 if let Some((kind, message)) = turn_fault {
                     // The partial turn is durable. Re-issue the turn after a
@@ -2716,7 +3189,7 @@ impl plan::CompiledAgentPlan {
                     // The interrupt exists to apply steering now. Nothing
                     // queued means the client raced a finishing run; continue
                     // with the next turn so the model resumes from its text.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         for steer in applied {
                             yield RuntimeEvent::SteeringApplied {
                                 message_id: steer.message_id,
@@ -2764,6 +3237,17 @@ impl plan::CompiledAgentPlan {
                     return;
                 }
 
+                // A sub-agent's final-answer turn ends the run whatever it
+                // returned (ADR-0054 § 3): its calls were admitted with a
+                // not-executed result and settle through the result path
+                // below, then the run completes there. A reply with no calls
+                // completes here. Jev final review, the audit hook, and
+                // steering cannot redirect it; an empty reply leaves the
+                // parent the child's latest report.
+                if final_answer_turn && calls.is_empty() {
+                    yield RuntimeEvent::Completed { final_output: None };
+                    return;
+                }
                 if checkpoint_turn {
                     // The persisted turn is the slice boundary whether or not
                     // the model obeyed the notice. Calls it made anyway were
@@ -2771,9 +3255,14 @@ impl plan::CompiledAgentPlan {
                     // through the ordinary result path below, so the next
                     // turn sees one result per call and can re-issue them.
                     // An empty reply is a missed report: the slice still
-                    // resets and the run continues (ADR-0054 § 2).
-                    slice_tool_calls = 0;
-                    checkpoint_noticed = false;
+                    // resets and the run continues (ADR-0054 § 2). A stall
+                    // report is the same kind of turn; it leaves the slice
+                    // count alone, since its calls still ran in this slice.
+                    if slice_report {
+                        slice_tool_calls = 0;
+                    }
+                    stall.reported();
+                    placed_report = None;
                     continuing_slice = true;
                     if calls.is_empty() {
                         // Assembly drops an empty turn and fills the gap
@@ -2790,7 +3279,7 @@ impl plan::CompiledAgentPlan {
                         // Steering that arrived during the report is applied
                         // here, before the continuation notice, exactly as at
                         // any other turn boundary.
-                        if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                             for steer in applied {
                                 yield RuntimeEvent::SteeringApplied {
                                     message_id: steer.message_id,
@@ -2806,7 +3295,15 @@ impl plan::CompiledAgentPlan {
                     // Steering that arrived during the final turn is not
                     // dropped: the run continues with it instead of
                     // completing, exactly as if the model had called a tool.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                        // A reply the run continues past stays in context, so
+                        // it must be provider-valid: an empty one takes the
+                        // placeholder assembly fills the gap with on replay.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
                         irreducible_message_bytes = irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -2819,6 +3316,96 @@ impl plan::CompiledAgentPlan {
                                 turn_ordinal: turn_ordinal.saturating_add(1),
                                 attachments: steer.attachments,
                             };
+                        }
+                        continue;
+                    }
+                    // A reply without tool calls while detached children are
+                    // still out is not the run's answer yet: wait for the next
+                    // answer (or steering), deliver it at the next boundary,
+                    // and run another turn (ADR-0054 § 4). Nothing here
+                    // selects on cancellation or the deadline: the session
+                    // consumer drops this stream on cancellation
+                    // (`execution.rs`, the `cancellation.changed()` arm) and
+                    // `RunDeadline::enforce` drops it at the deadline.
+                    if let Some(spawner) = &spawner
+                        && spawner.outstanding_detached() > 0
+                    {
+                        // Empty while waiting is likely (nothing left to do):
+                        // the same placeholder keeps the request valid.
+                        let assistant = if assistant.has_content() {
+                            assistant
+                        } else {
+                            Message::assistant(EMPTY_TURN_PLACEHOLDER)
+                        };
+                        irreducible_message_bytes = irreducible_message_bytes
+                            .saturating_add(measure_message(&assistant));
+                        Arc::make_mut(&mut messages).push(assistant);
+                        // A "waiting for sub-agents" activity is client work
+                        // (AC14); clients see the child sessions meanwhile.
+                        // The wait ends with something in context after the
+                        // reply, applied steering or a delivered answer, so
+                        // live and replayed context stay identical.
+                        #[cfg(test)]
+                        spawner.waiting_for_test();
+                        let mut delivery_retry = SUBAGENT_DELIVERY_RETRY;
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = steering_arrived(&mut steering, handled_interrupt) => {}
+                                () = spawner.child_settled() => {}
+                            }
+                            handled_interrupt = steering
+                                .as_ref()
+                                .map_or(handled_interrupt, |steering| *steering.interrupts.borrow());
+                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                for steer in applied {
+                                    yield RuntimeEvent::SteeringApplied {
+                                        message_id: steer.message_id,
+                                        turn_ordinal: turn_ordinal.saturating_add(1),
+                                        attachments: steer.attachments,
+                                    };
+                                }
+                                break;
+                            }
+                            match deliver_children(
+                                spawner,
+                                Boundary { turn_ordinal: turn_ordinal.saturating_add(1), reports: runtime::ReportDelivery::WithAnswers },
+                                Arc::make_mut(&mut messages),
+                                &mut irreducible_message_bytes,
+                                &mut budget,
+                                &mut stall,
+                                checkpoint_context.as_mut(),
+                            )
+                            .await
+                            {
+                                // Only an answer ends the wait, and reports
+                                // come only with one (`WithAnswers`): the
+                                // reply already said nothing is left to do
+                                // until answers arrive, and the delivery
+                                // that ends the wait is this boundary's
+                                // only one, so it spends one budget and
+                                // precedes any steering, as replay places it.
+                                Ok(delivered) if delivered.answers > 0 => {
+                                    wait_delivered_for = Some(turn_ordinal.saturating_add(1));
+                                    break;
+                                }
+                                Ok(delivered) => {
+                                    debug_assert_eq!(delivered.reports, 0);
+                                    // A settled child whose own descendants
+                                    // are still settling has no readable spend
+                                    // yet; its delivery is retried after they
+                                    // settle. Pause briefly so the wake does
+                                    // not spin.
+                                    if spawner.settled_detached() {
+                                        tokio::time::sleep(delivery_retry).await;
+                                        delivery_retry = (delivery_retry * 2).min(SUBAGENT_DELIVERY_RETRY_MAX);
+                                    }
+                                }
+                                Err(error) => {
+                                    yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
+                                    return;
+                                }
+                            }
                         }
                         continue;
                     }
@@ -2919,7 +3506,7 @@ impl plan::CompiledAgentPlan {
                             irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             yield RuntimeEvent::Interrupted { turn_ordinal };
-                            if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                            if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                                 for steer in applied {
                                     yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                 }
@@ -2943,7 +3530,7 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -3078,7 +3665,7 @@ impl plan::CompiledAgentPlan {
                                     irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(&mut messages).push(assistant);
                                     yield RuntimeEvent::Interrupted { turn_ordinal };
-                                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                                         for steer in applied {
                                             yield RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments };
                                         }
@@ -3125,7 +3712,7 @@ impl plan::CompiledAgentPlan {
                     }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                    if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                         irreducible_message_bytes = irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(&mut messages).split_off(keep);
@@ -3190,12 +3777,18 @@ impl plan::CompiledAgentPlan {
                     match decision {
                         GateDecision::Execute => {}
                         GateDecision::Deny { message } => {
+                            // A denied call counts toward the stall report:
+                            // a run that keeps asking for denied calls is
+                            // not producing anything either.
+                            stall.settled(false);
                             results[index] = Some(RetainedResult::error(message.clone()));
                             yield RuntimeEvent::ToolCallDenied { id: call.id, message };
                         }
                         // The gate persisted and published the answered call;
                         // the answer is the result and nothing executes.
                         GateDecision::Answered { result } => {
+                            // The human answered: new input, like a steer.
+                            stall.progress();
                             results[index] = Some(RetainedResult::answered(result.clone()));
                             yield RuntimeEvent::ToolCallAnswered { id: call.id, result };
                         }
@@ -3233,6 +3826,7 @@ impl plan::CompiledAgentPlan {
                         continue;
                     }
                     let (result, changed) = select_tools(&catalog, &mut pins, &call.arguments);
+                    stall.settled(false);
                     pins_changed |= changed;
                     results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
                     yield RuntimeEvent::ToolCallFinished {
@@ -3252,6 +3846,16 @@ impl plan::CompiledAgentPlan {
                     .into_iter()
                     .filter(|call| results[usize::from(call.call_ordinal - 1)].is_none())
                     .collect::<Vec<_>>();
+                let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
+                    || limits.max_total_tokens.is_some()
+                    || limits.max_input_tokens.is_some()
+                    || limits.max_output_tokens.is_some();
+                // A read spawn returns on durable admission and its answer
+                // arrives at a later boundary (ADR-0054 § 4), unless the run
+                // has a finite token or cost bound: each child is granted the
+                // parent's whole remainder, so overlapping children could
+                // overspend it, and those runs keep blocking spawns.
+                let detach_spawns = !bounded_child_spend;
                 let execute_one = |call: RuntimeToolCall,
                                    output: Option<
                     tokio::sync::mpsc::Sender<String>,
@@ -3355,9 +3959,15 @@ impl plan::CompiledAgentPlan {
                                                             authority: arguments.authority,
                                                             budget: child_budget,
                                                             purpose: qq_protocol::SessionPurpose::Task,
+                                                            detached: detach_spawns,
                                                         })
                                                         .await;
-                                                    child_spend = Some(outcome.spend);
+                                                    // A detached child's spend is
+                                                    // charged when its answer is
+                                                    // delivered, not here.
+                                                    if !outcome.detached {
+                                                        child_spend = Some(outcome.spend);
+                                                    }
                                                     tools::bounded_result(
                                                         outcome.content,
                                                         outcome.is_error,
@@ -3374,6 +3984,64 @@ impl plan::CompiledAgentPlan {
                                 None => {
                                     tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true)
                                 }
+                            },
+                            // Waiting and cancelling act on this run's own
+                            // background children; their answers arrive as
+                            // delivered notices at the next boundary, never
+                            // in these results (ADR-0054 § 4).
+                            None if host == Some(catalog::ToolHost::WaitAgents) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::WaitAgentsArgs>(&call.arguments) {
+                                    Ok(arguments) if !(1..=tools::MAX_WAIT_AGENTS_SECS).contains(&arguments.timeout_seconds) => {
+                                        tools::bounded_result(
+                                            format!("timeout_seconds must be between 1 and {}", tools::MAX_WAIT_AGENTS_SECS),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) if arguments.ids.as_ref().is_some_and(|ids| ids.len() > usize::from(sessions::MAX_SPAWNED_CHILDREN_PER_RUN)) => {
+                                        tools::bounded_result(
+                                            format!("ids may name at most {} sub-agents", sessions::MAX_SPAWNED_CHILDREN_PER_RUN),
+                                            true,
+                                        )
+                                    }
+                                    Ok(arguments) => match arguments
+                                        .ids
+                                        .map(|ids| ids.iter().map(|id| id.trim().parse::<qq_protocol::SessionId>()).collect::<Result<Vec<_>, _>>())
+                                        .transpose()
+                                    {
+                                        Err(_) => tools::bounded_result(
+                                            "ids must be sub-agent ids from spawn_agent results".to_owned(),
+                                            true,
+                                        ),
+                                        Ok(ids) => match spawner
+                                            .wait_children(ids, Duration::from_secs(arguments.timeout_seconds))
+                                            .await
+                                        {
+                                            Ok(report) => tools::bounded_result(report.render(arguments.timeout_seconds), false),
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                            },
+                            None if host == Some(catalog::ToolHost::CancelAgent) => match &spawner {
+                                Some(spawner) => match serde_json::from_str::<tools::CancelAgentArgs>(&call.arguments) {
+                                    Ok(arguments) => match arguments.id.trim().parse::<qq_protocol::SessionId>() {
+                                        Ok(id) => match spawner.cancel_child(id).await {
+                                            Ok(outcome) => {
+                                                let (text, is_error) = outcome.render(id);
+                                                tools::bounded_result(text, is_error)
+                                            }
+                                            Err(error) => tools::bounded_result(error.to_string(), true),
+                                        },
+                                        Err(_) => tools::bounded_result(
+                                            "id must be a sub-agent id from a spawn_agent result".to_owned(),
+                                            true,
+                                        ),
+                                    },
+                                    Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                },
+                                None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
                             },
                             // Full-transcript recall dispatches to the session
                             // layer; the tool is declared only when a searcher
@@ -3515,12 +4183,13 @@ impl plan::CompiledAgentPlan {
                 // read child may overlap: a write child is a mutation.
                 // Finite spend cannot be granted independently to overlapping children.
                 // Unbounded and duration-only read fanout retains its concurrency.
-                let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
-                    || limits.max_total_tokens.is_some()
-                    || limits.max_input_tokens.is_some()
-                    || limits.max_output_tokens.is_some();
+                // A wait or cancel runs in request order, after the spawns
+                // before it in the turn, so it sees the children they started.
                 let overlaps = |call: &RuntimeToolCall| {
                     !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
+                    && !catalog.lookup(&call.name).is_some_and(|entry| {
+                        matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent)
+                    })
                     && matches!(
                         approval::classify(call.effect, &call.name, &call.arguments, &network_policy),
                         approval::ToolClass::ReadOnly
@@ -3572,6 +4241,17 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        // Runtime rejections (over the cap, made in a report
+                        // turn, Jev's one-call rule, unknown or malformed)
+                        // never ran and are not counted.
+                        if call.rejection.is_none() {
+                            // A detached spawn's receipt is not an answer: the
+                            // answer is progress when it is delivered.
+                            let entry = catalog.lookup(&call.name);
+                            let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
+                                && child_spend.is_none();
+                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
+                        }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
                             Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3609,7 +4289,7 @@ impl plan::CompiledAgentPlan {
                                         return;
                                     }
                                     if let Some(spawner) = &spawner {
-                                        match spawner.drain().await {
+                                        match spawner.drain_attached().await {
                                             Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                                             Err(error) => {
                                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -3650,6 +4330,17 @@ impl plan::CompiledAgentPlan {
                             &call,
                             &result,
                         );
+                        // Runtime rejections (over the cap, made in a report
+                        // turn, Jev's one-call rule, unknown or malformed)
+                        // never ran and are not counted.
+                        if call.rejection.is_none() {
+                            // A detached spawn's receipt is not an answer: the
+                            // answer is progress when it is delivered.
+                            let entry = catalog.lookup(&call.name);
+                            let receipt = entry.is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent)
+                                && child_spend.is_none();
+                            stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
+                        }
                         let result = cite_spill(result, &call.name, call.id, spills.is_some());
                         results[usize::from(call.call_ordinal - 1)] =
                             Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3673,7 +4364,7 @@ impl plan::CompiledAgentPlan {
                                         return;
                                     }
                     if let Some(spawner) = &spawner {
-                        match spawner.drain().await {
+                        match spawner.drain_attached().await {
                             Ok(spends) => for spend in spends { budget.charge_child(spend.usage, spend.cost_usd_nanos); },
                             Err(error) => {
                                 yield RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() };
@@ -3860,10 +4551,31 @@ impl plan::CompiledAgentPlan {
                         .saturating_add(measure_message(&notice));
                     Arc::make_mut(&mut messages).push(notice);
                 }
+                // The final-answer turn's calls never ran; their results are
+                // durable, so the run completes with the turn as it stands
+                // (ADR-0054 § 3). Steering is left for the child's next run.
+                if final_answer_turn {
+                    // As at any completion: a run that overran its cost or
+                    // token bound settles as exhausted, never completed.
+                    if let Some(kind) = budget.exceeded(tokio::time::Instant::now())
+                        && matches!(
+                            kind,
+                            BudgetLimitKind::Cost
+                                | BudgetLimitKind::CostUnknown
+                                | BudgetLimitKind::TotalTokens
+                        )
+                    {
+                        let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                        yield RuntimeEvent::BudgetExhausted { exhaustion };
+                        return;
+                    }
+                    yield RuntimeEvent::Completed { final_output: None };
+                    return;
+                }
                 // The boundary: every result of this turn is in context, and
                 // the next request has not been built. Steering joins here as
                 // a user message after the tool results.
-                if let Some(applied) = apply_steering(&mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
+                if let Some(applied) = apply_steering(&mut stall, &mut steering, Arc::make_mut(&mut messages), &mut irreducible_message_bytes, checkpoint_context.as_mut(), &workspace, &file_state).await {
                     for steer in applied {
                         yield RuntimeEvent::SteeringApplied {
                             message_id: steer.message_id,
@@ -3957,6 +4669,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 RuntimeEvent::AssistantTurnCompleted { usage: None, .. }
                 // Direct runs have no compactor, so these never fire.
                 | RuntimeEvent::InRunCompacted { .. }
+                // Direct runs keep no session history to replay.
+                | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
@@ -4184,6 +4898,8 @@ pub enum RuntimeConfigError {
 
 #[cfg(test)]
 mod tests {
+    mod progress;
+
     use std::{
         sync::{
             Arc, Mutex,
@@ -4537,6 +5253,279 @@ mod tests {
         // default-set runs shared one.
         assert_ne!(systems[1], systems[2]);
         assert_ne!(systems[1], systems[3]);
+    }
+
+    /// Scripted turns for `Runtime::summarize`: each request pops the next
+    /// event list and is recorded.
+    struct SummarizeScript {
+        turns: Mutex<std::collections::VecDeque<Vec<Result<ProviderEvent, ProviderError>>>>,
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl Provider for SummarizeScript {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            let turn = self
+                .turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a scripted turn");
+            Box::pin(stream::iter(turn))
+        }
+    }
+
+    fn summarize_call(id: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
+        vec![
+            Ok(ProviderEvent::ToolCallStarted {
+                id: id.to_owned(),
+                name: "read_file".to_owned(),
+            }),
+            Ok(ProviderEvent::ToolCallArgumentsDelta {
+                id: id.to_owned(),
+                json: r#"{"path":"x"}"#.to_owned(),
+            }),
+            Ok(ProviderEvent::ToolCallCompleted { id: id.to_owned() }),
+        ]
+    }
+
+    async fn run_summarize(
+        turns: Vec<Vec<Result<ProviderEvent, ProviderError>>>,
+    ) -> (Result<String, String>, Vec<ModelRequest>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(turns.into()),
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let tools: Arc<[ToolSpec]> = Arc::from([ToolSpec::new(
+            "read_file",
+            "read",
+            serde_json::json!({"type": "object"}),
+        )]);
+        let result = runtime
+            .summarize(
+                vec![Message::user("summarize")],
+                Arc::from("system"),
+                tools,
+                256,
+            )
+            .await
+            .map(|(summary, _)| summary);
+        let requests = requests.lock().unwrap().clone();
+        (result, requests)
+    }
+
+    #[tokio::test]
+    async fn in_run_summarize_answers_one_call_turn_with_rejections_and_keeps_only_the_new_reply() {
+        // Turn one is cut mid-reply; turn two continues it but calls a tool,
+        // abandoning the reply; turn three writes the summary. Only turn
+        // three is the summary: no fragment of the abandoned reply survives.
+        let mut call_turn = vec![
+            Ok(ProviderEvent::Replay {
+                data: Arc::from("thinking-signature"),
+            }),
+            Ok(ProviderEvent::OutputTextDelta {
+                text: "let me check".to_owned(),
+            }),
+        ];
+        call_turn.extend(summarize_call("call_1"));
+        call_turn.push(Ok(ProviderEvent::Completed { usage: None }));
+        let (result, requests) = run_summarize(vec![
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "1. Intent: half".to_owned(),
+                }),
+                Ok(ProviderEvent::Incomplete {
+                    usage: None,
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ],
+            call_turn,
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "the summary".to_owned(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ],
+        ])
+        .await;
+        assert_eq!(result.as_deref(), Ok("the summary"));
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert_eq!(request.system(), Some("system"));
+            assert_eq!(request.tools().len(), 1);
+        }
+        // The retry carries the call with its replay data, then a rejection.
+        let messages = requests[2].messages();
+        let (call, result) = (&messages[messages.len() - 2], &messages[messages.len() - 1]);
+        assert_eq!(call.replay(), Some("thinking-signature"));
+        assert!(call.content().iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolCall { id, name, .. } if id == "call_1" && name == "read_file"
+        )));
+        assert!(matches!(
+            result.content(),
+            [ContentBlock::ToolResult { call_id, is_error: true, content }]
+                if call_id == "call_1" && content == SUMMARIZER_TOOL_REJECTION
+        ));
+    }
+
+    #[tokio::test]
+    async fn in_run_summarize_fails_on_a_second_call_turn_and_on_a_cut_call_turn() {
+        let mut first = summarize_call("call_1");
+        first.push(Ok(ProviderEvent::Completed { usage: None }));
+        let mut second = summarize_call("call_2");
+        second.push(Ok(ProviderEvent::Completed { usage: None }));
+        let (result, requests) = run_summarize(vec![first, second]).await;
+        assert_eq!(
+            result,
+            Err("summarizer called a tool on two turns".to_owned())
+        );
+        assert_eq!(requests.len(), 2);
+
+        let mut cut = summarize_call("call_1");
+        cut.push(Ok(ProviderEvent::Incomplete {
+            usage: None,
+            reason: qq_provider::IncompleteReason::OutputTokens,
+        }));
+        let (result, _) = run_summarize(vec![cut]).await;
+        assert_eq!(
+            result,
+            Err("summarizer called a tool and was cut off".to_owned())
+        );
+    }
+
+    /// ADR-0056 § 5: a summarizer run carries the system prompt and tools
+    /// of the prompt runs whose prefix key it is given, fetches no context
+    /// sources, and sends no output-contract notice, so its request shares
+    /// the cached prefix of those runs.
+    #[tokio::test]
+    async fn a_summarizer_run_sends_the_prompt_runs_system_prompt_and_tools_without_context_sources()
+     {
+        struct Capture(Arc<Mutex<Vec<ModelRequest>>>);
+
+        impl Provider for Capture {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.lock().unwrap().push(request);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "{\"ok\":true}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        struct CountingSource(Arc<AtomicUsize>);
+
+        impl ContextSource for CountingSource {
+            fn name(&self) -> &str {
+                "memory"
+            }
+            fn version(&self) -> &str {
+                "1"
+            }
+            fn cache_key(&self, _request: &context_source::ContextRequest) -> Option<[u8; 32]> {
+                None
+            }
+            fn fetch(
+                &self,
+                _request: context_source::ContextRequest,
+                _cancelled: RunCancellation,
+            ) -> context_source::ContextFetchFuture {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(context_source::ContextBundle {
+                        items: vec![context_source::ContextItem {
+                            provenance: "memory:0".to_owned(),
+                            content: "remembered".to_owned(),
+                        }],
+                    })
+                })
+            }
+            fn fail_policy(&self) -> context_source::FailPolicy {
+                context_source::FailPolicy::Open
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(Capture(Arc::clone(&requests)), "test-model", 256)
+            .unwrap()
+            .with_context_source(Arc::new(CountingSource(Arc::clone(&fetches))));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let contract = output::CompiledOutputSchema::compile(&qq_protocol::OutputContract {
+            schema: serde_json::json!({"type": "object"}),
+            repair_turns: 0,
+        })
+        .unwrap();
+        let user_key = plan::PromptPrefixKey {
+            tools: Some(catalog::StaticFilter {
+                spawn_agent: false,
+                search_history: false,
+                read_tool_result: false,
+                load_skill: true,
+                read_only: false,
+            }),
+            guidance: true,
+            subagent: None,
+        };
+        for capabilities in [
+            RunCapabilities::user(None),
+            RunCapabilities::restricted()
+                .with_output(Some(contract))
+                .summarizer(user_key),
+        ] {
+            let events = plan
+                .execute(
+                    vec![Message::user("hello")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::ReadOnly,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    capabilities,
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+        }
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            1,
+            "only the prompt run fetches context"
+        );
+        let requests = requests.lock().unwrap();
+        let (prompt, summarizer) = (&requests[0], &requests[1]);
+        let prompt_system = prompt.system().unwrap();
+        let summarizer_system = summarizer.system().unwrap();
+        assert!(prompt_system.contains("[memory:0]"));
+        assert!(!summarizer_system.contains("[memory:0]"));
+        assert!(!summarizer_system.contains("## Output contract"));
+        // The plan-constant prefix is shared byte for byte; only the prompt
+        // run's per-run suffix (here, the context block) follows it.
+        assert!(prompt_system.starts_with(summarizer_system));
+        assert_eq!(summarizer.tools(), prompt.tools());
+        assert!(!summarizer.tools().is_empty());
     }
 
     #[tokio::test]
@@ -5803,7 +6792,10 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].tools().len(), 9);
+        assert_eq!(
+            requests[0].tools().len(),
+            8 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
@@ -8190,6 +9182,89 @@ mod tests {
         );
     }
 
+    /// Bedrock Converse cannot ask for no tool calls, so a model may call a
+    /// tool on the budget-final turn anyway. The call never runs and the run
+    /// settles as exhausted without a final response, never as a provider
+    /// failure.
+    #[tokio::test]
+    async fn a_tool_call_on_the_budget_final_turn_settles_without_running() {
+        struct AlwaysCalls {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for AlwaysCalls {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let id = format!("call-{}", requests.len());
+                requests.push(request);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "__test_mutate".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: "{}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            AlwaysCalls {
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("work")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_model_turns: Some(2),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
+        assert_eq!(requests[1].tools(), requests[0].tools());
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
+            .count();
+        assert_eq!(started, 1, "only the first turn's call runs: {events:?}");
+        let turns = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { .. }))
+            .count();
+        assert_eq!(turns, 1, "the final turn's call is never committed");
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                if exhaustion.limit == BudgetLimitKind::ModelTurns && !exhaustion.final_response
+        ));
+    }
+
     #[tokio::test]
     async fn a_truncated_budget_final_turn_settles_as_exhausted_not_continued() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -8869,7 +9944,24 @@ mod tests {
                 drop(emitted);
                 let mut events = Vec::with_capacity(count * 3 + 1);
                 for index in first..first + count {
-                    events.extend(read(format!("call-{index}")));
+                    if index == first {
+                        // One write per turn is progress, so the run reaches
+                        // the slice checkpoint rather than a stall report.
+                        let id = format!("call-{index}");
+                        events.extend([
+                            Ok(ProviderEvent::ToolCallStarted {
+                                id: id.clone(),
+                                name: "write_file".to_owned(),
+                            }),
+                            Ok(ProviderEvent::ToolCallArgumentsDelta {
+                                id: id.clone(),
+                                json: r#"{"path":"progress.txt","content":"x"}"#.to_owned(),
+                            }),
+                            Ok(ProviderEvent::ToolCallCompleted { id }),
+                        ]);
+                    } else {
+                        events.extend(read(format!("call-{index}")));
+                    }
                 }
                 events.push(Ok(ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
@@ -8914,7 +10006,10 @@ mod tests {
             .filter(|event| {
                 matches!(
                     event,
-                    RuntimeEvent::ToolCallFinished { is_error: false, result, .. } if result.contains("hello")
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
                 )
             })
             .count();
@@ -9299,8 +10394,8 @@ mod tests {
         );
     }
 
-    /// When the turn after a slice report is the budget-final turn, it has no
-    /// tools, so it is not told that tools are available again: it carries
+    /// When the turn after a slice report is the budget-final turn, it asks
+    /// for no tool calls, so it is not told that tools are available again: it carries
     /// only the budget-final notice, and its turn records no continuation.
     #[tokio::test]
     async fn a_budget_final_turn_after_a_report_gets_no_continuation_notice() {
@@ -9312,7 +10407,9 @@ mod tests {
         impl Provider for ReportThenFinal {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.requests.lock().unwrap().push(request.clone());
-                if is_checkpoint_request(&request) || request.tools().is_empty() {
+                if is_checkpoint_request(&request)
+                    || request.tool_choice() == qq_provider::ToolChoice::None
+                {
                     return Box::pin(stream::iter([
                         Ok(ProviderEvent::OutputTextDelta {
                             text: "report".to_owned(),
@@ -9326,13 +10423,20 @@ mod tests {
                 let mut events = Vec::new();
                 for index in first..first + MAX_TOOL_CALLS_PER_TURN {
                     let id = format!("call-{index}");
+                    // One write per turn is progress, so the run reaches the
+                    // slice checkpoint, not a stall report.
+                    let (name, json) = if index == first {
+                        ("write_file", r#"{"path":"progress.txt","content":"x"}"#)
+                    } else {
+                        ("read_file", r#"{"path":"note.txt"}"#)
+                    };
                     events.push(Ok(ProviderEvent::ToolCallStarted {
                         id: id.clone(),
-                        name: "read_file".to_owned(),
+                        name: name.to_owned(),
                     }));
                     events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: id.clone(),
-                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                        json: json.to_owned(),
                     }));
                     events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
                 }
@@ -9383,9 +10487,14 @@ mod tests {
         let requests = requests.lock().unwrap();
         let report_at = requests.iter().position(is_checkpoint_request).unwrap();
         let final_request = &requests[report_at + 1];
+        assert_eq!(
+            final_request.tool_choice(),
+            qq_provider::ToolChoice::None,
+            "the final response asks for no tool calls"
+        );
         assert!(
-            final_request.tools().is_empty(),
-            "the final response has no tools"
+            !final_request.tools().is_empty(),
+            "the final response keeps its tools declared"
         );
         assert!(
             final_request
@@ -10358,7 +11467,10 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(requests[0].tools().len(), 10);
+        assert_eq!(
+            requests[0].tools().len(),
+            9 + usize::from(cfg!(feature = "tool-fetch"))
+        );
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -10601,6 +11713,91 @@ mod tests {
         }
     }
 
+    /// Delivers a fixed set of children once.
+    struct DeliveringSpawner {
+        delivered: Mutex<Vec<runtime::DeliveredChild>>,
+    }
+
+    impl SubagentSpawner for DeliveringSpawner {
+        fn acknowledge(&self, _: ToolCallId) {}
+        fn drain(&self) -> runtime::ChildDrainFuture {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+            unreachable!("this spawner only delivers")
+        }
+        fn deliver(&self, _: u32, _: runtime::ReportDelivery) -> runtime::DeliverFuture {
+            let delivered = std::mem::take(&mut *self.delivered.lock().unwrap());
+            Box::pin(std::future::ready(Ok(delivered)))
+        }
+    }
+
+    /// Only a child that answered is progress for its parent (ADR-0054 § 1),
+    /// exactly as only a successful blocking spawn result is. A delivered
+    /// notice that the child failed or was cancelled is still context the
+    /// parent sees and spend it pays, but it does not hold off the parent's
+    /// stall report: a parent spawning children that fail must still report.
+    /// An interim report from a child still working is neither progress nor
+    /// an answer.
+    #[tokio::test]
+    async fn only_a_delivered_answer_restarts_the_stall_count() {
+        let child = |answered: bool, interim: bool| runtime::DeliveredChild {
+            notice: format!("child answered: {answered}"),
+            answered,
+            interim,
+            spend: SpawnAgentSpend::NONE,
+        };
+        for (answered, interim, restarts) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, false),
+        ] {
+            let spawner: Arc<dyn SubagentSpawner> = Arc::new(DeliveringSpawner {
+                delivered: Mutex::new(vec![child(answered, interim)]),
+            });
+            let mut stall = runtime::StallScope::new(runtime::StallPolicy::Root);
+            for _ in 0..runtime::STALL_REPORT_CALLS {
+                stall.settled(false);
+            }
+            assert_eq!(stall.due(false), runtime::ReportDue::Report);
+            let mut messages = vec![Message::user("prompt")];
+            let mut bytes = 0;
+            let mut budget =
+                BudgetMeter::new(RunLimits::default(), None, tokio::time::Instant::now());
+            let delivered = deliver_children(
+                &spawner,
+                Boundary {
+                    turn_ordinal: 2,
+                    reports: runtime::ReportDelivery::Always,
+                },
+                &mut messages,
+                &mut bytes,
+                &mut budget,
+                &mut stall,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                delivered,
+                Delivered {
+                    answers: usize::from(!interim),
+                    reports: usize::from(interim),
+                }
+            );
+            // Either way the notice is in context.
+            assert_eq!(
+                messages.last().unwrap(),
+                &Message::user(format!("child answered: {answered}"))
+            );
+            assert_eq!(
+                stall.due(false) == runtime::ReportDue::None,
+                restarts,
+                "answered: {answered}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn spawner_less_runs_neither_declare_nor_dispatch_spawn_agent() {
         let directory = tempfile::tempdir().unwrap();
@@ -10647,12 +11844,14 @@ mod tests {
             Some(RuntimeEvent::Completed { .. })
         ));
         let requests = requests.lock().unwrap();
-        assert!(
-            !requests[0]
-                .tools()
-                .iter()
-                .any(|spec| spec.name() == tools::SPAWN_AGENT_TOOL)
-        );
+        // The delegation tools come and go together: a run that cannot
+        // spawn has no background children to wait for or cancel.
+        for tool in [tools::SPAWN_AGENT_TOOL, "wait_agents", "cancel_agent"] {
+            assert!(
+                !requests[0].tools().iter().any(|spec| spec.name() == tool),
+                "{tool}"
+            );
+        }
         let system = requests[0].system().unwrap();
         assert!(!system.contains("Delegation:"));
         // Direct runs have no durable transcript, so history recall is
@@ -10662,6 +11861,158 @@ mod tests {
                 .tools()
                 .iter()
                 .any(|spec| spec.name() == runtime::SEARCH_HISTORY_TOOL)
+        );
+    }
+
+    /// The tool-free wait asks for reports only together with an answer
+    /// (ADR-0054 § 4), so the one delivery that ends the wait is the
+    /// boundary's only one: one budget, before any steering, as replay
+    /// places it. The turn-top boundary takes reports from children still
+    /// working.
+    #[tokio::test]
+    async fn a_tool_free_wait_takes_reports_only_with_an_answer() {
+        struct AllowAllGate;
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+        /// One detached child that reports at every boundary that accepts
+        /// reports, and answers on the third wake of the wait.
+        struct Reporter {
+            asked: Mutex<Vec<runtime::ReportDelivery>>,
+            wakes: Mutex<usize>,
+            answered: std::sync::atomic::AtomicBool,
+        }
+        impl SubagentSpawner for Reporter {
+            fn acknowledge(&self, _: ToolCallId) {}
+            fn drain(&self) -> runtime::ChildDrainFuture {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn spawn(&self, _: SpawnRequest) -> SpawnAgentFuture {
+                Box::pin(std::future::ready(SpawnAgentOutcome {
+                    content: "started".to_owned(),
+                    is_error: false,
+                    spend: SpawnAgentSpend::NONE,
+                    session_id: None,
+                    detached: true,
+                }))
+            }
+            fn outstanding_detached(&self) -> usize {
+                usize::from(!self.answered.load(std::sync::atomic::Ordering::SeqCst))
+            }
+            fn child_settled(&self) -> runtime::ChildWaitFuture {
+                Box::pin(std::future::ready(()))
+            }
+            fn deliver(&self, _: u32, reports: runtime::ReportDelivery) -> runtime::DeliverFuture {
+                self.asked.lock().unwrap().push(reports);
+                let report = runtime::DeliveredChild {
+                    notice: "interim report".to_owned(),
+                    answered: false,
+                    interim: true,
+                    spend: SpawnAgentSpend::NONE,
+                };
+                let batch = match reports {
+                    runtime::ReportDelivery::Always => vec![report],
+                    runtime::ReportDelivery::WithAnswers => {
+                        let mut wakes = self.wakes.lock().unwrap();
+                        *wakes += 1;
+                        if *wakes < 3 {
+                            Vec::new()
+                        } else {
+                            self.answered
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            vec![
+                                runtime::DeliveredChild {
+                                    notice: "the answer".to_owned(),
+                                    answered: true,
+                                    interim: false,
+                                    spend: SpawnAgentSpend::NONE,
+                                },
+                                report,
+                            ]
+                        }
+                    }
+                };
+                Box::pin(std::future::ready(Ok(batch)))
+            }
+        }
+        let spawner = Arc::new(Reporter {
+            asked: Mutex::new(Vec::new()),
+            wakes: Mutex::new(0),
+            answered: std::sync::atomic::AtomicBool::new(false),
+        });
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        struct Recording {
+            inner: SpawnCallProvider,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+        impl Provider for Recording {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.requests.lock().unwrap().push(request.clone());
+                self.inner.stream(request)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            Recording {
+                inner: SpawnCallProvider {
+                    turn: Mutex::new(0),
+                    model: None,
+                },
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("go")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(AllowAllGate),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>)),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        // The turn-top boundaries (turns 1 and 2; this stub is outstanding
+        // from the start) take reports; the wait's three wakes do not, and
+        // the third, with the answer, ends it. Turn 3 then needs no boundary
+        // delivery: the wait already delivered for it.
+        use runtime::ReportDelivery::{Always, WithAnswers};
+        assert_eq!(
+            spawner.asked.lock().unwrap().as_slice(),
+            [Always, Always, WithAnswers, WithAnswers, WithAnswers]
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        // Turn 2 carried the turn-top report; turn 3 the reply, the answer,
+        // then the report that came with it.
+        let tail = requests[2]
+            .messages()
+            .iter()
+            .rev()
+            .take(3)
+            .map(|message| (message.role(), message.content().to_vec()))
+            .collect::<Vec<_>>();
+        let text = |text: &str| {
+            vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }]
+        };
+        assert_eq!(
+            tail,
+            [
+                (Role::User, text("interim report")),
+                (Role::User, text("the answer")),
+                (Role::Assistant, text("done")),
+            ]
         );
     }
 
@@ -10683,6 +12034,7 @@ mod tests {
                 is_error: false,
                 spend: SpawnAgentSpend::NONE,
                 session_id: None,
+                detached: false,
             },
             Arc::clone(&tasks),
         ));
@@ -10760,6 +12112,7 @@ mod tests {
                     is_error: false,
                     spend: SpawnAgentSpend::NONE,
                     session_id: None,
+                    detached: false,
                 },
                 Arc::clone(&tasks),
             ));
@@ -10864,6 +12217,7 @@ mod tests {
                     }),
                 },
                 session_id: None,
+                detached: false,
             },
             Arc::new(Mutex::new(Vec::new())),
         ));
@@ -10978,6 +12332,7 @@ mod tests {
                 is_error: false,
                 spend: SpawnAgentSpend::NONE,
                 session_id: None,
+                detached: false,
             },
             Arc::new(Mutex::new(Vec::new())),
         ));
@@ -11089,6 +12444,37 @@ mod tests {
     }
 
     #[test]
+    fn delegation_authority_guidance_matches_the_spawn_schema() {
+        let instructions = workspace::WorkspaceInstructions::empty();
+        for write_children in [false, true] {
+            let delegation = DelegationRoster {
+                write_children,
+                ..DelegationRoster::default()
+            };
+            let specs = [tools::spawn_agent_spec(&[], &delegation)];
+            let prompt = runtime::agent_system_prompt(
+                std::path::Path::new("/tmp/qq-prompt-test"),
+                &specs,
+                runtime::PromptSections::default(),
+                &instructions,
+                None,
+                None,
+            );
+            assert_eq!(prompt.contains("authority: write"), write_children);
+            assert_eq!(
+                prompt.contains("one-shot read-only sub-agent"),
+                !write_children
+            );
+            if write_children {
+                assert!(prompt.contains("read by default"));
+                assert!(prompt.contains("reviewer_model"));
+                assert!(prompt.contains("one write sub-agent"));
+                assert!(prompt.contains("implementation task"));
+            }
+        }
+    }
+
+    #[test]
     fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
@@ -11116,6 +12502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tool-fetch")]
     fn a_root_prompt_and_tools_change_only_by_the_brief_guidance() {
         // Golden against prompt version 14: a root's system
         // prompt gains only the delegation bullet, and its tools block only
@@ -11128,6 +12515,32 @@ mod tests {
             gets a long search and a late answer. Prefer several narrow briefs over one broad \
             one.\n";
         const OLD_TASK: &str = "A complete, self-contained brief for the sub-agent.";
+        const BLOCKING_SPAWN: &str = "- spawn_agent runs a one-shot read-only sub-agent in this \
+            workspace from a self-contained task brief and returns only its final answer.\n";
+        const BACKGROUND_SPAWN: &str = "- spawn_agent starts a one-shot read-only sub-agent in \
+            this workspace from a self-contained task brief. It usually runs in the background: \
+            the call returns at once, and the sub-agent's final answer arrives at a later turn as \
+            a runtime notice. Keep working on what does not depend on it; a reply without tool \
+            calls while sub-agents are working waits for their answers.\n";
+        const CONTROL_BULLET: &str = "- A sub-agent still working may also send its latest \
+            progress report as a notice. Call wait_agents when your next step needs specific \
+            answers, and cancel_agent for a sub-agent whose answer you no longer need.\n";
+        const CONCURRENT: &str = "because sub-agents run concurrently.";
+        const CONCURRENT_WITH_YOU: &str =
+            "because sub-agents run concurrently with each other and with you.";
+        const BLOCKING_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
+            sub-agent in this workspace and receive only its final answer. Worth it when the raw \
+            evidence would dwarf the distilled answer and you will not need that evidence \
+            verbatim later; several independent questions can be delegated in parallel. Single \
+            reads, searches, and quick lookups are cheaper inline. The task brief must carry \
+            everything the sub-agent needs: it starts with no other context. Omit model";
+        const BACKGROUND_DESCRIPTION: &str = "Delegate one self-contained task to a read-only \
+            sub-agent in this workspace; only its final answer comes back, usually later as a \
+            runtime notice while you keep working. Worth it when the raw evidence would dwarf the \
+            distilled answer and you will not need that evidence verbatim later; several \
+            independent questions can be delegated in parallel. Single reads, searches, and \
+            quick lookups are cheaper inline. The task brief must carry everything the sub-agent \
+            needs: it starts with no other context. Omit model";
         const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
             to answer, what the answer is for, and the answer shape you want back. The sub-agent \
             starts with no other context and stops once it can answer.";
@@ -11144,8 +12557,20 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        let v14 = prompt.replacen(NEW_BULLET, "", 1);
-        assert_ne!(v14, prompt);
+        // Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control bullet, and
+        // prompt 16 rewords only the first and last delegation bullets; undo
+        // them, then the brief bullet.
+        assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
+        let v16 = prompt.replacen(CONTROL_BULLET, "", 1);
+        assert!(v16.contains(BACKGROUND_SPAWN), "{v16}");
+        assert!(v16.contains(CONCURRENT_WITH_YOU), "{v16}");
+        let v15 = v16.replacen(BACKGROUND_SPAWN, BLOCKING_SPAWN, 1).replacen(
+            CONCURRENT_WITH_YOU,
+            CONCURRENT,
+            1,
+        );
+        let v14 = v15.replacen(NEW_BULLET, "", 1);
+        assert_ne!(v14, v15);
         assert_eq!(
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
@@ -11158,8 +12583,21 @@ mod tests {
             "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
         );
         let spawn = specs.last().unwrap();
+        assert!(
+            spawn.description().starts_with(BACKGROUND_DESCRIPTION),
+            "{}",
+            spawn.description()
+        );
         assert_eq!(
-            format!("{:x}", Sha256::digest(spawn.description().as_bytes())),
+            format!(
+                "{:x}",
+                Sha256::digest(
+                    spawn
+                        .description()
+                        .replacen(BACKGROUND_DESCRIPTION, BLOCKING_DESCRIPTION, 1)
+                        .as_bytes()
+                )
+            ),
             "09105474547d899bf0bf5346f2c72079425d0f0c236c9a201378a33f0421c5ac"
         );
         let schema = spawn.input_schema().get();
@@ -11194,6 +12632,43 @@ mod tests {
         );
         assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
         assert!(!prompt.contains("Sub-agent:"));
+    }
+
+    #[test]
+    fn agent_prompt_advertises_fetch_only_when_declared() {
+        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
+        let instructions = workspace::WorkspaceInstructions::empty();
+        let specs = tools::specs();
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &specs,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert_eq!(
+            prompt.contains("fetch reads one public"),
+            cfg!(feature = "tool-fetch")
+        );
+        assert_eq!(
+            prompt.contains("Prefer fetch over shell"),
+            cfg!(feature = "tool-fetch")
+        );
+        let without: Vec<_> = specs
+            .into_iter()
+            .filter(|spec| spec.name() != "fetch")
+            .collect();
+        let prompt = runtime::agent_system_prompt(
+            workspace,
+            &without,
+            runtime::PromptSections::default(),
+            &instructions,
+            None,
+            None,
+        );
+        assert!(!prompt.contains("fetch reads one public"));
+        assert!(!prompt.contains("Prefer fetch over shell"));
     }
 
     #[test]

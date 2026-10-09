@@ -190,6 +190,12 @@ impl Provider for OpenAi {
                     "OpenAI-compatible stream reused a function-call item id",
                     "OpenAI-compatible stream sent arguments for an unknown function call",
                 );
+                // Open calls whose arguments have been emitted. Codex routes
+                // stream deltas for the first call of a parallel batch and
+                // send the rest only as complete `arguments` on the done
+                // events; those are emitted once, as a single delta, for a
+                // call that has none yet. Bounded by the open calls.
+                let mut emitted: Vec<String> = Vec::new();
                 while let Some(event) = sse.next_event().await? {
                     let data = event.data;
                     if data == "[DONE]" || data.trim().is_empty() {
@@ -211,11 +217,39 @@ impl Provider for OpenAi {
                         }
                         DecodedEvent::ToolCallArguments { item_id, json } => {
                             let id = tool_calls.get(&item_id)?.to_owned();
+                            if json.is_empty() {
+                                continue;
+                            }
                             output_bytes.add(json.len())?;
+                            if !emitted.contains(&item_id) {
+                                emitted.push(item_id);
+                            }
                             yield ProviderEvent::ToolCallArgumentsDelta { id, json };
                         }
-                        DecodedEvent::ToolCallDone { item_id } => {
+                        DecodedEvent::ToolCallArgumentsDone { item_id, arguments } => {
+                            let id = tool_calls.get(&item_id)?.to_owned();
+                            if !arguments.is_empty() && !emitted.contains(&item_id) {
+                                output_bytes.add(arguments.len())?;
+                                emitted.push(item_id);
+                                yield ProviderEvent::ToolCallArgumentsDelta { id, json: arguments };
+                            }
+                        }
+                        DecodedEvent::ToolCallDone { item_id, arguments } => {
+                            let streamed = match emitted.iter().position(|open| *open == item_id) {
+                                Some(index) => {
+                                    emitted.swap_remove(index);
+                                    true
+                                }
+                                None => false,
+                            };
                             if let Some(call_id) = tool_calls.remove(&item_id) {
+                                if let Some(json) = arguments.filter(|json| !streamed && !json.is_empty()) {
+                                    output_bytes.add(json.len())?;
+                                    yield ProviderEvent::ToolCallArgumentsDelta {
+                                        id: call_id.clone(),
+                                        json,
+                                    };
+                                }
                                 yield ProviderEvent::ToolCallCompleted { id: call_id };
                             }
                         }
@@ -345,6 +379,8 @@ pub(crate) struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ResponsesTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
@@ -395,6 +431,7 @@ impl<'a> ResponsesRequest<'a> {
             instructions: request.system().map(Text),
             input,
             tools: request.tools().iter().map(ResponsesTool::from).collect(),
+            tool_choice: request.tools_disabled().then_some("none"),
             max_output_tokens: matches!(kind, ResponsesRequestKind::Standard)
                 .then(|| request.max_output_tokens()),
             reasoning: request.reasoning_effort().map(|effort| ReasoningConfig {
@@ -484,6 +521,8 @@ enum StreamingEvent {
     OutputItemAdded { item: OutputItem },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta { item_id: String, delta: String },
+    #[serde(rename = "response.function_call_arguments.done")]
+    FunctionCallArgumentsDone { item_id: String, arguments: String },
     #[serde(rename = "response.output_item.done")]
     OutputItemDone { item: OutputItem },
     #[serde(rename = "response.completed")]
@@ -512,6 +551,9 @@ enum OutputItem {
         id: String,
         call_id: String,
         name: String,
+        /// Complete on `output_item.done`; empty or absent on `added`.
+        #[serde(default)]
+        arguments: Option<String>,
     },
     #[serde(other)]
     Other,
@@ -585,8 +627,14 @@ pub(crate) enum DecodedEvent {
         item_id: String,
         json: String,
     },
+    /// The complete arguments of one call; emitted only when no delta was.
+    ToolCallArgumentsDone {
+        item_id: String,
+        arguments: String,
+    },
     ToolCallDone {
         item_id: String,
+        arguments: Option<String>,
     },
     Completed(Option<ProviderUsage>),
     Incomplete {
@@ -614,7 +662,9 @@ pub(crate) fn decode_event(
         StreamingEvent::OutputTextDelta { delta } => Ok(DecodedEvent::OutputTextDelta(delta)),
         StreamingEvent::RefusalDelta { delta } => Ok(DecodedEvent::RefusalDelta(delta)),
         StreamingEvent::OutputItemAdded {
-            item: OutputItem::FunctionCall { id, call_id, name },
+            item: OutputItem::FunctionCall {
+                id, call_id, name, ..
+            },
         } => Ok(DecodedEvent::ToolCallStarted {
             item_id: id,
             call_id,
@@ -626,9 +676,15 @@ pub(crate) fn decode_event(
                 json: delta,
             })
         }
+        StreamingEvent::FunctionCallArgumentsDone { item_id, arguments } => {
+            Ok(DecodedEvent::ToolCallArgumentsDone { item_id, arguments })
+        }
         StreamingEvent::OutputItemDone {
-            item: OutputItem::FunctionCall { id, .. },
-        } => Ok(DecodedEvent::ToolCallDone { item_id: id }),
+            item: OutputItem::FunctionCall { id, arguments, .. },
+        } => Ok(DecodedEvent::ToolCallDone {
+            item_id: id,
+            arguments,
+        }),
         StreamingEvent::OutputItemAdded {
             item: OutputItem::Other,
         }
@@ -875,6 +931,32 @@ mod tests {
             ProviderError::Configuration(message)
                 if message == "authentication header secret must not be empty"
         ));
+    }
+
+    #[test]
+    fn a_tool_choice_of_none_keeps_the_tools_and_sends_none() {
+        let tools = vec![crate::ToolSpec::new(
+            "read_file",
+            "Reads one file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        for kind in [ResponsesRequestKind::Standard, ResponsesRequestKind::Codex] {
+            let request = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tools(tools.clone())
+                .with_tool_choice(crate::ToolChoice::None);
+            let body = serde_json::to_value(ResponsesRequest::new(&request, kind)).unwrap();
+            assert_eq!(body["tool_choice"], "none");
+            assert_eq!(body["tools"][0]["name"], "read_file");
+
+            let auto = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tools(tools.clone());
+            let body = serde_json::to_value(ResponsesRequest::new(&auto, kind)).unwrap();
+            assert!(body.get("tool_choice").is_none());
+            let bare = ModelRequest::new("gpt-test", vec![Message::user("ping")], 64)
+                .with_tool_choice(crate::ToolChoice::None);
+            let body = serde_json::to_value(ResponsesRequest::new(&bare, kind)).unwrap();
+            assert!(body.get("tool_choice").is_none());
+        }
     }
 
     #[test]
@@ -1420,6 +1502,95 @@ mod tests {
                 ProviderEvent::ToolCallCompleted {
                     id: "call_1".to_owned(),
                 },
+                ProviderEvent::Completed { usage: None },
+            ]
+        );
+        server.capture();
+    }
+
+    /// T16 regression, shaped like a captured Codex stream (gpt-6-astra and
+    /// gpt-6-sol, 2026-10-06): the first call of a parallel batch streams
+    /// deltas, the rest send their arguments only on the done events. Before
+    /// the fix those calls ran with `{}`. Done payloads after deltas are not
+    /// emitted again, and `output_item.done` alone is enough.
+    #[tokio::test]
+    async fn parallel_calls_without_deltas_take_their_arguments_from_the_done_events() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",",
+            "\"name\":\"tree\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",",
+            "\"output_index\":0,\"delta\":\"{\\\"path\\\":\",\"obfuscation\":\"x\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",",
+            "\"output_index\":0,\"delta\":\"\\\".\\\"}\",\"obfuscation\":\"x\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",",
+            "\"output_index\":0,\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",",
+            "\"name\":\"tree\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\",\"status\":\"completed\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",",
+            "\"name\":\"read_file\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_2\",",
+            "\"output_index\":1,\"arguments\":\"{\\\"path\\\": \\\"a.txt\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",",
+            "\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\": \\\"a.txt\\\"}\",\"status\":\"completed\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":2,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_3\",\"call_id\":\"call_3\",",
+            "\"name\":\"read_file\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":2,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_3\",\"call_id\":\"call_3\",",
+            "\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":3,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_4\",\"call_id\":\"call_4\",",
+            "\"name\":\"tree\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":3,",
+            "\"item\":{\"type\":\"function_call\",\"id\":\"fc_4\",\"call_id\":\"call_4\",",
+            "\"name\":\"tree\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
+        );
+        let server = LoopbackServer::sse(body);
+        let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
+        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let events = provider
+            .stream(ModelRequest::new(
+                "gpt-test",
+                vec![Message::user("ping")],
+                128,
+            ))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+
+        let started = |id: &str, name: &str| ProviderEvent::ToolCallStarted {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        };
+        let arguments = |id: &str, json: &str| ProviderEvent::ToolCallArgumentsDelta {
+            id: id.to_owned(),
+            json: json.to_owned(),
+        };
+        let completed = |id: &str| ProviderEvent::ToolCallCompleted { id: id.to_owned() };
+        assert_eq!(
+            events,
+            vec![
+                started("call_1", "tree"),
+                arguments("call_1", "{\"path\":"),
+                arguments("call_1", "\".\"}"),
+                completed("call_1"),
+                started("call_2", "read_file"),
+                arguments("call_2", "{\"path\": \"a.txt\"}"),
+                completed("call_2"),
+                started("call_3", "read_file"),
+                arguments("call_3", "{\"path\":\"b.txt\"}"),
+                completed("call_3"),
+                // A call that really has no arguments still completes empty.
+                started("call_4", "tree"),
+                completed("call_4"),
                 ProviderEvent::Completed { usage: None },
             ]
         );

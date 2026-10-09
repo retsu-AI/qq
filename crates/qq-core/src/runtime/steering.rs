@@ -43,6 +43,9 @@ pub(crate) struct SteeringReceiver {
     /// Bumped once per interrupting steer. The loop compares against the last
     /// generation it handled so a bump that lands between turns is not lost.
     pub(crate) interrupts: watch::Receiver<u64>,
+    /// A message the loop received while waiting for sub-agent answers
+    /// (ADR-0054 § 4); the next boundary applies it first.
+    pub(crate) peeked: Option<SteeringMessage>,
 }
 
 /// The session layer's end.
@@ -71,6 +74,7 @@ pub(crate) fn steering_channel() -> (SteeringSender, SteeringReceiver) {
         SteeringReceiver {
             messages: messages_rx,
             interrupts: interrupts_rx,
+            peeked: None,
         },
     )
 }

@@ -402,9 +402,17 @@ impl AgentProfile {
     }
 }
 
+// Bound filesystem/catalog compilation independently of Tokio's blocking pool.
+pub(crate) static COMPILE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// Why a profile could not be compiled into a plan.
 #[derive(Debug, Error)]
 pub enum PlanCompileError {
+    #[error("plan compilation task did not finish: {source}")]
+    CompilationTask {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error(
         "exposed tool {name:?} is not a known static tool or a member of the discovered catalog"
     )]
@@ -560,6 +568,24 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    /// Compiles off the async executor, with at most four concurrent compiler tasks.
+    /// Dropping this future does not interrupt filesystem work already started.
+    pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
+        let permit = COMPILE_SLOTS
+            .acquire()
+            .await
+            .expect("compile semaphore stays open");
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Self::compile_blocking(profile)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(source) => Err(PlanCompileError::CompilationTask { source }),
+        }
+    }
+
     /// Compiles a profile. This opens the workspace, reads its instruction
     /// file, indexes its skill roots, builds the tool catalog from the static
     /// declarations and the host snapshots, and encodes the descriptor. It
@@ -733,6 +759,18 @@ impl CompiledAgentPlan {
             ToolHost::SpawnAgent,
             EffectClass::ReadOnly,
         ));
+        // Waiting for and cancelling the run's own background children
+        // change nothing outside it (ADR-0054 § 4).
+        static_tools.push(StaticTool::new(
+            tools::wait_agents_spec(),
+            ToolHost::WaitAgents,
+            EffectClass::ReadOnly,
+        ));
+        static_tools.push(StaticTool::new(
+            tools::cancel_agent_spec(),
+            ToolHost::CancelAgent,
+            EffectClass::ReadOnly,
+        ));
         static_tools.push(StaticTool::new(
             search_history_spec(),
             ToolHost::SearchHistory,
@@ -759,9 +797,11 @@ impl CompiledAgentPlan {
             exposed_tools.map(|names| names.into_iter().collect::<std::collections::BTreeSet<_>>());
         if let Some(names) = &exposed_tools {
             // Validate before either restriction removes tools. load_skill
-            // is known even when this workspace has no disclosed skills.
+            // is known even when this workspace has no disclosed skills; the
+            // tools that follow spawn_agent are not names of their own.
             let known = static_tools
                 .iter()
+                .filter(|tool| !matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent))
                 .map(|tool| tool.spec.name())
                 .chain(std::iter::once("load_skill"))
                 .chain(
@@ -780,10 +820,16 @@ impl CompiledAgentPlan {
         // inputs (rather than the compiled catalog) keeps every catalog
         // invariant intact and makes the digest reflect the policy. The
         // selector and loader are never filtered out: they are how the model
-        // reaches what the policy does allow.
+        // reaches what the policy does allow. `wait_agents` and
+        // `cancel_agent` follow `spawn_agent` through both restrictions:
+        // they act only on its children, so the three come and go together
+        // and the delegation prompt never names a tool the run lacks.
+        let follows_spawn =
+            |tool: &StaticTool| matches!(tool.host, ToolHost::WaitAgents | ToolHost::CancelAgent);
         if let Some(selection) = &pack {
             static_tools.retain(|tool| {
                 matches!(tool.host, ToolHost::SelectTools | ToolHost::LoadSkill)
+                    || follows_spawn(tool)
                     || selection.permits(tool.spec.name())
             });
             for contribution in &mut contributions {
@@ -794,13 +840,19 @@ impl CompiledAgentPlan {
             }
         }
         if let Some(names) = &exposed_tools {
-            static_tools.retain(|tool| names.contains(tool.spec.name()));
+            static_tools.retain(|tool| follows_spawn(tool) || names.contains(tool.spec.name()));
             for contribution in &mut contributions {
                 contribution
                     .catalog
                     .tools
                     .retain(|tool| names.contains(tool.spec.name()));
             }
+        }
+        if !static_tools
+            .iter()
+            .any(|tool| tool.host == ToolHost::SpawnAgent)
+        {
+            static_tools.retain(|tool| !follows_spawn(tool));
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
@@ -1202,6 +1254,28 @@ mod tests {
     use qq_protocol::PromptVersion;
 
     use super::{tests_support::*, *};
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_compilation_bounds_waiters_and_releases_cancelled_requests() {
+        use std::task::Poll;
+        let workspace = canonical_temp();
+        let permits = COMPILE_SLOTS.acquire_many(4).await.unwrap();
+        let mut cancelled = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut cancelled), Poll::Pending));
+        drop(cancelled);
+        let mut queued = Box::pin(CompiledAgentPlan::compile(profile(workspace.path())));
+        assert!(matches!(futures_util::poll!(&mut queued), Poll::Pending));
+        tokio::task::yield_now().await;
+        drop(permits);
+        let expected = queued.await.unwrap().digest();
+        let results = futures_util::future::join_all(
+            (0..12).map(|_| CompiledAgentPlan::compile(profile(workspace.path()))),
+        )
+        .await;
+        for result in results {
+            assert_eq!(result.unwrap().digest(), expected);
+        }
+        assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+    }
 
     #[test]
     fn explicit_exposure_narrows_the_catalog_and_empty_exposes_nothing() {
@@ -1232,6 +1306,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(narrow.digest(), same.digest());
+    }
+
+    /// `wait_agents` and `cancel_agent` are never named in policy: they
+    /// follow `spawn_agent` through exposure and pack filtering, so the three
+    /// delegation tools are always present together or absent together.
+    #[test]
+    fn the_delegation_tools_follow_spawn_agent_through_every_filter() {
+        let workspace = canonical_temp();
+        let delegation = |plan: &CompiledAgentPlan| {
+            ["spawn_agent", "wait_agents", "cancel_agent"]
+                .into_iter()
+                .filter(|name| plan.catalog().names().any(|tool| tool == *name))
+                .collect::<Vec<_>>()
+        };
+        let all = ["spawn_agent", "wait_agents", "cancel_agent"];
+        let default = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        assert_eq!(delegation(&default), all);
+        let with_spawn = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["read_file".to_owned(), "spawn_agent".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(delegation(&with_spawn), all);
+        let without = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        assert!(delegation(&without).is_empty());
+        // They are not policy vocabulary of their own.
+        assert!(matches!(
+            CompiledAgentPlan::compile_blocking(
+                profile(workspace.path()).with_exposed_tools(vec!["wait_agents".to_owned()]),
+            ),
+            Err(PlanCompileError::UnknownExposedTool { .. })
+        ));
     }
 
     #[test]
@@ -1376,20 +1485,21 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v12\0{\"version\":12,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v13\0{\"version\":13,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (prompt 15: ADR-0054 § 5).
+        // changing the encoding (descriptor 13 and prompt 18: capability-aware
+        // sub-agent authority guidance).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "9abb6d9cdf5a37ead19e6a167aaa35bdcaaa76ecdf8d0c0f3e75af5b86b45b0f"
+            "a1b49276d62a65130c359014c3b79d0e3ffae49296af4ab19e7c56882a7ad88c"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v12\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v13\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1783,6 +1893,8 @@ mod tests {
             "read_file",
             "shell",
             "spawn_agent",
+            "wait_agents",
+            "cancel_agent",
             "search_history",
             "select_tools",
         ] {

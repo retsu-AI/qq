@@ -16,10 +16,9 @@ use qq_core::{
     ToolHints,
 };
 use qq_protocol::{
-    ApprovalDecision, ApprovalGrant, ApprovalMode, CapabilitySupport, CommandId, CommandOutcome,
-    GenerationCapabilities, ModelSelection, PromptCacheCapabilities, ResolvedModel,
-    ResolvedModelVersion, RunFailureKind, RunId, RunOutcome, SessionCommand, SessionEvent,
-    SubscribeRequest, ToolCallSnapshot, ToolCallState,
+    ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, ModelSelection,
+    RunFailureKind, RunId, RunOutcome, SessionCommand, SessionEvent, SubscribeRequest,
+    ToolCallSnapshot, ToolCallState,
 };
 use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream, ToolSpec};
 
@@ -135,30 +134,12 @@ impl RuntimeLoader for McpLoader {
                 kind: RunFailureKind::Configuration,
                 message: error.to_string(),
             })?;
-            LoadedRuntime::compile_blocking(
-                &runtime,
-                ResolvedModel {
-                    version: ResolvedModelVersion::new(1).unwrap(),
-                    request_shape: None,
-                    route: "test/model".to_owned(),
-                    provider_model: "test-model".to_owned(),
-                    organization: None,
-                    credential_profile: None,
-                    max_output_tokens: 256,
-                    context_window: None,
-                    pricing: None,
-                    output_token_control: CapabilitySupport::Native,
-                    generation: GenerationCapabilities {
-                        reasoning_effort: CapabilitySupport::Unsupported,
-                    },
-                    prompt_cache: PromptCacheCapabilities {
-                        control: CapabilitySupport::Unsupported,
-                        cache_read_usage: false,
-                        cache_write_usage: false,
-                    },
-                },
+            LoadedRuntime::from_runtime(
+                runtime,
+                qq_protocol::AgentProfileId::default(),
                 PathBuf::from(request.workspace),
             )
+            .await
             .map_err(|error| RuntimeLoadError {
                 kind: RunFailureKind::Configuration,
                 message: error.to_string(),

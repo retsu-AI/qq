@@ -1,0 +1,25 @@
+[package]
+name = "qq-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+qq-auth.workspace = true
+qq-config.workspace = true
+qq-core.workspace = true
+qq-mcp.workspace = true
+qq-protocol.workspace = true
+qq-provider.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+axum.workspace = true
+tempfile.workspace = true

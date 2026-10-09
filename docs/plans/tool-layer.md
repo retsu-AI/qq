@@ -4,12 +4,12 @@
 
 | | |
 | --- | --- |
-| Now | No slice in progress. T9 (`fetch`) merged #50 (protocol 22) |
+| Now | T15–T17 merged (#267, #273, #272); D9's week-of-use outcome measurement remains open. T13 ablations and T14/T11 are next; T10 remains gated |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
-| Open | T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
+| Open | D9 post-merge qualification; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
 
-Updated 2026-09-16. Opened 2026-09-11; supersedes the R6 search/patch/terminal
+Updated 2026-10-08. Opened 2026-09-11; supersedes the R6 search/patch/terminal
 candidates in `terminal-bench-readiness.md` § Phase 6 (which keep their
 evaluation method and acceptance targets). The per-feature harness catalog
 that motivated it is superseded by
@@ -179,6 +179,142 @@ Contract in `tools.md` § File References In Prompts and `protocol.md`
 the text so the model can tie a sentence to its attachment. Open: server-side
 resolution of `WorkspaceFile` parts on `SteerRun` and direct `ask`.
 
+### D9 — Tool-failure audit (2026-10-06; T15–T17)
+
+The goal above sets an internal contract-failure rate below 1 %. The local
+session store says otherwise, and the TUI shows every one of those failures
+as a red `✕` with an error panel. A user watching a healthy run sees a wall
+of errors that the model fixed on its next call. Method and raw counts are in
+the ledger entry of the same date. The queries are read-only `sqlite3` over
+`tool_calls` joined to `runs.resolved_model_json` for the route.
+
+The whole store covers 2026-07-28 to 2026-10-06: 30,326 calls, of which
+3,654 (12 %) were `is_error`. Most of that predates fixes that have already
+shipped. One run accounted for 939 `cursor_invalid` calls, and T2.1 (ENG-959)
+now reads placeholder cursors as the first page. The numbers that matter are
+the ones since 2026-09-26, after T2.1:
+
+| | calls | errors | rate |
+| --- | --- | --- | --- |
+| all tools | 9,940 | 926 | 9.3 % |
+| `read_file` | 3,578 | 435 | 12.2 % |
+| `search` | 3,213 | 181 | 5.6 % |
+| `edit_file` | 392 | 105 | 26.8 % |
+| `tree` | 251 | 19 | 7.6 % |
+| `read_tool_result` | 39 | 13 | 33.3 % |
+
+The read-side and edit errors in that window (753) break down by cause:
+
+| class | n | example | routes | cause |
+| --- | --- | --- | --- | --- |
+| ranges + offset/limit | 252 | `{"ranges":["230-320"],"offset":230,"limit":220}` | Codex (`gpt-5.5`, `5.6-*`, `6.1-sol`) | Model fills every optional field. 307 of 445 lifetime cases set `offset` equal to the first range's start |
+| empty `{}` arguments | 234 | whole parallel batches of `read_file`/`search` with `{}` | Codex only (all routes) | Not a model mistake: an adapter gap, confirmed by capture. 286 empty calls across 60 turns had only 18 non-empty siblings; see T16 |
+| `edit_file` empty strings | 63 | `"old":"","insert_before":"","insert_after":"…"` | `gpt-6.1-sol`, `gpt-6-astra` | Fill-every-field again: `""` for the unused forms reads as "given" |
+| `path_not_found` | 42 | guessed paths | all | Real outcome; the model should see it. It is not a failure of the run |
+| `context` > 5 | 36 | `context: 10` | Claude | Bound refusal where a clamp with a note would do (RR10) |
+| `not executed` | 26 | slice checkpoint / > 16 calls per turn | Codex | Harness refusal. The model acts on it, but it renders as a failure |
+| empty glob | 16 | `"glob":""` | mixed | Same as the `edit_file` empty strings |
+| empty `query` in `read_tool_result` | 11 | `"query":""` with `offset`/`limit` | Codex | Same |
+| range out of bounds | 9 | | Codex | Real outcome |
+
+The same habit is visible where it does no harm: 6,293 `read_file` calls
+sent `if_changed_since: "h:000000000000"`, which never matches and so passes.
+
+Three observations drive the slices:
+
+1. **Most read-side failures are default-shaped arguments, not wrong
+   intent.** Codex-family models send every optional property, using `""`,
+   `0`, the schema default, or a duplicate of another field. Each class
+   above has exactly one sensible reading. Refusing it costs a round trip
+   and a red row, and the retry often fails the same way. After a contract
+   error, the next call to the same tool failed again 434 times and
+   succeeded 127 times. RR10 (ENG-872) owns type coercion (stringified
+   arrays, clamped integers, unknown fields such as `search.offset`). T15
+   owns the *semantic* defaults below, which RR10's list does not cover.
+2. **Empty arguments on Responses were an adapter gap, not a model
+   mistake** (confirmed by capture, T16). `openai.rs` built arguments only
+   from `response.function_call_arguments.delta` and ignored the complete
+   `arguments` on `response.function_call_arguments.done` and
+   `response.output_item.done`; an empty buffer became `"{}"` in the run
+   loop. Codex `gpt-6-astra` and `gpt-6-sol` stream deltas only for the
+   first call of a parallel batch (15 of 16 calls in each capture had no
+   delta), so every later call in the batch ran as `{}`.
+3. **Severity is a client bug of its own.** `ToolOutput` and the protocol
+   carry one bit, `is_error`. The TUI maps it to `✕` in the failure color
+   plus an error panel (`view/tools.rs` `tool_state_glyph`,
+   `tool_error_lines`). A corrected argument, a missing path the model was
+   probing, and a crashed command all look identical. The model needs the
+   text; the user needs to know whether to worry.
+
+**T15 — default-shaped arguments read as absent.** Each rule is one `match`
+in the tool's own validation, and the result header gains `note=` naming
+what was ignored, so the model learns without failing:
+
+- `read_file`: when `ranges` is non-empty, `offset`/`limit` are ignored
+  (`note=offset_ignored`) instead of failing `invalid_ranges`. A comma inside
+  one range (`"370,470"`) reads as `-`.
+- `edit_file`: an empty `old`, `insert_before`, or `insert_after` is absent
+  before the exactly-one-form check. An empty anchor that is the *only* form
+  still fails, because it has no reading.
+- `tree`/`search` globs, `read_tool_result.query`: `""` is absent.
+- `search.context` above the bound clamps with a note. This is RR10's rule;
+  T15 lands it only if RR10 has not.
+
+Not in T15: anything that changes which file is written, which command runs,
+or which approval applies. `path_not_found` and `range_out_of_bounds` stay
+errors; they are real.
+
+**T16 — Responses arguments from the done events.** In `qq-provider`
+(`providers/openai.rs`), keep the delta path, and when a function call
+completes with no deltas, take `arguments` from
+`function_call_arguments.done` or `output_item.done`, emitted once as a
+single delta. As built, a call that streamed deltas ignores its done
+payloads instead of comparing them: in every captured call with deltas
+(`gpt-5.5`, `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`; 34 calls) the done
+payloads matched the deltas byte for byte, and a comparison would buffer
+every call's arguments a second time in the adapter.
+
+Capture (2026-10-06, a throwaway build that appended each SSE `data:` line
+to a file; never committed): `gpt-5.5` and `gpt-6.1-sol` streamed deltas
+for every call; `gpt-6-astra` and `gpt-6-sol` streamed deltas for 1 of 16
+parallel calls, and the other 15 carried their arguments only on the two
+done events, identically. The regression test reproduces that shape.
+
+**T17 — error severity in clients.** Add `ToolErrorKind { Correction,
+Outcome, Failure }`, derived in `qq-protocol` from the built-in tool name
+and result's leading error code (`ToolErrorKind::of`,
+`ToolCallSnapshot::error_kind`). External-tool errors remain `Failure`
+regardless of text. As built,
+it carries no wire field: tool errors already start with a stable `code:`,
+so classifying on read grades every stored row and old peer identically,
+needs no store migration and no `PROTOCOL_VERSION` bump (the snapshot is
+`deny_unknown_fields`, so even an optional field would have been one).
+The classes:
+
+- `Correction`: argument-contract errors (`invalid_*`, `bad_glob`,
+  `cursor_invalid`, decode errors) and harness `not executed` refusals.
+- `Outcome`: the call was well-formed and the answer was "no", such as
+  `path_not_found`, `not_text`, `range_out_of_bounds`, `stale_file`,
+  `not_found`, `ambiguous`, a numeric non-zero exit from `exec`/`shell`
+  (a timeout, signal, or unknown ending is a `Failure`), or an HTTP 404/410
+  from `fetch`.
+- `Failure`: everything else, including I/O errors, interrupted, denied,
+  forbidden, and refusals: `path_escapes_workspace`, `env_not_allowed`, and
+  `use_builtin` enforce policy and stay visible.
+
+The TUI renders `Correction` as a muted `↻` with no error panel (the text
+stays on expand) and `Outcome` as a warning-colored `!` with a one-line
+reason. Only `Failure` keeps `✕` and the panel. A `Correction` followed in
+the same block by a successful call to the same tool folds into that call's
+row. The model-facing text and the persisted result do not change; this is
+rendering only.
+
+Acceptance for the three slices: rerun the D9 queries over a week of
+sessions after they land. The goal is read-side `Correction` below 1 % of
+calls, the stated target. With an unchanged model mix, empty-argument calls
+should be 0 or explained by a captured stream. Every `Failure` the TUI
+shows should be one a user would act on.
+
 ### New effect classes and wire impact
 
 Shipped with T6–T9: `EffectClass::{Network, Interactive}`,
@@ -206,10 +342,14 @@ table is `tools.md` § Approval Policy.
 | T12 | `@` mentions: grammar, ranges field, dirs/globs, `@diff`/`@sha`, completion | M | T2 | `qq-tui` composer, `src/headless.rs`, `qq-protocol/src/input.rs` | TUI render gate unchanged |
 | T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7 | `benchmarks/tools/` | Phase 6 acceptance |
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
+| T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
+| T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
+| T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9; remaining: T13 → T14 → T11
-→ T10. T13 runs paired evaluations over the shipped arms and again after T12;
+→ T10, with T15 → T16 → T17 ahead of T13 so the ablations measure the
+corrected contract. T13 runs paired evaluations over the shipped arms and again after T12;
 T10 waits for its evidence.
 
 ## Ablation Plan

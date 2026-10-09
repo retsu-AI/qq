@@ -55,7 +55,7 @@ evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 30
+PROTOCOL_VERSION = 31
 ```
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
@@ -209,7 +209,7 @@ advertise it). Version 29 and 30 values are accepted in every field of type
 effort and is never sent on a provider wire, distinct from an absent pin
 (inherit). Neither adds a field; each moves the version because older decoders
 reject the new enum value. Store schema 37 and 39 gate the same values on disk.
-Golden fixtures live under `crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29`
+Golden fixtures live under `crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30`
 are retained decode-only.
 
 Version 29 adds `max` to the reasoning-effort vocabulary (every
@@ -225,9 +225,21 @@ reasoning on models that advertise it). `default` is never sent on a
 provider wire and is not listed in `reasoning_efforts`. Older clients reject
 the value. Store schema 38 adds the provider continuation envelope that
 replays signed reasoning; schema 39 persists `default`. Schema 40 records each
-model turn's runtime notice (`report` or `continuation`) for replay; no wire
-shape changed. Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v30/`; `v23`–`v29` are retained
+model turn's runtime notice (`report`, `stall_report`, `continuation`, or
+`final_answer`) for replay; schema 41 adds `child_deliveries`, the delivered
+answers of non-blocking sub-agents, and schema 42 `child_reports`, their
+delivered interim reports (ADR-0054 § 4). No wire shape changed: a delivered
+answer or report reaches clients through the child session's own events.
+Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
+`prune_through_turn`; ADR-0056 § 6); no wire shape changed.
+
+Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
+and `SessionSummary.activity`). A compaction run reports it once, when it
+starts, and nothing else for its life; a prompt run reports it before it
+summarizes its own earlier turns and reports `waiting_for_provider` again at
+its next turn. No field was added; older clients reject the new value.
+Golden fixtures live under
+`crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30` are retained
 decode-only.
 
 Clients and servers must agree on this value.
@@ -772,7 +784,8 @@ persisted with the run and enforced by the runtime, not the client, so every
 surface observes the same outcome. The wall clock starts at admission and
 spans provider retries, tool execution, and sub-agent work. When the turn or
 tool-call budget is nearly spent, the runtime reserves the last permitted turn
-as a tool-free final status response. `max_cost_usd_nanos` requires the
+as a final status response that asks for no tool calls (the tools stay
+declared; a call made anyway settles the run). `max_cost_usd_nanos` requires the
 resolved model to carry pricing; otherwise the run fails with a
 `configuration` failure before any provider work. Sub-agents receive the
 parent's *remaining* wall clock, cost, and token bounds at spawn time (never
@@ -1209,13 +1222,16 @@ span since the marker, so repeated compactions fold rather than stack. A
 small bounded history of prior compactions (three rows) is retained
 server-side for rollback.
 
-The summary is validated before it commits: it must be non-empty, fit the
-session context limit, carry every required section heading (Intent;
-Decisions and constraints; Work state; Files touched; Errors; User messages),
-and shrink the assembled context relative to the prior assembly once that
-assembly exceeds a small floor. A summary failing any check fails the run
-with a `policy` failure and leaves the prior compaction (or the verbatim
-transcript) in force.
+The summary is the model's narrative followed by a compaction record that
+the runtime renders from stored rows (user messages verbatim, the last
+reply, files, failed calls). The narrative is validated before it commits:
+it must be non-empty, fit the session context limit, carry every required
+section heading (Intent; Decisions and constraints; Work state; Open
+problems; Next step), and shrink the assembled context relative to the
+prior assembly once that assembly exceeds a small floor. A summary failing
+any check fails the run with a `policy` failure and leaves the prior
+compaction (or the verbatim transcript) in force. `SessionCompacted.summary`
+carries the stored text, record included, truncated to 16 KiB.
 
 Outcome:
 
@@ -1506,7 +1522,14 @@ Session status: `idle`, `queued`, `running`.
 children persisted before the call was recorded. `activity` mirrors the latest
 `run_activity_changed` for `active_run_id` and is absent when idle or unknown,
 so a client that loads mid-run shows the right label without waiting for the
-next event.
+next event. The values are `waiting_for_provider`, `reasoning`,
+`generating_response`, `preparing_tool_call`, and `compacting` (QQ is
+summarizing earlier context: a compaction run, or a prompt run compacting its
+own turns). Every compaction run's `run_started` is followed by its own
+`run_activity_changed` `compacting`, committed together. An in-run compaction
+run starts and finishes while its prompt run holds the session: its own
+activity event and its `run_finished` do not replace or end the prompt run's
+activity.
 
 `context_tokens` is the latest exact prompt-turn input total measured for the
 session. It is absent when unknown. A successful compaction or a model change
@@ -2003,7 +2026,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v30/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v31/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

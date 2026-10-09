@@ -4,7 +4,7 @@
 **Date:** 2026-09-30
 **Deciders:** owner (accepted); a second reviewer still reviews DM1's crate boundary and any change to approval authority
 **Implements:** [decision-model plan](../plans/decision-models.md) DM1–DM8;
-design [`decision-models.md` § 5–6](../design/decision-models.md#5-architecture).
+plan [`decision-models.md` future architecture §§ 5–6](../plans/decision-models.md#5-architecture).
 Reverses the Jev plan's "no new crates, no decision framework" non-goal and
 [ADR-0047](0047-jev-approval-hold-lifecycle.md)'s rejected alternative "a
 generic decision-engine crate". ADR-0047's other decisions stand.
@@ -63,7 +63,7 @@ policy or evidence defect, and those need one owner.
      `TaskRouter` and `CheckpointReviewer`.
 
    Provider identity never branches inside it.
-3. **Uncalibrated means shadow.** A (model id, rubric id) pair with no
+3. **Uncalibrated means shadow.** A (provider, model id, rubric id, effect class) key with no
    calibration row can only score, never settle. This covers a new vendor,
    a new version, and an alias whose reported model id differs from the
    calibrated one. Promotion is a reviewed data change with a new policy

@@ -138,6 +138,9 @@ text only or with nothing.
 
 From store schema 40 (AP3a), each slice report is marked by
 `model_turns.notice = 'report'` on the first turn whose request carried it.
+From AP3b, a stall report is marked `stall_report` and a sub-agent's last
+turn `final_answer`; replace `notice = 'report'` with
+`notice IN ('report', 'stall_report')` below to count both report kinds.
 A report retried after a fault or an output-limit cut continues on later
 turn rows without the mark. Its final attempt is the last row before the row
 marked `continuation`. This query counts reports in the window, and how many

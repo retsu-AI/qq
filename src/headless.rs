@@ -1989,6 +1989,22 @@ mod tests {
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]));
             }
+            // Reads alone stall: every 64 calls without output the run is
+            // asked for a report, answers it, and keeps reading.
+            let stall_report = request.messages().last().is_some_and(|message| {
+                message.content().iter().any(|block| {
+                    matches!(block, qq_provider::ContentBlock::Text { text }
+                        if text.contains("tool calls changed nothing"))
+                })
+            });
+            if stall_report {
+                return Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "stall report".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]));
+            }
             if state.1 {
                 return Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {
@@ -3361,7 +3377,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 15);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 18);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(
