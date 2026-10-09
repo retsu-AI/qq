@@ -29,7 +29,7 @@ appended below, newest last.
 
 ### 2026-09-21 — plan opened
 
-Research in `docs/design/run-reliability-audit-2026-09-21.md`: read-only
+Research in `../../research/run-reliability.md`: read-only
 analysis of the operator's live store (190 runs, 27 % prompt failure, 73 % of
 failures harness-caused) plus four reference traces (Codex, OpenCode, Pi, fx).
 No code changed. Root granted ADR-0040 for two-phase retry ownership

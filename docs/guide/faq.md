@@ -17,7 +17,7 @@ approval model is stricter and more explicit (a real bash parser grades every
 command), the server is part of the design rather than an add-on, and it is
 one static binary with no runtime. It is younger and has fewer integrations.
 A detailed comparison lives in
-[`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md).
+[`../research/harness-comparison.md`](../research/harness-comparison.md).
 
 ### Which models work?
 

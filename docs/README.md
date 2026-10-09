@@ -15,7 +15,7 @@ below is for people changing QQ.
 
 ## Design — present tense, the system as built
 
-- [`token-efficiency.md`](design/token-efficiency.md) — baseline mechanisms and
+- [`token-efficiency.md`](research/token-efficiency.md) — baseline mechanisms and
   research hypotheses; future changes belong to the
   [token-efficiency plan](plans/token-efficiency.md).
 
@@ -36,28 +36,28 @@ below is for people changing QQ.
 - [`layout.md`](design/layout.md), [`transcript.md`](design/transcript.md),
   [`theme.md`](design/theme.md) — TUI layout tiers and panes, transcript
   rendering, themes.
-- [`harness-scale-audit-2026-09-16.md`](design/harness-scale-audit-2026-09-16.md)
+- [`harness-comparison.md`](research/harness-comparison.md)
   — reference audit of Codex, OpenCode, Pi, and fx against QQ: reliability
   findings (F01–F28), comparative capability matrix, core versus adapter
   placement, and acceptance criteria (research; supersedes the August audit
   and September catalog).
-- [`onboarding-audit-2026-09-22.md`](design/onboarding-audit-2026-09-22.md)
+- [`onboarding.md`](research/onboarding.md)
   — first-run and configuration UX of Codex, OpenCode, Pi, and fx against
   QQ; findings O01–O20 and the positions the onboarding plan builds on
   (research; the onboarding plan that acted on it is closed — receipt in
   `plans/progress/onboarding-ux.md`).
-- [`run-reliability-audit-2026-09-21.md`](design/run-reliability-audit-2026-09-21.md)
+- [`run-reliability.md`](research/run-reliability.md)
   — why sessions do not finish: failure taxonomy from the live session store
   (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
   OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
   by `plans/run-reliability.md`).
-- [`core-autonomy-audit-2026-09-28.md`](design/core-autonomy-audit-2026-09-28.md)
+- [`core-autonomy.md`](research/core-autonomy.md)
   — what stops `qq-core` from running one task unattended for hours and
   from being embedded: per-run bounds that never reset, no continuation of
   paused or interrupted runs, no loop guard or durable goal, composition
   locked in the binary, store write amplification (research; owned by
   `plans/autonomous-core.md`).
-- [`goal-reference-survey-2026-09-28.md`](design/goal-reference-survey-2026-09-28.md)
+- [`goal-pursuit.md`](research/goal-pursuit.md)
   — how Codex (thread goals), OpenCode (`todowrite`), Pi (`finishTurn`)
   and fx (the stop hook) pursue one objective over time, their weaknesses,
   and the positions QQ's `/goal` takes (research; owned by
@@ -93,7 +93,7 @@ evidence.
   may be a leaf symlink; this fixture still requires a regular `config.ron`.
 - [`perf-recording.md`](runbooks/perf-recording.md) — baseline/candidate
   procedure, focused fixtures, same-binary control, host conditions.
-- [`progress-report.md`](runbooks/progress-report.md) — read-only session
+- [`run-output-queries.md`](runbooks/run-output-queries.md) — read-only session
   store queries: do long runs and sub-agents produce output, or only
   activity.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how

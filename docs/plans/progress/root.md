@@ -11,7 +11,7 @@ may append a **request** row; only root changes a request's status.
 | ROOT-1 | Docs system: ADR directory, workflow, templates, ledgers, runbooks; plan compression | Shipped (`6c05fe7`) | 2026-09-08. `docs/plans/speed-first-…` 2,582 → 774 lines; reference audit extracted; ADR-0001–0010 backfilled |
 | ROOT-2 | Windows CI: targeted `windows-teardown` job | Shipped (`893e582`) | Full native workspace run not claimed |
 | ROOT-3 | Toolchain pin `1.97.1` | Shipped (`893e582`) | `rust-toolchain.toml`, profile minimal, musl target |
-| ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `docs/design/harness-scale-audit-2026-09-16.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
+| ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `../../research/harness-comparison.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
 | ENG-791.R1 | Typed reasoning effort reaches the real provider request | Shipped (#76 J6a; superseded row) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
@@ -310,7 +310,7 @@ this system is speed-first H20; its dispatch skeleton is in
 Source baseline: `7956e8e`; clean start; branch `docs/harness-scale-audit-2026-09`.
 Three read-only investigators covered core reliability and all four `.source`
 harnesses; root checked architecture, clients/server, profiles, CI and evidence.
-Produced `docs/design/harness-scale-audit-2026-09-16.md` and its index entry.
+Produced `../../research/harness-comparison.md` and its index entry.
 Public-API probes reproduce tool-result ID collision, late duration exhaustion,
 and attachment-context loss; stale exact CI selector runs zero tests, corrected
 selector passes one Linux test. One later-turn overflow regression also passes.
@@ -456,7 +456,7 @@ goals, Merkle index robustness, ENG-834 size budget.
 
 ### 2026-09-30 — AP0 progress baseline (autonomous-core, ENG-978)
 
-`docs/runbooks/progress-report.md` on the lead's store: 30 days ending
+`docs/runbooks/run-output-queries.md` on the lead's store: 30 days ending
 2026-10-01 (UTC), schema 39, 425 runs in the window, read-only. No AP
 slice is on `main`.
 - Long runs (≥ 20 turns): 95 roots, 85 children. No child made a change or

@@ -3,7 +3,7 @@
 Receipt for a completed plan. The plan document was removed when its last
 slice shipped (workflow § 1: plans are deleted when shipped); its goal,
 acceptance, slice table, and research are preserved in the entries below and
-in [`../../design/onboarding-audit-2026-09-22.md`](../../design/onboarding-audit-2026-09-22.md).
+in [`../../research/onboarding.md`](../../research/onboarding.md).
 Successor: [`../guide-expansion.md`](../guide-expansion.md). Read-only.
 
 | Slice | Goal | Status | Branch / PR | Notes |
@@ -27,7 +27,7 @@ Successor: [`../guide-expansion.md`](../guide-expansion.md). Read-only.
 
 ### 2026-09-22 — plan opened; OB0
 
-Research in `docs/design/onboarding-audit-2026-09-22.md`: read the four
+Research in `../../research/onboarding.md`: read the four
 vendored harnesses under `.source/` for their first-run, auth, config,
 trust, help, and docs surfaces; traced QQ's own startup paths; ran a
 fresh-machine simulation. Findings O01–O20.

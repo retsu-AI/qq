@@ -108,7 +108,7 @@ appended below, newest last.
 ### 2026-09-28 — plan opened
 
 [ENG-978](https://linear.app/retsu-ai/issue/ENG-978), branch `docs/eng-978-autonomous-core-plan`. Research in
-`docs/design/core-autonomy-audit-2026-09-28.md`, a read-only
+`../../research/core-autonomy.md`, a read-only
 source audit of `7885f2c` plus the four `.source/` references; no code
 changed. Three findings are new and verified from source:
 
