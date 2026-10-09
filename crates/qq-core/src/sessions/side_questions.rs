@@ -1,4 +1,18 @@
 use super::*;
+use crate::tools::output::escaped_len;
+use std::collections::hash_map::Entry;
+use std::sync::atomic::AtomicBool;
+use tokio::sync::Notify;
+
+/// In-memory side tasks (admitting, executing or settling) across the runtime.
+const MAX_SIDE_TASKS: usize = 64;
+const MAX_SIDE_DURATION_MS: u64 = 120_000;
+const MAX_SIDE_MODEL_TURNS: u32 = 8;
+const MAX_SIDE_OUTPUT_TOKENS: u64 = 16_384;
+const MAX_SIDE_TOOL_OUTPUT_BYTES: u64 = 96 * 1024;
+const MAX_SIDE_ANSWER_BYTES: usize = 128 * 1024;
+/// Smallest growth of a streamed turn between persisted partial updates.
+const SIDE_PUBLISH_MIN_BYTES: usize = 1024;
 
 /// A side answer is independent of the source session's transcript and spend.
 #[derive(Debug)]
@@ -10,24 +24,107 @@ pub struct SideAnswer {
     pub model_turns: u32,
 }
 
-struct SideAdmission {
+/// Per-question ceilings an embedder may lower but never raise. `None`
+/// keeps the shipped maximum: 120 s wall time (from submission, including
+/// permit and ownership waits), 8 model turns, 16,384 output tokens and
+/// 96 KiB of tool output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SideQueryLimits {
+    pub max_duration_ms: Option<u64>,
+    pub max_model_turns: Option<u32>,
+    pub max_output_tokens: Option<u64>,
+    pub max_tool_output_bytes: Option<u64>,
+}
+
+/// Validated [`SideQueryLimits`] with every ceiling resolved.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SideCeilings {
+    pub(super) duration_ms: u64,
+    model_turns: u32,
+    output_tokens: u64,
+    tool_output_bytes: u64,
+}
+
+impl SideQueryLimits {
+    pub(super) fn resolve(self) -> Result<SideCeilings, SessionRuntimeError> {
+        fn lower<T: Copy + PartialOrd + Default>(
+            value: Option<T>,
+            maximum: T,
+        ) -> Result<T, SessionRuntimeError> {
+            match value {
+                None => Ok(maximum),
+                Some(value) if value > T::default() && value <= maximum => Ok(value),
+                Some(_) => Err(SessionRuntimeError::InvalidRunLimit),
+            }
+        }
+        Ok(SideCeilings {
+            duration_ms: lower(self.max_duration_ms, MAX_SIDE_DURATION_MS)?,
+            model_turns: lower(self.max_model_turns, MAX_SIDE_MODEL_TURNS)?,
+            output_tokens: lower(self.max_output_tokens, MAX_SIDE_OUTPUT_TOKENS)?,
+            tool_output_bytes: lower(self.max_tool_output_bytes, MAX_SIDE_TOOL_OUTPUT_BYTES)?,
+        })
+    }
+}
+
+impl SideCeilings {
+    pub(super) const fn duration(self) -> Duration {
+        Duration::from_millis(self.duration_ms)
+    }
+}
+
+/// A durably admitted side question awaiting execution.
+pub(super) struct SideLaunch {
+    pub(super) session: SessionId,
+    pub(super) id: RunId,
+    pub(super) question: String,
+    pub(super) request: RuntimeLoadRequest,
+    pub(super) messages: Vec<Message>,
+}
+
+/// One reserved `side_tasks` slot; shutdown waits for every slot to drop.
+struct SideTaskSlot(Arc<runtime::SessionRuntimeInner>);
+
+impl Drop for SideTaskSlot {
+    fn drop(&mut self) {
+        self.0.side_tasks.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Routes a cancel command to the executing question.
+struct SideRegistration {
     inner: Arc<runtime::SessionRuntimeInner>,
-    session: SessionId,
     id: RunId,
 }
 
-impl Drop for SideAdmission {
+impl Drop for SideRegistration {
     fn drop(&mut self) {
-        self.inner
-            .side_sessions
-            .lock()
-            .expect("side admission lock")
-            .remove(&self.session);
         self.inner
             .side_cancellations
             .lock()
             .expect("side cancellation lock")
             .remove(&self.id);
+    }
+}
+
+/// In-memory execution ownership of a source session. A cancelled question
+/// releases its durable `running` row before it has drained, so a durably
+/// admitted replacement waits here for the handoff instead of failing busy.
+struct SideOwnership {
+    inner: Arc<runtime::SessionRuntimeInner>,
+    session: SessionId,
+}
+
+impl Drop for SideOwnership {
+    fn drop(&mut self) {
+        let released = self
+            .inner
+            .side_sessions
+            .lock()
+            .expect("side admission lock")
+            .remove(&self.session);
+        if let Some(released) = released {
+            released.notify_waiters();
+        }
     }
 }
 
@@ -47,48 +144,98 @@ impl ToolGate for InspectionGate {
 }
 
 impl SessionRuntime {
-    pub(super) fn launch_side_question(
+    fn reserve_side_task(&self) -> Result<SideTaskSlot, SessionRuntimeError> {
+        match self
+            .inner
+            .side_tasks
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_SIDE_TASKS).then_some(count + 1)
+            }) {
+            Ok(_) => Ok(SideTaskSlot(Arc::clone(&self.inner))),
+            Err(_) => Err(SessionRuntimeError::Overloaded),
+        }
+    }
+
+    /// The wire submission. A spawned task owns the store command and the
+    /// launch from before the transaction can commit, so dropping the
+    /// caller's future never strands a durable `running` row without an
+    /// executor.
+    pub(super) async fn submit_side_question(
         &self,
-        source: (SessionId, RunId, String, RuntimeLoadRequest, Vec<Message>),
-    ) {
+        command_id: CommandId,
+        command: SessionCommand,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        let lifecycle = self.inner.lifecycle.read().await;
+        if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        let slot = self.reserve_side_task()?;
         let runtime = self.clone();
-        self.inner.side_tasks.fetch_add(1, Ordering::AcqRel);
-        let started = tokio::time::Instant::now();
+        let (reply, response) = oneshot::channel();
         tokio::spawn(async move {
-            struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
-            impl Drop for TaskGuard {
-                fn drop(&mut self) {
-                    self.0.side_tasks.fetch_sub(1, Ordering::AcqRel);
-                }
-            }
-            let _task = TaskGuard(Arc::clone(&runtime.inner));
-            let (session, id, question, request, messages) = source;
-            let outcome = AssertUnwindSafe(runtime.execute_side_question(
-                session,
-                question,
-                RunCancellation::new(),
-                false,
-                Some((id, request, messages)),
-                started,
-            ))
-            .catch_unwind()
-            .await;
-            let state = match outcome {
-                Ok(Ok(_)) => return,
-                Ok(Err(_)) => qq_protocol::SideQuestionState::Failed,
-                Err(_) => qq_protocol::SideQuestionState::Interrupted,
-            };
-            if runtime
+            let _slot = slot;
+            let started = tokio::time::Instant::now();
+            let applied = match runtime
                 .inner
                 .store
-                .finish_side_question(id, state)
+                .command_with_seed(
+                    command_id,
+                    command,
+                    WorkspaceGrantSeed::default(),
+                    Some(runtime.inner.grant_promotions.clone()),
+                )
                 .await
-                .is_err()
             {
-                runtime.inner.failed.send_replace(true);
+                Ok(applied) => applied,
+                Err(error) => {
+                    // The caller may have gone away; nothing was committed.
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            runtime.inner.notify(applied.receipt.committed_through);
+            // A dropped caller does not stop the committed launch below.
+            let _ = reply.send(Ok(applied.receipt));
+            if let Some(launch) = applied.side_launch {
+                runtime.run_launched_side_question(launch, started).await;
             }
         });
+        drop(lifecycle);
+        match response.await {
+            Ok(result) => result,
+            Err(_) => Err(SessionRuntimeError::Unavailable),
+        }
     }
+
+    /// Executes a committed launch to durable settlement, including after a
+    /// panic.
+    pub(super) async fn run_launched_side_question(
+        &self,
+        launch: SideLaunch,
+        started: tokio::time::Instant,
+    ) {
+        let id = launch.id;
+        let outcome =
+            AssertUnwindSafe(self.execute_side_question(launch, RunCancellation::new(), started))
+                .catch_unwind()
+                .await;
+        let state = match outcome {
+            Ok(Ok(_)) => return,
+            // Most errors were already settled; settlement is idempotent.
+            Ok(Err(_)) => qq_protocol::SideQuestionState::Failed,
+            Err(_) => qq_protocol::SideQuestionState::Interrupted,
+        };
+        if self
+            .inner
+            .store
+            .finish_side_question(id, state, false, self.inner.side_limits.duration_ms)
+            .await
+            .is_err()
+        {
+            self.inner.failed.send_replace(true);
+        }
+    }
+
     /// Runs without claiming the main session slot. Captures and updates are
     /// persisted separately; success returns only after durable settlement.
     pub async fn answer_side_question(
@@ -113,27 +260,13 @@ impl SessionRuntime {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
         }
-        if self
-            .inner
-            .side_tasks
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < 64).then_some(count + 1)
-            })
-            .is_err()
-        {
-            return Err(SessionRuntimeError::Overloaded);
-        }
+        let slot = self.reserve_side_task()?;
         let runtime = self.clone();
         let started = tokio::time::Instant::now();
-        let (reply, response) = tokio::sync::oneshot::channel();
+        let (reply, response) = oneshot::channel();
         tokio::spawn(async move {
-            struct TaskGuard(Arc<runtime::SessionRuntimeInner>);
-            impl Drop for TaskGuard {
-                fn drop(&mut self) {
-                    self.0.side_tasks.fetch_sub(1, Ordering::AcqRel);
-                }
-            }
-            let _task = TaskGuard(Arc::clone(&runtime.inner));
+            let _slot = slot;
+            let limit = runtime.inner.side_limits.duration_ms;
             let id = match RunId::generate() {
                 Ok(id) => id,
                 Err(_) => {
@@ -141,7 +274,7 @@ impl SessionRuntime {
                     return;
                 }
             };
-            let deadline = started + Duration::from_secs(120);
+            let deadline = started + runtime.inner.side_limits.duration();
             let mut pending = match runtime
                 .inner
                 .store
@@ -159,7 +292,17 @@ impl SessionRuntime {
                 () = tokio::time::sleep_until(deadline) => {
                     cancellation.cancel();
                     let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
-                    if matches!(pending.await, Ok(Ok(_))) && runtime.inner.store.finish_side_question(id, qq_protocol::SideQuestionState::TimedOut).await.is_err() { runtime.inner.failed.send_replace(true); }
+                    // Accepted admission may still commit; settle what it wrote.
+                    if matches!(pending.await, Ok(Ok(_)))
+                        && runtime
+                            .inner
+                            .store
+                            .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, limit)
+                            .await
+                            .is_err()
+                    {
+                        runtime.inner.failed.send_replace(true);
+                    }
                     return;
                 }
             };
@@ -174,266 +317,343 @@ impl SessionRuntime {
                     return;
                 }
             };
-            let execution = AssertUnwindSafe(runtime.execute_side_question(
+            let launch = SideLaunch {
                 session,
+                id,
                 question,
-                cancellation,
-                new_thread,
-                Some((id, request, messages)),
-                started,
-            ))
-            .catch_unwind();
-            tokio::pin!(execution);
-            let outcome = execution.await;
-            let result = match outcome {
-                Ok(result) => {
-                    if result.is_err()
-                        && runtime
-                            .inner
-                            .store
-                            .finish_side_question(id, qq_protocol::SideQuestionState::Failed)
-                            .await
-                            .is_err()
-                    {
-                        runtime.inner.failed.send_replace(true);
-                    }
-                    result
-                }
-                Err(_) => {
-                    if runtime
-                        .inner
-                        .store
-                        .finish_side_question(id, qq_protocol::SideQuestionState::Interrupted)
-                        .await
-                        .is_err()
-                    {
-                        runtime.inner.failed.send_replace(true);
-                    }
-                    Err(SessionRuntimeError::Unavailable)
-                }
+                request,
+                messages,
             };
+            let outcome =
+                AssertUnwindSafe(runtime.execute_side_question(launch, cancellation, started))
+                    .catch_unwind()
+                    .await;
+            let (result, fallback) = match outcome {
+                Ok(Ok(answer)) => (Ok(answer), None),
+                Ok(Err(error)) => (Err(error), Some(qq_protocol::SideQuestionState::Failed)),
+                Err(_) => (
+                    Err(SessionRuntimeError::Unavailable),
+                    Some(qq_protocol::SideQuestionState::Interrupted),
+                ),
+            };
+            if let Some(state) = fallback
+                && runtime
+                    .inner
+                    .store
+                    .finish_side_question(id, state, false, limit)
+                    .await
+                    .is_err()
+            {
+                runtime.inner.failed.send_replace(true);
+            }
             let _ = reply.send(result);
         });
         drop(lifecycle);
-        response
-            .await
-            .map_err(|_| SessionRuntimeError::Unavailable)?
+        match response.await {
+            Ok(result) => result,
+            Err(_) => Err(SessionRuntimeError::Unavailable),
+        }
+    }
+
+    /// Waits until no other execution owns `session`. Registers for the
+    /// release before re-checking ownership so a handoff is never missed.
+    async fn own_side_session(&self, session: SessionId) -> SideOwnership {
+        loop {
+            let owner = {
+                let mut sessions = self
+                    .inner
+                    .side_sessions
+                    .lock()
+                    .expect("side admission lock");
+                match sessions.entry(session) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(Arc::new(Notify::new()));
+                        return SideOwnership {
+                            inner: Arc::clone(&self.inner),
+                            session,
+                        };
+                    }
+                    Entry::Occupied(entry) => Arc::clone(entry.get()),
+                }
+            };
+            let released = owner.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            let current = self
+                .inner
+                .side_sessions
+                .lock()
+                .expect("side admission lock")
+                .get(&session)
+                .is_some_and(|current| Arc::ptr_eq(current, &owner));
+            if current {
+                released.await;
+            }
+        }
     }
 
     async fn execute_side_question(
         &self,
-        session: SessionId,
-        question: String,
+        launch: SideLaunch,
         cancellation: RunCancellation,
-        new_thread: bool,
-        admitted: Option<(RunId, RuntimeLoadRequest, Vec<Message>)>,
         started: tokio::time::Instant,
     ) -> Result<SideAnswer, SessionRuntimeError> {
+        let SideLaunch {
+            session,
+            id,
+            question,
+            request,
+            mut messages,
+        } = launch;
         if question.trim().is_empty() || question.len() > 8192 {
             return Err(SessionRuntimeError::InvalidSideQuestion);
         }
-        if *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+        // Subscribe before reading so a shutdown after the check still wakes.
+        let mut shutdown = self.inner.shutdown.subscribe();
+        if *self.inner.failed.borrow() || *shutdown.borrow_and_update() {
             return Err(SessionRuntimeError::Unavailable);
         }
-        {
-            let mut sessions = self
-                .inner
-                .side_sessions
-                .lock()
-                .expect("side admission lock");
-            if !sessions.insert(session) {
-                return Err(SessionRuntimeError::SideQuestionBusy);
-            }
-        }
-        let id = match &admitted {
-            Some((id, _, _)) => *id,
-            None => RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?,
-        };
+        let limits = self.inner.side_limits;
         self.inner
             .side_cancellations
             .lock()
             .expect("side cancellation lock")
             .insert(id, cancellation.clone());
-        let _admission = SideAdmission {
+        let _registration = SideRegistration {
             inner: Arc::clone(&self.inner),
-            session,
             id,
         };
-        // Admission must finish before cancellation can settle it: a queued
-        // SQLite job may commit even if its receiving future is dropped.
-        let (request, mut messages) = match admitted {
-            Some((_, request, messages)) => (request, messages),
-            None => {
-                self.inner
-                    .store
-                    .side_source(session, id, question.clone(), new_thread)
-                    .await?
-            }
+        let deadline = started + limits.duration();
+        let tool_tasks = crate::tools::ToolTasks::default();
+        // Whether a provider request may have been sent and not committed:
+        // its spend is then unknown rather than the last committed total.
+        let in_flight = AtomicBool::new(false);
+        let acquired = tokio::select! {
+            ownership = self.own_side_session(session) => Ok(ownership),
+            () = tokio::time::sleep_until(deadline) => Err(SessionRuntimeError::SideQuestionTimedOut),
+            () = cancellation.cancelled() => Err(SessionRuntimeError::SideQuestionCancelled),
+            _ = shutdown.changed() => Err(SessionRuntimeError::SideQuestionCancelled),
         };
-        let deadline = started + Duration::from_secs(120);
-        let work = tokio::time::timeout_at(deadline, async {
-            let stored = self
-                .inner
-                .store
-                .call(store::Priority::AwaitControl, move |connection| {
-                    load_side_snapshot(connection, id)
-                })
-                .await?;
-            if stored.state != qq_protocol::SideQuestionState::Running {
-                return Err(SessionRuntimeError::SideQuestionCancelled);
-            }
-            let remaining =
-                120_000_u64.saturating_sub(now_ms().saturating_sub(stored.created_at_ms));
-            if remaining == 0 {
-                return Err(SessionRuntimeError::SideQuestionTimedOut);
-            }
-            let durable_deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
-            let execution = async {
-                let _permit = self
-                    .inner
-                    .side_permits
-                    .acquire()
-                    .await
-                    .map_err(|_| SessionRuntimeError::Unavailable)?;
-                if *self.inner.shutdown.borrow() {
-                    return Err(SessionRuntimeError::SideQuestionCancelled);
-                }
-                let workspace = request.workspace.clone();
-                let loaded = self
-                    .inner
-                    .loader
-                    .load_with_progress(request, RuntimeLoadProgress::default())
-                    .await
-                    .map_err(|_| SessionRuntimeError::Unavailable)?;
-                if loaded.plan.workspace_path() != Path::new(&workspace) {
-                    return Err(SessionRuntimeError::CONSTRAINT);
-                }
-                let plan = loaded
-                    .plan
-                    .side_question_plan()
-                    .await
-                    .map_err(|_| SessionRuntimeError::Unavailable)?;
-                messages.push(Message::user("This is an isolated side question. The preceding context was captured from committed session history; live file inspection is not a filesystem snapshot. Do not steer or modify the main task."));
-                messages.push(Message::user(question));
-                let capabilities = RunCapabilities::restricted()
-                    .with_limits(
-                        RunLimits {
-                            max_duration_ms: Some(120_000),
-                            max_model_turns: Some(8),
-                            max_output_tokens: Some(16_384),
-                            max_tool_output_bytes: Some(96 * 1024),
-                            max_children: Some(0),
-                            max_concurrent_children: Some(0),
-                            ..RunLimits::default()
-                        },
-                        plan.resolved_model().pricing.clone(),
-                    )
-                    .with_execution_started(started);
-                let mut events = plan.execute(
-                    messages,
-                    cancellation.clone(),
-                    Arc::new(InspectionGate),
-                    Arc::new(FileState::default()),
-                    capabilities,
-                );
-                let mut answer = SideAnswer {
-                    id,
-                    text: String::new(),
-                    usage: Some(TokenUsage::default()),
-                    estimated_cost_usd_nanos: plan.resolved_model().pricing.as_ref().map(|_| 0),
-                    model_turns: 0,
-                };
-                let mut published_bytes = 0_usize;
-                while let Some(event) = events.next().await {
-                    match event {
-                        RuntimeEvent::OutputTextDelta { text } => {
-                            if text.is_empty() {
-                                continue;
-                            }
-                            if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
-                                return Err(SessionRuntimeError::CONSTRAINT);
-                            }
-                            answer.text.push_str(&text);
-                            if answer.text.len().saturating_sub(published_bytes) >= 1024
-                                || published_bytes == 0
-                            {
-                                self.inner
-                                    .store
-                                    .record_side_turn(
-                                        id,
-                                        answer.text.clone(),
-                                        answer.usage,
-                                        answer.estimated_cost_usd_nanos,
-                                        answer.model_turns,
-                                    )
-                                    .await?;
-                                published_bytes = answer.text.len();
-                            }
+        let (ownership, result) = match acquired {
+            Err(error) => (None, Err(error)),
+            Ok(ownership) => {
+                let work = Box::pin(async {
+                    let stored = self
+                        .inner
+                        .store
+                        .call(store::Priority::AwaitControl, move |connection| {
+                            find_side_snapshot(connection, id)
+                        })
+                        .await?;
+                    // A cancelled (or since deleted) row is not executed.
+                    let Some(stored) = stored else {
+                        return Err(SessionRuntimeError::SideQuestionCancelled);
+                    };
+                    if stored.state != qq_protocol::SideQuestionState::Running {
+                        return Err(SessionRuntimeError::SideQuestionCancelled);
+                    }
+                    let remaining = limits
+                        .duration_ms
+                        .saturating_sub(now_ms().saturating_sub(stored.created_at_ms));
+                    if remaining == 0 {
+                        return Err(SessionRuntimeError::SideQuestionTimedOut);
+                    }
+                    let durable_deadline =
+                        tokio::time::Instant::now() + Duration::from_millis(remaining);
+                    let execution = async {
+                        let _permit = self
+                            .inner
+                            .side_permits
+                            .acquire()
+                            .await
+                            .map_err(|_| SessionRuntimeError::Unavailable)?;
+                        if *self.inner.shutdown.borrow() {
+                            return Err(SessionRuntimeError::SideQuestionCancelled);
                         }
-                        RuntimeEvent::AssistantTurnCompleted { message, usage, .. } => {
-                            answer.model_turns += 1;
-                            answer.text.clear();
-                            for block in message.content() {
-                                if let ContentBlock::Text { text } = block {
-                                    if answer.text.len().saturating_add(text.len()) > 128 * 1024 {
+                        let workspace = request.workspace.clone();
+                        let loaded = self
+                            .inner
+                            .loader
+                            .load_with_progress(request, RuntimeLoadProgress::default())
+                            .await
+                            .map_err(|_| SessionRuntimeError::Unavailable)?;
+                        if loaded.plan.workspace_path() != Path::new(&workspace) {
+                            return Err(SessionRuntimeError::CONSTRAINT);
+                        }
+                        let plan = loaded
+                            .plan
+                            .side_question_plan()
+                            .await
+                            .map_err(|_| SessionRuntimeError::Unavailable)?;
+                        messages.push(Message::user("This is an isolated side question. The preceding context was captured from committed session history; live file inspection is not a filesystem snapshot. Do not steer or modify the main task."));
+                        messages.push(Message::user(question));
+                        let pricing = plan.resolved_model().pricing.clone();
+                        let capabilities = RunCapabilities::restricted()
+                            .with_limits(
+                                RunLimits {
+                                    max_duration_ms: Some(limits.duration_ms),
+                                    max_model_turns: Some(limits.model_turns),
+                                    max_output_tokens: Some(limits.output_tokens),
+                                    max_tool_output_bytes: Some(limits.tool_output_bytes),
+                                    max_children: Some(0),
+                                    max_concurrent_children: Some(0),
+                                    ..RunLimits::default()
+                                },
+                                pricing.clone(),
+                            )
+                            .with_tool_tasks(tool_tasks.clone())
+                            .with_execution_started(started);
+                        let mut events = plan.execute(
+                            messages,
+                            cancellation.clone(),
+                            Arc::new(InspectionGate),
+                            Arc::new(FileState::default()),
+                            capabilities,
+                        );
+                        let mut answer = SideAnswer {
+                            id,
+                            text: String::new(),
+                            usage: Some(TokenUsage::default()),
+                            estimated_cost_usd_nanos: pricing.as_ref().map(|_| 0),
+                            model_turns: 0,
+                        };
+                        // The streaming turn is kept apart from the last
+                        // completed answer; partial updates carry only it.
+                        let mut turn_text = String::new();
+                        let mut published_bytes = 0_usize;
+                        while let Some(event) = events.next().await {
+                            match event {
+                                RuntimeEvent::Prepared { .. } => {
+                                    in_flight.store(true, Ordering::Release);
+                                    // A cancel command settles the row without
+                                    // this task, so the durable spend must
+                                    // already read unknown. Before the first
+                                    // commit it is still the insert's NULL.
+                                    if answer.model_turns > 0 {
+                                        self.inner
+                                            .store
+                                            .record_side_turn(
+                                                id,
+                                                answer.text.clone(),
+                                                None,
+                                                None,
+                                                answer.model_turns,
+                                            )
+                                            .await?;
+                                    }
+                                }
+                                RuntimeEvent::OutputTextDelta { text } => {
+                                    if text.is_empty() {
+                                        continue;
+                                    }
+                                    if turn_text.len().saturating_add(text.len())
+                                        > MAX_SIDE_ANSWER_BYTES
+                                    {
                                         return Err(SessionRuntimeError::CONSTRAINT);
                                     }
-                                    answer.text.push_str(text);
+                                    turn_text.push_str(&text);
+                                    // Geometric checkpoints keep re-persisting
+                                    // the growing turn O(n log n), not O(n²).
+                                    let threshold =
+                                        (published_bytes / 2).max(SIDE_PUBLISH_MIN_BYTES);
+                                    if published_bytes == 0
+                                        || turn_text.len() - published_bytes >= threshold
+                                    {
+                                        self.inner
+                                            .store
+                                            .record_side_turn(
+                                                id,
+                                                turn_text.clone(),
+                                                None,
+                                                None,
+                                                answer.model_turns,
+                                            )
+                                            .await?;
+                                        published_bytes = turn_text.len();
+                                    }
                                 }
+                                RuntimeEvent::AssistantTurnCompleted { message, usage, .. } => {
+                                    answer.model_turns += 1;
+                                    answer.text.clear();
+                                    for block in message.content() {
+                                        if let ContentBlock::Text { text } = block {
+                                            if answer.text.len().saturating_add(text.len())
+                                                > MAX_SIDE_ANSWER_BYTES
+                                            {
+                                                return Err(SessionRuntimeError::CONSTRAINT);
+                                            }
+                                            answer.text.push_str(text);
+                                        }
+                                    }
+                                    answer.usage = match (answer.usage, usage) {
+                                        (Some(total), Some(usage)) => {
+                                            execution::add_usage(total, usage)
+                                        }
+                                        _ => None,
+                                    };
+                                    answer.estimated_cost_usd_nanos =
+                                        match (answer.estimated_cost_usd_nanos, usage) {
+                                            (Some(total), Some(usage)) => pricing
+                                                .as_ref()
+                                                .and_then(|pricing| run_cost(usage, pricing))
+                                                .and_then(|cost| total.checked_add(cost)),
+                                            _ => None,
+                                        };
+                                    turn_text.clear();
+                                    published_bytes = 0;
+                                    self.inner
+                                        .store
+                                        .record_side_turn(
+                                            id,
+                                            answer.text.clone(),
+                                            answer.usage,
+                                            answer.estimated_cost_usd_nanos,
+                                            answer.model_turns,
+                                        )
+                                        .await?;
+                                    in_flight.store(false, Ordering::Release);
+                                }
+                                RuntimeEvent::Completed { .. } => return Ok(answer),
+                                // The plan's own clock shares this deadline.
+                                RuntimeEvent::BudgetExhausted { exhaustion }
+                                    if exhaustion.limit
+                                        == qq_protocol::BudgetLimitKind::Duration =>
+                                {
+                                    return Err(SessionRuntimeError::SideQuestionTimedOut);
+                                }
+                                RuntimeEvent::Failed { .. }
+                                | RuntimeEvent::BudgetExhausted { .. } => {
+                                    return Err(SessionRuntimeError::Unavailable);
+                                }
+                                _ => {}
                             }
-                            answer.usage = match (answer.usage, usage) {
-                                (Some(total), Some(usage)) => execution::add_usage(total, usage),
-                                _ => None,
-                            };
-                            answer.estimated_cost_usd_nanos =
-                                match (answer.estimated_cost_usd_nanos, usage) {
-                                    (Some(total), Some(usage)) => plan
-                                        .resolved_model()
-                                        .pricing
-                                        .as_ref()
-                                        .and_then(|pricing| run_cost(usage, pricing))
-                                        .and_then(|cost| total.checked_add(cost)),
-                                    _ => None,
-                                };
-                            self.inner
-                                .store
-                                .record_side_turn(
-                                    id,
-                                    answer.text.clone(),
-                                    answer.usage,
-                                    answer.estimated_cost_usd_nanos,
-                                    answer.model_turns,
-                                )
-                                .await?;
                         }
-                        RuntimeEvent::Completed { .. } => return Ok(answer),
-                        RuntimeEvent::Failed { .. } | RuntimeEvent::BudgetExhausted { .. } => {
-                            return Err(SessionRuntimeError::Unavailable);
-                        }
-                        _ => {}
+                        Err(SessionRuntimeError::Unavailable)
+                    };
+                    match tokio::time::timeout_at(durable_deadline, execution).await {
+                        Ok(result) => result,
+                        Err(_) => Err(SessionRuntimeError::SideQuestionTimedOut),
                     }
-                }
-                Err(SessionRuntimeError::Unavailable)
-            };
-            match tokio::time::timeout_at(durable_deadline, execution).await {
-                Ok(result) => result,
-                Err(_) => {
+                });
+                let mut work = work;
+                let result = tokio::select! {
+                    result = &mut work => result,
+                    () = tokio::time::sleep_until(deadline) => Err(SessionRuntimeError::SideQuestionTimedOut),
+                    () = cancellation.cancelled() => Err(SessionRuntimeError::SideQuestionCancelled),
+                    _ = shutdown.changed() => Err(SessionRuntimeError::SideQuestionCancelled),
+                };
+                if result.is_err() {
                     cancellation.cancel();
-                    Err(SessionRuntimeError::SideQuestionTimedOut)
                 }
-            }
-        });
-        tokio::pin!(work);
-        let mut shutdown = self.inner.shutdown.subscribe();
-        let result = tokio::select! {
-            result = &mut work => match result {
-                Ok(result) => result,
-                Err(_) => { cancellation.cancel(); Err(SessionRuntimeError::SideQuestionTimedOut) }
-            },
-            () = cancellation.cancelled() => Err(SessionRuntimeError::SideQuestionCancelled),
-            _ = shutdown.changed() => {
-                cancellation.cancel();
-                Err(SessionRuntimeError::SideQuestionCancelled)
+                // Dropping the stream stops dispatch; the drain then waits for
+                // blocking inspection already running, so no side tool outlives
+                // settlement or the task slot shutdown waits on.
+                drop(work);
+                let result = match tool_tasks.drain().await {
+                    Ok(()) => result,
+                    Err(_) => Err(SessionRuntimeError::Unavailable),
+                };
+                (Some(ownership), result)
             }
         };
         let state = match &result {
@@ -446,7 +666,13 @@ impl SessionRuntime {
             }
             Err(_) => qq_protocol::SideQuestionState::Failed,
         };
-        let effective = self.inner.store.finish_side_question(id, state).await?;
+        let spend_known = result.is_ok() || !in_flight.load(Ordering::Acquire);
+        let effective = self
+            .inner
+            .store
+            .finish_side_question(id, state, spend_known, limits.duration_ms)
+            .await?;
+        drop(ownership);
         match effective {
             qq_protocol::SideQuestionState::Completed => result,
             qq_protocol::SideQuestionState::TimedOut => {
@@ -466,14 +692,38 @@ pub(super) fn load_side_snapshot(
     connection: &Connection,
     id: RunId,
 ) -> Result<qq_protocol::SideQuestionSnapshot, SessionRuntimeError> {
-    let row = connection.query_row(
-        "SELECT session_id, thread_id, question, answer, state, usage_json,
+    // Callers read a row they just wrote or already found.
+    find_side_snapshot(connection, id)?.ok_or(SessionRuntimeError::CONSTRAINT)
+}
+
+pub(super) fn find_side_snapshot(
+    connection: &Connection,
+    id: RunId,
+) -> Result<Option<qq_protocol::SideQuestionSnapshot>, SessionRuntimeError> {
+    let row = connection
+        .query_row(
+            "SELECT session_id, thread_id, question, answer, state, usage_json,
             estimated_cost_usd_nanos, model_turns, created_at_ms, finished_at_ms FROM side_questions WHERE id = ?1",
-        [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?, row.get::<_, Option<u64>>(6)?, row.get::<_, u32>(7)?,
-            row.get::<_, u64>(8)?, row.get::<_, Option<u64>>(9)?)),
-    )?;
+            [id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<u64>>(6)?,
+                    row.get::<_, u32>(7)?,
+                    row.get::<_, u64>(8)?,
+                    row.get::<_, Option<u64>>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
     let state = match row.4.as_str() {
         "running" => qq_protocol::SideQuestionState::Running,
         "completed" => qq_protocol::SideQuestionState::Completed,
@@ -483,7 +733,7 @@ pub(super) fn load_side_snapshot(
         "timed_out" => qq_protocol::SideQuestionState::TimedOut,
         _ => return Err(SessionRuntimeError::CODEC),
     };
-    Ok(qq_protocol::SideQuestionSnapshot {
+    Ok(Some(qq_protocol::SideQuestionSnapshot {
         id,
         session_id: parse_id(&row.0)?,
         thread_id: parse_id(&row.1)?,
@@ -500,9 +750,15 @@ pub(super) fn load_side_snapshot(
         model_turns: row.7,
         created_at_ms: row.8,
         finished_at_ms: row.9,
-    })
+    }))
 }
 
+/// Bytes of a snapshot body reserved for side questions ahead of the
+/// transcript, so a long main session cannot starve them on reconnect.
+const SIDE_SNAPSHOT_BUDGET_BYTES: usize = 1024 * 1024;
+
+/// The running question, then the newest terminal ones, from a reserved
+/// share of `budget`. Only what is admitted is charged.
 pub(super) fn load_side_snapshots(
     connection: &Connection,
     session: SessionId,
@@ -515,19 +771,24 @@ pub(super) fn load_side_snapshots(
         .query_map([session.to_string()], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let mut questions = Vec::new();
+    let mut reserved =
+        snapshots::SnapshotBudget::new(budget.remaining().min(SIDE_SNAPSHOT_BUDGET_BYTES));
+    let mut questions = Vec::with_capacity(ids.len());
+    let mut charged = 0_usize;
     for id in ids {
         let item = load_side_snapshot(connection, parse_id(&id)?)?;
-        if !budget.admit(
-            item.question
-                .len()
-                .saturating_add(item.answer.len())
-                .saturating_mul(6),
-        ) {
+        let bytes = escaped_len(&item.question).saturating_add(escaped_len(&item.answer));
+        // Admission refuses a second running row, so the running one is the
+        // newest and is charged first. Its escaped worst case (8 KiB question,
+        // 128 KiB answer) fits the reserve, so it is kept whenever the body
+        // has the reserve left, and always for the focused body.
+        if !reserved.admit(bytes) {
             break;
         }
+        charged = charged.saturating_add(bytes);
         questions.push(item);
     }
+    budget.charge(charged, questions.len());
     questions.reverse();
     Ok(questions)
 }

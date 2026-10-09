@@ -788,23 +788,38 @@ pub(super) fn capture_side_context(
         remaining = remaining.saturating_sub(prompt.len());
         active_context.push(Message::user(prompt));
         // Text-only committed assistant output is quoted as captured evidence,
-        // not replayed as an assistant/tool protocol turn.
+        // not replayed as an assistant/tool protocol turn. Streamed text lives
+        // in message_chunks; the preflight sums both before anything is read.
         let mut statement = connection.prepare_cached(
-            "SELECT CASE WHEN length(CAST(m.output AS BLOB)) <= ?2 THEN m.output ELSE NULL END
+            "SELECT m.id, length(CAST(m.output AS BLOB)) + COALESCE((
+                    SELECT SUM(length(CAST(c.text AS BLOB))) FROM message_chunks c
+                    WHERE c.message_id = m.id), 0)
              FROM messages m JOIN sessions s ON s.active_run_id = m.run_id
              WHERE m.session_id = ?1 AND m.role = 'assistant' AND m.state = 'complete'
              ORDER BY m.ordinal DESC LIMIT 16",
         )?;
-        let texts = statement
-            .query_map(
-                params![
-                    session_id.to_string(),
-                    remaining.saturating_sub(128).min(8192)
-                ],
-                |row| row.get::<_, Option<String>>(0),
-            )?
+        let candidates = statement
+            .query_map([session_id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        for text in texts.into_iter().rev().flatten() {
+        drop(statement);
+        let bound = u64::try_from(remaining.saturating_sub(128).min(8192)).unwrap_or(u64::MAX);
+        let mut texts = Vec::with_capacity(candidates.len());
+        for (id, bytes) in candidates {
+            if bytes > bound {
+                continue;
+            }
+            let message_id: MessageId = parse_id(&id)?;
+            let output: String = connection.query_row(
+                "SELECT output FROM messages WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )?;
+            let (output, _) = load_message_text(connection, message_id, output, String::new())?;
+            texts.push(output);
+        }
+        for text in texts.into_iter().rev().filter(|text| !text.is_empty()) {
             let text = format!("[Committed main assistant text; tool exchanges omitted]\n{text}");
             if text.len() > remaining {
                 break;

@@ -1,4 +1,5 @@
 use super::scheduler::schedule_runs;
+use super::side_questions::SideQueryLimits;
 use super::*;
 use crate::plan::{
     AgentProfile, CompiledAgentPlan, HostSnapshot, PlanCompileError, ProviderDescriptor,
@@ -568,6 +569,8 @@ pub struct SessionRuntimeOptions {
     pub max_active_runs: usize,
     /// May lower, but not raise, the independent derived side-query ceiling.
     pub max_active_side_queries: Option<usize>,
+    /// Per-question ceilings; each may lower, but not raise, the shipped one.
+    pub side_query_limits: SideQueryLimits,
     /// How long a held call may wait for a client before the server denies
     /// it `denied_timeout`. `None` (the default) is no server deadline: an
     /// interactive hold waits for the client, the run's own deadline, or
@@ -594,6 +597,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("database_path", &self.database_path)
             .field("max_active_runs", &self.max_active_runs)
             .field("max_active_side_queries", &self.max_active_side_queries)
+            .field("side_query_limits", &self.side_query_limits)
             .field("approval_timeout", &self.approval_timeout)
             .field("delegate_timeout", &self.delegate_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
@@ -609,6 +613,7 @@ impl SessionRuntimeOptions {
             database_path,
             max_active_runs: 8,
             max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -650,7 +655,10 @@ pub(super) struct SessionRuntimeInner {
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
-    pub(super) side_sessions: Mutex<std::collections::HashSet<SessionId>>,
+    pub(super) side_limits: side_questions::SideCeilings,
+    /// Source sessions with an executing side question; the owner's drop
+    /// removes its entry and wakes a replacement awaiting the handoff.
+    pub(super) side_sessions: Mutex<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     pub(super) side_cancellations: Mutex<HashMap<RunId, RunCancellation>>,
     /// Run permits for child (sub-agent) sessions, one pool per depth
     /// (`child_permits[d - 1]` serves depth `d`), each separate from
@@ -676,7 +684,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) scheduler_stopped: watch::Sender<bool>,
     pub(super) settlements: watch::Sender<u64>,
-    grant_promotions: mpsc::Sender<()>,
+    pub(super) grant_promotions: mpsc::Sender<()>,
     grant_promotion_stopped: watch::Sender<bool>,
     pub(super) lifecycle: RwLock<()>,
 }
@@ -787,19 +795,32 @@ impl SessionRuntime {
         if side_limit == 0 || side_limit > side_ceiling {
             return Err(SessionRuntimeError::InvalidRunLimit);
         }
+        let side_limits = options.side_query_limits.resolve()?;
         let store = Store::open(options.database_path).await?;
         let recovered = store.recover_interrupted_runs().await?;
         let store_id = store.store_id();
-        store.call_write(store::Priority::AwaitControl, move |connection| {
-            let transaction = store::begin_unit(connection)?;
-            let mut statement = transaction.prepare("SELECT id FROM side_questions WHERE state = 'running'")?;
-            let ids = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-            drop(statement);
-            transaction.execute("UPDATE side_questions SET state = 'interrupted', finished_at_ms = ?1 WHERE state = 'running'", [now_ms()])?;
-            for id in ids { side_questions::append_side_event(&transaction, store_id, parse_id(&id)?)?; }
-            transaction.commit()?;
-            Ok(())
-        }).await?;
+        store
+            .call_write(store::Priority::AwaitControl, move |connection| {
+                let transaction = store::begin_unit(connection)?;
+                let mut statement =
+                    transaction.prepare("SELECT id FROM side_questions WHERE state = 'running'")?;
+                let ids = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                drop(statement);
+                // A crashed request's spend is unknown, never the last committed total.
+                transaction.execute(
+                    "UPDATE side_questions SET state = 'interrupted', finished_at_ms = ?1,
+                    usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE state = 'running'",
+                    [now_ms()],
+                )?;
+                for id in ids {
+                    side_questions::append_side_event(&transaction, store_id, parse_id(&id)?)?;
+                }
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
         let (schedule, receiver) = mpsc::channel(1);
         let (grant_promotions, grant_promotion_receiver) = mpsc::channel(1);
         let (failed, _) = watch::channel(false);
@@ -815,7 +836,8 @@ impl SessionRuntime {
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
-            side_sessions: Mutex::new(std::collections::HashSet::new()),
+            side_limits,
+            side_sessions: Mutex::new(HashMap::new()),
             side_cancellations: Mutex::new(HashMap::new()),
             child_permits: (0..MAX_CHILD_DEPTH)
                 .map(|_| Arc::new(Semaphore::new(options.max_active_runs)))
@@ -871,6 +893,9 @@ impl SessionRuntime {
     ) -> Result<CommandReceipt, SessionRuntimeError> {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
+        }
+        if matches!(command, SessionCommand::SubmitSideQuestion { .. }) {
+            return self.submit_side_question(command_id, command).await;
         }
         let signal_side = match &command {
             SessionCommand::CancelSideQuestion { side_question_id } => Some(*side_question_id),
@@ -961,9 +986,10 @@ impl SessionRuntime {
         if applied.grant_promotion_pending {
             self.request_grant_promotions();
         }
-        if let Some(source) = applied.side_launch {
-            self.launch_side_question(source);
-        }
+        debug_assert!(
+            applied.side_launch.is_none(),
+            "side launches are owned by submit_side_question"
+        );
         drop(lifecycle);
         if should_schedule || applied.schedule {
             self.request_schedule();
@@ -1402,6 +1428,8 @@ pub enum SessionRuntimeError {
     SideQuestionCancelled,
     #[error("side question deadline expired")]
     SideQuestionTimedOut,
+    #[error("side question was not found")]
+    SideQuestionNotFound,
     #[error("page limits must be greater than zero")]
     InvalidPageLimit,
     #[error("workspace path must not be empty")]

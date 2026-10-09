@@ -62,7 +62,7 @@ mod runtime;
 mod scheduler;
 mod settlement;
 mod side_questions;
-pub use side_questions::SideAnswer;
+pub use side_questions::{SideAnswer, SideQueryLimits};
 mod snapshots;
 mod store;
 mod streaming;

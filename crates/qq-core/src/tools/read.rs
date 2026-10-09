@@ -66,6 +66,35 @@ struct Loaded {
     perms: String,
 }
 
+#[cfg(test)]
+struct ReadHook {
+    workspace: std::path::PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static READ_HOOKS: std::sync::Mutex<Vec<ReadHook>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds the next `read_file` in `workspace` on its blocking thread until
+/// released, ignoring cancellation, as a slow filesystem would.
+#[cfg(test)]
+pub(crate) fn hold_tool_read(
+    workspace: &std::path::Path,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    READ_HOOKS.lock().unwrap().push(ReadHook {
+        workspace: workspace.to_owned(),
+        entered,
+        release: release_rx,
+    });
+    (entered_rx, release)
+}
+
 #[inline]
 pub(super) fn read_file(
     workspace: &Workspace,
@@ -73,6 +102,20 @@ pub(super) fn read_file(
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
+    #[cfg(test)]
+    {
+        let hook = {
+            let mut hooks = READ_HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|hook| hook.workspace == workspace.path())
+                .map(|index| hooks.remove(index))
+        };
+        if let Some(hook) = hook {
+            let _ = hook.entered.send(());
+            let _ = hook.release.recv();
+        }
+    }
     // Models that fill every optional field send `offset`/`limit` beside
     // `ranges` (usually offset = the first range's start). `ranges` is the
     // more specific request, so it wins and the header says so.

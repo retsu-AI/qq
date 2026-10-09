@@ -47,7 +47,9 @@ Proposed shipped ceilings, independently configurable downward:
 - 32 KiB captured main context, 32 KiB retained side history and 8 KiB question;
 - bounded tool output and event queues using existing tighter runtime limits.
 
-Never truncate a tool-call/result pair into an invalid provider history. Reject
+A continued thread replays prior questions and final answers only; side tool
+calls and results are not retained. Never truncate a tool-call/result pair into
+an invalid provider history. Reject
 an oversized question; shorten captured context on complete-message boundaries
 with an explicit omission notice. Context capture must not hold a synchronous
 lock across await or copy an unbounded transcript. Track known cost, tokens and

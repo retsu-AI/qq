@@ -1019,6 +1019,7 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn side_source(
         &self,
         session_id: SessionId,
@@ -1062,6 +1063,10 @@ impl Store {
         .await
     }
 
+    /// Persists a side answer update. `usage`/`cost` are the committed totals,
+    /// or `None` while a provider request is in flight (spend unknown). A row
+    /// that is no longer running (cancelled, or deleted with its session)
+    /// takes no update and publishes nothing.
     pub(super) async fn record_side_turn(
         &self,
         id: RunId,
@@ -1073,21 +1078,32 @@ impl Store {
         let store_id = self.store_id;
         self.call_write(Priority::AwaitControl, move |connection| {
             let transaction = begin_unit(connection)?;
-            transaction.execute(
+            let usage = usage.map(|usage| serde_json::to_string(&usage)).transpose()?;
+            let changed = transaction.execute(
                 "UPDATE side_questions SET answer = ?2, usage_json = ?3,
                     estimated_cost_usd_nanos = ?4, model_turns = ?5 WHERE id = ?1 AND state = 'running'",
-                params![id.to_string(), text, serde_json::to_string(&usage)?, cost, turns],
+                params![id.to_string(), text, usage, cost, turns],
             )?;
-            side_questions::append_side_event(&transaction, store_id, id)?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
             transaction.commit()?;
             Ok(())
         }).await
     }
 
+    /// Settles a running side question and returns its effective state. When
+    /// `spend_known` is false a provider request may have been in flight, so
+    /// persisted usage and cost become unknown. A completion at or past
+    /// `duration_ms` from admission settles as timed out. A row deleted with
+    /// its session (possible only after cancellation released it) reports
+    /// `Cancelled`.
     pub(super) async fn finish_side_question(
         &self,
         id: RunId,
         state: qq_protocol::SideQuestionState,
+        spend_known: bool,
+        duration_ms: u64,
     ) -> Result<qq_protocol::SideQuestionState, SessionRuntimeError> {
         let store_id = self.store_id;
         self.call_write(Priority::AwaitControl, move |connection| {
@@ -1102,22 +1118,31 @@ impl Store {
                 }
             };
             let transaction = begin_unit(connection)?;
-            let created: u64 = transaction.query_row(
-                "SELECT created_at_ms FROM side_questions WHERE id = ?1",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
+            let created: Option<u64> = transaction
+                .query_row(
+                    "SELECT created_at_ms FROM side_questions WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(created) = created else {
+                transaction.commit()?;
+                return Ok(qq_protocol::SideQuestionState::Cancelled);
+            };
             let finished_at_ms = now_ms();
-            let state = if state == "completed" && finished_at_ms.saturating_sub(created) >= 120_000
+            let state = if state == "completed"
+                && finished_at_ms.saturating_sub(created) >= duration_ms
             {
                 "timed_out"
             } else {
                 state
             };
             let changed = transaction.execute(
-                "UPDATE side_questions SET state = ?2, finished_at_ms = ?3
+                "UPDATE side_questions SET state = ?2, finished_at_ms = ?3,
+                    usage_json = CASE WHEN ?4 THEN usage_json ELSE NULL END,
+                    estimated_cost_usd_nanos = CASE WHEN ?4 THEN estimated_cost_usd_nanos ELSE NULL END
                  WHERE id = ?1 AND state = 'running'",
-                params![id.to_string(), state, finished_at_ms],
+                params![id.to_string(), state, finished_at_ms, spend_known],
             )?;
             if changed != 0 {
                 side_questions::append_side_event(&transaction, store_id, id)?;

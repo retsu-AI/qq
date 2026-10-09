@@ -3256,6 +3256,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::SessionActive
         | SessionRuntimeError::ParentWorkspaceMismatch
         | SessionRuntimeError::RunNotFound
+        | SessionRuntimeError::SideQuestionNotFound
         | SessionRuntimeError::ToolCallNotFound
         | SessionRuntimeError::ApprovalNotPending
         | SessionRuntimeError::ChildAuthorityEscalation
