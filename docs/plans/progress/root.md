@@ -473,6 +473,32 @@ slice is on `main`.
   `spawn_agent` call open (merged intervals). 34 of 124 spawns returned an
   error, 12 of them children over their context limit.
 
+### 2026-10-01 — Rust quality skill (user-requested, no issue supplied)
+
+- Added `.qq/skills/rust-quality/SKILL.md`: functional design, ownership, typed
+  errors, bounded/cancellation-safe async, measured performance, and `qq-verify`.
+  Adapted the three user references to QQ rules; no runtime/config changes.
+- Name/front matter/size checks passed (156-byte description, 15,042-byte file);
+  `cargo test -p qq-core workspace::skills::tests --lib` passed 3/3;
+  `git diff --check` passed. Existing unrelated work preserved.
+- Current-session `load_skill("rust-quality")` returned unknown; fresh catalog
+  discovery/loading remains unverified. Full workspace gates and benchmarks
+  not run for this Markdown-only addition. No commit, PR, or issue created.
+
+### 2026-10-01 — Rust skill reference-library revision
+
+- User rejected the shallow single-document checklist. Read Apollo's nine
+  chapters, Rust Engineer's five references, and Async Patterns' details; rebuilt
+  the entry as task-based routing to nine original detailed chapters plus sources.
+- Added ownership/functional/type/error/async/perf/testing/tooling/review examples,
+  tradeoffs, failure modes, and evidence checks. No runtime/config changes.
+- Validation: 18 Rust blocks compiled using pinned rustc and existing dependency
+  artifacts; 16 example tests passed; all local links/front matter/size checks
+  passed; skill-index tests passed 3/3; `git diff --check` passed.
+- Evidence script/binaries live in ignored `target/rust-quality-validation/`.
+  Full workspace gates not run for Markdown-only changes; fresh-session skill
+  loading still unverified. Independent review unavailable (model route rejected).
+
 ### 2026-10-05 — embedding stack review readiness
 
 User authorized publishing regression and merging AC10 forward through AC11/AC12.1 without force pushes.
@@ -486,3 +512,13 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-09 — Rust quality skill replacement review
+
+- PR #247 continues the original skill at `c5fd4bd3ccb4565316e99914694bcab35b845ce1`; current main `03077dfaad966f6b69a5e1984ae7826c864126fa` was merged normally. All recent ledger entries are preserved.
+- Four review repairs: literal workspace read paths for all nine routed chapters, checked state restoration, deterministic blocked-send shutdown coverage, and this evidence receipt. No QQ runtime/configuration/dependency changes.
+- Retained non-author discovery/load verification at original head `0bcf4c5c9bad67a296f43707cbae5cb715c7926b`: `tests::exact_pr243_rust_quality_skill_is_discovered_and_loaded` passed 1/1. Raw harness, command, environment, stdout and independent review remain in the manager's `reviews/startup-chat-accounting-2026-10-03/pr-completion-20261003/qq243-review/` packet, outside this repository.
+- Pinned Rust 1.97.1: both edited chapters' actual Rust fences compiled; nine repaired-example tests and two original-surface checks passed. The actual worker-first original test observed zero output-send polls before cancellation; the repaired test proves a blocked send first. Removing only the blocked-send cancellation arm failed with `Elapsed(())`, exit 101.
+- Fresh actual QQ discovery and `load_skill` at `91f84175b6e589909544a69299fa76e8c1c60401`: `tests::exact_pr247_rust_quality_skill_is_discovered_and_loaded` passed exactly 1/1; the loaded body and filesystem contain all nine literal chapter paths. Local TurnScript only; no provider-backed assistant session or external model call is claimed.
+- Native-loader build used default core features with dev/test debug symbols disabled; this is a focused loader check, not a full workspace gate. Fmt, exact-test guard and diff checks passed. Raw extracted source, full logs, commands, exit and cleanup receipts are in the manager's `reviews/qq-composition-20261004/pr247-repair-20261009/` packet.
+- This final change only records the preceding verification; tested skill/runtime bytes are unchanged. Current-head hosted CI and non-author acceptance remain separate publishing checks.
