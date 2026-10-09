@@ -839,6 +839,12 @@ pub enum CommandOutcome {
     SideQuestionCancelled {
         side_question_id: RunId,
     },
+    /// The cancel found the question already settled; `state` is how it
+    /// ended. Nothing was changed.
+    SideQuestionAlreadyFinished {
+        side_question_id: RunId,
+        state: SideQuestionState,
+    },
     SideQuestionSubmitted {
         side_question_id: RunId,
         thread_id: RunId,

@@ -252,6 +252,21 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         },
     );
     check(
+        "receipt_side_question_already_finished",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7b; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 2,
+            },
+            outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                side_question_id: run_id,
+                state: qq_protocol::SideQuestionState::Completed,
+            },
+        },
+    );
+    check(
         "event_side_question_updated",
         &SessionEventEnvelope {
             cursor: EventCursor {
