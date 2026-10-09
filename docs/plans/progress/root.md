@@ -512,3 +512,16 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-09 — Rust quality skill replacement review
+
+- Replacement PR #247 carries the original Rust-quality skill scope from head
+  `c5fd4bd3ccb4565316e99914694bcab35b845ce1`. This repair updates only its
+  documented link routing, async example coordination, and state-construction
+  invariant. Runtime QQ code remains unchanged.
+- The final discovery/load check for this replacement reads the source paths
+  directly as `.qq/skills/rust-quality/references/<chapter>.md` from the
+  workspace root. The prior independent verification receipt remains the
+  retained review artifact for the original subject and scope; this entry does
+  not claim a fresh provider-backed session or external model run.
+- Current-main integration is based on `03077dfaad966f6b69a5e1984ae7826c864126fa`.

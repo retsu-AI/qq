@@ -61,6 +61,31 @@ enum TransitionError {
     Conflict { sequence: u64 },
     #[error("total exceeds representable range")]
     TotalOverflow,
+    #[error("invalid state at sequence {sequence}: {reason}")]
+    InvalidState { sequence: u64, reason: &'static str },
+}
+
+impl State {
+    fn new(
+        sequence: u64,
+        total: u64,
+        last_delta: Option<u64>,
+    ) -> Result<Self, TransitionError> {
+        match (sequence, last_delta) {
+            (0, Some(_)) => Err(TransitionError::InvalidState {
+                sequence,
+                reason: "empty state cannot have a last delta",
+            }),
+            (0, None) => Ok(Self { sequence, total, last_delta }),
+            (sequence, Some(_)) => {
+                Ok(Self { sequence, total, last_delta })
+            }
+            (sequence, None) => Err(TransitionError::InvalidState {
+                sequence,
+                reason: "applied state must retain its last delta",
+            }),
+        }
+    }
 }
 
 fn decide(state: &State, event: Event) -> Result<Decision, TransitionError> {
@@ -97,7 +122,7 @@ fn apply(state: &mut State, decision: Decision) {
 
 #[test]
 fn overflow_rejects_without_changing_state() {
-    let state = State { sequence: 1, total: u64::MAX, last_delta: Some(2) };
+    let state = State::new(1, u64::MAX, Some(2)).expect("valid applied state");
     assert_eq!(decide(&state, Event { sequence: 2, delta: 1 }),
         Err(TransitionError::TotalOverflow));
     assert_eq!(state.total, u64::MAX);
@@ -106,7 +131,7 @@ fn overflow_rejects_without_changing_state() {
 
 #[test]
 fn replaying_the_last_event_does_not_apply_it_twice() {
-    let mut state = State { sequence: 0, total: 0, last_delta: None };
+    let mut state = State::new(0, 0, None).expect("valid empty state");
     let event = Event { sequence: 1, delta: 3 };
     let initial = decide(&state, event).expect("valid initial event");
     apply(&mut state, initial);
@@ -114,6 +139,24 @@ fn replaying_the_last_event_does_not_apply_it_twice() {
     assert_eq!(duplicate, Decision::Duplicate);
     apply(&mut state, duplicate);
     assert_eq!(state.total, 3);
+}
+
+#[test]
+fn state_construction_rejects_inconsistent_sequence_payload_pairs() {
+    assert_eq!(
+        State::new(0, 0, Some(3)),
+        Err(TransitionError::InvalidState {
+            sequence: 0,
+            reason: "empty state cannot have a last delta",
+        })
+    );
+    assert_eq!(
+        State::new(2, 3, None),
+        Err(TransitionError::InvalidState {
+            sequence: 2,
+            reason: "applied state must retain its last delta",
+        })
+    );
 }
 ```
 

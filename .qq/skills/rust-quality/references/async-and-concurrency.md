@@ -43,7 +43,8 @@ rather than collecting every result. Cancellation is fail-stop, not rollback.
 A tokio watch receiver represents shutdown; true or sender closure requests stop.
 
 ```rust
-use tokio::sync::{mpsc, watch};
+use std::future::{poll_fn, Future};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -77,16 +78,39 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn send_with_probe(
+    output: &mpsc::Sender<usize>,
+    value: usize,
+    pending: Option<oneshot::Sender<()>>,
+) -> Result<(), WorkerError> {
+    let send = output.send(value);
+    tokio::pin!(send);
+    let mut pending = pending;
+    let result = poll_fn(|cx| {
+        let polled = send.as_mut().poll(cx);
+        if polled.is_pending() {
+            if let Some(pending) = pending.take() {
+                let _ = pending.send(());
+            }
+        }
+        polled
+    })
+    .await;
+    result.map_err(|_| WorkerError::OutputClosed)
+}
+
 async fn run_bounded(
     mut input: mpsc::Receiver<String>,
     output: mpsc::Sender<usize>,
     mut shutdown: watch::Receiver<bool>,
     limit: usize,
+    pending_output: Option<oneshot::Sender<()>>,
 ) -> Result<(), WorkerError> {
     if !(1..=64).contains(&limit) {
         return Err(WorkerError::InvalidLimit);
     }
     let mut tasks = JoinSet::new();
+    let mut pending_output = pending_output;
     let mut input_closed = false;
     let outcome = loop {
         if input_closed && tasks.is_empty() {
@@ -105,7 +129,7 @@ async fn run_bounded(
                 let sent = tokio::select! {
                     biased;
                     _ = stopped(&mut shutdown) => Err(WorkerError::Cancelled),
-                    sent = output.send(value) => sent.map_err(|_| WorkerError::OutputClosed),
+                    sent = send_with_probe(&output, value, pending_output.take()) => sent,
                 };
                 if let Err(error) = sent {
                     break Err(error);
@@ -144,7 +168,7 @@ async fn finite_input_is_drained_before_success() {
     drop(sender);
     let (output, mut receiver) = mpsc::channel(2);
     let (_shutdown_sender, shutdown) = watch::channel(false);
-    assert!(run_bounded(input, output, shutdown, 2).await.is_ok());
+    assert!(run_bounded(input, output, shutdown, 2, None).await.is_ok());
     let mut lengths = Vec::new();
     while let Some(value) = receiver.recv().await {
         lengths.push(value);
@@ -161,17 +185,22 @@ async fn shutdown_is_observed_with_a_full_output_queue() {
     let (output, _receiver) = mpsc::channel(1);
     output.try_send(99).expect("fill output queue");
     let (shutdown_sender, shutdown) = watch::channel(false);
-    let worker = run_bounded(input, output, shutdown, 1);
+    let (pending_sender, pending_receiver) = oneshot::channel();
+    let worker = run_bounded(input, output, shutdown, 1, Some(pending_sender));
     tokio::pin!(worker);
-    // All work is nonblocking. With no cancellation and no sink capacity,
-    // polling the worker cannot finish successfully.
+    tokio::pin!(pending_receiver);
+    // The probe is sent only after the actual output send future returns
+    // Pending. This proves the worker reached the full sink before shutdown.
     tokio::select! {
         biased;
-        result = &mut worker => panic!("worker should remain pending: {result:?}"),
-        _ = std::future::ready(()) => {}
+        result = &mut worker => panic!("worker finished before probing the sink: {result:?}"),
+        result = &mut pending_receiver => result.expect("send reached the full sink"),
     }
     shutdown_sender.send(true).expect("worker owns shutdown receiver");
-    assert!(matches!(worker.await, Err(WorkerError::Cancelled)));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut worker)
+        .await
+        .expect("shutdown must wake a blocked output send");
+    assert!(matches!(result, Err(WorkerError::Cancelled)));
 }
 ```
 

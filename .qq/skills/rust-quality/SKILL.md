@@ -11,7 +11,9 @@ this skill supplies engineering methods, not tool permissions or new policy.
 ## Load the relevant chapters before working
 
 The table is a routing procedure, not optional further reading. Read the selected
-files with `read_file` using their workspace paths below. Batch independent reads.
+files with `read_file` using their workspace paths below. The links resolve from
+the workspace root, so read them as `.qq/skills/rust-quality/references/<chapter>.md`.
+Batch independent reads.
 Do not assume `load_skill` automatically loads supporting files. Load additional
 chapters when investigation reveals a new concern; do not load everything for a
 small unrelated edit.
