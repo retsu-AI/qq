@@ -11,8 +11,14 @@ this skill supplies engineering methods, not tool permissions or new policy.
 ## Load the relevant chapters before working
 
 The table is a routing procedure, not optional further reading. Read the selected
-files with `read_file` using their workspace paths below. The links resolve from
-the workspace root, so read them as `.qq/skills/rust-quality/references/<chapter>.md`.
+files with `read_file` using their workspace paths below. Markdown links remain
+relative to this skill file; the read paths are workspace-root paths.
+
+| Selected chapter | `read_file` workspace path | Markdown link |
+| --- | --- | --- |
+| Functional design | `.qq/skills/rust-quality/references/functional-design.md` | [Functional design](references/functional-design.md) |
+| Async and concurrency | `.qq/skills/rust-quality/references/async-and-concurrency.md` | [Async and concurrency](references/async-and-concurrency.md) |
+
 Batch independent reads.
 Do not assume `load_skill` automatically loads supporting files. Load additional
 chapters when investigation reveals a new concern; do not load everything for a

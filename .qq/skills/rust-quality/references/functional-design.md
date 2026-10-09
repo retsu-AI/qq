@@ -142,6 +142,27 @@ fn replaying_the_last_event_does_not_apply_it_twice() {
 }
 
 #[test]
+fn conflicting_replay_is_rejected() {
+    let mut state = State::new(0, 0, None).expect("valid empty state");
+    let first = Event { sequence: 1, delta: 3 };
+    let decision = decide(&state, first).expect("valid initial event");
+    apply(&mut state, decision);
+    assert_eq!(
+        decide(&state, Event { sequence: 1, delta: 4 }),
+        Err(TransitionError::Conflict { sequence: 1 })
+    );
+}
+
+#[test]
+fn maximum_sequence_replay_remains_idempotent() {
+    let state = State::new(u64::MAX, 3, Some(3)).expect("valid maximum state");
+    assert_eq!(
+        decide(&state, Event { sequence: u64::MAX, delta: 3 }),
+        Ok(Decision::Duplicate)
+    );
+}
+
+#[test]
 fn state_construction_rejects_inconsistent_sequence_payload_pairs() {
     assert_eq!(
         State::new(0, 0, Some(3)),

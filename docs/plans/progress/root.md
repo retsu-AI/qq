@@ -519,9 +519,16 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
   `c5fd4bd3ccb4565316e99914694bcab35b845ce1`. This repair updates only its
   documented link routing, async example coordination, and state-construction
   invariant. Runtime QQ code remains unchanged.
-- The final discovery/load check for this replacement reads the source paths
-  directly as `.qq/skills/rust-quality/references/<chapter>.md` from the
-  workspace root. The prior independent verification receipt remains the
-  retained review artifact for the original subject and scope; this entry does
-  not claim a fresh provider-backed session or external model run.
+- The retained original-head loader receipt is for `0bcf4c5c9bad67a296f43707cbae5cb715c7926b`.
+  Its independent focused test is
+  `tests::exact_pr243_rust_quality_skill_is_discovered_and_loaded`, passed 1/1
+  against the actual workspace discovery and `load_skill` path. The existing
+  evidence packet is
+  `reviews/qq-backlog-readiness-20261004/control-and-feedback-readback.json`.
+  That receipt covers the original skill subject and scope. The replacement
+  reuses that payload and path contract; it does not claim a fresh
+  provider-backed session or external model run.
+- The repaired examples were separately extracted from the replacement
+  chapters and compiled from their actual fences. This is source-based example
+  verification, distinct from the retained loader receipt.
 - Current-main integration is based on `03077dfaad966f6b69a5e1984ae7826c864126fa`.
