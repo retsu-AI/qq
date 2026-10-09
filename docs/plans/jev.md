@@ -1,8 +1,8 @@
 # Jev: first-class, opt-in, and worth turning on
 
-**Status:** Proposed 2026-09-28. JV0 (this plan) is in review. No
-implementation slice (JV1–JV13) has started. Merging it doesn't enable Jev or authorize implementation or paid
-evaluation.
+**Status:** Proposed 2026-09-28. JV0 (this plan, #210), JV1's activation
+fix (#214) and JV2 (#215) shipped; JV3–JV13 are planned. Paid evaluation is
+not authorized.
 **Tracking:** ENG-791 (parent). JV slices get their own issues when started.
 ENG-938 and draft #193 are folded in here. ENG-811 owns paid evaluation and
 the quiet-host run, ENG-815 routing qualification, and ENG-809 spend approval.

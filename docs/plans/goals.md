@@ -13,8 +13,8 @@
 ## Delivery stack
 
 Tracking: [ENG-1011](https://linear.app/retsu-ai/issue/ENG-1011). ENG-982 delivered
-design only. Deliver [side-questions.md](side-questions.md) first: SQ0 planning,
-SQ1 isolated read-only runtime, SQ2 surfaces. Then stack **G0 → G2 → G3 → G4 → G5**.
+design only. Side questions (SQ0–SQ2) shipped first
+([`../design/side-questions.md`](../design/side-questions.md)). Then stack **G0 → G2 → G3 → G4 → G5**.
 Each PR targets its immediate predecessor until merge, then rebases/retargets.
 This is delivery ordering, not a runtime dependency. G0 retains AC4 and one
 goal protocol bump; G1 stays dropped. G4 stays together after G3 initially.

@@ -1,7 +1,7 @@
 # Token efficiency: more verified work per token
 
-**Status:** TE0 documentation in review; TE1–TE8 planned, no new runtime
-behavior or savings established. [Ledger](progress/token-efficiency.md).
+**Status:** TE0 (#141) and TE1.1 accounting coverage (#158) shipped; the
+rest of TE1 and TE2–TE8 are planned. No savings established. [Ledger](progress/token-efficiency.md).
 **Baseline:** `8089a0e`. **Tracker:** [ENG-886](https://linear.app/retsu-ai/issue/ENG-886), project `qq`,
 team `ENG`. Planning PR: [#141](https://github.com/retsu-AI/qq/pull/141).
 **Research:** [current mechanisms and hypotheses](../research/token-efficiency.md).
