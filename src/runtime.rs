@@ -1800,7 +1800,7 @@ impl RuntimeFactory {
                 .collect();
             profile = profile.with_exposed_tools(names);
         }
-        profile = profile.with_denied_tools(snapshot.policy().deny_tools().to_vec());
+        profile = profile.with_side_question_denies(snapshot.policy().deny_tools().to_vec());
         let mut bindings = LiveBindings {
             provider: provider_config.access().cloned(),
             mcp: None,
@@ -3256,6 +3256,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::SessionActive
         | SessionRuntimeError::ParentWorkspaceMismatch
         | SessionRuntimeError::RunNotFound
+        | SessionRuntimeError::SideQuestionNotFound
         | SessionRuntimeError::ToolCallNotFound
         | SessionRuntimeError::ApprovalNotPending
         | SessionRuntimeError::ChildAuthorityEscalation

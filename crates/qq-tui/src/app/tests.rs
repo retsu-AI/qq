@@ -4950,6 +4950,35 @@ fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
 }
 
 #[test]
+fn a_cancel_that_loses_the_race_releases_the_acknowledged_id() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.composer.text = "/btw slow?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    // The question completed before the cancel committed.
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: cancel.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: cancel.command_id,
+            outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                side_question_id: side,
+                state: qq_protocol::SideQuestionState::Completed,
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(
+        app.visible_status(),
+        Some(("side question already finished", NoticeLevel::Info))
+    );
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+}
+
+#[test]
 fn a_receipt_after_the_terminal_update_is_not_retained_for_cancel() {
     let mut app = App::new(TuiOptions::default());
     app.apply_snapshot(snapshot());

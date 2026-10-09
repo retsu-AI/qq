@@ -60,7 +60,10 @@ PROTOCOL_VERSION = 32
 
 Version 32 adds isolated side-question submission and cancellation commands,
 separate durable side-question snapshots, and replayable side projection updates.
-These do not alter the main session transcript or accounting.
+Cancelling a question that already settled returns
+`side_question_already_finished` with its effective state and changes
+nothing; an unknown side-question id is a client error. These do not alter
+the main session transcript or accounting.
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
 values (1–12) belonged to pre-release iterations and no released build

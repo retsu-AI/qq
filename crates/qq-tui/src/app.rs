@@ -727,6 +727,10 @@ impl App {
                                 .to_owned(),
                             );
                         }
+                        let cancel_side_session = match intent.as_ref() {
+                            Some(PendingIntent::CancelSide { session_id }) => Some(*session_id),
+                            _ => None,
+                        };
                         if matches!(receipt.outcome, CommandOutcome::RunAlreadyFinished { .. }) {
                             // A steer that lost the race to the finishing run was never
                             // applied; hand the text back rather than losing it.
@@ -747,6 +751,17 @@ impl App {
                             CommandOutcome::SideQuestionCancelled { side_question_id } => {
                                 self.acknowledged_side_questions
                                     .retain(|_, id| id != side_question_id);
+                            }
+                            CommandOutcome::SideQuestionAlreadyFinished {
+                                side_question_id,
+                                ..
+                            } => {
+                                self.acknowledged_side_questions
+                                    .retain(|_, id| id != side_question_id);
+                                self.set_info_for(
+                                    cancel_side_session,
+                                    "side question already finished".to_owned(),
+                                );
                             }
                             CommandOutcome::CompactionQueued { session_id, .. } => {
                                 self.set_info_for(

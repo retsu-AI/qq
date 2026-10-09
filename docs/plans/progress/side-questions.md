@@ -188,6 +188,31 @@ Plan: [../side-questions.md](../side-questions.md). Tracking: ENG-1011.
   limit; do not represent this as a new reviewer approval. SQ1 acceptance evidence
   is ready for review; SQ2 surfaces remain to be implemented separately.
 
+### 2026-10-09 — main merge and Codex review fixes (#266)
+
+- Merged `main` (v0.1.6): SQ1 now ships as protocol 32 (fixtures under
+  `v32/`) and store schema 44 (the `side_questions` step).
+- Addressed the Codex review: each side execution owns a `ToolTasks` drained
+  before settlement; delete/prune refuse a session with a running side row and
+  late writes tolerate a vanished row; in-flight spend persists as unknown
+  (cancel, failure, timeout, recovery), completed rows keep known totals;
+  reconnect snapshots load side questions first from a 1 MiB reserve; active-run
+  capture reassembles streamed chunks behind a byte preflight; managed denies
+  narrow only the derived side catalog (main catalogs and digests unchanged);
+  `SubmitSideQuestion` runs in an owned task holding a side slot, so a dropped
+  caller cannot strand a `running` row; cold client views drop and ignore side
+  bodies; streaming resets per turn with geometric checkpoints; downward-only
+  `SideQueryLimits` on `SessionRuntimeOptions`; replacements wait for the
+  cancelled owner's in-memory handoff; a cancel that loses returns
+  `side_question_already_finished` (v32 fixture); an unknown id is
+  `SideQuestionNotFound` (client error).
+- Declined finding 12 (persist side tool exchanges): continuation replays only
+  question/answer pairs within the 32 KiB side-history bound, live reads are not
+  snapshots, and replaying stale results would mislead. Recorded in the plan.
+- Evidence: 15 new focused tests; side filter 48 passed; `qq-core` 913 passed
+  (3 ignored); workspace 2,204 passed, 0 failed, 13 ignored; fmt and all-target
+  all-feature Clippy clean.
+
 ### 2026-10-07 — SQ2 aliases and separate side view
 
 - Added `/btw` and `/ask`, `/btw-new QUESTION` explicit thread reset and

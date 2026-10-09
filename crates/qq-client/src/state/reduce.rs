@@ -116,7 +116,11 @@ impl SessionStore {
         let session_id = envelope.session_id;
         match &envelope.event {
             SessionEvent::SideQuestionUpdated { side_question } => {
-                if let Some(view) = self.get_mut(&session_id) {
+                // Side bodies follow the transcript body: a summary-only view
+                // holds none, so cold sessions cannot accumulate them.
+                if let Some(view) = self.get_mut(&session_id)
+                    && view.is_warm()
+                {
                     if let Some(existing) = view
                         .side_questions
                         .iter_mut()

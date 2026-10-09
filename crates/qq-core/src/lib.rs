@@ -98,9 +98,9 @@ pub use sessions::{
     ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
     RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
     RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SideAnswer, SlashCommandError, SpawnModelValidationFuture, TaskRouter,
-    TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
-    run_cost,
+    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
+    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
+    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).

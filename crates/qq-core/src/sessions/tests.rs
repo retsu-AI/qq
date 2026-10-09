@@ -1474,6 +1474,7 @@ async fn approval_harness_with_clocks(
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout,
             delegate_timeout,
             grant_authority,
@@ -6548,7 +6549,7 @@ async fn side_recovery_marks_interrupted_without_replaying_provider_work() {
 }
 
 #[tokio::test]
-async fn side_failure_retains_committed_turn_usage_without_charging_main() {
+async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_charging_main() {
     struct FailureLoader;
     impl RuntimeLoader for FailureLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
@@ -6617,7 +6618,7 @@ async fn side_failure_retains_committed_turn_usage_without_charging_main() {
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(1)?,
                         row.get::<_, u32>(2)?,
                     ))
                 },
@@ -6625,10 +6626,26 @@ async fn side_failure_retains_committed_turn_usage_without_charging_main() {
         })
         .await
         .unwrap();
+    // Turn 1 committed, but turn 2's request was sent and failed: its spend
+    // is unknown, so the total is unknown rather than turn 1's figure.
     assert_eq!(row.0, "failed");
     assert_eq!(row.2, 1);
-    let usage: Option<TokenUsage> = serde_json::from_str(&row.1).unwrap();
-    assert_eq!(usage.unwrap().output_tokens, 2);
+    assert_eq!(row.1, None);
+    let session = harness.session_id;
+    let main_cost = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT estimated_cost_usd_nanos FROM sessions WHERE id = ?1",
+                [session.to_string()],
+                |row| row.get::<_, Option<u64>>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(matches!(main_cost, None | Some(0)));
 }
 
 #[tokio::test]
@@ -7138,13 +7155,22 @@ async fn side_deadline_from_admission_times_out_before_provider_load() {
         })
         .await
         .unwrap();
-    harness.runtime.launch_side_question((
-        harness.session_id,
-        id,
-        "expired".to_owned(),
-        request,
-        messages,
-    ));
+    let runtime = harness.runtime.clone();
+    let session_id = harness.session_id;
+    tokio::spawn(async move {
+        runtime
+            .run_launched_side_question(
+                side_questions::SideLaunch {
+                    session: session_id,
+                    id,
+                    question: "expired".to_owned(),
+                    request,
+                    messages,
+                },
+                tokio::time::Instant::now(),
+            )
+            .await;
+    });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let item = harness
@@ -7198,7 +7224,12 @@ async fn side_terminal_settlement_is_idempotent_without_duplicate_events() {
         .runtime
         .inner
         .store
-        .finish_side_question(answer.id, qq_protocol::SideQuestionState::Failed)
+        .finish_side_question(
+            answer.id,
+            qq_protocol::SideQuestionState::Failed,
+            true,
+            120_000,
+        )
         .await
         .unwrap();
     let after = harness
@@ -7255,7 +7286,7 @@ async fn side_late_completion_settlement_is_timed_out_not_completed() {
         .runtime
         .inner
         .store
-        .finish_side_question(id, qq_protocol::SideQuestionState::Completed)
+        .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
     let item = harness
@@ -7314,7 +7345,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
         .runtime
         .inner
         .store
-        .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut)
+        .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, 120_000)
         .await
         .unwrap();
     assert_eq!(effective, qq_protocol::SideQuestionState::TimedOut);
@@ -7322,7 +7353,7 @@ async fn side_accepted_admission_receipt_survives_deadline_and_is_settled() {
         .runtime
         .inner
         .store
-        .finish_side_question(id, qq_protocol::SideQuestionState::Completed)
+        .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
         .await
         .unwrap();
     assert_eq!(again, effective);
@@ -7362,4 +7393,873 @@ async fn side_expired_admission_does_not_enter_worker_queue() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+/// A side provider driven by a per-request script. Each request pops the next
+/// script; an exhausted script hangs, so a test can hold a request in flight.
+type SideScript = Vec<Result<qq_provider::ProviderEvent, qq_provider::ProviderError>>;
+
+struct SideScriptLoader {
+    scripts: Arc<StdMutex<std::collections::VecDeque<(SideScript, bool)>>>,
+    priced: bool,
+}
+
+impl SideScriptLoader {
+    /// `(events, then_hang)` per request.
+    fn new(scripts: Vec<(SideScript, bool)>, priced: bool) -> Arc<Self> {
+        Arc::new(Self {
+            scripts: Arc::new(StdMutex::new(scripts.into())),
+            priced,
+        })
+    }
+}
+
+impl RuntimeLoader for SideScriptLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let scripts = Arc::clone(&self.scripts);
+        let priced = self.priced;
+        Box::pin(async move {
+            struct ScriptProvider(Arc<StdMutex<std::collections::VecDeque<(SideScript, bool)>>>);
+            impl Provider for ScriptProvider {
+                fn stream(&self, _: ModelRequest) -> ProviderStream {
+                    let (events, hang) = self.0.lock().unwrap().pop_front().unwrap_or_default();
+                    let events = stream::iter(events);
+                    if hang || events.size_hint().0 == 0 {
+                        Box::pin(events.chain(stream::pending()))
+                    } else {
+                        Box::pin(events)
+                    }
+                }
+            }
+            let pricing = priced.then(|| ModelPricing {
+                input_usd_nanos_per_token: 1_000,
+                output_usd_nanos_per_token: 2_000,
+                cache_read_usd_nanos_per_token: Some(100),
+                cache_write_usd_nanos_per_token: Some(300),
+                context_tier: None,
+                provenance: "test".to_owned(),
+            });
+            Ok(loaded_runtime(
+                Runtime::new(ScriptProvider(scripts), "test-model", 256).unwrap(),
+                &request.workspace,
+                pricing,
+            ))
+        })
+    }
+}
+
+fn side_text(text: &str) -> Result<qq_provider::ProviderEvent, qq_provider::ProviderError> {
+    Ok(qq_provider::ProviderEvent::OutputTextDelta {
+        text: text.to_owned(),
+    })
+}
+
+fn side_done() -> Result<qq_provider::ProviderEvent, qq_provider::ProviderError> {
+    Ok(qq_provider::ProviderEvent::Completed {
+        usage: Some(qq_provider::ProviderUsage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_tokens: None,
+        }),
+    })
+}
+
+fn side_tool_call(
+    name: &str,
+    arguments: &str,
+) -> Vec<Result<qq_provider::ProviderEvent, qq_provider::ProviderError>> {
+    vec![
+        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+            id: "inspect".to_owned(),
+            name: name.to_owned(),
+        }),
+        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+            id: "inspect".to_owned(),
+            json: arguments.to_owned(),
+        }),
+        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+            id: "inspect".to_owned(),
+        }),
+    ]
+}
+
+async fn submit_side(harness: &SpawnHarness, question: &str) -> RunId {
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitSideQuestion {
+                session_id: harness.session_id,
+                question: question.to_owned(),
+                new_thread: false,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SideQuestionSubmitted {
+        side_question_id, ..
+    } = receipt.outcome
+    else {
+        panic!("side receipt")
+    };
+    side_question_id
+}
+
+async fn side_row(harness: &SpawnHarness, id: RunId) -> qq_protocol::SideQuestionSnapshot {
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            side_questions::load_side_snapshot(connection, id)
+        })
+        .await
+        .unwrap()
+}
+
+async fn wait_side(
+    harness: &SpawnHarness,
+    id: RunId,
+    done: impl Fn(&qq_protocol::SideQuestionSnapshot) -> bool,
+) -> qq_protocol::SideQuestionSnapshot {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let item = side_row(harness, id).await;
+            if done(&item) {
+                return item;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("side question state")
+}
+
+async fn side_events(harness: &SpawnHarness, id: RunId) -> Vec<qq_protocol::SideQuestionSnapshot> {
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let mut statement =
+                connection.prepare("SELECT envelope_json FROM events ORDER BY rowid")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|json| {
+                    match serde_json::from_str::<SessionEventEnvelope>(&json)
+                        .ok()?
+                        .event
+                    {
+                        SessionEvent::SideQuestionUpdated { side_question } => {
+                            (side_question.id == id).then_some(*side_question)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect())
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
+    let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
+    first.push(side_done());
+    let harness =
+        spawn_harness_with_loader(SideScriptLoader::new(vec![(first, false)], false), 4).await;
+    let workspace = harness
+        .runtime
+        .workspace_path(harness.workspace_id)
+        .await
+        .unwrap();
+    std::fs::write(Path::new(&workspace).join("note.txt"), "evidence").unwrap();
+    let (entered, release) = crate::tools::hold_tool_read(Path::new(&workspace));
+    let id = submit_side(&harness, "inspect").await;
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelSideQuestion {
+                side_question_id: id,
+            },
+        )
+        .await
+        .unwrap();
+    // The read ignores cancellation: the executor must still own it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.runtime.inner.side_tasks.load(Ordering::Acquire), 1);
+    assert!(
+        harness
+            .runtime
+            .inner
+            .side_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&harness.session_id)
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.runtime.inner.side_tasks.load(Ordering::Acquire) != 0 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        side_row(&harness, id).await.state,
+        qq_protocol::SideQuestionState::Cancelled
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns() {
+    let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
+    first.push(side_done());
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.side_query_limits.max_duration_ms = Some(200);
+    let runtime = SessionRuntime::open(options, SideScriptLoader::new(vec![(first, false)], false))
+        .await
+        .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let CommandOutcome::SessionCreated { session_id } =
+        create_session(&runtime, workspace_id, None).await.outcome
+    else {
+        panic!("session")
+    };
+    let workspace = runtime.workspace_path(workspace_id).await.unwrap();
+    std::fs::write(Path::new(&workspace).join("note.txt"), "evidence").unwrap();
+    let (entered, release) = crate::tools::hold_tool_read(Path::new(&workspace));
+    let task = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .answer_side_question(session_id, "inspect".to_owned(), RunCancellation::new())
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    // Past the deadline with the read still blocked, nothing has settled.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!task.is_finished());
+    let state = runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT state FROM side_questions", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+    release.send(()).unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SessionRuntimeError::SideQuestionTimedOut)
+    ));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_running_question_blocks_delete_and_prune() {
+    let harness = spawn_harness_with_loader(SideScriptLoader::new(Vec::new(), false), 4).await;
+    let id = submit_side(&harness, "wait").await;
+    let deleted = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: harness.session_id,
+            },
+        )
+        .await;
+    assert_eq!(deleted, Err(SessionRuntimeError::SessionActive));
+    let pruned = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::PruneSessions {
+                workspace_id: harness.workspace_id,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        pruned.outcome,
+        CommandOutcome::SessionsPruned { deleted: 0, .. }
+    ));
+    assert_eq!(
+        side_row(&harness, id).await.state,
+        qq_protocol::SideQuestionState::Running
+    );
+    harness.runtime.shutdown().await.unwrap();
+    assert!(!*harness.runtime.inner.failed.borrow());
+}
+
+#[tokio::test]
+async fn side_settlement_tolerates_a_session_deleted_after_cancel() {
+    let harness = spawn_harness_with_loader(SideScriptLoader::new(Vec::new(), false), 4).await;
+    let id = RunId::generate().unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .side_source(harness.session_id, id, "x".to_owned(), true)
+        .await
+        .unwrap();
+    // A cancel releases the row, so the session may be deleted while the
+    // executor is still tearing down; its late writes must not fail.
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            connection.execute("UPDATE side_questions SET state = 'cancelled'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: harness.session_id,
+            },
+        )
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .record_side_turn(id, "late".to_owned(), None, None, 1)
+        .await
+        .unwrap();
+    let effective = harness
+        .runtime
+        .inner
+        .store
+        .finish_side_question(id, qq_protocol::SideQuestionState::Completed, true, 120_000)
+        .await
+        .unwrap();
+    assert_eq!(effective, qq_protocol::SideQuestionState::Cancelled);
+    assert!(!*harness.runtime.inner.failed.borrow());
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_cancel_mid_stream_reports_unknown_spend_and_completion_known_totals() {
+    let harness = spawn_harness_with_loader(
+        SideScriptLoader::new(
+            vec![
+                (vec![side_text("partial")], true),
+                (vec![side_text("done"), side_done()], false),
+            ],
+            true,
+        ),
+        4,
+    )
+    .await;
+    let id = submit_side(&harness, "first").await;
+    wait_side(&harness, id, |item| item.answer == "partial").await;
+    let running = side_row(&harness, id).await;
+    assert_eq!(running.usage, None);
+    assert_eq!(running.estimated_cost_usd_nanos, None);
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelSideQuestion {
+                side_question_id: id,
+            },
+        )
+        .await
+        .unwrap();
+    let cancelled = wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(cancelled.state, qq_protocol::SideQuestionState::Cancelled);
+    assert_eq!(cancelled.usage, None);
+    assert_eq!(cancelled.estimated_cost_usd_nanos, None);
+
+    let id = submit_side(&harness, "second").await;
+    let completed = wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(completed.state, qq_protocol::SideQuestionState::Completed);
+    assert_eq!(completed.usage.unwrap().output_tokens, 2);
+    assert_eq!(completed.estimated_cost_usd_nanos, Some(14_000));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
+    let harness = spawn_harness_with_loader(SideScriptLoader::new(Vec::new(), false), 4).await;
+    let id = submit_side(&harness, "still running").await;
+    let session = harness.session_id;
+    // A transcript far larger than the whole snapshot body budget.
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction()?;
+            // 256 messages of 24 KiB exceed the 6 MiB body budget and leave
+            // less than one row's overhead for anything loaded after them.
+            let big = "m".repeat(24 * 1024);
+            for index in 0..128_u64 {
+                let run_id = RunId::generate().unwrap().to_string();
+                let user = MessageId::generate().unwrap().to_string();
+                let assistant = MessageId::generate().unwrap().to_string();
+                transaction.execute(
+                    "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                         assistant_message_id, status, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6)",
+                    params![
+                        run_id,
+                        session.to_string(),
+                        CommandId::generate().unwrap().to_string(),
+                        user,
+                        assistant,
+                        index
+                    ],
+                )?;
+                for (offset, (message, role)) in [(&user, "user"), (&assistant, "assistant")]
+                    .into_iter()
+                    .enumerate()
+                {
+                    transaction.execute(
+                        "INSERT INTO messages(id, session_id, run_id, ordinal, role, state,
+                             output, created_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'complete', ?6, 1)",
+                        params![
+                            message,
+                            session.to_string(),
+                            run_id,
+                            index * 2 + offset as u64 + 1,
+                            role,
+                            big
+                        ],
+                    )?;
+                }
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(session),
+            include_sessions: Vec::new(),
+            session_limit: 16,
+            message_limit: 256,
+        })
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);
+    let focused = snapshot.focused.unwrap();
+    assert!(focused.has_older_messages);
+    assert_eq!(focused.side_questions.len(), 1);
+    assert_eq!(focused.side_questions[0].id, id);
+    assert_eq!(
+        focused.side_questions[0].state,
+        qq_protocol::SideQuestionState::Running
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[test]
+fn side_capture_reads_streamed_chunks_of_active_run_assistant_turns() {
+    let directory = TempDir::new().unwrap();
+    let (connection, session) = super::bench_support::seed_compacted_session(
+        &directory.path().join("chunks.sqlite"),
+        0,
+        2,
+        1,
+        100,
+    );
+    let (run, assistant): (String, String) = connection
+        .query_row(
+            "SELECT run_id, id FROM messages WHERE role = 'assistant' ORDER BY ordinal DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE runs SET status = 'running' WHERE id = ?1", [&run])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET active_run_id = ?1 WHERE id = ?2",
+            params![run, session.to_string()],
+        )
+        .unwrap();
+    for (ordinal, text) in [(1, "streamed "), (2, "assistant evidence")] {
+        connection
+            .execute(
+                "INSERT INTO message_chunks(message_id, channel, chunk_ordinal, text)
+                 VALUES (?1, 'output', ?2, ?3)",
+                params![assistant, ordinal, text],
+            )
+            .unwrap();
+    }
+    let context = transcript::capture_side_context(&connection, session).unwrap();
+    assert!(
+        format!("{context:?}").contains("streamed assistant evidence"),
+        "{context:?}"
+    );
+    // An oversized chunked turn is skipped before it is loaded.
+    connection
+        .execute(
+            "INSERT INTO message_chunks(message_id, channel, chunk_ordinal, text)
+             VALUES (?1, 'output', 3, ?2)",
+            params![assistant, "x".repeat(16 * 1024)],
+        )
+        .unwrap();
+    let context = transcript::capture_side_context(&connection, session).unwrap();
+    assert!(!format!("{context:?}").contains("streamed assistant evidence"));
+    assert!(transcript::context_bytes(&context) <= 32 * 1024);
+}
+
+#[tokio::test]
+async fn side_dropped_submit_future_still_settles_and_frees_the_session() {
+    let harness = spawn_harness_with_loader(
+        SideScriptLoader::new(
+            vec![
+                (vec![side_text("answer"), side_done()], false),
+                (vec![side_text("next"), side_done()], false),
+            ],
+            false,
+        ),
+        4,
+    )
+    .await;
+    // Hold the store worker so the submission is queued, not yet committed.
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = harness
+        .runtime
+        .inner
+        .store
+        .enqueue_side_write(None, move |_| {
+            let _ = entered.send(());
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    held.await.unwrap();
+    let submit = harness.runtime.command(
+        CommandId::generate().unwrap(),
+        SessionCommand::SubmitSideQuestion {
+            session_id: harness.session_id,
+            question: "dropped".to_owned(),
+            new_thread: false,
+        },
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), submit)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    worker.await.unwrap().unwrap();
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let found = harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, |connection| {
+                    Ok(connection
+                        .query_row("SELECT id FROM side_questions", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .optional()?)
+                })
+                .await
+                .unwrap();
+            if let Some(id) = found {
+                return parse_id::<RunId>(&id).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let settled = wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(settled.state, qq_protocol::SideQuestionState::Completed);
+    assert_eq!(settled.answer, "answer");
+    // The session is not stuck busy.
+    let next = submit_side(&harness, "next").await;
+    wait_side(&harness, next, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_turns_stream_separately_and_never_concatenate() {
+    let one = "a".repeat(2000);
+    let two = "b".repeat(1500);
+    let mut first = vec![side_text(&one)];
+    first.extend(side_tool_call("tree", "{}"));
+    first.push(side_done());
+    let harness = spawn_harness_with_loader(
+        SideScriptLoader::new(
+            vec![(first, false), (vec![side_text(&two), side_done()], false)],
+            false,
+        ),
+        4,
+    )
+    .await;
+    let id = submit_side(&harness, "two turns").await;
+    let settled = wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(settled.state, qq_protocol::SideQuestionState::Completed);
+    assert_eq!(settled.answer, two);
+    let answers = side_events(&harness, id)
+        .await
+        .into_iter()
+        .map(|item| item.answer)
+        .collect::<Vec<_>>();
+    assert!(answers.contains(&one));
+    // Turn 2 streams from an empty buffer: its first delta is published.
+    assert!(answers.iter().filter(|answer| **answer == two).count() >= 2);
+    for answer in &answers {
+        assert!(
+            answer.is_empty() || *answer == one || *answer == two,
+            "an update mixed turns: {} bytes",
+            answer.len()
+        );
+    }
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_long_stream_persists_logarithmically_many_partial_updates() {
+    let deltas = 128_usize;
+    let mut script = (0..deltas)
+        .map(|_| side_text(&"z".repeat(1000)))
+        .collect::<Vec<_>>();
+    script.push(side_done());
+    let harness =
+        spawn_harness_with_loader(SideScriptLoader::new(vec![(script, false)], false), 4).await;
+    let id = submit_side(&harness, "long").await;
+    let settled = wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(settled.answer.len(), deltas * 1000);
+    let partial = side_events(&harness, id)
+        .await
+        .into_iter()
+        .filter(|item| {
+            item.state == qq_protocol::SideQuestionState::Running && item.model_turns == 0
+        })
+        .count();
+    // Admission plus geometric checkpoints: ~log1.5(128) ≈ 12, not 128.
+    assert!((2..=16).contains(&partial), "{partial} partial updates");
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_query_limits_validate_and_a_lowered_turn_limit_applies() {
+    for limits in [
+        SideQueryLimits {
+            max_duration_ms: Some(0),
+            ..SideQueryLimits::default()
+        },
+        SideQueryLimits {
+            max_model_turns: Some(9),
+            ..SideQueryLimits::default()
+        },
+        SideQueryLimits {
+            max_output_tokens: Some(16_385),
+            ..SideQueryLimits::default()
+        },
+        SideQueryLimits {
+            max_tool_output_bytes: Some(0),
+            ..SideQueryLimits::default()
+        },
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.side_query_limits = limits;
+        assert!(matches!(
+            SessionRuntime::open(options, Arc::new(ScriptedLoader)).await,
+            Err(SessionRuntimeError::InvalidRunLimit)
+        ));
+    }
+    let turn = || {
+        let mut turn = side_tool_call("tree", "{}");
+        turn.push(side_done());
+        (turn, false)
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.side_query_limits.max_model_turns = Some(1);
+    let loader = SideScriptLoader::new(vec![turn(), turn()], false);
+    let scripts = Arc::clone(&loader.scripts);
+    let runtime = SessionRuntime::open(options, loader).await.unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let CommandOutcome::SessionCreated { session_id } =
+        create_session(&runtime, workspace_id, None).await.outcome
+    else {
+        panic!("session")
+    };
+    // One permitted turn is the reserved tool-free final response; a tool
+    // call there cannot continue, so the side query ends without a second.
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.answer_side_question(session_id, "inspect".to_owned(), RunCancellation::new()),
+    )
+    .await
+    .expect("a one-turn side query ends without a second request");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(
+        scripts.lock().unwrap().len(),
+        1,
+        "exactly one provider request"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {
+    let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
+    first.push(side_done());
+    let harness = spawn_harness_with_loader(
+        SideScriptLoader::new(
+            vec![
+                (first, false),
+                (vec![side_text("replacement"), side_done()], false),
+            ],
+            false,
+        ),
+        4,
+    )
+    .await;
+    let workspace = harness
+        .runtime
+        .workspace_path(harness.workspace_id)
+        .await
+        .unwrap();
+    std::fs::write(Path::new(&workspace).join("note.txt"), "evidence").unwrap();
+    let (entered, release) = crate::tools::hold_tool_read(Path::new(&workspace));
+    let first = submit_side(&harness, "first").await;
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelSideQuestion {
+                side_question_id: first,
+            },
+        )
+        .await
+        .unwrap();
+    // The old execution still owns the session while its read drains.
+    let replacement = submit_side(&harness, "replacement").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        side_row(&harness, replacement).await.state,
+        qq_protocol::SideQuestionState::Running
+    );
+    release.send(()).unwrap();
+    let settled = wait_side(&harness, replacement, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    assert_eq!(settled.state, qq_protocol::SideQuestionState::Completed);
+    assert_eq!(settled.answer, "replacement");
+    assert_eq!(
+        side_row(&harness, first).await.state,
+        qq_protocol::SideQuestionState::Cancelled
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_cancel_after_completion_reports_already_finished_without_an_event() {
+    let harness = spawn_harness_with_loader(
+        SideScriptLoader::new(vec![(vec![side_text("done"), side_done()], false)], false),
+        4,
+    )
+    .await;
+    let id = submit_side(&harness, "finish first").await;
+    wait_side(&harness, id, |item| {
+        item.state != qq_protocol::SideQuestionState::Running
+    })
+    .await;
+    let before = side_events(&harness, id).await.len();
+    let command_id = CommandId::generate().unwrap();
+    let command = SessionCommand::CancelSideQuestion {
+        side_question_id: id,
+    };
+    let receipt = harness
+        .runtime
+        .command(command_id, command.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::SideQuestionAlreadyFinished {
+            side_question_id: id,
+            state: qq_protocol::SideQuestionState::Completed,
+        }
+    );
+    assert_eq!(
+        harness.runtime.command(command_id, command).await.unwrap(),
+        receipt
+    );
+    assert_eq!(side_events(&harness, id).await.len(), before);
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_cancel_of_an_unknown_id_is_a_typed_not_found() {
+    let harness = spawn_harness_with_loader(Arc::new(ScriptedLoader), 1).await;
+    let result = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelSideQuestion {
+                side_question_id: RunId::generate().unwrap(),
+            },
+        )
+        .await;
+    assert_eq!(result, Err(SessionRuntimeError::SideQuestionNotFound));
 }
