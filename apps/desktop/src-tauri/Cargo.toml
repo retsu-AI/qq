@@ -7,7 +7,7 @@
 [package]
 name = "qq-desktop"
 description = "QQ desktop app: a Tauri shell over the QQ server protocol"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/retsu-AI/qq"
