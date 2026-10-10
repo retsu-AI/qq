@@ -78,9 +78,11 @@ Goal flags conflict with an ordinary prompt; goal mode also rejects
 set per-run limits, while `--max-cost-usd` caps total goal spending. Budget
 changes on bare resume require supplying an objective explicitly.
 
-## `qq serve [--bind ADDR] [--allow-origin ORIGIN]…`
+## `qq serve [--bind ADDR] [--allow-origin ORIGIN]… [--exit-on-stdin-close]`
 
 The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
+`--exit-on-stdin-close` also stops the server when standard input closes, so
+a supervising process (the desktop app) holding the pipe bounds its lifetime.
 [Headless](headless.md#qq-serve--a-persistent-server).
 
 ## `qq goal …`
