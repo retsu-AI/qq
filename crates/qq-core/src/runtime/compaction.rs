@@ -31,6 +31,12 @@ pub(crate) struct InRunCompactionRequest {
     pub(crate) system: Arc<str>,
     /// The run's declared tools. Calls are rejected, never run.
     pub(crate) tools: Arc<[ToolSpec]>,
+    /// The live request's weight without the replaced span and without the
+    /// summary: system prompt, tool schemas, session context before the
+    /// prompt, the prompt, and the retained turns. The store adds the framed
+    /// summary it commits and re-bases the run's context reservation to the
+    /// total in the marker's transaction (ADR-0048 § 1).
+    pub(crate) retained_bytes: u64,
 }
 
 /// A committed in-run summary the loop splices in.

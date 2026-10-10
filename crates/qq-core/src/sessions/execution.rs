@@ -1367,7 +1367,7 @@ async fn admit_with_summary_only_history(
 /// not fully summarized, no step for this prompt has failed, and the step
 /// cap is not reached. Any of those exhausts the fold; the reason names
 /// which so the failure is actionable.
-fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
+pub(super) fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
     if let Some(bytes) = claimed.context_compaction_oversized_unit_bytes {
         return context::CompactionDisposition::Exhausted(
             context::CompactionExhaustion::OversizedUnit { bytes },

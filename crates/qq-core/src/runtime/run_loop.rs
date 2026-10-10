@@ -2,20 +2,26 @@
 use crate::*;
 
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
-/// these counters. In particular text bytes and empty-output retries remain
-/// run-wide until AC2; stall and checkpoint state retain their own reset seams.
+/// these counters (ADR-0048 § 1: harness bounds reset at their seams, so none
+/// of these is a lifetime bound on output). Stall and checkpoint state retain
+/// their own reset seams.
 struct RunScope {
     handled_interrupt: u64,
+    /// Raised toward the ceiling by empty truncations and never lowered: a
+    /// cap that once needed raising stays raised for the run.
     max_output_tokens: u32,
-    empty_output_retries: u16,
     budget: BudgetMeter,
     audit_triggers: runtime::AuditTriggers,
     audit_actions: Vec<runtime::AuditedAction>,
     audit_revisions: u16,
     checkpoint_context: Option<runtime::CheckpointContext>,
     output_repairs: u8,
-    model_text_bytes: usize,
-    compacted_turns: u32,
+    /// The stored turn ordinal of each assistant message in the live
+    /// transcript after the prompt, in order. In-run compaction cuts by these
+    /// stored ordinals, not by counting live messages, because an empty
+    /// faulted attempt or a reactive overflow uses an ordinal without adding
+    /// a live assistant message (ENG-991).
+    live_turns: Vec<u32>,
     summarizer_rejected_turns: u8,
     stall: runtime::StallScope,
     pins: catalog::PinSet,
@@ -25,13 +31,17 @@ struct RunScope {
     call_effects: HashMap<String, catalog::EffectClass>,
 }
 
-/// Live context accounting. Stubbing remeasures both partitions; successful
-/// in-run compaction invalidates the measured chain and remeasures only the
-/// irreducible partition. Provider usage replaces the chain after each attempt.
+/// Live context accounting for the current window. Stubbing remeasures both
+/// partitions; successful in-run compaction opens a new window: it invalidates
+/// the measured chain, remeasures the irreducible partition and zeroes the
+/// streamed model text. Provider usage replaces the chain after each attempt.
 struct WindowScope {
     reducible_message_bytes: u64,
     irreducible_message_bytes: u64,
     compatible_request: Option<(u64, u64, u64, u64)>,
+    /// Streamed model text in this window, bounded by
+    /// `MAX_RUN_MODEL_TEXT_BYTES`.
+    model_text_bytes: usize,
 }
 
 /// Report-boundary state. Only a completed slice report clears the call count.
@@ -45,11 +55,14 @@ struct SliceScope {
 }
 
 /// Cross-attempt turn recovery. Fault-free attempts clear retries; non-truncated
-/// attempts clear continuation and reasoning streaks. Overflow and child delivery
-/// markers are consumed independently at boundaries, never by an ordinal reset.
+/// attempts clear continuation, empty-output retry and reasoning streaks. Overflow
+/// and child delivery markers are consumed independently at boundaries, never by
+/// an ordinal reset.
 struct TurnScope {
     turn_retries: u16,
     output_continuations: u16,
+    /// Cap raises spent on the current streak of truncated turns.
+    empty_output_retries: u16,
     reasoning_only_truncations: u16,
     provider_overflowed: bool,
     reactive_compaction_turn: Option<u32>,
@@ -431,8 +444,9 @@ impl plan::CompiledAgentPlan {
                        .unwrap_or(model_max_output_tokens)
                        .min(model_max_output_tokens);
                    // Empty truncations raise the cap toward `output_ceiling` once
-                   // per run: the catalog limit (policy-bounded), which is above the
-                   // configured cap whenever the catalog knows one.
+                   // per streak of truncated turns: the catalog limit
+                   // (policy-bounded), which is above the configured cap whenever
+                   // the catalog knows one.
                    let empty_output_retries = 0_u16;
                    // Consecutive truncated turns that produced nothing at all (not
                    // even a complete tool call). Only these are "spent on
@@ -698,10 +712,10 @@ impl plan::CompiledAgentPlan {
                    // The notice placed before the next turn's request, persisted with
                    // the first turn row that request produces.
                    let pending_notice: Option<runtime::TurnNotice> = None;
-                   // Durable turns already replaced by in-run compaction: the live
-                   // transcript's assistant messages after the summary are turns
-                   // `compacted_turns + 1..`, and the next cutoff is durable too.
-                   let compacted_turns: u32 = 0;
+                   // Durable turns already replaced by in-run compaction are gone
+                   // from the live transcript; the rest are listed here by their
+                   // stored ordinal.
+                   let live_turns: Vec<u32> = Vec::new();
                    // The provider rejected the previous request for its window even
                    // though the estimate said it fit. The provider's verdict is
                    // authoritative: the next attempt compacts before sending
@@ -717,15 +731,13 @@ impl plan::CompiledAgentPlan {
                    let run = RunScope {
                        handled_interrupt,
                        max_output_tokens,
-                       empty_output_retries,
                        budget,
                        audit_triggers,
                        audit_actions,
                        audit_revisions,
                        checkpoint_context,
                        output_repairs,
-                       model_text_bytes,
-                       compacted_turns,
+                       live_turns,
                        summarizer_rejected_turns,
                        stall,
                        pins,
@@ -738,6 +750,7 @@ impl plan::CompiledAgentPlan {
                        reducible_message_bytes,
                        irreducible_message_bytes,
                        compatible_request,
+                       model_text_bytes,
                    };
                    let slice = SliceScope {
                        slice_tool_calls,
@@ -748,6 +761,7 @@ impl plan::CompiledAgentPlan {
                    let recovery = TurnScope {
                        turn_retries,
                        output_continuations,
+                       empty_output_retries,
                        reasoning_only_truncations,
                        provider_overflowed,
                        reactive_compaction_turn,
@@ -1048,7 +1062,17 @@ impl RunState {
                                 sessions::CONTEXT_PRUNE_KEEP_TURNS,
                             );
                             if let Some((replace_through, replaced_turns)) = boundary {
-                                let turn_cutoff = run.compacted_turns.saturating_add(replaced_turns);
+                                // The cutoff is the stored ordinal of the last
+                                // replaced turn, the unit replay compares against
+                                // (ENG-991): a faulted attempt or a reactive
+                                // overflow uses an ordinal with no live message.
+                                let replaced_turns = usize::try_from(replaced_turns).expect("turn count fits usize");
+                                debug_assert_eq!(
+                                    run.live_turns.len(),
+                                    messages[run_start..].iter().filter(|message| message.role() == Role::Assistant).count(),
+                                    "every live assistant message carries its stored ordinal"
+                                );
+                                let turn_cutoff = run.live_turns[replaced_turns - 1];
                                 // The summarizer sends the request this turn would
                                 // have sent, cut at the boundary: the same system
                                 // prompt, tools, and message prefix, so it reads the
@@ -1080,6 +1104,14 @@ impl RunState {
                                 } else {
                                     messages[reducible_messages..cut].to_vec()
                                 };
+                                // What the next request carries besides the
+                                // summary; the store adds the summary and
+                                // re-bases the reservation to the sum.
+                                let retained_bytes = system_bytes
+                                    .saturating_add(tool_schema_bytes)
+                                    .saturating_add(window.reducible_message_bytes)
+                                    .saturating_add(measure_messages(&messages[reducible_messages..run_start]))
+                                    .saturating_add(measure_messages(&messages[cut..]));
                                 // The summarizer is one silent provider turn; this
                                 // run's next turn reports `WaitingForProvider` again.
                                 yield TurnStep::Emit(RuntimeEvent::ActivityChanged {
@@ -1091,6 +1123,7 @@ impl RunState {
                                         turn_cutoff,
                                         system: Arc::clone(system),
                                         tools: Arc::clone(&run.tool_specs),
+                                        retained_bytes,
                                     })
                                     .await
                                 {
@@ -1101,10 +1134,13 @@ impl RunState {
                                         ));
                                         let live = Arc::make_mut(messages);
                                         live.splice(run_start..run_start + replace_through, [summary]);
-                                        run.compacted_turns = turn_cutoff;
-                                        // The measured chain covered the replaced
-                                        // turns; the next provider usage re-seeds it.
+                                        run.live_turns.drain(..replaced_turns);
+                                        // A new window: the measured chain covered
+                                        // the replaced turns (the next provider usage
+                                        // re-seeds it), and the streamed-text bound
+                                        // counts this window only (ADR-0048 § 1).
                                         window.compatible_request = None;
+                                        window.model_text_bytes = 0;
                                         window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
                                     }
@@ -1304,14 +1340,14 @@ impl RunState {
                                         attempt.activity = RunActivity::GeneratingResponse;
                                         yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity: attempt.activity });
                                     }
-                                    if run.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
+                                    if window.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
                                         yield TurnStep::Emit( RuntimeEvent::Failed {
                                             kind: RunFailureKind::Policy,
-                                            message: "model text exceeded the 16 MiB per-run limit".to_owned(),
+                                            message: "model text exceeded the 16 MiB per-window limit".to_owned(),
                                         });
                                         yield TurnStep::Stop; return;
                                     }
-                                    run.model_text_bytes += text.len();
+                                    window.model_text_bytes += text.len();
                                     append_turn_text(&mut attempt.blocks, &text);
                                     yield TurnStep::Emit( RuntimeEvent::OutputTextDelta { text });
                                 }
@@ -1320,14 +1356,14 @@ impl RunState {
                                         attempt.activity = RunActivity::GeneratingResponse;
                                         yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity: attempt.activity });
                                     }
-                                    if run.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
+                                    if window.model_text_bytes.saturating_add(text.len()) > MAX_RUN_MODEL_TEXT_BYTES {
                                         yield TurnStep::Emit( RuntimeEvent::Failed {
                                             kind: RunFailureKind::Policy,
-                                            message: "model text exceeded the 16 MiB per-run limit".to_owned(),
+                                            message: "model text exceeded the 16 MiB per-window limit".to_owned(),
                                         });
                                         yield TurnStep::Stop; return;
                                     }
-                                    run.model_text_bytes += text.len();
+                                    window.model_text_bytes += text.len();
                                     append_turn_text(&mut attempt.blocks, &text);
                                     yield TurnStep::Emit( RuntimeEvent::RefusalDelta { text });
                                 }
@@ -1810,6 +1846,7 @@ impl RunState {
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                             }
                             if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
                                 Arc::make_mut(messages).push(Message::user(TURN_RETRY_CONTINUE_NOTICE));
@@ -1853,7 +1890,7 @@ impl RunState {
                                     // like any visible truncation (a fresh sample may
                                     // fit). A provider pause with no text is not this
                                     // case: it must be resent.
-                                    let can_raise = run.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
+                                    let can_raise = recovery.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
                                         && run.max_output_tokens < output_ceiling;
                                     if streamed_visible_output {
                                         recovery.reasoning_only_truncations = 0;
@@ -1890,7 +1927,7 @@ impl RunState {
                                 }
                                 if !assistant.has_content()
                                     && truncation_reason == qq_provider::IncompleteReason::OutputTokens
-                                    && run.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
+                                    && recovery.empty_output_retries < MAX_EMPTY_OUTPUT_RETRIES
                                     && run.max_output_tokens < output_ceiling
                                 {
                                     // The retry counts against the run's shared
@@ -1908,13 +1945,13 @@ impl RunState {
                                         });
                                         yield TurnStep::Stop; return;
                                     }
-                                    run.empty_output_retries += 1;
+                                    recovery.empty_output_retries += 1;
                                     run.max_output_tokens = run.max_output_tokens
                                         .saturating_mul(2)
                                         .min(output_ceiling);
                                     // The retry is a continuation of the same answer
                                     // (1-based, bounded by MAX_EMPTY_OUTPUT_RETRIES
-                                    // plus MAX_OUTPUT_CONTINUATIONS across the run).
+                                    // plus MAX_OUTPUT_CONTINUATIONS per streak).
                                     recovery.output_continuations += 1;
                                     yield TurnStep::Emit( RuntimeEvent::OutputTruncated {
                                         turn_ordinal,
@@ -1944,6 +1981,7 @@ impl RunState {
                                     window.irreducible_message_bytes = window.irreducible_message_bytes
                                         .saturating_add(measure_message(&assistant));
                                     Arc::make_mut(messages).push(assistant);
+                                    run.live_turns.push(turn_ordinal);
                                 }
                                 if messages.last().is_some_and(|message| message.role() == Role::Assistant) {
                                     Arc::make_mut(messages).push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
@@ -1954,9 +1992,11 @@ impl RunState {
                             }
                         } else {
                             recovery.output_continuations = 0;
-                            // A turn that completed (text or tool calls) ends any run
-                            // of reasoning-only truncations the diagnostic counts.
+                            // A turn that completed (text or tool calls) ends the
+                            // truncation streak: the diagnostic's reasoning-only
+                            // count and the cap-raise allowance both reset.
                             recovery.reasoning_only_truncations = 0;
+                            recovery.empty_output_retries = 0;
                         }
 
                         if interrupted_turn {
@@ -1965,6 +2005,7 @@ impl RunState {
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                             }
                             // The interrupt exists to apply steering now. Nothing
                             // queued means the client raced a finishing run; continue
@@ -2056,6 +2097,7 @@ impl RunState {
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                                 // Steering that arrived during the report is applied
                                 // here, before the continuation notice, exactly as at
                                 // any other turn boundary.
@@ -2103,6 +2145,7 @@ impl RunState {
                                 let keep = messages.len() - applied.len();
                                 let steering_messages = Arc::make_mut(messages).split_off(keep);
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                                 Arc::make_mut(messages).extend(steering_messages);
                                 for steer in applied {
                                     yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
@@ -2134,6 +2177,7 @@ impl RunState {
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                                 // A "waiting for sub-agents" activity is client work
                                 // (AC14); clients see the child sessions meanwhile.
                                 // The wait ends with something in context after the
@@ -2210,6 +2254,7 @@ impl RunState {
                         window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&assistant));
                         Arc::make_mut(messages).push(assistant);
+                        run.live_turns.push(turn_ordinal);
 
          yield TurnStep::Ready(TurnRoute::Tools { turn_ordinal, final_answer_turn, calls });
 
@@ -2325,6 +2370,7 @@ impl RunState {
                             run.handled_interrupt = steering.as_ref().map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
                             window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                             Arc::make_mut(messages).push(assistant);
+                            run.live_turns.push(turn_ordinal);
                             yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
                             if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
                                 for steer in applied {
@@ -2338,6 +2384,7 @@ impl RunState {
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(messages).push(assistant);
+                            run.live_turns.push(turn_ordinal);
                             let mut notice = String::from(runtime::AUDIT_REVISION_NOTICE);
                             for finding in &verdict.findings {
                                 notice.push_str("\n- ");
@@ -2355,6 +2402,7 @@ impl RunState {
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(messages).split_off(keep);
                         Arc::make_mut(messages).push(assistant);
+                        run.live_turns.push(turn_ordinal);
                         Arc::make_mut(messages).extend(queued);
                         for steer in applied { yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }); }
                         yield TurnStep::NextTurn; return;
@@ -2393,6 +2441,7 @@ impl RunState {
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(&assistant));
                                 Arc::make_mut(messages).push(assistant);
+                                run.live_turns.push(turn_ordinal);
                                 Arc::make_mut(messages).push(Message::user(output::repair_notice(errors)));
                                 window.irreducible_message_bytes = window.irreducible_message_bytes
                                     .saturating_add(measure_message(messages.last().expect("just pushed")));
@@ -2484,6 +2533,7 @@ impl RunState {
                                     run.handled_interrupt = steering.as_ref().map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
                                     window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                                     Arc::make_mut(messages).push(assistant);
+                                    run.live_turns.push(turn_ordinal);
                                     yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
                                     if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
                                         for steer in applied {
@@ -2518,6 +2568,7 @@ impl RunState {
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(messages).push(assistant);
+                            run.live_turns.push(turn_ordinal);
                             let notice = format!(
                                 "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
                                 verdict.outcome.label(), verdict.feedback
@@ -2537,6 +2588,7 @@ impl RunState {
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(messages).split_off(keep);
                         Arc::make_mut(messages).push(assistant);
+                        run.live_turns.push(turn_ordinal);
                         Arc::make_mut(messages).extend(queued);
                         for steer in applied { yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }); }
                         yield TurnStep::NextTurn; return;

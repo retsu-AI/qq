@@ -86,8 +86,8 @@ appended below, newest last.
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
-| AC1 | `RunState` extraction by reset scope | In review | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271), on main | AC1.1 mechanical relocation; AC1.2 scopes; AC1.3 typed steps/short driver; quiet-host perf qualification pending |
-| AC2 | Bounds reset at seams | Planned | | | ADR-0048 § 1 |
+| AC1 | `RunState` extraction by reset scope | Shipped (13d9c585) | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271) | Merged by lead; final qualification below: dispatch median +4.0% vs A/A +0.14%, open with the lead |
+| AC2 | Bounds reset at seams | In review | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | `fix/eng-1017-ac2-bounds-reset-at-seams` | ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
 | AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
@@ -1219,3 +1219,19 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Old #271 CI failure (`wall_clock_budget_settles_a_hanging_provider_without_a_final_response`, 0 vs 1 request) matches the load flake recorded in `compaction.md` and `latest-models.md`; it passes 4/4 locally in `qq-core --lib` runs.
 - Gates at stack top: `cargo fmt --all -- --check`, workspace all-target/all-feature Clippy `-D warnings`, `cargo test --workspace -- --test-threads=4` (2,218 passed, 0 failed), `cargo build --workspace`, `git diff --check`. #263 alone: `cargo test -p qq-core` 913 lib passed.
 - Performance: not re-qualified. IO some avg10 ≈21% at restack time, so quiet-host A/B+A/A is still outstanding; no waiver.
+
+### 2026-10-09 — AC1 final qualification after merge (ENG-1007)
+
+- #263/#271 merged as `f86d7724`/`13d9c585`. 30 alternating A/B pairs per gate, A = `e317bdfe` (main before AC1), B = `13d9c585`; release benches in isolated detached worktrees. Same-binary A/A = A runs split by pair parity. IO some avg10 6.84–49.08%.
+- `tool_dispatch` (10,000 iterations) median 60,976 → 63,416 ns (+4.0%); A/A +0.14%. **Not within noise**; open with the lead, no waiver claimed.
+- `context_assembly` 10/1k/10k archived: 59.55/60.75/71.14 → 59.10/63.30/66.87 µs (−0.8/+4.2/−6.0%); A/A +0.7/−0.5/−5.5%. 1k is outside its A/A; 10k drift matches A/A.
+- `turn_overhead` 10/100/1k: 37.57/36.34/36.87 → 37.29/36.90/37.22 ms (−0.8/+1.5/+1.0%); A/A −1.0/−0.1/+0.5%. Flat within noise.
+- Medians only; tails not qualified on this host. Raw evidence `target/qq-perf/ac1-final-2026-10-09/`.
+
+### 2026-10-09 — AC2 bounds reset at seams (ENG-1017, closes ENG-991)
+
+- Branch `fix/eng-1017-ac2-bounds-reset-at-seams` from `13d9c585`; worktree `.worktrees/ac2`. Baseline: the AC0 desired-completion oracles fail on `13d9c585` (soak stops at 399/500 turns on the 4 MiB reservation; compaction fixture stops at 32; separated truncations fail at turn 100).
+- Change: `complete_in_run_compaction` re-bases `context_base_bytes` to `retained_bytes` (new `InRunCompactionRequest` field) + framed summary and zeroes the increment in the marker's transaction; `start_in_run_compaction` no longer charges `context_compaction_attempted`; `model_text_bytes` moved to `WindowScope` and zeroed at each in-run compaction; `empty_output_retries` moved to `TurnScope` and cleared by any non-truncated turn; the cutoff is `RunScope::live_turns[n-1]`, the stored ordinal of each live assistant message (ENG-991).
+- Tests (each fails on `13d9c585` or under the old cutoff rule): soak `separated_empty_truncations_each_recover_with_a_fresh_retry`, `scripted_soak_completes_across_context_windows` (500 turns), `forty_in_run_compactions_complete_off_the_between_run_budget` (≥ 40), `forty_mib_of_streamed_text_across_windows_completes` (900 × 48 KiB); `an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live` (ENG-991); `the_between_run_fold_still_stops_at_its_step_budget`; reservation/step assertions added to `one_run_spanning_several_windows_compacts_its_own_turns_and_completes`. The single-window 4 MiB test is unchanged.
+- Gates: `cargo fmt --all -- --check`; workspace all-target/all-feature Clippy `-D warnings`; `cargo test -p qq-core --lib` 915 passed; qq-core integration/examples passed; `cargo test --workspace --exclude qq-core` 1,291 passed; ignored soak suite 6 passed; `cargo build --workspace`; `git diff --check`.
+- Hot path: two field moves and one `Vec<u32>` push per settled turn; `turn_overhead` not re-measured for this slice yet.

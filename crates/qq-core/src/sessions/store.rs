@@ -1888,6 +1888,7 @@ impl Store {
         summary: String,
         accounting: Option<RunAccounting>,
         record_budget: usize,
+        retained_bytes: u64,
     ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1899,6 +1900,7 @@ impl Store {
                 summary,
                 accounting,
                 record_budget,
+                retained_bytes,
             )
         })
         .await

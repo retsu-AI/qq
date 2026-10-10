@@ -1,7 +1,9 @@
 //! AC0 baseline characterization. No real provider, user state, or network.
 //!
-//! `QQ_SOAK_EXPECT_COMPLETED=1` turns the known-bound fixtures into the
-//! desired-completion oracles that AC2/AC3 will make green.
+//! AC2 flipped the long-run bound fixtures (empty retries per streak, the
+//! context reservation re-based per window, in-run compactions off the
+//! between-run step budget): they now assert completion and fail on the
+//! pre-AC2 tree.
 
 #![forbid(unsafe_code)]
 
@@ -22,23 +24,6 @@ use qq_protocol::{RunCommand, RunEvent, RunFailureKind, RunOutcome, SessionEvent
 use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream};
 use support::{Script, run};
 
-fn completion_or_baseline(report: &support::Report, kind: RunFailureKind, message: &str) {
-    if std::env::var("QQ_SOAK_EXPECT_COMPLETED").as_deref() == Ok("1") {
-        assert_eq!(
-            report.outcome,
-            RunOutcome::Completed,
-            "desired-completion oracle"
-        );
-    } else {
-        assert!(
-            matches!(&report.outcome, RunOutcome::Failed { failure }
-            if failure.kind == kind && failure.message.contains(message)),
-            "{:?}",
-            report.outcome
-        );
-    }
-}
-
 fn receipt(case: &str, report: &support::Report) {
     println!("{}", serde_json::json!({"case":case,"report":report}));
 }
@@ -54,25 +39,19 @@ async fn scripted_smoke_completes_without_duplicate_side_effects() {
 }
 
 #[tokio::test]
-async fn separated_empty_truncations_characterize_the_lifetime_retry_bound() {
+async fn separated_empty_truncations_each_recover_with_a_fresh_retry() {
+    // AC2 (c): the cap-raise allowance is per streak of truncated turns, so
+    // two reasoning-only truncations 100 turns apart both recover. Before
+    // AC2 the allowance was run-wide and the second one failed the run.
     let mut script = Script::tools(120, 16, None);
     script.calls_per_turn = [1, 1];
     script.truncate_at = vec![0, 100];
     let report = run(script).await;
-    receipt("empty_retry_lifetime", &report);
-    let reached = if std::env::var("QQ_SOAK_EXPECT_COMPLETED").as_deref() == Ok("1") {
-        120
-    } else {
-        100
-    };
-    assert_eq!(report.work_turns, reached);
-    assert_eq!(report.executed_calls, reached);
+    receipt("empty_retry_per_streak", &report);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.work_turns, 120);
+    assert_eq!(report.executed_calls, 120);
     assert_eq!(report.duplicate_sequences, 0);
-    completion_or_baseline(
-        &report,
-        RunFailureKind::ProviderOutputTruncated,
-        "without producing any visible output",
-    );
 }
 
 #[tokio::test]
@@ -129,8 +108,10 @@ async fn bounded_loop_fixture_records_repeated_execution_without_a_guard() {
 }
 
 #[tokio::test]
-#[ignore = "AC0 500-turn baseline; QQ_SOAK_TURNS=2000 selects full mode"]
-async fn scripted_soak_characterizes_long_run_bounds_and_resources() {
+#[ignore = "AC0 500-turn soak; QQ_SOAK_TURNS=2000 selects full mode"]
+async fn scripted_soak_completes_across_context_windows() {
+    // AC2 (a): the 4 MiB context reservation re-bases at each in-run
+    // compaction, so a run whose lifetime output far exceeds it completes.
     let turns = match std::env::var("QQ_SOAK_TURNS") {
         Ok(value) => value.parse::<usize>().expect("QQ_SOAK_TURNS is an integer"),
         Err(std::env::VarError::NotPresent) => 500,
@@ -141,39 +122,48 @@ async fn scripted_soak_characterizes_long_run_bounds_and_resources() {
         "soak modes are 500 or 2000 turns"
     );
     let report = run(Script::tools(turns, 4_096, Some(64 * 1_024))).await;
-    receipt("context_reservation_lifetime", &report);
+    receipt("context_reservation_per_window", &report);
     assert!(
         report.compactions > 0,
         "must cross an in-run compaction seam"
     );
     assert_eq!(report.duplicate_sequences, 0);
-    if std::env::var("QQ_SOAK_EXPECT_COMPLETED").as_deref() == Ok("1") {
-        assert_eq!(report.work_turns, turns);
-        assert_eq!(report.executed_calls, turns * 5 / 2);
-    } else {
-        assert!(
-            report.work_turns < turns,
-            "baseline must expose a long-run bound"
-        );
-    }
-    completion_or_baseline(&report, RunFailureKind::Policy, "context");
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.work_turns, turns);
+    assert_eq!(report.executed_calls, turns * 5 / 2);
 }
 
 #[tokio::test]
-#[ignore = "AC0 isolate the 32-compaction budget independently of 4 MiB"]
-async fn in_run_compactions_characterize_the_shared_32_step_budget() {
+#[ignore = "AC0 isolate the in-run compaction count independently of 4 MiB"]
+async fn forty_in_run_compactions_complete_off_the_between_run_budget() {
+    // AC2 (d): in-run compactions no longer draw on the between-run
+    // `MAX_COMPACTION_STEPS` (32); before AC2 the 33rd was refused.
     let mut script = Script::tools(1_000, 1_024, Some(12 * 1_024));
     script.calls_per_turn = [1, 1];
     let report = run(script).await;
-    receipt("compaction_lifetime", &report);
-    if std::env::var("QQ_SOAK_EXPECT_COMPLETED").as_deref() == Ok("1") {
-        assert!(report.compactions >= 40);
-        assert_eq!(report.work_turns, 1_000);
-    } else {
-        assert_eq!(report.compactions, 32);
-    }
+    receipt("compaction_count", &report);
+    assert!(report.compactions >= 40, "{}", report.compactions);
+    assert_eq!(report.work_turns, 1_000);
     assert_eq!(report.duplicate_sequences, 0);
-    completion_or_baseline(&report, RunFailureKind::Policy, "compaction");
+    assert_eq!(report.outcome, RunOutcome::Completed);
+}
+
+#[tokio::test]
+#[ignore = "AC2 long run: 40 MiB of streamed text across windows"]
+async fn forty_mib_of_streamed_text_across_windows_completes() {
+    // AC2 (b): the 16 MiB streamed-text bound is per window. 900 turns of
+    // 48 KiB is 42 MiB of text; the 128k-token window compacts every few
+    // turns, so no window approaches 16 MiB. Before AC2 the run failed at
+    // 16 MiB of lifetime text.
+    let mut script = Script::tools(900, 64, Some(128 * 1_024));
+    script.calls_per_turn = [1, 1];
+    script.text_bytes = 48 * 1_024;
+    let report = run(script).await;
+    receipt("text_per_window", &report);
+    assert!(report.compactions > 0, "must cross a window seam");
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.work_turns, 900);
+    assert_eq!(report.duplicate_sequences, 0);
 }
 
 #[tokio::test]
