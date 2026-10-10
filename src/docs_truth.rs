@@ -1688,7 +1688,7 @@ mod tests {
             .1;
         assert_eq!(
             RENDERED[0].0,
-            crate::LOGIN_PROVIDERS.join(", "),
+            qq_auth::LOGIN_PROVIDERS.join(", "),
             "RENDERED quotes the login provider list; keep it equal to LOGIN_PROVIDERS"
         );
         assert_eq!(

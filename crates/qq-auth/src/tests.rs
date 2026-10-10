@@ -2834,3 +2834,46 @@ fn file_lock_serializes_concurrent_updates() {
         );
     }
 }
+
+#[test]
+fn every_login_provider_has_a_built_in_endpoint() {
+    for provider in LOGIN_PROVIDERS {
+        assert!(built_in_endpoint(provider).is_some(), "{provider}");
+    }
+}
+
+#[test]
+fn login_with_api_key_binds_the_provider_endpoint() {
+    let (store, _keyring, _directory) = test_store();
+    store
+        .login_with_api_key("anthropic", "default", b"sk-test", false)
+        .unwrap();
+    let metadata = store.status("anthropic/default").unwrap().unwrap();
+    assert_eq!(metadata.kind.as_deref(), Some("anthropic"));
+    assert_eq!(
+        metadata.endpoint.as_deref(),
+        Some("https://api.anthropic.com")
+    );
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("anthropic/default".to_owned()),
+            Some("https://api.anthropic.com"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"sk-test");
+}
+
+#[test]
+fn login_with_api_key_rejects_unknown_and_oauth_only_providers() {
+    let (store, _keyring, _directory) = test_store();
+    for provider in ["opnai", "openai-codex"] {
+        let error = store
+            .login_with_api_key(provider, "default", b"key", false)
+            .unwrap_err();
+        assert!(
+            matches!(error, AuthError::UnknownLoginProvider { .. }),
+            "{provider}: {error}"
+        );
+    }
+    assert!(store.list().unwrap().is_empty());
+}

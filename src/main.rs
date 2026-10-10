@@ -1674,13 +1674,13 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
     // nothing can resolve. Arbitrary names go through `auth set`. Checked
     // before the store opens so a typo never touches the keyring.
     if let cli::AuthCommand::Login(arguments) = &command
-        && built_in_endpoint(&arguments.provider).is_none()
+        && auth::built_in_endpoint(&arguments.provider).is_none()
     {
         return Err(format!(
             "{:?} is not a built-in provider; `qq auth login` accepts {}. \
              For a gateway or MCP bearer use `qq auth set NAME` and reference Stored(\"NAME\")",
             arguments.provider,
-            LOGIN_PROVIDERS.join(", ")
+            auth::LOGIN_PROVIDERS.join(", ")
         )
         .into());
     }
@@ -1724,12 +1724,11 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
                 login.complete(&store, &arguments.profile, arguments.allow_file)?
             } else {
                 let secret = read_secret(&format!("{} API key: ", arguments.provider))?;
-                store.set_with_metadata(
-                    &name,
+                store.login_with_api_key(
+                    &arguments.provider,
+                    &arguments.profile,
                     secret.expose_secret_bytes(),
                     arguments.allow_file,
-                    Some(&arguments.provider),
-                    built_in_endpoint(&arguments.provider),
                 )?
             };
             println!("stored {name} in {backend}");
@@ -1907,19 +1906,6 @@ fn read_secret(prompt: &str) -> Result<auth::Secret, Box<dyn Error>> {
 }
 
 /// Providers `qq auth login` accepts, in the order the error lists them.
-const LOGIN_PROVIDERS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openai-codex"];
-
-fn built_in_endpoint(provider: &str) -> Option<&'static str> {
-    match provider {
-        "openai" => Some("https://api.openai.com"),
-        "openai-codex" => Some("https://chatgpt.com"),
-        "anthropic" => Some("https://api.anthropic.com"),
-        "google" => Some("https://generativelanguage.googleapis.com"),
-        "xai" => Some("https://api.x.ai"),
-        _ => None,
-    }
-}
-
 async fn run_blocking_command(
     command: impl FnOnce() -> Result<(), Box<dyn Error>> + Send + 'static,
 ) -> Result<(), Box<dyn Error>> {
@@ -2035,7 +2021,7 @@ mod tests {
             error.contains("\"opnai\" is not a built-in provider"),
             "{error}"
         );
-        for provider in LOGIN_PROVIDERS {
+        for provider in auth::LOGIN_PROVIDERS {
             assert!(error.contains(provider), "{error}");
         }
         assert!(error.contains("qq auth set NAME"), "{error}");
@@ -2094,13 +2080,6 @@ mod tests {
             "refresh-token",
         ] {
             assert!(!prompt.contains(secret), "prompt leaked {secret}");
-        }
-    }
-
-    #[test]
-    fn every_login_provider_has_a_built_in_endpoint() {
-        for provider in LOGIN_PROVIDERS {
-            assert!(built_in_endpoint(provider).is_some(), "{provider}");
         }
     }
 
