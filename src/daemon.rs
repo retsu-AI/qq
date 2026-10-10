@@ -97,21 +97,30 @@ pub async fn command(
 
 #[derive(Debug, Clone, Copy)]
 pub enum Host {
-    Serve,
+    Serve { exit_on_stdin_close: bool },
     Daemon,
 }
 
 impl Host {
+    async fn stdin_closed(self) {
+        match self {
+            Self::Serve {
+                exit_on_stdin_close: true,
+            } => stdin_closed().await,
+            Self::Serve { .. } | Self::Daemon => std::future::pending().await,
+        }
+    }
+
     fn already_running(self, connection: &server::ServerConnection) {
         match self {
-            Self::Serve => println!("qq server already running at {}", connection.address()),
+            Self::Serve { .. } => println!("qq server already running at {}", connection.address()),
             Self::Daemon => println!("qq daemon already running at {}", connection.address()),
         }
     }
 
     fn listening(self, connection: &server::ServerConnection) {
         match self {
-            Self::Serve => println!("qq server listening at {}", connection.address()),
+            Self::Serve { .. } => println!("qq server listening at {}", connection.address()),
             Self::Daemon => println!("qq daemon listening at {}", connection.address()),
         }
     }
@@ -172,6 +181,7 @@ pub async fn host(
     let stopped = tokio::select! {
         result = stop_signal.recv() => result,
         () = stop_requests.wait() => Ok(()),
+        () = kind.stdin_closed() => Ok(()),
         result = server.finished() => result.map_err(io::Error::other),
     };
     let shutdown = crate::EmbeddedRuntime { server, handler }.shutdown().await;
@@ -179,6 +189,17 @@ pub async fn host(
     stopped?;
     shutdown?;
     Ok(())
+}
+
+async fn stdin_closed() {
+    let (closed, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut bytes = [0_u8; 256];
+        while matches!(std::io::Read::read(&mut stdin, &mut bytes), Ok(n) if n > 0) {}
+        let _ = closed.send(());
+    });
+    let _ = receiver.await;
 }
 
 enum HostLock {
