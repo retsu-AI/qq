@@ -18,14 +18,25 @@ src-tauri/  Rust core
 src/        React UI (sidebar, transcript, approvals, composer)
 ```
 
+## A separate Cargo workspace
+
+`src-tauri/` is its own Cargo workspace with its own `Cargo.lock` and
+`target/`. Tauri links platform webview libraries (WebKitGTK on Linux), and
+the engine's workspace, CI, and `cargo build --workspace` must not need them.
+The app depends on the engine crates by path, so it always builds against the
+engine in this checkout; nothing in the root workspace refers to the app.
+
 ## Develop
 
-From the repository root, build the engine once so the app can find it
-(it looks beside its own executable, then `QQ_DESKTOP_ENGINE`, then `PATH`):
+From the repository root, build the engine once so the app can find it:
 
 ```sh
 cargo build --bin qq
 ```
+
+The app looks for its engine in this order: `QQ_DESKTOP_ENGINE`, beside its
+own executable (installed builds), the repository's `target/debug/qq.exe`
+(debug builds only), then `PATH`.
 
 Then, from a real terminal (`tauri dev` exits when stdin is not a TTY):
 
@@ -40,8 +51,12 @@ pnpm tauri dev
 ## Checks
 
 ```sh
+cd apps/desktop
 pnpm typecheck
-cargo check -p qq-desktop
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 ## Package
@@ -54,7 +69,7 @@ pnpm bundle
 This builds the release `qq` engine, stages it as a Tauri sidecar
 (`src-tauri/binaries/qq-<target-triple>.exe`, ignored by git), and builds a
 per-user NSIS installer (no administrator rights) under
-`target/release/bundle/nsis/`. The installer puts `qq.exe` beside the app,
+`src-tauri/target/release/bundle/nsis/`. The installer puts `qq.exe` beside the app,
 which is the first place the app looks for its engine.
 
 The sidecar is declared only in `src-tauri/tauri.bundle.conf.json`, merged in
