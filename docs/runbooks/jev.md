@@ -1,4 +1,4 @@
-# Jev operator runbook
+# Runbook: Jev operation
 
 How to turn QQ's optional TypeSafe Jev capabilities on, see what they do,
 and turn them off. Design and known limitations:
@@ -117,10 +117,11 @@ choice, not routing.
 Enable it with `jev_approval: true` or `QQ_JEV_APPROVAL=on`. Jev then
 decides calls the approval mode already holds, before `reviewer_model` and
 before you (ADR-0041). Whether a held call reaches the delegates at all is the
-separate `approval_delegate` setting (or `/delegate`): the default `by_mode`
-consults them under `auto` and `supervised` but sends `ask` straight to you;
-`on` consults them under `ask` too; `off` never does. The mode stays the ceiling. `Forbidden` shell shapes,
-blocked hosts, managed denies and `ask_user` never reach Jev.
+separate `approval_delegate` setting (`on`, `off`, or absent) and the session's
+`/delegate` override; see
+[Who decides a held call](../guide/permissions.md#who-decides-a-held-call).
+The mode stays the ceiling. `Forbidden` shell shapes, blocked hosts, managed
+denies and `ask_user` never reach Jev.
 
 The setting is resolved with the run's profile, like `jev_review` and
 `jev_routing`: a profile's `jev_approval: false` turns Jev off for runs of
@@ -160,22 +161,23 @@ Jev never approves on failure.
 advice under `ask`. An approve may record the exact command or host for the
 session, nothing wider. Spend counts as reviewer spend only for a returned
 verdict; a request that a human, cancellation or deadline overtakes may be
-billed without being counted (design finding 7, fixed by JV6).
+billed without being counted.
 
 `/delegate off` withdraws both approval delegates for the session. It does
 not disable review or routing, and it does not revoke earlier grants.
 
-### Known limitations (tracked in the plan)
+### Known limitations
+
+These are current behavior; [`../plans/jev.md`](../plans/jev.md) tracks the
+planned changes.
 
 - **You may be prompted before Jev answers.** The TUI shows "approval
   needed" as soon as a call is held. Jev may settle it moments later, and
-  answering first drops Jev's decision. Fixed by JV5.
-- **Root sessions send no task brief,** so Jev and the fallback often
-  abstain or deny for lack of a stated need. Fixed by JV4.
-- **Headless `qq run` with Jev but no `reviewer_model`** denies held calls
-  immediately. Configure a `reviewer_model` as well. Fixed by JV2.
-- **Rounded Jev replies can be rejected as malformed** and fall through.
-  Fixed by JV3.
+  answering first drops Jev's decision.
+- **Root sessions send no task brief,** only child sessions do, so Jev and
+  the fallback often abstain or deny for lack of a stated need.
+- **Rounded Jev replies can be rejected as malformed** and fall through:
+  the three probabilities must sum to 1 within 0.001.
 
 ## Passive advisory observer — `qq jev observe`
 
@@ -207,9 +209,9 @@ part is. Store receipts with the same care as session history.
 1. **Configuration.** On the server, set `QQ_JEV_CHECKPOINTS=off`,
    `QQ_JEV_ROUTING=off` and `QQ_JEV_APPROVAL=off`. These beat every profile.
    Top-level `jev_review: off` / `jev_routing: false` / `jev_approval: false`
-   are not enough on their own: a selected profile that sets `jev_review` or
-   `jev_routing` still wins (see Precedence), so clear those profile values
-   too if you use configuration instead of the overrides.
+   are not enough on their own: a selected profile that sets `jev_review`,
+   `jev_routing` or `jev_approval` still wins (see Precedence), so clear those
+   profile values too if you use configuration instead of the overrides.
 2. **Next run.** Approval activation is resolved for each new run; a run
    already in progress keeps the plan it started with.
 3. **Stop observers.** Stop any `qq jev observe` processes.

@@ -1,6 +1,6 @@
 # Ledger — speed-first extensible agent harness
 
-Plan: [`../speed-first-extensible-agent-harness.md`](../speed-first-extensible-agent-harness.md).
+Plan: [`../speed-first.md`](../speed-first.md).
 Only the agent working this plan edits this file. Current state on top;
 dated entries appended below, newest last.
 

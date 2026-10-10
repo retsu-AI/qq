@@ -1450,7 +1450,7 @@ pub(in crate::sessions) fn open_database(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    // 44: isolated side questions (side-questions plan SQ1). Rows never enter
+    // 44: isolated side questions (SQ1; docs/design/side-questions.md). Rows never enter
     // the main transcript; at most one runs per session.
     if schema_version.as_deref() != Some("44") {
         let transaction = connection.transaction()?;

@@ -53,24 +53,17 @@ the command that continues it:
 
 Earlier sessions stay reachable from the TUI's session list as well as by id.
 
-The first complete vertical slice should allow a developer to:
-
-1. Run `qq` in a codebase.
-2. Send a request from the TUI.
-3. Receive a streamed model response.
-4. Let the agent read and search files.
-5. Review and apply a file change.
-6. Run a build or test command with visible output.
-7. Exit and resume the persisted session.
-
-This slice is more valuable than many disconnected commands or provider
-integrations.
+A developer can run `qq` in a codebase, send a request from the TUI, receive
+a streamed model response, let the agent read and search files, review and
+apply a file change, run a build or test command with visible output, and exit
+and resume the persisted session. That end-to-end loop matters more than many
+disconnected commands or provider integrations.
 
 ## Interaction Modes
 
 ### Interactive TUI
 
-The TUI is the initial human interface. It should optimize keyboard-driven
+The TUI is the interactive human interface. It should optimize keyboard-driven
 conversation and make agent state obvious without filling the screen with
 incidental detail. Streaming must never block input, cancellation, or
 navigation.
@@ -82,19 +75,22 @@ to outlive a particular client when using `qq serve`.
 ### Headless Server
 
 `qq serve [ARGS]` runs persistent sessions for clients on the local machine or
-over a private Tailscale network. Several clients may observe a session. Rules
-for simultaneous control must be explicit; the initial design may permit one
-active controller with additional read-only observers.
+over a private Tailscale network. Several clients may observe a session; rules
+for simultaneous control are an open decision (§ Open Decisions).
 
 The server owns model requests, tools, history, scheduling, and event replay.
 Clients render state and submit commands but do not become the source of truth.
 
 ### Comprehensive CLI
 
-QQ will grow a comprehensive CLI for direct conversations, one-shot agent
-runs, session management, scripting, and machine-readable automation. Command
-names beyond `qq` and `qq serve` are intentionally unspecified until their
-workflows are designed.
+Beyond the TUI, `qq` provides `ask` (one streamed answer), `run` (a durable
+headless agent run), `serve` (the foreground server), `config` (inspect and
+validate configuration), `auth` (provider credentials), `mcp` (inspect an MCP
+server's descriptors), `jev` (Jev credentials and the advisory observer),
+`org` (organization manifests), `trust` (approve sensitive project
+configuration), `doctor` (readiness checks), `init` (a starter
+`config.ron`), and `version` (product and contract versions). The
+[CLI guide](../guide/cli.md) documents every command and flag.
 
 CLI commands must reuse the same server/runtime behavior as the TUI. They must
 support predictable exit codes and structured output where automation needs
@@ -154,29 +150,29 @@ The progression should be:
 Agents must not race to edit one checkout. No multi-agent swarm is required for
 the first useful release.
 
-## Scope Now
+## Scope
 
-The initial implementation and its supporting specifications should cover:
+QQ covers:
 
-- Cargo workspace and the `qq` binary.
+- The Cargo workspace and the single `qq` binary.
 - `qq` TUI startup from the current directory.
 - `qq serve` process lifecycle and configuration.
 - Versioned HTTP commands and resumable SSE events.
 - SQLite session and event persistence.
-- One model integration.
-- Minimal file, search, patch, and shell tools.
+- Provider integrations behind one provider-neutral model API
+  ([`providers.md`](providers.md)).
+- A small built-in tool set for files, search, edits, shell, and network
+  ([`tools.md`](tools.md)).
 - Cancellation, approval, and error behavior.
-- Performance measurement for the core vertical slice.
+- Performance measurement for the core loop.
 
 ## Explicit Non-Goals
 
-Do not create these products or scaffolds during the initial Rust work:
+QQ does not include these products or scaffolds:
 
-- Web or React frontend and mobile application — deferred, not refused:
-  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md)
-  is the approved route (a Rust/WASM client over `qq-client`, then desktop
-  and mobile shells) and its Phase 1–2 groundwork has shipped; nothing above
-  `qq-client` exists yet.
+- Web or React frontend and mobile application. No browser, desktop or mobile
+  client exists; see
+  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md).
 - JavaScript or TypeScript workspace.
 - Hosted SaaS or multi-user system.
 - Distributed execution workers.
@@ -184,8 +180,8 @@ Do not create these products or scaffolds during the initial Rust work:
 - Broad provider matrix.
 - Autonomous multi-agent editing.
 
-Future web and mobile clients are expected, but the HTTP/SSE protocol is the
-only preparation they need now.
+Web and mobile clients need nothing beyond the HTTP/SSE protocol and
+`qq-client`.
 
 ## Open Decisions
 

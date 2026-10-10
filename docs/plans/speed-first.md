@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | No implementation phase is active. Phases 0–6 are closed (see Completed Phases). Phase 7 (H10) waits on R6 in `terminal-bench-readiness.md` and a platform threat model; Phase 8 (H11) waits on a real client; Phase 9 (H12) waits on both |
+| Now | No implementation phase is active. Phases 0–6 are closed (see Completed Phases). Phase 7 (H10) waits on R6 in `terminal-bench.md` and a platform threat model; Phase 8 (H11) waits on a real client; Phase 9 (H12) waits on both |
 | Next | Quiet-host recordings, not code: the Phase 5a H0 tail comparison and the H20 eight-stream p95 (then tighten the executable budget 50→20 ms). The seven H22 deferrals in § H22 deferrals are the only unscheduled code items from this plan |
 | Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20); Phase 5a full H0 tail acceptance on a quiet host; native Windows full-workspace run (carried to Phase 7 per decision #3) |
 | Last closed | Phase 6, 2026-09-16 (#46 `486926b`, #47 `c7fd5c4`, ADR-0026) |
@@ -86,7 +86,7 @@ a reason to open that code appears.
 
 ### Readiness Dependencies
 
-Milestones owned by `terminal-bench-readiness.md`. R4 and R5 shipped and were
+Milestones owned by `terminal-bench.md`. R4 and R5 shipped and were
 imported in Phase 1.
 
 | Milestone | Owning phase | Required outcome here |
@@ -108,7 +108,7 @@ contract and a platform threat model defines the isolation boundary. This
 document does not redefine the search, edit, terminal, sub-agent, scheduling,
 or warm-runtime contracts.
 
-Acceptance: the readiness plan records completion evidence for each R6–R8
+Acceptance: the Terminal-Bench plan (`terminal-bench.md`) records completion evidence for each R6–R8
 milestone a shipped extension requires; sandbox tests prove filesystem,
 network, process, and secret boundaries; local and sandbox adapters pass one
 shared process contract suite; sandbox failure never silently falls back to

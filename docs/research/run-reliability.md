@@ -2,7 +2,7 @@
 
 Research snapshot: 2026-09-21, QQ `2e5e2ce`. Reference trees under `.source/`
 at the revisions recorded in
-[`harness-scale-audit-2026-09-16.md`](harness-scale-audit-2026-09-16.md)
+[`harness-comparison.md`](harness-comparison.md)
 § Scope. This document records evidence and proposes work; it does not claim
 implementation. Implementation status lives in
 [`../plans/progress/run-reliability.md`](../plans/progress/run-reliability.md).

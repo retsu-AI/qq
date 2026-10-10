@@ -33,19 +33,21 @@ version: 4.
 
 ## Focused fixtures
 
-Use these while iterating; they are faster and isolate one gate. Each is a
-hidden `xtask perf` worker run as a release binary. Run baseline and candidate
-alternately (A, B, A, B, …) for at least 30 pairs.
+Use these while iterating; they are faster and isolate one gate. The worker
+rows are hidden `xtask perf` subcommands that refuse a debug build and run only
+on Linux, so they go through `cargo run --release` rather than the debug
+`cargo xtask` alias. Run baseline and candidate alternately (A, B, A, B, …) for
+at least 30 pairs.
 
 | Gate | Command |
 | --- | --- |
-| Eight-stream output gap, cancellation, control latency | `cargo xtask perf r4-worker --case eight-streams` |
-| One-MiB shell output | `cargo xtask perf r4-worker --case shell` |
-| Reasoning batching | `cargo xtask perf r4-worker --case reasoning` |
-| Restart reconstruction | `cargo xtask perf r4-worker --case restart` |
-| Feed churn / retained RSS | `cargo xtask perf feed-worker --case churn` |
-| Feed attach and replay | `cargo xtask perf feed-worker --case attach-replay` (cold path only; see ADR-0006) |
-| Fan-out at 1/8/32 subscribers | `cargo xtask perf feed-worker --case fan-out` |
+| Eight-stream output gap, cancellation, control latency | `cargo run --release -p xtask -- perf r4-worker --case eight-streams` |
+| One-MiB shell output | `cargo run --release -p xtask -- perf r4-worker --case shell` |
+| Reasoning batching | `cargo run --release -p xtask -- perf r4-worker --case reasoning` |
+| Restart reconstruction | `cargo run --release -p xtask -- perf r4-worker --case restart` |
+| Feed churn / retained RSS | `cargo run --release -p xtask -- perf feed-worker --case churn` |
+| Feed attach and replay | `cargo run --release -p xtask -- perf feed-worker --case attach-replay` (cold path only; see ADR-0006) |
+| Fan-out at 1/8/32 subscribers | `cargo run --release -p xtask -- perf feed-worker --case fan-out` |
 | Store group commit | `cargo bench -p qq-core --bench store_output_batch` |
 | Child admission | `cargo bench -p qq-core --bench child_admission` |
 | Provider compilation | `cargo bench -p qq-provider --bench provider_compiler` |

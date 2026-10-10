@@ -5,7 +5,7 @@ Status: Phases 1–5 shipped and qualified (Phase 4 2026-09-01, Phase 5
 `architecture.md` § Runtime, § Provider Compilation, § Persistence;
 `tools.md` § Context Budget, § Workspace Instructions) and their receipts in
 [`progress/terminal-bench.md`](./progress/terminal-bench.md) and Git history
-(`git log -- docs/plans/terminal-bench-readiness.md` before `#66`). Phase 6's
+(`git log -- docs/plans/terminal-bench.md` before `#66`). Phase 6's
 candidate designs shipped through [`tool-layer.md`](./tool-layer.md) T2/T5,
 with the persistent terminal (T10) gated on the T13 ablation this plan's
 method owns. Open: R6-terminal evidence (T13), R7, R8, and the paid
@@ -230,7 +230,7 @@ Priority: P2. Start only after end-to-end measurements identify the cost.
 Hand-off recorded 2026-09-04: the retry-exposure, shared-message-storage, and
 request-encoding-benchmark candidates below are implemented by H14 (D3) and
 H18 (D5) in
-[`speed-first-extensible-agent-harness.md`](./speed-first-extensible-agent-harness.md)
+[`speed-first.md`](./speed-first.md)
 after its audit confirmed nested provider/core retries (up to 24 sends per
 turn) and a full history clone per attempt. This phase keeps the remaining
 candidates.

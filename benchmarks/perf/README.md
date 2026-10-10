@@ -1,7 +1,15 @@
-# Phase 0 Performance Baseline
+# Performance baseline
 
-QQ's Phase 0 performance harness records the current default release artifact
-and deterministic end-to-end runtime paths before extension work begins. Raw
+QQ's performance harness records the current default release artifact and
+deterministic end-to-end runtime paths. Codes such as H0, R4, R5, AC0.1, and
+AC0.2 name the plan slices that introduced or own a measurement: H0 is the
+speed constitution (this harness and its fixture) in
+[`speed-first.md`](../../docs/plans/speed-first.md); R4 (linear, fair durable
+streaming) and R5 (resolved model, context planning, run budgets) are
+readiness milestones from `terminal-bench.md`, recorded in `speed-first.md`
+§ Completed Phases; AC0.1 and AC0.2 are the autonomous-core soak and
+resource characterization in
+[`autonomous-core.md`](../../docs/plans/autonomous-core.md). Raw
 reports and dependency trees are generated under `target/qq-perf/` and remain
 untracked. `--output` is deliberately restricted to a new `.json` file in that
 directory. Capability-relative create-new file handles stay open for the full
