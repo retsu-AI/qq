@@ -84,6 +84,7 @@ may append a **request** row; only root changes a request's status.
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
+| 0062 | Desktop app: Tauri client of the local server, native Rust client core (`TuiClient` + `qq-client::state`), TypeScript UI, own Cargo workspace | multi-surface D1–D3 (local server) | Proposed 2026-10-14: `docs/adr/0062-desktop-client-native-core-ts-ui.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -155,7 +156,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0062. Reserve here before opening a PR that adds an ADR.
+Next free number: 0063. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

@@ -63,6 +63,7 @@ written.
 
 | 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed (action-bias AB2, ENG-1039) |
+| 0062 | [The desktop app is a Tauri client of the local server with a native Rust client core and a TypeScript UI](0062-desktop-client-native-core-ts-ui.md) | Proposed (multi-surface D1–D3, local server; applies ADR-0017's documented TypeScript fallback to desktop only) |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet
