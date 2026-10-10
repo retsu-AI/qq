@@ -6,10 +6,10 @@ appended below, newest last.
 
 | Slice | Page | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| GE0.1 | versions checked; prose corrections | In review | `fix/eng-979-ge0-1-versions` | ENG-979; stacked on #186 |
-| GE0.2 | samples run in CI | In review | `fix/eng-979-ge0-2-samples` | ENG-979; stacked on GE0.1 |
-| GE0.3 | reference tables mirror the code | In review | `fix/eng-979-ge0-3-tables` | ENG-979; stacked on GE0.2 |
-| GE10 | `concepts.md` | In review | `docs/eng-980-ge10-concepts` | ENG-980; stacked on GE0.3 |
+| GE0.1 | versions checked; prose corrections | Shipped (`b6870dc`) | `fix/eng-979-ge0-1-versions` | ENG-979; stacked on #186 |
+| GE0.2 | samples run in CI | Shipped (`2979fbb`) | `fix/eng-979-ge0-2-samples` | ENG-979; stacked on GE0.1 |
+| GE0.3 | reference tables mirror the code | Shipped (`2c9b712`) | `fix/eng-979-ge0-3-tables` | ENG-979; stacked on GE0.2 |
+| GE10 | `concepts.md` | Shipped (`f086433`) | `docs/eng-980-ge10-concepts` | ENG-980; stacked on GE0.3 |
 | GE1 | `agents.md` | Planned | | ENG-929; after GE0, GE10, GE4, GE5 |
 | GE2 | `sessions.md` | Planned | | ENG-930; after GE0; ADR-0038 is Proposed — label it |
 | GE3 | `skills.md` | Planned | | ENG-931; after GE10, GE4, GE5 |
@@ -25,7 +25,7 @@ appended below, newest last.
 ### 2026-09-25 — plan opened
 
 Successor to the onboarding plan, which closed the same day with every
-slice shipped (receipt: [`onboarding-ux.md`](onboarding-ux.md)). The eight
+slice shipped (receipt in Git history: `docs/plans/progress/onboarding-ux.md`). The eight
 pages here are the routes the v0 site design had that `docs/guide/` did not
 back; OB12 dropped them rather than ship stubs. Research for each page
 (sources, existing coverage to link rather than repeat, the user questions

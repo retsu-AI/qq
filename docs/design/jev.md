@@ -2,12 +2,8 @@
 
 This is the single design document for QQ's optional TypeSafe Jev
 integration. It records what Jev is, what QQ does with it today, why the
-current integration hands most work back to a human, and the direction the
-[Jev plan](../plans/jev.md) follows. Operator procedure is in the
-[Jev runbook](../runbooks/jev.md). Progress is in the
-[ledger](../plans/progress/jev.md).
-
-Code anchors in § 3 were checked against `main` at `1e91895` (2026-09-28).
+current integration hands most work back to a human. Operator procedure is
+in the [Jev runbook](../runbooks/jev.md).
 
 ## 1. What Jev is
 
@@ -133,25 +129,13 @@ necessarily the model, causes most handoffs.
    "approval needed" (`qq-tui/src/app.rs:2228`,
    `view/overlay.rs:606`). Even a fast Jev approval looks like a handoff. If
    the human answers first, Jev's decision is dropped.
-4. **Headless runs deny before Jev answers when only Jev is configured.**
-   *(Fixed in v0.1.5, #215; kept as recorded.)*
-   `reviewer_configured` checks only `reviewer_model` (`src/main.rs:405`).
-   Headless `auto` denies a root hold immediately when that flag is false
-   (`src/headless.rs:987`). The only Jev headless test sets the flag by hand
-   (`headless.rs:3490`), which hides the bug.
-5. **Turning Jev on or off doesn't reliably take effect.** *(Fixed in
-   v0.1.5, #214: the compiled plan carries the merged `jev_approval` to each
-   held call and an edit replaces the cached plan; kept as recorded.)* Defaults are
-   correct, and a stored key alone makes no Jev calls. But:
-   - The approval reviewer caches the "enabled" answer per workspace and
-     credential epoch (`src/runtime/approval.rs:77-116`). The epoch changes
-     only when credentials change, so turning `jev_approval` off in config
-     has no effect until restart.
-   - The reviewer reloads workspace configuration without the selected
-     profile or run overrides. A profile's `jev_approval` is merged during
-     plan compilation (`src/runtime.rs:1506-1509`), but it never reaches the
-     approval gate or `PlanKey`. A profile can't turn approval on, and a
-     profile's off can't override a top-level on.
+4. **Headless runs wait for Jev.** When only `jev_approval` is configured,
+   headless `auto` treats Jev as a delegate and waits for its answer
+   (`headless_delegate_options` in `src/main.rs`).
+5. **Jev activation follows the run's plan.** The held call's compiled plan
+   carries the merged `jev_approval` (profile and overrides included), so a
+   profile can turn it on or off and a configuration edit takes effect with
+   the next plan (`src/runtime/approval.rs`, ADR-0052).
 6. **Rounded answers are rejected as malformed.** All three parsers require
    probabilities to sum to 1 within 0.001: approval
    (`src/runtime/approval.rs:385`), routing (`routing.rs:191`) and checkpoint
@@ -178,120 +162,13 @@ necessarily the model, causes most handoffs.
      +7.65% on a loaded host. Default and minimal binaries exceed their
      absolute size budgets, and that predates Jev.
 
-Findings 1, 2 and 7 are design choices; findings 3–6 are defects. None of
+Findings 1, 2 and 7 are design choices; findings 3 and 6 are defects. None of
 them justifies lowering the 0.7 threshold. That would treat missing context
 and missing authority as model uncertainty.
 
 ## 4. Direction
 
-This section is the target the [plan](../plans/jev.md) builds toward, not
-behavior as built; §§ 2–3 describe today. Where it differs from today, the
-owning JV slice is the change (for example, `enforce` does add a serial
-review today: finding 8, JV12).
-
-**Jev replaces an LLM turn or a human interruption. It should never add a
-serial wait to the hot path.** The rules below follow from that.
-
-- **Code owns authority; Jev answers the semantic questions code cannot.**
-  - Classify every action by effect: local read, recoverable workspace
-    write, public network read, network write, credential access,
-    system-level, publish.
-  - Operator policy decides which classes may be delegated at all.
-  - Publishing, protected-branch operations, credential access, privilege
-    escalation, cross-workspace access and policy changes are always
-    decided by a human. Jev's confidence doesn't change that.
-  - A GET is not safe by itself: the URL, query data, credentials,
-    redirects and destination policy all matter.
-- **Ask narrow questions in parallel, then combine in code.**
-  - One request asks whether the call is relevant to the effective task,
-    whether it conflicts with an explicit constraint, whether the evidence
-    is sufficient, and for a typed concern reason.
-  - Code combines the answers with thresholds per effect class, calibrated
-    on QQ outcomes.
-  - Correlated probabilities are never multiplied as though independent.
-- **Give Jev the real context, bounded.**
-  - Include the effective task (original request plus applied steering),
-    the delegated scope, the current plan, and short summaries of recent
-    results with provenance.
-  - Mark missing information as missing; it is never proof that an action
-    is unnecessary.
-  - Tool output and model rationale are untrusted data, never permission.
-- **The server owns the hold lifecycle.**
-  - Phases are durable and replayable: delegate-pending, fallback-pending,
-    human-required, terminal.
-  - Clients take focus and alert only for human-required.
-  - A human can still deliberately override a pending decision.
-  - Headless follows the same phases, not a guessed flag or timer.
-- **Batch per turn.** All held calls from one model turn share one Jev
-  request. Independent reads keep running in parallel.
-- **Every attempt leaves a receipt.** Before dispatch, admit the worst-case
-  spend and persist a pending marker. Persist the result or unknown spend
-  before publishing. Record the raw distribution, confidence, parse result,
-  policy identity, latency and cost.
-- **Shadow before settle.** A new policy scores real holds while humans keep
-  deciding. It settles holds only after a pre-agreed safety and utility gate
-  passes.
-- **Opt-in is easy and honest.**
-  - A preset may bundle capabilities, but only as an explained multi-choice
-    that still lists each capability separately.
-  - `jev_approval` keeps its own consent.
-  - One server-side Off wins everywhere.
-  - A `/jev` view shows effective settings with their sources, what is sent
-    to TypeSafe, spend, and interruptions saved.
-- **Measure what matters.** The headline metric is human interruptions per
-  successful agent-hour, within false-approval limits. Report it alongside
-  time, tokens and cost to an independently verified result. Count
-  human-required phases and actual human answers, not
-  `ToolApprovalRequested`.
-
-### Acceleration opportunities
-
-These are hypotheses until the plan measures them. Take them one at a time;
-each ships only on evidence.
-
-| Opportunity | Replaces | Question shape |
-| --- | --- | --- |
-| Per-turn effort and model routing by predicted adequacy; code chooses among adequate options by measured cost and latency | Over-provisioned reasoning on every turn | `noul` per candidate |
-| Context retention ranking at compaction | Tokens resent every turn | `score` per unit |
-| Search and file result ranking before reads | Speculative reads | `score` per result |
-| Failure classification (transient, logic, environment, flaky) driving retry policy | An LLM diagnosis turn | `choice` |
-| Loop and stuck detection (repeated reads, edit back-and-forth) | Wasted turns, human rescue | `noul` |
-| Claim-to-evidence completion check, advisory | LLM self-verification turns | `noul` per claim |
-
-Jev never replaces running tests, citing sources, durable state, idempotent
-tools, cancellation or bounded resources. For long runs, those matter more
-than any judge.
-
-### Rejected alternatives
-
-- **Lower thresholds to reduce prompts.** This confuses missing context and
-  authority with model uncertainty.
-- **Prompt the human while Jev races them.** Successful delegation becomes
-  an interruption, and a quick human answer cancels valid work.
-- **A longer headless grace timer.** A timing guess duplicates server state
-  and still fails under load, reconnect or fallback.
-- **Let a stored credential or one intensity knob enable everything.**
-  Consent, review frequency and authorization are different things.
-- **Require strict completion review before approving tools.** A review
-  after the result can't authorize a side effect that already happened.
-- **A generic decision-engine crate or a separate recovery agent.** The
-  existing approval, routing, checkpoint and budget seams are enough.
-
-## 5. Provenance
-
-This document replaces the following, which were deleted in the
-consolidation. Git history retains them except where noted.
-
-- `design/jev-runtime-review-2026-09-18.md`: review of #72. Its opt-in
-  contract shipped in #74–#78 and ADR-0030.
-- `design/jev-delegation-audit-2026-09-25.md`: now § 1 and § 3. It was
-  never on `main`; the original is commit `0c1cbd6`, kept by GitHub at
-  `refs/pull/193/head` (`git fetch origin pull/193/head`). Its probe source
-  was local (`target/qq-perf/jev-audit-2026-09-25/`) and is not retained.
-- `plans/jev-opt-in.md` and `plans/progress/jev-opt-in.md`: J1–J9 shipped.
-  The receipt is summarized in the [ledger](../plans/progress/jev.md).
-
-The unmerged proposal in draft PR #193 (ENG-938) is folded into the
-[plan](../plans/jev.md): `plans/jev-usefulness.md`, its PR comparison,
-`runbooks/jev-qualification.md`, and a proposed ADR numbered 0046, which
-collides with the accepted MCP-pinning ADR-0046.
+The target design (code-owned authority with narrow parallel Jev questions,
+bounded task context, a server-owned hold lifecycle, per-attempt receipts,
+the acceleration opportunities, and rejected alternatives) is in the
+[Jev plan § Target design](../plans/jev.md#target-design).

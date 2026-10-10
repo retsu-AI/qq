@@ -16,7 +16,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 ### 2026-09-28 — plan opened
 
 This is a design PR only. The reference survey is in
-`design/goal-reference-survey-2026-09-28.md`. Of the reference harnesses,
+`../../research/goal-pursuit.md`. Of the reference harnesses,
 only Codex has a real goal. OpenCode, Pi and fx have pieces: a todo list
 that is never re-injected, a finish-turn hook, and a stop hook that fails
 open.

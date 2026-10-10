@@ -6,15 +6,15 @@
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
 | Now | Design only. Nothing below is built. The decision record is [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md), revised here and still Proposed |
-| Research | [`../design/goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md) |
+| Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [`autonomous-core.md`](./autonomous-core.md). This plan replaces its AC7–AC9. AC4 (the loop guard) stays there and lands with G0 |
 
 ## Delivery stack
 
 Tracking: [ENG-1011](https://linear.app/retsu-ai/issue/ENG-1011). ENG-982 delivered
-design only. Deliver [side-questions.md](side-questions.md) first: SQ0 planning,
-SQ1 isolated read-only runtime, SQ2 surfaces. Then stack **G0 → G2 → G3 → G4 → G5**.
+design only. Side questions (SQ0–SQ2) shipped first
+([`../design/side-questions.md`](../design/side-questions.md)). Then stack **G0 → G2 → G3 → G4 → G5**.
 Each PR targets its immediate predecessor until merge, then rebases/retargets.
 This is delivery ordering, not a runtime dependency. G0 retains AC4 and one
 goal protocol bump; G1 stays dropped. G4 stays together after G3 initially.

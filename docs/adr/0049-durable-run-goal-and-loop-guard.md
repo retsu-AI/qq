@@ -4,7 +4,7 @@
 acceptance, from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
-**Implements:** [`goals.md`](../plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](../plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md), audit [`core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) A3, A4
+**Implements:** [`goals.md`](../plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](../plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
 
 ## Context
 
@@ -497,7 +497,7 @@ a goal.
 
 ## Evidence / references
 
-- Survey: [`goal-reference-survey-2026-09-28.md`](../design/goal-reference-survey-2026-09-28.md).
+- Survey: [`goal-pursuit.md`](../research/goal-pursuit.md).
 - Codex: `codex-rs/ext/goal/src/runtime.rs:425–523`, `accounting.rs:133–230`,
   `state/src/runtime/goals.rs:499–611`.
 - OpenCode: `src/session/todo.ts:29–50`, `src/session/processor.ts:29`.

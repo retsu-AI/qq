@@ -4,7 +4,7 @@
 **Date:** 2026-09-11
 **Deciders:** speed-first plan HC1 (headless contract)
 **Implements:** [`architecture.md` § Persistence](../design/architecture.md#persistence),
-[`headless-contract.md` § Gaps](../design/headless-contract.md#gaps-a-supervisor-currently-works-around)
+[`headless-contract.md` § Supervisor Boundary Notes](../design/headless-contract.md#supervisor-boundary-notes)
 (resume into an existing session)
 
 ## Context

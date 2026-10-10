@@ -8,60 +8,60 @@ below is for people changing QQ.
 | --- | --- |
 | how the system works today | [`design/architecture.md`](design/architecture.md), then the topic docs below |
 | why something is the way it is | [`adr/README.md`](adr/README.md) |
+| what evidence motivated a plan | `research/` below |
 | what is being built next and how it is accepted | [`plans/README.md`](plans/README.md) |
 | what is in flight right now and its evidence | [`plans/progress/README.md`](plans/progress/README.md) |
 | how to do a unit of work or review one | [`plans/workflow.md`](plans/workflow.md) |
 | how to run, measure, or qualify something | `runbooks/` below |
 
-## Design — present tense, the system as built
-
-- [`token-efficiency.md`](design/token-efficiency.md) — baseline mechanisms and
-  research hypotheses; future changes belong to the
-  [token-efficiency plan](plans/token-efficiency.md).
+## Design — `design/`, the system as built
 
 - [`architecture.md`](design/architecture.md) — system shape, crate layout,
   runtime, compiled plans, persistence, hosting boundary, deferred items.
 - [`product.md`](design/product.md) — product intent, priorities, scope.
-- [`protocol.md`](design/protocol.md) — HTTP/SSE wire protocol and route
-  contract.
+- [`protocol.md`](design/protocol.md) — HTTP/SSE wire protocol, route
+  contract, and version history.
 - [`headless-contract.md`](design/headless-contract.md) — `qq run` JSONL/exit
   contract and the supervisor boundary.
 - [`providers.md`](design/providers.md) — provider validation standard.
-- [`jev.md`](design/jev.md) — optional TypeSafe Jev: what it is, the four
-  capabilities as built, why it hands work back today, and the direction the
-  [Jev plan](plans/jev.md) follows. The only Jev design doc.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
   bounding/spill boundary, containment, edit semantics, shell classification,
-  `@` mentions, approvals, MCP and embedded hosts.
+  `@` mentions, approvals (including
+  [delegated approval](design/tools.md#approval-policy)), MCP and embedded
+  hosts.
+- [`side-questions.md`](design/side-questions.md) — `/btw` side questions:
+  captured context, least-authority tools, bounds, durability.
+- [`jev.md`](design/jev.md) — optional TypeSafe Jev: what it is, the four
+  capabilities as built, and why it hands work back today. The only Jev
+  design doc; the [Jev plan](plans/jev.md) owns what comes next.
 - [`layout.md`](design/layout.md), [`transcript.md`](design/transcript.md),
   [`theme.md`](design/theme.md) — TUI layout tiers and panes, transcript
   rendering, themes.
-- [`harness-scale-audit-2026-09-16.md`](design/harness-scale-audit-2026-09-16.md)
-  — reference audit of Codex, OpenCode, Pi, and fx against QQ: reliability
-  findings (F01–F28), comparative capability matrix, core versus adapter
-  placement, and acceptance criteria (research; supersedes the August audit
-  and September catalog).
-- [`onboarding-audit-2026-09-22.md`](design/onboarding-audit-2026-09-22.md)
-  — first-run and configuration UX of Codex, OpenCode, Pi, and fx against
-  QQ; findings O01–O20 and the positions the onboarding plan builds on
-  (research; the onboarding plan that acted on it is closed — receipt in
-  `plans/progress/onboarding-ux.md`).
-- [`run-reliability-audit-2026-09-21.md`](design/run-reliability-audit-2026-09-21.md)
-  — why sessions do not finish: failure taxonomy from the live session store
-  (27 % of prompt runs failed, 73 % of those by harness policy), how Codex,
-  OpenCode, Pi, and fx keep runs alive, and findings R01–R12 (research; owned
-  by `plans/run-reliability.md`).
-- [`core-autonomy-audit-2026-09-28.md`](design/core-autonomy-audit-2026-09-28.md)
-  — what stops `qq-core` from running one task unattended for hours and
-  from being embedded: per-run bounds that never reset, no continuation of
-  paused or interrupted runs, no loop guard or durable goal, composition
-  locked in the binary, store write amplification (research; owned by
-  `plans/autonomous-core.md`).
-- [`goal-reference-survey-2026-09-28.md`](design/goal-reference-survey-2026-09-28.md)
-  — how Codex (thread goals), OpenCode (`todowrite`), Pi (`finishTurn`)
-  and fx (the stop hook) pursue one objective over time, their weaknesses,
-  and the positions QQ's `/goal` takes (research; owned by
-  `plans/goals.md`).
+
+## Research — `research/`, dated evidence behind plans
+
+Snapshots of QQ and reference harnesses (Codex, OpenCode, Pi, fx) at a
+recorded commit. They are not updated as work ships; each names its snapshot
+date and the plan that acts on it.
+
+- [`harness-comparison.md`](research/harness-comparison.md) (2026-09-16) —
+  reliability findings F01–F28, comparative capability matrix, core versus
+  adapter placement, acceptance criteria.
+- [`run-reliability.md`](research/run-reliability.md) (2026-09-21) — why
+  sessions do not finish: failure taxonomy from the live session store,
+  findings R01–R12. Acted on by [`plans/run-reliability.md`](plans/run-reliability.md).
+- [`onboarding.md`](research/onboarding.md) (2026-09-22) — first-run and
+  configuration UX, findings O01–O20. The onboarding plan that acted on it
+  has closed.
+- [`token-efficiency.md`](research/token-efficiency.md) (2026-09-23) —
+  baseline mechanisms and hypotheses. Acted on by
+  [`plans/token-efficiency.md`](plans/token-efficiency.md).
+- [`core-autonomy.md`](research/core-autonomy.md) (2026-09-28) — what stops
+  `qq-core` from running one task unattended for hours and from being
+  embedded. Acted on by [`plans/autonomous-core.md`](plans/autonomous-core.md).
+- [`goal-pursuit.md`](research/goal-pursuit.md) (2026-09-28) — how the
+  reference harnesses pursue one objective over time, and the positions
+  QQ's `/goal` takes. Acted on by [`plans/goals.md`](plans/goals.md).
 
 ## Decisions — `adr/`
 
@@ -78,26 +78,25 @@ in [`plans/workflow.md`](plans/workflow.md). Templates in
 
 ## Progress — `plans/progress/`
 
-One ledger per plan, a root ledger for shared-file work and ADR numbering,
-[`decisions-needed.md`](plans/progress/decisions-needed.md), and phase-gate
-evidence.
+One ledger per active plan, a root ledger for shared-file work and ADR
+numbering, [`decisions-needed.md`](plans/progress/decisions-needed.md), and
+phase-gate evidence.
 
 ## Runbooks — `runbooks/`
 
-- [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,
-  routing, approval, and the advisory observer.
 - [`local-dev.md`](runbooks/local-dev.md) — toolchain, gates, test
   environment, worktrees.
-- [`tui-qa.md`](runbooks/tui-qa.md) — explicit credential-free, loopback-only
-  TUI diagnostic fixture and cleanup. The ordinary user-global config path
-  may be a leaf symlink; this fixture still requires a regular `config.ron`.
-- [`perf-recording.md`](runbooks/perf-recording.md) — baseline/candidate
-  procedure, focused fixtures, same-binary control, host conditions.
-- [`progress-report.md`](runbooks/progress-report.md) — read-only session
-  store queries: do long runs and sub-agents produce output, or only
-  activity.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how
   to extend it.
+- [`perf-recording.md`](runbooks/perf-recording.md) — baseline/candidate
+  procedure, focused fixtures, same-binary control, host conditions.
+- [`run-output-queries.md`](runbooks/run-output-queries.md) — read-only
+  session-store queries: do long runs and sub-agents produce output, or only
+  activity.
+- [`tui-qa.md`](runbooks/tui-qa.md) — credential-free, loopback-only TUI
+  diagnostic fixture and cleanup.
+- [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,
+  routing, approval, and the advisory observer.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
 - [`website.md`](runbooks/website.md) — how the docs site is generated from
@@ -116,11 +115,11 @@ these files at build time ([`runbooks/website.md`](runbooks/website.md)).
    Amend them in the commit that changes behavior.
 2. ADRs are one decision, one page, immutable once accepted.
 3. Plans are mortal: phases collapse to one row when they close; a fully
-   shipped plan moves its durable content to `design/` and is deleted.
+   shipped plan moves its durable content to `design/` and is deleted, along
+   with its ledger. Receipts stay in Git history.
 4. Ledgers are append-only evidence with one writer each; raw measurements
    stay under `target/qq-perf/` and out of Git.
-5. Research that motivated a plan lives in `design/`, not in the plan.
-
-Delegated approval: [as built](design/tools.md#approval-policy),
-[operator guide](guide/permissions.md#who-decides-a-held-call),
-[receipt](plans/progress/delegated-approval.md).
+5. Research that motivated a plan lives in `research/`, not in the plan or in
+   `design/`. It is a dated snapshot and is not amended as work ships.
+6. File names say what the file is about, without dates or slice IDs. A plan
+   and its ledger share one name.

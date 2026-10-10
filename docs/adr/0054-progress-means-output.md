@@ -8,7 +8,7 @@
 ## Context
 
 The session store on the lead's machine has 30 days of real use. The numbers
-come from the [`progress-report.md`](../runbooks/progress-report.md) queries,
+come from the [`run-output-queries.md`](../runbooks/run-output-queries.md) queries,
 for the 30 days ending 2026-10-01, on store schema 39. They show agents doing plenty of work but
 producing almost nothing:
 
@@ -284,7 +284,7 @@ with the AP0 runbook and changed with evidence.
 
 ## Evidence / references
 
-- Store queries: [`../runbooks/progress-report.md`](../runbooks/progress-report.md);
+- Store queries: [`../runbooks/run-output-queries.md`](../runbooks/run-output-queries.md);
   baseline recorded in `plans/progress/root.md` (2026-09-30).
 - QQ source:
   - `crates/qq-core/src/lib.rs:106–122`, `352–379`, `1712–1731`,

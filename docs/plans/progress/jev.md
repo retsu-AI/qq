@@ -5,9 +5,9 @@ One writer per ledger per `workflow.md` § 3.
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| JV0 | Consolidate Jev docs | In review | [#210](https://github.com/retsu-AI/qq/pull/210) | This entry |
-| JV1 | Effective activation, reliable Off | Activation in review | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | Plan-carried activation, off wins, edit replaces cached plan, bounded client cache (ADR-0052). Still open from A1: env/runtime-off and trust-change cases as named tests, revocation racing a result, server-side Off (JV9) |
-| JV2 | Headless waits for the delegate | In review | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
+| JV0 | Consolidate Jev docs | Shipped (`08694a3`) | [#210](https://github.com/retsu-AI/qq/pull/210) | This entry |
+| JV1 | Effective activation, reliable Off | Activation shipped (`a944be8`) | [#214](https://github.com/retsu-AI/qq/pull/214) (ENG-971) | Plan-carried activation, off wins, edit replaces cached plan, bounded client cache (ADR-0052). Still open from A1: env/runtime-off and trust-change cases as named tests, revocation racing a result, server-side Off (JV9) |
+| JV2 | Headless waits for the delegate | Shipped (`0e2eb64`) | [#215](https://github.com/retsu-AI/qq/pull/215) (ENG-972) | Flag follows resolved `jev_approval` and `approval_delegate` |
 | JV3 | Precision-safe parsing | Planned | — | |
 | JV4 | Effective task context | Planned | — | After JV1 |
 | JV5 | Durable hold lifecycle (ADR-0047) | Planned | — | After JV2 |

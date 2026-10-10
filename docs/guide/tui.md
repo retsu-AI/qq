@@ -57,12 +57,12 @@ below works the same either way.
 
 \* `Esc` focuses the parent only when nothing else claims it. An open
 picker, palette, or overlay (`/models`, `/sessions`, `Ctrl-K`, …) closes
-first, the trust prompt quits on it, and a pending approval or question
-claims it (see below). Otherwise
-it first closes an open `@` completion list, clears a transcript selection,
-closes a workspace view, dismisses an error notice for the focused session,
-and while a run is active arms `Esc Esc` to cancel it. Informational notices do not claim it. `Alt-Up` is not a
-focus key; it pulls back the newest queued draft.
+first, the trust prompt quits on it, and a pending approval or question claims
+it (see below). Otherwise it first closes an open `@` completion list, clears
+a transcript selection, closes a workspace view, dismisses an error notice for
+the focused session, and while a run is active arms `Esc Esc` to cancel it.
+Informational notices do not claim it. `Alt-Up` is not a focus key; it pulls
+back the newest queued draft.
 
 QQ names a session from its first prompt. Sessions persist in SQLite; quit
 and come back with `qq --session ID` (the exit message prints it) or pick
@@ -80,6 +80,29 @@ in a terminal multiplexer to watch two.
 | cancel the run | `Ctrl-X`, or `Esc Esc` |
 
 Steering appears in the transcript as a `steering` row until applied.
+
+## Side questions without interrupting work
+
+Use `/btw QUESTION` or `/ask QUESTION` while the main agent works. Answers
+appear in a separate scrollable side-question view; `Esc` returns to the main
+transcript. `/btw` without a question reopens the view. `/btw-new QUESTION`
+starts a new side thread; otherwise questions continue the existing thread.
+`/btw-cancel` cancels only the active side question, not the main agent.
+
+Each question captures bounded committed session context. Unfinished tool
+exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
+`tree` are available, further restricted by the session's tool policy. Live
+file inspection is not a consistent filesystem snapshot. Side questions,
+answers, and usage never become main-agent prompts, steering, or goal budget.
+
+One query per session may run, for at most 8 model turns. Its execution,
+including waits, is cut off at 120 seconds; the final state appears once the
+server has recorded it, which can take a moment longer under heavy load.
+Questions are limited to 8 KiB. Partial answers and independent cost/status
+are durable and restored after reconnect; interrupted queries are not
+restarted automatically. The same typed submit/cancel commands and side
+projection are available through the session API to embedded and remote
+clients.
 
 ## Approvals and questions
 
@@ -298,24 +321,3 @@ What happens to running work depends on who owns the server:
 
 To keep long runs alive while you close the terminal, start `qq serve` in
 another terminal (or a multiplexer) first, then open `qq`.
-
-## Side questions without interrupting work
-
-Use `/btw QUESTION` or `/ask QUESTION` while the main agent works. Answers
-appear in a separate scrollable side-question view; `Esc` returns to the main
-transcript. `/btw` without a question reopens the view. `/btw-new QUESTION`
-starts a new side thread; otherwise questions continue the existing thread.
-`/btw-cancel` cancels only the active side question, not the main agent.
-
-Each question captures bounded committed session context. Unfinished tool
-exchanges are omitted explicitly. Only built-in `read_file`, `search`, and
-`tree` are available, further restricted by the session's tool policy. Live
-file inspection is not a consistent filesystem snapshot. Side questions,
-answers, and usage never become main-agent prompts, steering, or goal budget.
-
-One query per session may run, for at most 8 model turns. Its execution,
-including waits, is cut off at 120 seconds; the final state appears once the
-server has recorded it, which can take a moment longer under heavy load. Questions are limited to 8 KiB. Partial answers and independent
-cost/status are durable and restored after reconnect; interrupted queries are
-not restarted automatically. The same typed submit/cancel commands and side
-projection are available through the session API to embedded and remote clients.

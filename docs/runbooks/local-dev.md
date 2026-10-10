@@ -2,10 +2,12 @@
 
 ## Toolchain
 
-`rust-toolchain.toml` pins the channel (currently `1.97.1`, minimal profile,
-plus the `x86_64-unknown-linux-musl` target). `rustup` resolves it on the first
-`cargo` invocation. A Nix development shell (`flake.nix`) provides the same
-toolchain plus `rustfmt` and Clippy:
+`rust-toolchain.toml` pins the channel (currently `1.97.1`, minimal profile)
+with the `clippy`, `llvm-tools-preview`, `rust-analyzer`, `rust-src`, and
+`rustfmt` components and two extra targets: `x86_64-unknown-linux-musl` (the
+static evaluation binary) and `wasm32-unknown-unknown` (`qq-client` for
+browsers). `rustup` resolves it on the first `cargo` invocation. A Nix
+development shell (`flake.nix`) builds the same toolchain from that file:
 
 ```sh
 nix develop
@@ -14,7 +16,12 @@ nix develop
 ## Gates
 
 Run the narrowest useful test while iterating, then the workspace gates before
-every push. These are the same checks CI runs.
+every push. CI (`.github/workflows/ci.yml`) runs the test, format, and Clippy
+gates but not `cargo build --workspace` or the minimal `qq-provider` profile.
+It also runs the exact-test coverage guard, `tests/install_sh.sh`, the
+`qq-core` embedding example and minimal (`--no-default-features`) profile, the
+`qq-client` wasm32 build, the native Windows shell-teardown tests, and a
+release build-size report.
 
 ```sh
 cargo test --workspace
@@ -41,8 +48,6 @@ to its source. Cargo reruns the script when `HEAD` moves. See
   fake provider; a host that blocks loopback will fail them.
 - Some color-output tests fail if `NO_COLOR` is set in the environment. Unset
   it for the test run: `env -u NO_COLOR cargo test --workspace`.
-- `cargo test` count at the time of writing is about 1,220 tests; a slice's
-  ledger receipt records the exact passed/ignored counts.
 - Tests create temporary SQLite stores and workspaces; nothing touches the
   user's XDG state.
 

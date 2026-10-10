@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol)
-**Implements:** [`autonomous-core.md` § AC2, AC3, AC5, AC6](../plans/autonomous-core.md); audit [`core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) A1, A2. Extends ADR-0039 and ADR-0040; supersedes ADR-0040 § Alternatives' deferral of `resume_run`
+**Implements:** [`autonomous-core.md` § AC2, AC3, AC5, AC6](../plans/autonomous-core.md); audit [`core-autonomy.md`](../research/core-autonomy.md) A1, A2. Extends ADR-0039 and ADR-0040; supersedes ADR-0040 § Alternatives' deferral of `resume_run`
 
 ## Context
 

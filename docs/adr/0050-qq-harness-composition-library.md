@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (crate boundaries, features)
-**Implements:** [`autonomous-core.md` § AC10–AC13](../plans/autonomous-core.md); audit [`core-autonomy-audit-2026-09-28.md`](../design/core-autonomy-audit-2026-09-28.md) B1–B4. Refines ADR-0027 (the public surface) and audit F19 (build profiles)
+**Implements:** [`autonomous-core.md` § AC10–AC13](../plans/autonomous-core.md); audit [`core-autonomy.md`](../research/core-autonomy.md) B1–B4. Refines ADR-0027 (the public surface) and audit F19 (build profiles)
 
 ## Context
 

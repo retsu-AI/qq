@@ -9,10 +9,10 @@ for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
 
 | Mechanism | Evidence | What this does not establish |
 | --- | --- | --- |
-| Hash-aware reads, outlines/ranges, bounded search, batched edits, spills and exact recall | [Tool contracts](tools.md); [tool-layer plan](../plans/tool-layer.md) | That defaults minimize tokens per successful task; T13 remains an evaluation owner |
-| Provider prompt-cache breakpoints | [Providers](providers.md), prompt-cache discussion | Cross-turn cache-hit rate, prefix stability, or savings across compaction |
+| Hash-aware reads, outlines/ranges, bounded search, batched edits, spills and exact recall | [Tool contracts](../design/tools.md); [tool-layer plan](../plans/tool-layer.md) | That defaults minimize tokens per successful task; T13 remains an evaluation owner |
+| Provider prompt-cache breakpoints | [Providers](../design/providers.md), prompt-cache discussion | Cross-turn cache-hit rate, prefix stability, or savings across compaction |
 | Bounded delegation and experimental worker/depth arms | [Delegation plan](../plans/supervised-delegation.md); `benchmarks/arms/` | That more agents beat root-only work on tokens or dollars per pass |
-| Durable history and bounded model-facing tool output | [Transcript](transcript.md); [ADR-0019](../adr/0019-spill-handles.md) | A shared cross-agent evidence protocol or arbitrary permission to read another session |
+| Durable history and bounded model-facing tool output | [Transcript](../design/transcript.md); [ADR-0019](../adr/0019-spill-handles.md) | A shared cross-agent evidence protocol or arbitrary permission to read another session |
 | In-run compaction at safe boundaries | [ADR-0039](../adr/0039-in-run-compaction.md); [run-reliability plan](../plans/run-reliability.md) | Real-model constraint retention over repeated summaries |
 | Evaluation comparison and usage accounting | [Delegation evaluation](../plans/supervised-delegation.md); [evaluation program ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | A complete, deduplicated task-tree waste report with uncertain usage explicitly represented |
 

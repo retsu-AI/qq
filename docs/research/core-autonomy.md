@@ -16,9 +16,9 @@ today, and what do the reference harnesses provide that it lacks?
 
 This audit builds on two earlier audits. It does not repeat them:
 
-- [`harness-scale-audit-2026-09-16.md`](harness-scale-audit-2026-09-16.md)
+- [`harness-comparison.md`](harness-comparison.md)
   (F01–F28: compaction, attachments, caching, sandbox, retention, SDKs).
-- [`run-reliability-audit-2026-09-21.md`](run-reliability-audit-2026-09-21.md)
+- [`run-reliability.md`](run-reliability.md)
   (R01–R12: why interactive sessions do not finish).
 
 Many items in those two audits have since shipped:

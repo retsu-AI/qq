@@ -230,7 +230,7 @@ McNemar p-value, both arms' scorecards and their delta, and the candidate's
 dollars-per-pass as a ratio of the baseline's with a percentile bootstrap
 interval over task pairs (deterministic from `--seed`; `--resamples` defaults
 to 2000). A ratio below 1.0 favors the candidate. The R7 promotion gate in
-`docs/plans/terminal-bench-readiness.md` reads: ratio interval entirely below
+`docs/plans/terminal-bench.md` reads: ratio interval entirely below
 0.80 with no meaningful pass-rate loss.
 
 ## Compare Against Other Harnesses

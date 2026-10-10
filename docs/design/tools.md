@@ -159,8 +159,9 @@ global configuration directory and `.qq/packs/` (each project manifest
 admitted only once its exact content is trusted); see
 `docs/design/architecture.md`.
 
-User-home, administrator-managed, and bundled roots are reserved follow-up
-tiers. Reading the server process's home directory implicitly would make a
+User-home, administrator-managed, and bundled roots are not discovered (see
+§ Intentionally Deferred). Reading the server process's home directory
+implicitly would make a
 remote TUI mean something different from a direct run and would grant
 host-level authority outside the selected workspace. Add such roots only as
 explicit server-owned configuration with provenance and the same bounds; do
@@ -608,10 +609,9 @@ walk, so a checkpoint on a quiet tree is a walk with no reads. Both run
 inside an `IndexBudget` (defaults: `search`'s 50 000 entries, 64 MiB, 5 s)
 and a build the budget ends is `IndexOutcome::Partial`, which has no root
 hash and cannot be diffed. `diff` merges two complete indexes' sorted file
-lists into sorted `added`/`modified`/`deleted` paths. Its consumer is the
-run-snapshot dirty scan (`docs/plans/run-snapshots.md` § Change
-Detection). Blocking: call it through the runtime's bounded blocking pool,
-never on a Tokio worker.
+lists into sorted `added`/`modified`/`deleted` paths. The index is exported
+from `qq-core` (`WorkspaceIndex`); no QQ surface calls it. Blocking: call it
+through the runtime's bounded blocking pool, never on a Tokio worker.
 
 ### Reading Files
 
@@ -666,9 +666,9 @@ lines.
 **`mode=info`.** `read <path> info size= lines= h: utf8= eol=lf|crlf|none
 perms= binary=[ mime=]`, one line, for any file including binaries (which
 `lines` and `outline` refuse with `not_text`). Images (`png jpg gif webp`)
-answer `info` plus `hint=image_unsupported_by_model` from every mode; a
-`view_image` tool and provider image content block are proposed in
-`docs/plans/tool-layer.md` (T11).
+answer `info` plus `hint=image_unsupported_by_model` from every mode
+(`hint=image_too_large` above 5 MiB); no tool passes image content to a
+model.
 
 Failures are typed: `invalid_ranges`, `invalid_offset`, `invalid_limit`,
 `invalid_if_changed_since`, `range_out_of_bounds` (with `last_line=`),
@@ -867,9 +867,9 @@ sessions interleave safely at file granularity. Semantic conflicts surface as
 stale-file errors to the losing agent, which is the correct outcome: the
 model re-reads and reconciles, exactly as a human would after a rebase.
 
-This is the same progression `product.md` already commits to: concurrent
-sessions share a checkout safely at file granularity now; editing subagents
-get isolated worktrees later. Worktree orchestration stays deferred.
+Concurrent sessions therefore share a checkout safely at file granularity.
+Worktree isolation for editing subagents is deferred (§ Intentionally
+Deferred).
 
 ## Shell Execution
 
@@ -964,12 +964,9 @@ control, not that the model needs new verbs.
   user writes the grant themselves. QQ does not make publishing a
   default.
 - **jj is a policy entry, not a dependency.** jj users overwhelmingly
-  run colocated repos, so git-shaped harness features (run snapshots,
-  later worktree isolation) work for them unchanged. QQ takes no jj-lib
+  run colocated repos, so git-shaped harness features work for them
+  unchanged. QQ takes no jj-lib
   dependency; revisit only if jj-native workspaces become a real ask.
-
-The harness's own undo layer, run snapshots, is independent of the
-user's VCS and planned in `docs/plans/run-snapshots.md`.
 
 ## Network Tools
 
@@ -1539,6 +1536,8 @@ dispatch overhead has a benchmark.
 ## Intentionally Deferred
 
 - Git worktree or sandbox isolation for editing subagents.
+- A harness-owned undo layer (run snapshots) independent of the user's VCS.
+- User-home, administrator-managed, and bundled skill roots.
 - OS-level shell sandboxing (Landlock/seccomp).
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.

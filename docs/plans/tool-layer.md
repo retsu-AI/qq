@@ -10,10 +10,10 @@
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
 
 Updated 2026-10-08. Opened 2026-09-11; supersedes the R6 search/patch/terminal
-candidates in `terminal-bench-readiness.md` § Phase 6 (which keep their
+candidates in `terminal-bench.md` § Phase 6 (which keep their
 evaluation method and acceptance targets). The per-feature harness catalog
 that motivated it is superseded by
-[`../design/harness-scale-audit-2026-09-16.md`](../design/harness-scale-audit-2026-09-16.md).
+[`../research/harness-comparison.md`](../research/harness-comparison.md).
 
 ## Goal
 
@@ -25,7 +25,7 @@ trustworthy. Every truncation carries a continuation; every result has a
 header; model-facing text and UI payload are separate; every bound is a named
 constant with a test.
 
-Measured targets (paired evaluation per `terminal-bench-readiness.md`
+Measured targets (paired evaluation per `terminal-bench.md`
 § Phase 6 method):
 
 - ≥ 25 % fewer discovery/edit tool calls on repository-navigation and
@@ -412,7 +412,7 @@ through `qq-provider`); T11 and any later sandbox are opt-in features.
 Amended per slice as shipped: `tools.md` §§ Built-In Tools, Shell Execution,
 File References In Prompts, Output Bounding, Spilled Outputs, Read-Side Walk,
 Reading Files, Shell Classification, Approval Policy; ADR-0019 (T4), ADR-0020
-(T6); `terminal-bench-readiness.md` § Phase 6 points here; `plans/README.md`
+(T6); `terminal-bench.md` § Phase 6 points here; `plans/README.md`
 and the ledger; ADR-0021 and `tools.md` § Network Tools (T8/T9).
 
 ## Risks

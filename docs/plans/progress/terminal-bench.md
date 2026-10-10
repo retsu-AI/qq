@@ -1,6 +1,6 @@
 # Ledger — Terminal-Bench readiness
 
-Plan: [`../terminal-bench-readiness.md`](../terminal-bench-readiness.md).
+Plan: [`../terminal-bench.md`](../terminal-bench.md).
 Only the agent working this plan edits this file. Current state on top;
 dated entries appended below, newest last.
 

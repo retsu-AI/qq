@@ -470,8 +470,8 @@ relevant execution/teardown prerequisites are satisfied. Its placement with
 daily-development adapters is architectural, not a dependency on completing
 the paid evaluations or all work in order 4.
 
-Existing owners: [speed-first](../plans/speed-first-extensible-agent-harness.md),
-[tools](../plans/tool-layer.md), [readiness](../plans/terminal-bench-readiness.md),
+Existing owners: [speed-first](../plans/speed-first.md),
+[tools](../plans/tool-layer.md), [readiness](../plans/terminal-bench.md),
 [delegation](../plans/supervised-delegation.md),
 [clients](../plans/multi-surface-clients.md),
 [snapshots](../plans/run-snapshots.md), and

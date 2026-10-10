@@ -1,9 +1,10 @@
 # Guide expansion: correct the guide, then fill its gaps
 
-**Status:** Proposed 2026-09-25; revised 2026-09-29. Ledger:
+**Status:** Active from 2026-09-25. GE0 (#222–#224) and GE10 (#230) shipped;
+GE1–GE9 planned. Ledger:
 [`progress/guide-expansion.md`](progress/guide-expansion.md). Predecessor:
-onboarding UX (closed; receipt in
-[`progress/onboarding-ux.md`](progress/onboarding-ux.md)).
+onboarding UX (closed 2026-09-25; research in
+[`../research/onboarding.md`](../research/onboarding.md)).
 **Linear:** [ENG-928](https://linear.app/retsu-ai/issue/ENG-928) (parent);
 GE0 ENG-979, GE1 ENG-929, GE2 ENG-930, GE3 ENG-931, GE4 ENG-932, GE5
 ENG-933, GE6 ENG-934, GE7 ENG-935, GE8 ENG-936, GE9 ENG-981, GE10 ENG-980.

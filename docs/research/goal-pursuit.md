@@ -2,7 +2,7 @@
 
 Research snapshot, 2026-09-28. QQ `origin/main` is `6022d99`. Reference trees
 under `.source/` are the same revisions recorded in
-[`core-autonomy-audit-2026-09-28.md`](core-autonomy-audit-2026-09-28.md).
+[`core-autonomy.md`](core-autonomy.md).
 This is evidence for [`../plans/goals.md`](../plans/goals.md) and
 [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md). It is not a
 claim about QQ.
