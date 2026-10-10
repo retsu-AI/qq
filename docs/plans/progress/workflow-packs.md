@@ -4,7 +4,7 @@ Plan: [../workflow-packs.md](../workflow-packs.md). Tracking: [ENG-1018](https:/
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| WP0 | Plan, ADR-0057, ledger, Linear issues (ENG-1019) | In progress | `docs/eng-1019-workflow-packs` | Worktree `.worktrees/skill-pack-design`, rebased on `origin/main` `f5dbf229` (#276 docs reorganization) |
+| WP0 | Plan, ADR-0057, ledger, Linear issues (ENG-1019) | In review | [#277](https://github.com/retsu-AI/qq/pull/277) | Worktree `.worktrees/skill-pack-design`, rebased on `origin/main` `f5dbf229` (#276 docs reorganization) |
 | WP1 | `load_skill` supporting files (ENG-1020) | Planned | — | |
 | WP2 | Delegate skill pull (ENG-1021) | Planned | — | Second reviewer (`sessions/`) |
 | WP3 | Shared `.qq/skills/` library (ENG-1022) | Planned | — | Needs WP1 |
@@ -29,3 +29,7 @@ Plan: [../workflow-packs.md](../workflow-packs.md). Tracking: [ENG-1018](https:/
 - Renamed the plan from `deep-pack` to `workflow-packs` because `deep` is now
   one pack among several.
 - Filed ENG-1018 (parent) and sub-issues ENG-1019 to ENG-1027 for WP0 to WP8 in the new Workflow Packs milestone.
+
+### 2026-10-10 — WP0 in review
+
+- Rebased onto `f5dbf229` (#276). Opened [#277](https://github.com/retsu-AI/qq/pull/277). Docs-truth: 23 passed.
