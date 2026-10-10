@@ -8,7 +8,7 @@
 //! exits with the app even when the app is killed.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::Mutex,
     time::{Duration, Instant},
@@ -158,6 +158,17 @@ fn engine_binary() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.join(name)));
     if let Some(path) = beside.filter(|path| path.is_file()) {
         return Some(path);
+    }
+    // Development builds live in the desktop workspace's own target
+    // directory, so the engine from `cargo build --bin qq` at the repository
+    // root is not beside them.
+    if cfg!(debug_assertions) {
+        let repository_build = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../target/debug")
+            .join(name);
+        if repository_build.is_file() {
+            return Some(repository_build);
+        }
     }
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)

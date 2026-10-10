@@ -20,7 +20,6 @@ pkg-fmt = "zip"
 
 [workspace]
 members = [
-  "apps/desktop/src-tauri",
   "crates/qq-auth",
   "crates/qq-client",
   "crates/qq-config",
