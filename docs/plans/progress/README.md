@@ -21,6 +21,7 @@ ledger is deleted with it; the receipts stay in Git history.
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | agent on the multi-surface plan | W, S, U, D, M slices and the tracer-bullet gate |
 | [`supervised-delegation.md`](./supervised-delegation.md) | agent on the delegation plan | D6b paired evaluation and default decisions |
 | [`terminal-bench.md`](./terminal-bench.md) | agent on the Terminal-Bench plan | R6–R8 and the Terminal-Bench evaluation program |
+| [`workflow-packs.md`](./workflow-packs.md) | agent on the workflow-packs plan | WP0–WP8: ADR-0057 runtime gaps, shared `.qq/skills/` library, `deep` pack, retrofits, guide |
 | [`speed-first.md`](./speed-first.md) | agent on the speed-first plan | H and HC slices; two open quiet-host recordings; Phases 7–9 when gated |
 | [`root.md`](./root.md) | lead | Shared-file changes, dependency and toolchain bumps, ADR number allocation, cross-plan requests, harness-comparison findings (F-rows) |
 | [`decisions-needed.md`](./decisions-needed.md) | anyone appends; lead resolves | Open questions with the conservative default taken |

@@ -44,6 +44,7 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | [`terminal-bench.md`](./terminal-bench.md) | Harness reliability and the Terminal-Bench evaluation program. Phases 1–5 shipped; open: R6-terminal evidence, R7, R8, `TB-pilot` |
 | [`speed-first.md`](./speed-first.md) | The speed-first backend. Phases 0–6 closed; open: two quiet-host recordings and seven H22 deferrals; Phases 7–9 gated. Shipped design is in `architecture.md` § Extension Contract and § Performance Discipline |
 | [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state. No ledger until a slice starts |
+| [`workflow-packs.md`](./workflow-packs.md) | Role packs modeled on pstack over a shared `.qq/skills/` library: the `deep` router (playbooks, principles, multi-model workflows) and the retrofitted `reviewer`/`perf`/`protocol`. WP0–WP8 planned; ADR-0057 Proposed |
 | [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration. No ledger until a slice starts |
 
 | Process file | Purpose |
