@@ -180,4 +180,4 @@ TypeSafe's optional assessment model. QQ can ask it to review final answers
 (`jev_review`), pick the model and effort for a prompt (`jev_routing`), and
 answer held calls as a [delegate](#delegate) (`jev_approval`). All are off
 by default; `qq jev setup` stores the key and turns nothing on. See
-[`qq jev`](cli.md#qq-jev-) and the [Jev runbook](../runbooks/jev.md).
+[`qq jev`](cli.md#qq-jev) and the [Jev runbook](../runbooks/jev.md).
