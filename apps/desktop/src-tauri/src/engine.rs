@@ -67,20 +67,30 @@ impl Engine {
     /// A connection to the user's server, starting one if necessary.
     pub async fn ensure(&self) -> Result<Connection, EngineError> {
         let _guard = self.starting.lock().await;
-        if let Some(connection) = discover().await? {
-            return Ok(connection);
-        }
+        // A discovery error is not final. `discover` judges the recorded
+        // metadata before probing it, so a record left by an older build
+        // that exited uncleanly reads as a protocol mismatch although no
+        // server runs. `qq serve` decides by the instance lock instead: it
+        // replaces a stale record, or exits when a live server holds the
+        // lock, in which case the discovery error is the real answer.
+        let mut last_error = match discover().await {
+            Ok(Some(connection)) => return Ok(connection),
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
         self.spawn()?;
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
-            if let Some(connection) = discover().await? {
-                return Ok(connection);
+            match discover().await {
+                Ok(Some(connection)) => return Ok(connection),
+                Ok(None) => {}
+                Err(error) => last_error = Some(error),
             }
             if let Some(status) = self.exited() {
-                return Err(EngineError::Exited(status));
+                return Err(last_error.unwrap_or(EngineError::Exited(status)));
             }
             if Instant::now() >= deadline {
-                return Err(EngineError::Timeout(START_TIMEOUT));
+                return Err(last_error.unwrap_or(EngineError::Timeout(START_TIMEOUT)));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
