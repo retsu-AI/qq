@@ -64,7 +64,8 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Serve {
             bind,
             allow_origins,
-        }) => serve(bind, &allow_origins, &overrides).await?,
+            exit_on_stdin_close,
+        }) => serve(bind, &allow_origins, &overrides, exit_on_stdin_close).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -465,6 +466,7 @@ async fn serve(
     bind: std::net::SocketAddr,
     allow_origins: &[String],
     overrides: &CliOverrides,
+    exit_on_stdin_close: bool,
 ) -> Result<(), Box<dyn Error>> {
     let options = server::ServerOptions::for_user()?
         .with_bind_address(bind)
@@ -512,13 +514,33 @@ async fn serve(
                 "qq server listening at {}",
                 embedded.server.connection().address()
             );
-            let signal_result = tokio::signal::ctrl_c().await;
+            let signal_result = if exit_on_stdin_close {
+                tokio::select! {
+                    signal = tokio::signal::ctrl_c() => signal,
+                    () = stdin_closed() => Ok(()),
+                }
+            } else {
+                tokio::signal::ctrl_c().await
+            };
             let shutdown_result = embedded.shutdown().await;
             signal_result?;
             shutdown_result?;
         }
     }
     Ok(())
+}
+
+/// Resolves once standard input reaches end-of-file or fails. Reads run on a
+/// dedicated thread because console stdin has no portable async reader.
+async fn stdin_closed() {
+    let (closed, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut bytes = [0_u8; 256];
+        while matches!(std::io::Read::read(&mut stdin, &mut bytes), Ok(n) if n > 0) {}
+        let _ = closed.send(());
+    });
+    let _ = receiver.await;
 }
 
 struct EmbeddedRuntime {

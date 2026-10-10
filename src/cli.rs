@@ -99,6 +99,10 @@ pub enum Command {
         /// server sends no CORS headers.
         #[arg(long = "allow-origin", value_name = "ORIGIN")]
         allow_origins: Vec<String>,
+        /// Shut down when standard input closes. A supervising process (the
+        /// desktop app) holds the pipe, so the server never outlives it.
+        #[arg(long)]
+        exit_on_stdin_close: bool,
     },
 
     /// Inspect and validate effective configuration.
@@ -874,7 +878,7 @@ mod tests {
         assert!(qa.command.is_none());
         assert!(matches!(
             Cli::try_parse_from(["qq", "serve"]).unwrap().command,
-            Some(Command::Serve { bind, allow_origins })
+            Some(Command::Serve { bind, allow_origins, exit_on_stdin_close: false })
                 if bind == "127.0.0.1:0".parse().unwrap() && allow_origins.is_empty()
         ));
         assert!(matches!(
