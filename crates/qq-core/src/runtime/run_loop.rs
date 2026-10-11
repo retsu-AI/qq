@@ -1067,12 +1067,26 @@ impl RunState {
                                 // (ENG-991): a faulted attempt or a reactive
                                 // overflow uses an ordinal with no live message.
                                 let replaced_turns = usize::try_from(replaced_turns).expect("turn count fits usize");
-                                debug_assert_eq!(
-                                    run.live_turns.len(),
-                                    messages[run_start..].iter().filter(|message| message.role() == Role::Assistant).count(),
-                                    "every live assistant message carries its stored ordinal"
-                                );
-                                let turn_cutoff = run.live_turns[replaced_turns - 1];
+                                let live_assistant_messages = messages[run_start..]
+                                    .iter()
+                                    .filter(|message| message.role() == Role::Assistant)
+                                    .count();
+                                let turn_cutoff = match run.live_turns.get(replaced_turns.wrapping_sub(1)) {
+                                    Some(ordinal) if run.live_turns.len() == live_assistant_messages => *ordinal,
+                                    // Every live assistant message records its stored
+                                    // ordinal; a mismatch would compact against the
+                                    // wrong turn and diverge replay from the live run.
+                                    Some(_) | None => {
+                                        yield TurnStep::Emit(RuntimeEvent::Failed {
+                                            kind: RunFailureKind::Server,
+                                            message: format!(
+                                                "in-run compaction found {} recorded turns for {live_assistant_messages} live assistant messages",
+                                                run.live_turns.len()
+                                            ),
+                                        });
+                                        yield TurnStep::Stop; return;
+                                    }
+                                };
                                 // The summarizer sends the request this turn would
                                 // have sent, cut at the boundary: the same system
                                 // prompt, tools, and message prefix, so it reads the

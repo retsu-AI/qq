@@ -849,6 +849,10 @@ pub(super) fn complete_in_run_compaction(
             let context_base_bytes =
                 i64::try_from(retained_bytes.saturating_add(framed_summary_bytes))
                     .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
+            // A prompt run that settled while this commit was queued (its task
+            // dropped at a deadline or cancel) has no window left to re-base:
+            // zero rows updated is expected then, and the marker still records
+            // the summary its replay renders.
             transaction.execute(
                 "UPDATE runs SET context_base_bytes = ?2, context_increment_bytes = 0
                      WHERE id = ?1 AND status = 'running'",
