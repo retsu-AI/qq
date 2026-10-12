@@ -106,10 +106,11 @@ fn from_git() -> Option<(String, String, String)> {
     println!("cargo:rerun-if-env-changed=QQ_EXACT_REVISION");
     let exact = env::var("PROFILE").as_deref() == Ok("release")
         || env::var("QQ_EXACT_REVISION").as_deref() == Ok("1");
-    if exact && let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--git-path", "index"])
-        .current_dir(root)
-        .output()
+    if exact
+        && let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--git-path", "index"])
+            .current_dir(root)
+            .output()
         && output.status.success()
     {
         let index = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -117,10 +118,11 @@ fn from_git() -> Option<(String, String, String)> {
             println!("cargo:rerun-if-changed={index}");
         }
     }
-    if exact && let Ok(output) = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output()
+    if exact
+        && let Ok(output) = Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(root)
+            .output()
         && output.status.success()
     {
         for path in output
