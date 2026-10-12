@@ -25,7 +25,7 @@ newest last.
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
-| T19 | Edit freshness by exact unique match (D10) | Planned | | ADR-0057 reserved |
+| T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0057 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
 | T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
 
 ## Entries
@@ -478,3 +478,18 @@ Behavior changes beyond the plan text, conservative: `> 1` (a file named 1) now 
 Deviations: the brief's ≥ 40 replay target and glob item are superseded by `3f36c947`, so globs are unchanged. Executor MCP was unavailable, so Linear went through `linear` CLI and GitHub through `gh`.
 Docs: `tools.md` § Shell Classification.
 Evidence: `target/qq-perf/t18-2026-10-11/` (baseline.txt, candidate.txt, pressure-*, replay-*.jsonl, workspace-test.log).
+
+### 2026-10-11 — T19 edit freshness by exact match
+
+- Baseline `edit_batch` recorded before any code change, 3 runs. The first commit holds 10 failing regressions for shapes (a)–(i); (e), the `if_hash` mismatch, was already green as a guard.
+- Rebased onto 3f36c947 midway. The amended plan drops `h:` from refusals, so the code, tests, ADR, and design followed. Refusals now name the fix, and every refusal test asserts the current hash is absent. My draft decisions-needed row about anchors was dropped, because the amended plan already says only the `old` form qualifies.
+
+#### T19 receipt — 2026-10-11
+Commit(s): 7cae8be4 (red), 50344d7a, 7946a1e1, 035f09e0, + docs/ledger head.
+Tests: 12 added in `tools::edit::tests` (shapes (a)–(i), plus a stale fuzzy case and the note combination); 1 updated (`edits_and_overwrites_require_a_prior_read_in_this_session` now uses an anchor insert). Workspace 2230 passed / 1 failed / 14 ignored. The failure, `plan::tests::async_compilation_bounds_waiters_and_releases_cancelled_requests`, is pre-existing: it fails 2/3 on the base 3f36c947 on this host. qq-core lib 926/0 on 2 of 3 head runs.
+Gates: `edit_batch` medians of 3 (µs): exact dry 9384 → 8560, fuzzy dry 34144 → 29056, exact apply 9433 → 8389, single 1494 → 1446. Unchanged within noise; the baseline host was more loaded. `tool_dispatch` does not exercise edits and was not run.
+Digests: tool schema 568cef80… → cc630679… (`edit_file` description); prompt 18 → 19; descriptor golden a1b49276… → 09227e1b….
+Deviations: every `if_hash` in a batch is checked, not only the first per file. A unique `old` must also be unique in the plan-time bytes, not only after earlier edits. Approval preview has no freshness logic, so it is unchanged.
+Docs: ADR-0057 (Proposed), `docs/adr/README.md`, root.md reservation, `tools.md` § Edit Semantics and § Optimistic Concurrency.
+Open: independent review requested. Rebased onto T18 (#283) and retargeted.
+Evidence: target/qq-perf/t19-2026-10-11/ (untracked).

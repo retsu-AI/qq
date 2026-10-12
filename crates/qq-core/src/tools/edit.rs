@@ -1123,9 +1123,9 @@ mod tests {
     }
 
     /// The same holds for a recorded read that went stale: no unique exact
-    /// match, `stale_file` with the current hash.
+    /// match, `stale_file`, and no current hash.
     #[test]
-    fn a_fuzzy_only_match_on_a_changed_file_is_stale_with_its_hash() {
+    fn a_fuzzy_only_match_on_a_changed_file_is_stale_without_its_hash() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("a.rs"), "    let x = 1;\n").unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
