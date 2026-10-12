@@ -314,15 +314,17 @@ pub(super) fn edit_file(
             }
             Form::InsertBefore { .. } | Form::InsertAfter { .. } => false,
         };
-        let hash = &file.before_hash[..12];
+        // A refusal names the fix but never the current hash: handing it
+        // back would let the next call pass it as if_hash and apply the same
+        // fuzzy edit without the model seeing any content.
         let refusal = match file.freshness {
             Freshness::Proven => None,
             Freshness::Unread if !unique_exact() => Some(format!(
-                "edit {index}: not_read: {} is h:{hash} and has not been read in this session; old must match exactly once to edit without a read. Call read_file on it, or pass if_hash:\"h:{hash}\"",
+                "edit {index}: not_read: {} has not been read in this session; an edit to an unread file applies only when its old matches exactly once (an anchor insert never does). Extend old until it is exact and unique, or read_file the lines around the edit",
                 edit.path
             )),
             Freshness::ChangedSinceRead if !unique_exact() => Some(format!(
-                "edit {index}: stale_file: {} is h:{hash} and changed since it was last read in this session; old must match exactly once to edit without a re-read. Read it again, or pass if_hash:\"h:{hash}\"",
+                "edit {index}: stale_file: {} changed since it was last read in this session; an edit to a changed file applies only when its old matches exactly once (an anchor insert never does). Extend old until it is exact and unique, or read_file the lines around the edit",
                 edit.path
             )),
             Freshness::Unread | Freshness::ChangedSinceRead => None,
@@ -417,11 +419,9 @@ pub(super) fn edit_file(
             Ok(current) => current,
             Err(error) => return ToolOutput::error(error),
         };
-        let current_hash = content_hash(&current.bytes);
-        if current_hash != file.before_hash {
-            let hash = &current_hash[..12];
+        if content_hash(&current.bytes) != file.before_hash {
             return ToolOutput::error(format!(
-                "stale_file: {} is h:{hash} and changed since it was read; read it again, or pass if_hash:\"h:{hash}\"",
+                "stale_file: {} changed since it was read; read it again and retry",
                 file.key
             ));
         }
@@ -925,6 +925,17 @@ mod tests {
         format!("h:{}", &content_hash(bytes)[..12])
     }
 
+    /// A refusal must not hand back the current hash: passed as if_hash on
+    /// the next call, it would apply the refused edit with no content seen.
+    fn assert_no_current_hash(refused: &ToolOutput, current: &[u8]) {
+        assert!(refused.is_error, "{}", refused.model_text);
+        assert!(
+            !refused.model_text.contains(&short(current)[2..]),
+            "{}",
+            refused.model_text
+        );
+    }
+
     /// (a) The traced shape: the model reads a file, rewrites it itself
     /// with a shell `python3` script, then edits text it can see in the
     /// new content. A unique exact match applies and says so.
@@ -1038,15 +1049,12 @@ mod tests {
             r#"{"edits":[{"path":"list.txt","old":"item","new":"entry","replace_all":true}]}"#,
         ] {
             let refused = run(&workspace, &state, "edit_file", arguments);
-            assert!(refused.is_error, "{arguments}");
             assert_eq!(
                 refused.model_text,
-                format!(
-                    "edit 0: not_read: list.txt is {} and has not been read in this session; old must match exactly once to edit without a read. Call read_file on it, or pass if_hash:\"{0}\"",
-                    short(b"item\nitem\n")
-                ),
+                "edit 0: not_read: list.txt has not been read in this session; an edit to an unread file applies only when its old matches exactly once (an anchor insert never does). Extend old until it is exact and unique, or read_file the lines around the edit",
                 "{arguments}"
             );
+            assert_no_current_hash(&refused, b"item\nitem\n");
         }
         assert_eq!(
             fs::read_to_string(directory.path().join("list.txt")).unwrap(),
@@ -1065,7 +1073,7 @@ mod tests {
         assert!(
             refused
                 .model_text
-                .starts_with("edit 1: not_read: keys.txt is h:"),
+                .starts_with("edit 1: not_read: keys.txt has not been read"),
             "{}",
             refused.model_text
         );
@@ -1091,13 +1099,11 @@ mod tests {
             r#"{"edits":[{"path":"a.rs","old":"let  x = 1;\n","new":"let x = 2;\n"}]}"#,
         );
         assert!(
-            refused.model_text.starts_with(&format!(
-                "edit 0: not_read: a.rs is {} ",
-                short(b"    let x = 1;\n")
-            )),
+            refused.model_text.starts_with("edit 0: not_read: a.rs "),
             "{}",
             refused.model_text
         );
+        assert_no_current_hash(&refused, b"    let x = 1;\n");
         // An exact `old` that is simply absent is also no proof.
         let absent = run(
             &workspace,
@@ -1106,9 +1112,7 @@ mod tests {
             r#"{"edits":[{"path":"a.rs","old":"missing","new":"x"}]}"#,
         );
         assert!(
-            absent
-                .model_text
-                .starts_with("edit 0: not_read: a.rs is h:"),
+            absent.model_text.starts_with("edit 0: not_read: a.rs "),
             "{}",
             absent.model_text
         );
@@ -1137,11 +1141,9 @@ mod tests {
         );
         assert_eq!(
             refused.model_text,
-            format!(
-                "edit 0: stale_file: a.rs is {} and changed since it was last read in this session; old must match exactly once to edit without a re-read. Read it again, or pass if_hash:\"{0}\"",
-                short(b"    let x = 1;\nlet y;\n")
-            )
+            "edit 0: stale_file: a.rs changed since it was last read in this session; an edit to a changed file applies only when its old matches exactly once (an anchor insert never does). Extend old until it is exact and unique, or read_file the lines around the edit"
         );
+        assert_no_current_hash(&refused, b"    let x = 1;\nlet y;\n");
     }
 
     /// (e) An `if_hash` is an assertion of a version: a mismatch is
@@ -1189,11 +1191,14 @@ mod tests {
         ] {
             let refused = run(&workspace, &state, "edit_file", arguments);
             assert!(
-                refused.model_text.contains("not_read: a.txt is h:"),
+                refused
+                    .model_text
+                    .contains("not_read: a.txt has not been read"),
                 "{arguments}: {}",
                 refused.model_text
             );
             assert!(refused.file_states.is_empty());
+            assert_no_current_hash(&refused, b"alpha\nbeta\n");
         }
         assert_eq!(
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
@@ -1202,9 +1207,9 @@ mod tests {
     }
 
     /// (g) `write_file` replaces the whole file, so it proves nothing about
-    /// what was there; the refusal carries the hash for an `if_hash` retry.
+    /// what was there. Neither refusal hands back the hash.
     #[test]
-    fn a_write_over_an_unread_file_is_not_read_with_its_hash() {
+    fn a_write_over_an_unread_or_changed_file_is_refused_without_its_hash() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("note.txt"), "content\n").unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -1216,22 +1221,14 @@ mod tests {
             "write_file",
             r#"{"path":"note.txt","content":"replaced\n"}"#,
         );
-        let hash = short(b"content\n");
-        assert_eq!(
-            refused.model_text,
-            format!(
-                "not_read: note.txt is {hash} and has not been read in this session; call read_file on it first, or pass if_hash:\"{hash}\""
-            )
+        assert!(
+            refused.model_text.starts_with("not_read: note.txt "),
+            "{}",
+            refused.model_text
         );
-        let retried = run(
-            &workspace,
-            &state,
-            "write_file",
-            &format!(r#"{{"path":"note.txt","content":"replaced\n","if_hash":"{hash}"}}"#),
-        );
-        assert!(!retried.is_error, "{}", retried.model_text);
+        assert_no_current_hash(&refused, b"content\n");
 
-        // A stale recorded read carries the hash as well.
+        run(&workspace, &state, "read_file", r#"{"path":"note.txt"}"#);
         fs::write(directory.path().join("note.txt"), "outside\n").unwrap();
         let stale = run(
             &workspace,
@@ -1239,13 +1236,12 @@ mod tests {
             "write_file",
             r#"{"path":"note.txt","content":"again\n"}"#,
         );
-        let hash = short(b"outside\n");
-        assert_eq!(
-            stale.model_text,
-            format!(
-                "stale_file: note.txt is {hash} and changed since it was last read in this session; read it again, or pass if_hash:\"{hash}\""
-            )
+        assert!(
+            stale.model_text.starts_with("stale_file: note.txt "),
+            "{}",
+            stale.model_text
         );
+        assert_no_current_hash(&stale, b"outside\n");
         assert_eq!(
             fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "outside\n"
@@ -1271,7 +1267,7 @@ mod tests {
         assert!(
             refused
                 .model_text
-                .starts_with("edit 1: not_read: b.txt is h:"),
+                .starts_with("edit 1: not_read: b.txt has not been read"),
             "{}",
             refused.model_text
         );
@@ -1308,13 +1304,11 @@ mod tests {
             "edit_file",
             r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
         );
-        let hash = short(b"alpha\nbeta\nwritten by another session\n");
         assert_eq!(
             refused.model_text,
-            format!(
-                "stale_file: a.txt is {hash} and changed since it was read; read it again, or pass if_hash:\"{hash}\""
-            )
+            "stale_file: a.txt changed since it was read; read it again and retry"
         );
+        assert_no_current_hash(&refused, b"alpha\nbeta\nwritten by another session\n");
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "alpha\nbeta\nwritten by another session\n"

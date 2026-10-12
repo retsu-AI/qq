@@ -806,9 +806,10 @@ anchor alone, an `old` that needs the fuzzy cascade, an absent `old`, and a
 repeated `old` (even under `replace_all`) prove nothing, and fail
 `not_read` for an unread file or `stale_file` for a changed one, never
 `ambiguous` or `not_found`. The header then says `note=unread` or
-`note=changed_since_read`. Every `not_read`/`stale_file` names the file's
-current `h:<12 hex>` so the retry can pass it as `if_hash` without a
-`read_file`. A replacement whose match lands inside text an earlier edit wrote
+`note=changed_since_read`. A refusal names the fix (extend `old` until it is
+exact and unique, or read the lines around the edit) but never the file's
+current hash: passed back as `if_hash`, it would apply the refused edit
+without the model seeing any content. A replacement whose match lands inside text an earlier edit wrote
 is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2,
 under `apply_lock` for microseconds: re-hash every file against its
 plan-time hash, then temp+rename each in path order. A file that changed
@@ -857,8 +858,8 @@ Failures abort the whole batch and name the edit index: `not_read`,
 `if_hash` as currency proof without a prior read, and answers
 `write <path> created|replaced bytes= lines= h:<new12>`. Overwriting an
 existing file still needs a recorded read of its content or a matching
-`if_hash`: no `old` vouches for the text it replaces. Its `not_read` and
-`stale_file` carry the current `h:` like `edit_file`'s. When the new
+`if_hash`: no `old` vouches for the text it replaces. Like `edit_file`'s,
+its `not_read` and `stale_file` do not name the current hash. When the new
 content keeps more than 80 % of the old file's lines (line LCS, both under
 4 000 lines) the header adds `hint=use_edit_file`: the rewrite would have
 cost a fraction of the tokens as an edit. Rejected: `append` (an
@@ -876,8 +877,7 @@ long-held locks:
    hash. `edit_file` requires the same, except that an edit whose `old`
    occurs exactly once in the current content applies without either and
    says `note=unread` or `note=changed_since_read` (§ Edit Semantics,
-   ADR-0057). An `if_hash` that does not match is always `stale_file`. A
-   refusal names the current hash.
+   ADR-0057). An `if_hash` that does not match is always `stale_file`.
 3. At apply time, under a short per-workspace exclusive section, the current
    content is re-hashed. If it no longer matches the content phase 1
    planned against, the call fails with a stale-file error and the agent

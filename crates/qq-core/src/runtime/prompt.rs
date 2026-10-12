@@ -28,7 +28,7 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// arrives later as a runtime notice; 16 → 17 adds interim reports,
 /// wait_agents, and cancel_agent; 17 → 18 makes delegation guidance reflect
 /// the spawn schema's write authority; 18 → 19 says an unread or changed
-/// file takes a unique exact edit and that refusals carry the hash (T19).
+/// file takes a unique exact edit, and how to recover from a refusal (T19).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -259,7 +259,7 @@ fn agent_prompt_prefix(
          \n\
          Working conventions:\n\
          - Determine observable completion criteria from the user's request before acting.\n\
-         - Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. A refusal carries the file's current h:<hash>; pass it as if_hash to retry. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline to see a file's shape before reading it.\n\
+         - Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline to see a file's shape before reading it.\n\
          - edit_file takes a batch: edits=[{{path, old, new}}] or {{path, insert_before|insert_after, new}}; later edits see earlier results, the whole batch applies or none does, and the result names via=<strategy> when whitespace or indentation had to be forgiven. Extend old until it is unique rather than guessing; use dry_run to preview.\n\
          - Inspect existing state before changing it and preserve unrelated work.\n\
          - Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\

@@ -42,12 +42,14 @@ Still refused:
 - an `if_hash` that does not match. The model asserted a version, and every
   `if_hash` in a batch is checked.
 
-A batch fails whole. One qualifying file does not carry another. Every
-remaining `not_read`/`stale_file` in `edit_file` and `write_file`, including
-the apply-time one, names the current `h:<12 hex>` so the retry can pass it
-as `if_hash` without a read. Phase 2 is unchanged: under the exclusive
-section each file is re-hashed against its plan-time hash, and an applied
-edit records the new hash in `FileState`.
+A batch fails whole. One qualifying file does not carry another.
+Refusals do not name the file's current hash. Passed back as `if_hash`, it
+would apply the refused fuzzy edit or overwrite on the next call without the
+model seeing any content. The message names the cheapest fix instead: extend
+`old` until it is exact and unique, or read the lines around the edit. The
+`if_hash` path itself is unchanged (see Consequences). Phase 2 is unchanged:
+under the exclusive section each file is re-hashed against its plan-time
+hash, and an applied edit records the new hash in `FileState`.
 
 `Freshness` in `crates/qq-core/src/tools/edit.rs` encodes the three states.
 
@@ -64,8 +66,8 @@ is there. None of these meet the bar, so they keep the old rule.
 ## Consequences
 
 - Positive: the traced refusals apply without a round trip. Models have
-  less reason to edit through the shell. Refusals carry the hash, so the
-  retry is one call with `if_hash`.
+  less reason to edit through the shell. A refused edit can usually be
+  retried at once by extending `old`.
 - Concurrent sessions: suppose session B has read a file and session A
   then changes it. B's edit now applies if its `old` still occurs once in
   A's content. That is a clean rebase of a disjoint change, and
@@ -80,6 +82,10 @@ is there. None of these meet the bar, so they keep the old rule.
   makes that visible. A short, common `old` that happens to be unique (for
   example `x = 1`) is weak evidence. The rule accepts it because the
   replaced bytes are what the model named.
+- Unchanged weakness: `if_hash` still proves currency with no content seen
+  (`read_file mode=info` returns `h:`, and 44 stored calls sent the
+  placeholder `h:000000000000`). This decision neither widens nor narrows
+  it; decisions-needed row 12 asks whether to.
 - Follow-ups: the D10 rerun after T18–T20 (`not_read`+`stale_file` below
   3 %, a falling shell-write to `edit_file` ratio).
 
@@ -90,6 +96,7 @@ is there. None of these meet the bar, so they keep the old rule.
 | Keep the rule; improve the refusal text only | Still a round trip per refusal, and the audit shows the round trip is what pushes models to the shell |
 | Record a read when shell output shows file text | Parsing `grep`/`sed` output to infer file state is fragile and does not cover the model's own `python3` rewrite |
 | Accept any match the cascade finds | A fuzzy or ambiguous match is the case where the model's view differs from the file |
+| Return the current `h:` in every refusal (the first D10 draft) | The hash is the whole proof: the next call could pass it as `if_hash` and apply the refused fuzzy edit or overwrite blind |
 | Drop freshness entirely | Loses the guard against overwriting text the model never saw, and `write_file` would overwrite whole files blind |
 
 ## Evidence / references

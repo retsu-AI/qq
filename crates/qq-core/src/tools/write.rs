@@ -75,33 +75,30 @@ pub(super) fn write_file(
                 Err(error) => return ToolOutput::error(error),
             };
             let current_hash = content_hash(&current.bytes);
-            // Overwrites follow the read-before-write and staleness rules: a
-            // recorded read of this content, or an if_hash that proves
-            // currency another way. Only new files are exempt. A whole-file
-            // write replaces text no `old` vouches for, so the exact-match
-            // relaxation edits get (ADR-0057) does not apply; the refusal
-            // carries the current hash so a retry needs no read.
-            let hash = &current_hash[..12];
+            // Overwrites follow the same read-before-write and staleness
+            // rules as edits: a recorded read of this content, or an if_hash
+            // that proves currency another way. Only new files are exempt.
             match (&arguments.if_hash, file_state.recorded(&key)) {
                 (Some(if_hash), _) => {
-                    if if_hash[2..] != *hash {
+                    if if_hash[2..] != current_hash[..12] {
                         return ToolOutput::error(format!(
-                            "stale_file: {} is h:{hash} now, not {if_hash}; read it again",
+                            "stale_file: {} is h:{} now, not {if_hash}; read it again",
                             arguments.path,
+                            &current_hash[..12]
                         ));
                     }
                 }
                 (None, Some(recorded)) => {
                     if recorded != current_hash {
                         return ToolOutput::error(format!(
-                            "stale_file: {} is h:{hash} and changed since it was last read in this session; read it again, or pass if_hash:\"h:{hash}\"",
+                            "stale_file: {} changed since it was last read in this session; read it again and retry",
                             arguments.path
                         ));
                     }
                 }
                 (None, None) => {
                     return ToolOutput::error(format!(
-                        "not_read: {} is h:{hash} and has not been read in this session; call read_file on it first, or pass if_hash:\"h:{hash}\"",
+                        "not_read: {} already exists but has not been read in this session; call read_file on it first (or pass if_hash from its header)",
                         arguments.path
                     ));
                 }

@@ -9602,8 +9602,8 @@ mod tests {
         const EXACT_EDIT_BULLET: &str = "- Read a file with read_file before overwriting it or \
             editing by anchor; an edit to a file not read in this session (or changed since) \
             applies only when its old matches exactly once, and the result says note=unread or \
-            note=changed_since_read. A refusal carries the file's current h:<hash>; pass it as \
-            if_hash to retry.";
+            note=changed_since_read. If one is refused, extend old until it is exact and \
+            unique, or read the lines around it.";
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
