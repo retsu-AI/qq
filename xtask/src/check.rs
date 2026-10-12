@@ -412,18 +412,12 @@ pub fn parse_nextest_failures(output: &str) -> Vec<TestFailure> {
         };
         let package = binary.split("::").next().unwrap_or(binary).to_owned();
         let test = test.trim().to_owned();
-        if failures
-            .iter()
-            .any(|failure| failure.package == package && failure.test == test)
-        {
-            continue;
-        }
         let mut message = Vec::new();
         for following in lines.iter().skip(index + 1).take(200) {
             let following = following.trim();
-            if following.starts_with("PASS ")
-                || following.starts_with("FAIL ")
-                || following.starts_with("Summary ")
+            if following.starts_with("PASS [")
+                || following.starts_with("FAIL [")
+                || following.starts_with("Summary [")
             {
                 break;
             }
@@ -447,11 +441,24 @@ pub fn parse_nextest_failures(output: &str) -> Vec<TestFailure> {
         if message.is_empty() && trimmed.starts_with("TIMEOUT") {
             message.push("terminated by the nextest slow-timeout".to_owned());
         }
+        let message = message.join("\n");
+        // nextest prints a failure once when it happens and again after the
+        // summary; with `failure-output = "final"` only the second carries
+        // the output, so merge rather than keep the first.
+        if let Some(existing) = failures
+            .iter_mut()
+            .find(|failure| failure.package == package && failure.test == test)
+        {
+            if existing.message.is_empty() {
+                existing.message = message;
+            }
+            continue;
+        }
         failures.push(TestFailure {
             rerun: format!("cargo nextest run -p {package} -E 'test(={test})' --no-capture"),
             package,
             test,
-            message: message.join("\n"),
+            message,
         });
     }
     failures
@@ -975,6 +982,34 @@ mod tests {
         assert_eq!(
             failure.rerun,
             "cargo nextest run -p qq-core -E 'test(=sessions::tests::nonblocking::a_parent_replays)' --no-capture"
+        );
+    }
+
+    #[test]
+    fn final_failure_output_after_the_summary_is_attached() {
+        let output = "\
+        FAIL [   0.003s] (380/624) qq-tui render::probe_tests::probe_fails
+────────────
+     Summary [   6.741s] 624 tests run: 623 passed, 1 failed, 3 skipped
+        FAIL [   0.003s] (380/624) qq-tui render::probe_tests::probe_fails
+  stdout ───
+
+    test render::probe_tests::probe_fails ... FAILED
+
+  stderr ───
+
+    thread 'render::probe_tests::probe_fails' (604676) panicked at crates/qq-tui/src/render.rs:429:9:
+    assertion `left == right` failed: probe: arithmetic broke
+      left: 2
+     right: 3
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+";
+        let failures = parse_nextest_failures(output);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].message,
+            "thread 'render::probe_tests::probe_fails' (604676) panicked at crates/qq-tui/src/render.rs:429:9:\n\
+             assertion `left == right` failed: probe: arithmetic broke\nleft: 2\nright: 3"
         );
     }
 
