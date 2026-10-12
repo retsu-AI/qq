@@ -926,16 +926,64 @@ over every simple command anywhere in the tree (ADR-0020):
 
 | tier | reached by | under `auto` | under `full` |
 | --- | --- | --- | --- |
-| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, harmless redirects only) whose every command is a listed read/build shape with workspace-relative operands | executes | executes |
-| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
+| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, stream-only redirects) whose every command, once launchers are peeled, is a listed read/build shape with workspace-relative operands | executes | executes |
+| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes other than a plain `fetch`, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
 | `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | refused | **refused** |
 
 `Forbidden` is refused under every mode as a tool error naming the rule and
 an alternative; only a grant that quotes the exact command string lifts it
-(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep (`env
-nice nohup time timeout stdbuf xargs sudo`; `sh -c STRING` is reparsed) so
-the inner command is judged too. Commands over 16 KiB skip parsing and
-prompt. The rules are a static table in `approval/rules.rs` whose
+(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep so the
+inner command is judged too. Past that depth, what is left counts as nested
+and is never allowed. Commands over 16 KiB skip parsing and prompt.
+
+**Launchers** are a closed set: `timeout`, `time`, `nice`, `nohup`, and
+`stdbuf`. They are judged by the command they launch. A launcher qualifies
+when it has only its own options and an inner command follows:
+
+- `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, `--preserve-status`,
+  and `--foreground`, then a duration.
+- `nice`: `-n N` or `--adjustment=N`.
+- `stdbuf`: `-i/-o/-e MODE`.
+- `time`: `-p`.
+- `nohup`: no options.
+
+A qualifying launcher is replaced by its inner command at the same level,
+so it adds no tier. `timeout 300 cargo test` is `Allow`, `nice rm -rf
+target` is `Prompt`, and `timeout 5 sudo ls` is `Forbidden`. A launcher
+with any other option, or with nothing to launch, is `unlisted`.
+
+The other wrappers are recorded as commands of their own, and the command
+they wrap counts as nested, so it is never allowed. These are `env`,
+`xargs`, `sudo`, `doas`, and `su`, plus `ionice`, `chrt`, `taskset`, and
+`renice`, which are not launchers because they can retarget a running
+process. `sh -c STRING` is reparsed.
+
+A redirect writes nothing when its target is `/dev/null`, `/dev/std*`, or
+a descriptor duplication (`2>&1`, `>&2`). `> 1` writes a file named `1`. A
+list or pipeline whose redirects all write nothing (`cd src && cargo test
+2>&1 | grep FAILED`) is judged like the same list without them. Any other
+redirected construct counts as nested.
+
+Globs stay dynamic (`dynamic_word`), including workspace-relative ones. A
+glob expands to filenames the workspace controls, and a filename can be
+program syntax: a file named `e touch PWN` turns `sed -n *` into a script
+that runs a command.
+
+`git -C <dir>` is skipped before the subcommand is read. The joined
+directory of every `-C` hop must stay inside the workspace. An escape is
+`Prompt` with `path_outside_workspace`, and `git -C sub push --force` is
+still `Forbidden`. `git worktree list` and `git branch --list [pattern]`
+are reads.
+
+`git fetch` updates only `FETCH_HEAD` and remote-tracking refs, so its
+plain form is `Allow`. It is admitted by allowlist. The only options
+allowed are `-q`, `-v`, `--all`, and `--no-tags`. Every other argument
+must be a remote or branch name, with no leading `-`, `+`, `.`, `/`, or
+`~`, and no `:`. Any other form keeps `git_remote`. That covers force,
+prune, tags, refspecs, `--depth`, `--upload-pack`, URLs, paths, and a
+`git -c` prefix.
+
+The rules are a static table in `approval/rules.rs` whose
 `match`/`not_match` examples run as one unit test. `ShellCommandPreview`
 carries `verdict` and `reasons` (rule ids) so a client can show why it is
 asking. Cost: 3–10 µs on ordinary commands, ~165 µs on a 1 KiB one-liner

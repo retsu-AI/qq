@@ -463,3 +463,18 @@ Seven Codex findings on `9bcb60a6`; all were valid and the plan is amended:
 - T18 acceptance is a checked-in `d10_held` table of sanitized shapes, not the private session corpus (the repository is public). The `/tmp` replay stays advisory.
 - T19 covers only the `old` form; anchor inserts are anchor-only in the schema and still need a read. Refusals no longer return `h:`, which would have authorized the refused edit on the next call. The existing `if_hash` weakness (`mode=info`, 44 placeholder hashes) is decisions-needed row 12.
 - T20 no longer lists recent handles: a zero handle gets a parse-time `handle_placeholder` correction and needs no store query. `qq-protocol` `ToolErrorKind::of` is added to T20's owned paths.
+
+### 2026-10-11 — T18 in progress → in review (ENG-1031)
+
+- Branch `fix/t18-classifier-false-prompts`, stacked on `docs/tool-layer-d10-audit` (#280). The first implementation followed the plan at `9bcb60a6`, including globs and a fetch denylist. Before I pushed it, the plan was tightened in `3f36c947`, so I discarded that version and redid the slice against the tightened plan. The ledger numbers below are from the redone version.
+- Replay method (advisory): `/tmp/opencode/replay` is untracked. `src/main.rs` classifies every `cmds.jsonl` line whose `a` ends in `/auto` through `qq_core::classify_bench::classify`. Two copies of the crate were built with path dependencies on a detached `3f36c947` worktree and on this branch, and their outputs were diffed by line index.
+
+#### T18 receipt — 2026-10-11
+Commits: `f90c6736` (failing rows + `D10_HELD`), `dc169ad0` (fix), plus this docs commit.
+Tests: `rule_examples_hold` +122 rows; `D10_HELD` 30 shapes with before/after verdicts and a no-Forbidden-crossing assertion; reason asserts +8; workspace 2221 passed / 14 ignored.
+Gate `classify_command` (median of 3, ns): simple 3306 → 3565, pipeline 10196 → 10431, forbidden_wrapped 9326 → 8704, 1 KiB 164007 → 163260 (budget 200 µs). IO pressure `some avg10` was 19–71 % (another agent active); the medians are informative, and no tail is claimed.
+Replay (226 `auto`, 143 held): prompt 143 → 113, allow 83 → 113. 30 moved prompt→allow (all reviewer- or human-approved), 0 allow→prompt, and 0 in or out of Forbidden (0 before, 0 after). That is above the plan's ~26 because `git fetch` and `2>&1` lists combine in a few commands.
+Behavior changes beyond the plan text, conservative: `> 1` (a file named 1) now prompts. `git -C x push --force` is now Forbidden (it was Prompt). A bare or foreign-option launcher is `unlisted` (the five launchers left the allow tables). More than 8 wrappers is nested.
+Deviations: the brief's ≥ 40 replay target and glob item are superseded by `3f36c947`, so globs are unchanged. Executor MCP was unavailable, so Linear went through `linear` CLI and GitHub through `gh`.
+Docs: `tools.md` § Shell Classification.
+Evidence: `target/qq-perf/t18-2026-10-11/` (baseline.txt, candidate.txt, pressure-*, replay-*.jsonl, workspace-test.log).
