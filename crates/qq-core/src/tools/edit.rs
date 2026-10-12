@@ -36,6 +36,22 @@ struct ApplyHook {
 static APPLY_HOOKS: std::sync::Mutex<Vec<ApplyHook>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
+type PlannedHook = (PathBuf, Box<dyn FnOnce() + Send>);
+
+/// Runs once between an `edit_file` plan and its apply-time exclusive
+/// section in `workspace`, standing in for a writer that lands in between.
+#[cfg(test)]
+static PLANNED_HOOKS: std::sync::Mutex<Vec<PlannedHook>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn on_edit_planned(workspace: &Path, hook: impl FnOnce() + Send + 'static) {
+    PLANNED_HOOKS
+        .lock()
+        .unwrap()
+        .push((workspace.to_owned(), Box::new(hook)));
+}
+
+#[cfg(test)]
 pub(crate) fn hold_tool_apply(
     workspace: &Path,
 ) -> (
@@ -323,6 +339,19 @@ pub(super) fn edit_file(
         return result;
     }
 
+    #[cfg(test)]
+    {
+        let hook = {
+            let mut hooks = PLANNED_HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|(path, _)| path == workspace.path())
+                .map(|index| hooks.remove(index).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     // Phase 2, under the apply lock: re-hash every file, then temp+rename
     // each in path order. A rename failure midway is reported honestly.
     let guard = workspace
@@ -820,7 +849,404 @@ pub(super) fn apply_atomically(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{Edit, Form};
+    use crate::{
+        RunCancellation,
+        tools::dispatch::{ToolCancellation, ToolOutput, execute_blocking},
+        workspace::{FileState, Workspace, content_hash},
+    };
+
+    fn run(workspace: &Workspace, state: &FileState, name: &str, arguments: &str) -> ToolOutput {
+        execute_blocking(
+            workspace,
+            state,
+            name,
+            arguments,
+            &ToolCancellation::new(RunCancellation::new()),
+        )
+    }
+
+    fn short(bytes: &[u8]) -> String {
+        format!("h:{}", &content_hash(bytes)[..12])
+    }
+
+    /// (a) The traced shape: the model reads a file, rewrites it itself
+    /// with a shell `python3` script, then edits text it can see in the
+    /// new content. A unique exact match applies and says so.
+    #[test]
+    fn an_exact_edit_after_an_outside_rewrite_applies_as_changed_since_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.py"), "x = 1\ny = 2\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run(&workspace, &state, "read_file", r#"{"path":"a.py"}"#);
+        fs::write(directory.path().join("a.py"), "x = 1\ny = 3\nz = 4\n").unwrap();
+
+        let edited = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.py","old":"z = 4","new":"z = 5"}]}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        let after = b"x = 1\ny = 3\nz = 5\n";
+        assert_eq!(
+            edited.model_text,
+            format!(
+                "edit ok files=1 edits=1 note=changed_since_read\na.py {} L3 -1+1\n",
+                short(after)
+            )
+        );
+        assert_eq!(fs::read(directory.path().join("a.py")).unwrap(), after);
+        assert_eq!(state.recorded("a.py"), Some(content_hash(after)));
+    }
+
+    /// (b) Never read in this session; the `old` is unique and exact.
+    #[test]
+    fn a_unique_exact_edit_on_an_unread_file_applies_as_unread() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.rs"), "fn one() {}\nfn two() {}\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let edited = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.rs","old":"fn two() {}","new":"fn two() { 2 }"},{"path":"a.rs","old":"fn one() {}","new":"fn one() { 1 }"}]}"#,
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        let after = b"fn one() { 1 }\nfn two() { 2 }\n";
+        assert!(
+            edited
+                .model_text
+                .starts_with("edit ok files=1 edits=2 note=unread\n"),
+            "{}",
+            edited.model_text
+        );
+        assert_eq!(fs::read(directory.path().join("a.rs")).unwrap(), after);
+        assert_eq!(state.recorded("a.rs"), Some(content_hash(after)));
+        assert_eq!(edited.file_states.len(), 1);
+
+        // The applied edit recorded the new hash: the next edit is proven.
+        let next = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.rs","insert_after":"fn two() { 2 }","new":"fn three() {}"}]}"#,
+        );
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(!next.model_text.contains("note="), "{}", next.model_text);
+    }
+
+    /// The dry run follows the same rule and names the note too, and an
+    /// existing note joins it with a comma.
+    #[test]
+    fn an_unread_dry_run_and_an_ignored_form_combine_their_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let preview = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma","insert_after":""}],"dry_run":true}"#,
+        );
+        assert!(!preview.is_error, "{}", preview.model_text);
+        assert!(
+            preview
+                .model_text
+                .starts_with("edit dry_run files=1 edits=1 note=empty_form_ignored,unread\n"),
+            "{}",
+            preview.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+        assert_eq!(state.recorded("a.txt"), None);
+    }
+
+    /// (c) A duplicate `old` proves nothing about which copy the model saw:
+    /// on an unread file it is `not_read`, not `ambiguous`.
+    #[test]
+    fn a_duplicate_old_on_an_unread_file_is_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("list.txt"), "item\nitem\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        for arguments in [
+            r#"{"edits":[{"path":"list.txt","old":"item","new":"entry"}]}"#,
+            r#"{"edits":[{"path":"list.txt","old":"item","new":"entry","replace_all":true}]}"#,
+        ] {
+            let refused = run(&workspace, &state, "edit_file", arguments);
+            assert!(refused.is_error, "{arguments}");
+            assert_eq!(
+                refused.model_text,
+                format!(
+                    "edit 0: not_read: list.txt is {} and has not been read in this session; old must match exactly once to edit without a read. Call read_file on it, or pass if_hash:\"{0}\"",
+                    short(b"item\nitem\n")
+                ),
+                "{arguments}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(directory.path().join("list.txt")).unwrap(),
+            "item\nitem\n"
+        );
+    }
+
+    /// (d) A fuzzy-only match means the model's text differs from the file:
+    /// it does not prove the region was seen.
+    #[test]
+    fn a_fuzzy_only_match_on_an_unread_file_is_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.rs"), "    let x = 1;\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.rs","old":"let  x = 1;\n","new":"let x = 2;\n"}]}"#,
+        );
+        assert!(
+            refused.model_text.starts_with(&format!(
+                "edit 0: not_read: a.rs is {} ",
+                short(b"    let x = 1;\n")
+            )),
+            "{}",
+            refused.model_text
+        );
+        // An exact `old` that is simply absent is also no proof.
+        let absent = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.rs","old":"missing","new":"x"}]}"#,
+        );
+        assert!(
+            absent
+                .model_text
+                .starts_with("edit 0: not_read: a.rs is h:"),
+            "{}",
+            absent.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.rs")).unwrap(),
+            "    let x = 1;\n"
+        );
+    }
+
+    /// The same holds for a recorded read that went stale: no unique exact
+    /// match, `stale_file` with the current hash.
+    #[test]
+    fn a_fuzzy_only_match_on_a_changed_file_is_stale_with_its_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.rs"), "    let x = 1;\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run(&workspace, &state, "read_file", r#"{"path":"a.rs"}"#);
+        fs::write(directory.path().join("a.rs"), "    let x = 1;\nlet y;\n").unwrap();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.rs","old":"let  x = 1;\n","new":"let x = 2;\n"}]}"#,
+        );
+        assert_eq!(
+            refused.model_text,
+            format!(
+                "edit 0: stale_file: a.rs is {} and changed since it was last read in this session; old must match exactly once to edit without a re-read. Read it again, or pass if_hash:\"{0}\"",
+                short(b"    let x = 1;\nlet y;\n")
+            )
+        );
+    }
+
+    /// (e) An `if_hash` is an assertion of a version: a mismatch is
+    /// `stale_file` even when `old` would match exactly once.
+    #[test]
+    fn an_if_hash_mismatch_is_still_stale_file() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma","if_hash":"h:000000000000"}]}"#,
+        );
+        assert_eq!(
+            refused.model_text,
+            format!(
+                "edit 0: stale_file: a.txt is {} now, not h:000000000000; read it again",
+                short(b"alpha\nbeta\n")
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+    }
+
+    /// (f) An insert names only an anchor; no text is replaced, so nothing
+    /// proves the model saw where it lands.
+    #[test]
+    fn an_anchor_only_insert_on_an_unread_file_is_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        for arguments in [
+            r#"{"edits":[{"path":"a.txt","insert_after":"alpha","new":"x"}]}"#,
+            r#"{"edits":[{"path":"a.txt","insert_before":"beta","new":"x"}]}"#,
+            // One qualifying replace does not carry an insert in the same file.
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"},{"path":"a.txt","insert_after":"alpha","new":"x"}]}"#,
+        ] {
+            let refused = run(&workspace, &state, "edit_file", arguments);
+            assert!(
+                refused.model_text.contains("not_read: a.txt is h:"),
+                "{arguments}: {}",
+                refused.model_text
+            );
+            assert!(refused.file_states.is_empty());
+        }
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\nbeta\n"
+        );
+    }
+
+    /// (g) `write_file` replaces the whole file, so it proves nothing about
+    /// what was there; the refusal carries the hash for an `if_hash` retry.
+    #[test]
+    fn a_write_over_an_unread_file_is_not_read_with_its_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("note.txt"), "content\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"note.txt","content":"replaced\n"}"#,
+        );
+        let hash = short(b"content\n");
+        assert_eq!(
+            refused.model_text,
+            format!(
+                "not_read: note.txt is {hash} and has not been read in this session; call read_file on it first, or pass if_hash:\"{hash}\""
+            )
+        );
+        let retried = run(
+            &workspace,
+            &state,
+            "write_file",
+            &format!(r#"{{"path":"note.txt","content":"replaced\n","if_hash":"{hash}"}}"#),
+        );
+        assert!(!retried.is_error, "{}", retried.model_text);
+
+        // A stale recorded read carries the hash as well.
+        fs::write(directory.path().join("note.txt"), "outside\n").unwrap();
+        let stale = run(
+            &workspace,
+            &state,
+            "write_file",
+            r#"{"path":"note.txt","content":"again\n"}"#,
+        );
+        let hash = short(b"outside\n");
+        assert_eq!(
+            stale.model_text,
+            format!(
+                "stale_file: note.txt is {hash} and changed since it was last read in this session; read it again, or pass if_hash:\"{hash}\""
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+            "outside\n"
+        );
+    }
+
+    /// (h) A batch qualifies file by file, and fails whole: one file with a
+    /// unique exact match does not carry another without one.
+    #[test]
+    fn a_mixed_batch_fails_whole_and_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        fs::write(directory.path().join("b.txt"), "beta\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"alpha","new":"ALPHA"},{"path":"b.txt","old":"beta","new":"BETA"}]}"#,
+        );
+        assert!(
+            refused
+                .model_text
+                .starts_with("edit 1: not_read: b.txt is h:"),
+            "{}",
+            refused.model_text
+        );
+        assert!(refused.ui_payload.is_none());
+        assert!(refused.file_states.is_empty());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("b.txt")).unwrap(),
+            "beta\nbeta\n"
+        );
+        assert_eq!(state.recorded("a.txt"), None);
+    }
+
+    /// (i) The match proves what the model saw at plan time. A writer that
+    /// lands before the apply-time re-hash still fails the edit.
+    #[test]
+    fn a_write_between_plan_and_apply_is_stale_and_not_clobbered() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("a.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let writer = path.clone();
+        super::on_edit_planned(workspace.path(), move || {
+            fs::write(writer, "alpha\nbeta\nwritten by another session\n").unwrap();
+        });
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
+        );
+        assert!(
+            refused
+                .model_text
+                .starts_with("stale_file: a.txt changed since it was read"),
+            "{}",
+            refused.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "alpha\nbeta\nwritten by another session\n"
+        );
+        assert_eq!(state.recorded("a.txt"), None);
+    }
 
     #[test]
     fn empty_optional_insert_modes_do_not_conflict_with_replace() {
