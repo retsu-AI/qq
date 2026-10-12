@@ -7,7 +7,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::classify::{Decision, SimpleCommand, basename};
+use super::classify::{Decision, SimpleCommand, basename, stream_target};
 
 /// Identifies which rule produced a verdict so the approval preview can say
 /// why it is asking (or refusing) and a grant can quote it.
@@ -192,17 +192,47 @@ pub(crate) fn judge(
     let Some(program) = command.program() else {
         return (Decision::Prompt, Some(RuleId::DynamicWord));
     };
-    let args: Vec<&str> = command
+    let mut args: Vec<&str> = command
         .args()
         .iter()
         .map(|arg| arg.as_deref().unwrap_or("\u{0}"))
         .collect();
-    let dynamic = command.has_dynamic_word();
+    // `git -C <dir>…` runs git in `<dir>`. The subcommand is read after every
+    // `-C` hop, and the hops, joined as git joins them, must stay inside the
+    // workspace.
+    let mut git_dir_escapes = false;
+    if program == "git" {
+        let mut dir = String::new();
+        let mut hops = 0;
+        while args.get(hops) == Some(&"-C") {
+            match args.get(hops + 1).copied() {
+                Some(hop) if hop != "\u{0}" => {
+                    dir = if dir.is_empty() || Path::new(hop).is_absolute() {
+                        hop.to_owned()
+                    } else {
+                        format!("{dir}/{hop}")
+                    };
+                    hops += 2;
+                }
+                // A dynamic or missing directory: leave the words in place
+                // so the command reads as dynamic or unlisted.
+                _ => break,
+            }
+        }
+        if hops > 0 {
+            git_dir_escapes = path_escapes(&dir, workspace);
+            args.drain(..hops);
+        }
+    }
+    let dynamic = args.contains(&"\u{0}");
     let literal_args: Vec<&str> = args.iter().copied().filter(|arg| *arg != "\u{0}").collect();
 
     // Forbidden shapes first: they win regardless of anything else.
     if let Some(rule) = forbidden(program, &literal_args, command, workspace) {
         return (Decision::Forbidden, Some(rule));
+    }
+    if git_dir_escapes {
+        return (Decision::Prompt, Some(RuleId::PathOutsideWorkspace));
     }
     // Redirects into the workspace ask; outside it (except /tmp) ask too, but
     // a redirect to a shell profile or a device was caught above.
@@ -214,11 +244,7 @@ pub(crate) fn judge(
         match target {
             None => return (Decision::Prompt, Some(RuleId::RedirectIntoWorkspace)),
             Some(target) => {
-                if target == "/dev/null"
-                    || target.starts_with("/dev/std")
-                    || target.starts_with("/dev/fd/")
-                    || target.chars().all(|c| c.is_ascii_digit())
-                {
+                if stream_target(target) || target.starts_with("/dev/fd/") {
                     continue;
                 }
                 if path_escapes(target, workspace) {
@@ -400,6 +426,24 @@ fn prompt(
     match program {
         "rm" | "rmdir" | "unlink" | "shred" | "truncate" => Some(RuleId::RemoveFile),
         "git" => match args.first().copied() {
+            // Plain fetch updates only `FETCH_HEAD` and remote-tracking refs
+            // (lead decision 2026-10-11). It is admitted by allowlist: a few
+            // output and scope options, and remote or branch names. That
+            // excludes force, prune, tags, refspecs, depth, transfer programs,
+            // URLs, and paths.
+            Some("fetch")
+                if args[1..].iter().all(|a| {
+                    matches!(
+                        *a,
+                        "-q" | "--quiet" | "-v" | "--verbose" | "--all" | "--no-tags"
+                    ) || (!a.is_empty()
+                        && !a.starts_with(['-', '+', '.', '/', '~'])
+                        && !a.contains([':', '\\'])
+                        && !a.contains(".."))
+                }) =>
+            {
+                None
+            }
             Some("push" | "fetch" | "pull" | "clone" | "remote" | "submodule" | "lfs") => {
                 if args.first() == Some(&"remote")
                     && matches!(args.get(1).copied(), None | Some("-v" | "show" | "get-url"))
@@ -419,6 +463,7 @@ fn prompt(
                 // without delete are reads and fall through to the allow table.
                 let read = (args.first() == Some(&"stash")
                     && matches!(args.get(1).copied(), Some("list" | "show")))
+                    || (args.first() == Some(&"worktree") && args.get(1) == Some(&"list"))
                     || (args.first() == Some(&"config")
                         && matches!(
                             args.get(1).copied(),
@@ -449,8 +494,13 @@ fn prompt(
             {
                 Some(RuleId::GitMutation)
             }
-            Some("branch") if args.len() > 1 && !args[1..].iter().all(|a| a.starts_with('-')) => {
-                // `git branch name` creates.
+            Some("branch")
+                if args.len() > 1
+                    && !args[1..].iter().all(|a| a.starts_with('-'))
+                    && !args.contains(&"--list") =>
+            {
+                // `git branch name` creates; `git branch --list pattern`
+                // filters the listing.
                 Some(RuleId::GitMutation)
             }
             _ => None,
@@ -536,7 +586,10 @@ fn prompt(
 }
 
 /// The read-only and build shapes `auto` mode runs without asking. Requires
-/// literal argv (the caller checked) and no redirects.
+/// literal argv (the caller checked) and no redirects. The launchers
+/// (`timeout`, `nice`, …) are absent on purpose: the classifier peels a
+/// well-formed one, so one that reaches here has a foreign option or nothing
+/// to launch.
 fn allow(program: &str, args: &[&str], workspace: Option<&Path>) -> bool {
     // Redirects that write were judged above; what remains (null, streams)
     // does not change what the program does.
@@ -615,11 +668,14 @@ fn allow(program: &str, args: &[&str], workspace: Option<&Path>) -> bool {
                         | "show-branch"
                 )
             ) || (first == Some("branch")
-                && args[1..].iter().all(|a| a.starts_with('-'))
+                && (args[1..].iter().all(|a| a.starts_with('-')) || args.contains(&"--list"))
                 && !args
                     .iter()
                     .any(|a| matches!(*a, "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "-u")))
                 || (first == Some("stash") && matches!(args.get(1).copied(), Some("list" | "show")))
+                || (first == Some("worktree") && args.get(1) == Some(&"list"))
+                // Only the plain form reaches here; `prompt` judged the rest.
+                || first == Some("fetch")
                 || (first == Some("remote")
                     && matches!(args.get(1).copied(), None | Some("-v" | "show" | "get-url")))
                 || (first == Some("config")
@@ -657,29 +713,28 @@ fn allow(program: &str, args: &[&str], workspace: Option<&Path>) -> bool {
         | "gawk" | "jq" | "yq" | "xxd" | "hexdump" | "od" | "strings" | "md5sum" | "sha1sum"
         | "sha256sum" | "b2sum" | "cksum" | "tput" | "tty" | "locale" | "getconf" | "ldd"
         | "objdump" | "nm" | "readelf" | "size" | "ps" | "top" | "free" | "uptime" | "lsof"
-        | "ss" | "ip" | "ifconfig" | "dig" | "host" | "nslookup" | "ping" | "time" | "timeout"
-        | "nice" | "nohup" | "stdbuf" | "mktemp" | "man" | "info" | "help" | "cd" | "export"
-        | "set" | "unset" | "alias" | "history" | "sed" | "look" | "fold" | "fmt" | "pr"
-        | "expand" | "unexpand" | "shuf" | "tsort" | "sum" | "split" | "csplit" | "iconv"
-        | "dos2unix" | "unix2dos" | "pandoc" | "shellcheck" | "shfmt" | "black" | "ruff"
-        | "mypy" | "pyright" | "flake8" | "isort" | "eslint" | "prettier" | "tsc" | "biome"
-        | "clippy-driver" | "cargo-fmt" | "cargo-clippy" | "gofmt" | "golangci-lint"
-        | "staticcheck" | "zig" | "clang-format" | "clang-tidy" | "cppcheck" | "javac" | "java"
-        | "kotlinc" | "swift" | "dotnet" | "ctest" | "cmake" | "ninja" | "meson" | "bazel"
-        | "buck2" | "gradle" | "mvn" | "sbt" | "lein" | "mix" | "elixir" | "erl" | "ghc"
-        | "cabal" | "stack" | "ocaml" | "dune" | "opam" | "nix" | "nix-build" | "nix-shell"
-        | "direnv" | "just" | "make" | "gmake" | "bmake" | "task" | "mage" | "pytest"
-        | "python" | "python3" | "node" | "npm" | "pnpm" | "yarn" | "bun" | "deno" | "go"
-        | "ruby" | "bundle" | "rake" | "rspec" | "perl" | "php" | "composer" | "phpunit" | "R"
-        | "Rscript" | "julia" | "lua" | "luajit" | "tclsh" | "gcc" | "g++" | "clang"
-        | "clang++" | "cc" | "c++" | "ld" | "ar" | "as" | "strip" | "pkg-config" | "autoconf"
-        | "automake" | "libtool" | "m4" | "flex" | "bison" | "protoc" | "buf" | "grpcurl"
-        | "sqlite3" | "psql" | "mysql" | "redis-cli" | "gh" | "glab" | "hub" | "op" | "vault"
-        | "aws" | "gcloud" | "az" | "kubectl" | "helm" | "terraform" | "tofu" | "pulumi"
-        | "ansible" | "vagrant" | "docker" | "podman" | "nerdctl" | "wasm-pack" | "wasmtime"
-        | "wasmer" | "trunk" | "vite" | "webpack" | "esbuild" | "rollup" | "parcel" | "next"
-        | "nuxt" | "astro" | "svelte-kit" | "ng" | "vue" | "expo" | "flutter" | "dart"
-        | "xcodebuild" | "swiftc" | "fastlane" | "pod" | "carthage" => {
+        | "ss" | "ip" | "ifconfig" | "dig" | "host" | "nslookup" | "ping" | "mktemp" | "man"
+        | "info" | "help" | "cd" | "export" | "set" | "unset" | "alias" | "history" | "sed"
+        | "look" | "fold" | "fmt" | "pr" | "expand" | "unexpand" | "shuf" | "tsort" | "sum"
+        | "split" | "csplit" | "iconv" | "dos2unix" | "unix2dos" | "pandoc" | "shellcheck"
+        | "shfmt" | "black" | "ruff" | "mypy" | "pyright" | "flake8" | "isort" | "eslint"
+        | "prettier" | "tsc" | "biome" | "clippy-driver" | "cargo-fmt" | "cargo-clippy"
+        | "gofmt" | "golangci-lint" | "staticcheck" | "zig" | "clang-format" | "clang-tidy"
+        | "cppcheck" | "javac" | "java" | "kotlinc" | "swift" | "dotnet" | "ctest" | "cmake"
+        | "ninja" | "meson" | "bazel" | "buck2" | "gradle" | "mvn" | "sbt" | "lein" | "mix"
+        | "elixir" | "erl" | "ghc" | "cabal" | "stack" | "ocaml" | "dune" | "opam" | "nix"
+        | "nix-build" | "nix-shell" | "direnv" | "just" | "make" | "gmake" | "bmake" | "task"
+        | "mage" | "pytest" | "python" | "python3" | "node" | "npm" | "pnpm" | "yarn" | "bun"
+        | "deno" | "go" | "ruby" | "bundle" | "rake" | "rspec" | "perl" | "php" | "composer"
+        | "phpunit" | "R" | "Rscript" | "julia" | "lua" | "luajit" | "tclsh" | "gcc" | "g++"
+        | "clang" | "clang++" | "cc" | "c++" | "ld" | "ar" | "as" | "strip" | "pkg-config"
+        | "autoconf" | "automake" | "libtool" | "m4" | "flex" | "bison" | "protoc" | "buf"
+        | "grpcurl" | "sqlite3" | "psql" | "mysql" | "redis-cli" | "gh" | "glab" | "hub" | "op"
+        | "vault" | "aws" | "gcloud" | "az" | "kubectl" | "helm" | "terraform" | "tofu"
+        | "pulumi" | "ansible" | "vagrant" | "docker" | "podman" | "nerdctl" | "wasm-pack"
+        | "wasmtime" | "wasmer" | "trunk" | "vite" | "webpack" | "esbuild" | "rollup"
+        | "parcel" | "next" | "nuxt" | "astro" | "svelte-kit" | "ng" | "vue" | "expo"
+        | "flutter" | "dart" | "xcodebuild" | "swiftc" | "fastlane" | "pod" | "carthage" => {
             allow_refined(program, args, workspace)
         }
         _ => false,
@@ -974,10 +1029,10 @@ fn allow_refined(program: &str, args: &[&str], workspace: Option<&Path>) -> bool
         | "nproc" | "df" | "which" | "type" | "env" | "printenv" | "id" | "whoami" | "hostname"
         | "basename" | "dirname" | "tr" | "rev" | "seq" | "yes" | "sleep" | "expr" | "bc"
         | "tput" | "tty" | "locale" | "getconf" | "ps" | "top" | "free" | "uptime" | "lsof"
-        | "ss" | "ip" | "ifconfig" | "dig" | "host" | "nslookup" | "ping" | "time" | "timeout"
-        | "nice" | "nohup" | "stdbuf" | "mktemp" | "man" | "info" | "help" | "cd" | "export"
-        | "set" | "unset" | "alias" | "history" | "look" | "fmt" | "expand" | "unexpand"
-        | "tsort" | "sum" | "dos2unix" | "unix2dos" | "cargo" | "git" | "jj" => {
+        | "ss" | "ip" | "ifconfig" | "dig" | "host" | "nslookup" | "ping" | "mktemp" | "man"
+        | "info" | "help" | "cd" | "export" | "set" | "unset" | "alias" | "history" | "look"
+        | "fmt" | "expand" | "unexpand" | "tsort" | "sum" | "dos2unix" | "unix2dos" | "cargo"
+        | "git" | "jj" => {
             // Builtins and pure text tools; `cd`/`ls`-class operands checked.
             !(program == "cd" && args.first().is_some_and(|a| path_escapes(a, workspace)))
                 && !(program == "ip"

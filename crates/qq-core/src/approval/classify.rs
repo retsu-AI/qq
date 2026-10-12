@@ -69,6 +69,16 @@ impl SimpleCommand {
     }
 }
 
+/// A redirect target that writes nothing: the null device, a standard
+/// stream, or a descriptor duplication (`2>&1`, recorded as `&1`).
+pub(crate) fn stream_target(target: &str) -> bool {
+    target == "/dev/null"
+        || target.starts_with("/dev/std")
+        || target
+            .strip_prefix('&')
+            .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+}
+
 pub(crate) fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
@@ -177,6 +187,58 @@ pub(crate) fn classify_command(command: &str, workspace: Option<&std::path::Path
     Verdict { decision, reasons }
 }
 
+/// For a transparent launcher, the number of words after the program that
+/// belong to it: its own options and, for `timeout`, the duration. It is
+/// `None` in three cases: the program is not one of the closed set, a word is
+/// not a literal option of that launcher, or no inner command follows. In
+/// each case the launcher is judged as a program of its own (`unlisted`).
+fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
+    // Options that take the next word, options that stand alone, and the
+    // `--long=` and attached short forms (`-oL`) that carry their value.
+    let (with_value, alone, attached): (&[&str], &[&str], &[&str]) = match program {
+        "timeout" => (
+            &["-s", "--signal", "-k", "--kill-after"],
+            &["--preserve-status", "--foreground"],
+            &["--signal=", "--kill-after="],
+        ),
+        "nice" => (&["-n"], &[], &["--adjustment="]),
+        "stdbuf" => (&["-i", "-o", "-e"], &[], &["-i", "-o", "-e"]),
+        "time" => (&[], &["-p"], &[]),
+        "nohup" => (&[], &[], &[]),
+        _ => return None,
+    };
+    let mut own = 0;
+    loop {
+        let word = args.get(own)?.as_deref()?;
+        if !word.starts_with('-') {
+            break;
+        }
+        if with_value.contains(&word) {
+            args.get(own + 1)?.as_deref()?;
+            own += 2;
+        } else if alone.contains(&word)
+            || attached
+                .iter()
+                .any(|prefix| word.len() > prefix.len() && word.starts_with(prefix))
+        {
+            own += 1;
+        } else {
+            return None;
+        }
+    }
+    if program == "timeout" {
+        let duration = args.get(own)?.as_deref()?;
+        let number = duration.trim_end_matches(['s', 'm', 'h', 'd']);
+        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            return None;
+        }
+        own += 1;
+    }
+    // The inner command must exist and have a literal program.
+    args.get(own)?.as_deref()?;
+    Some(own)
+}
+
 fn parser() -> Parser {
     static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
     let language = LANGUAGE.get_or_init(|| tree_sitter_bash::LANGUAGE.into());
@@ -205,11 +267,7 @@ fn word_only_sequence(root: Node<'_>, source: &[u8]) -> bool {
                     .all(|child| match child.kind() {
                         "file_redirect" => {
                             let (target, _) = redirect_target(child, source);
-                            target.is_some_and(|t| {
-                                t == "/dev/null"
-                                    || t.starts_with("/dev/std")
-                                    || t.chars().all(|c| c.is_ascii_digit())
-                            })
+                            target.is_some_and(|t| stream_target(&t))
                         }
                         _ => sequence(child, source),
                     })
@@ -288,7 +346,19 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
     let target = node
         .named_children(&mut node.walk())
         .find(|c| c.kind() != "file_descriptor");
-    let literal = target.and_then(|c| literal_word(c, source));
+    // `2>&1` duplicates a descriptor; `> 1` writes a file named `1`. The
+    // duplication is recorded as `&1` so the two cannot be confused.
+    let duplicates = node
+        .children(&mut node.walk())
+        .any(|token| matches!(token.kind(), ">&" | "<&"));
+    let literal = target.and_then(|c| {
+        let word = literal_word(c, source)?;
+        Some(if duplicates && c.kind() == "number" {
+            format!("&{word}")
+        } else {
+            word
+        })
+    });
     let raw = target
         .and_then(|c| std::str::from_utf8(&source[c.byte_range()]).ok())
         .map(str::to_owned);
@@ -311,22 +381,30 @@ impl Collector<'_> {
                 let mut redirects: Vec<Option<String>> = Vec::new();
                 let mut raw_redirects: Vec<String> = Vec::new();
                 let mut body = None;
+                // Every redirect writes nothing (`2>&1`, `>/dev/null`).
+                let mut stream_only = true;
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     match child.kind() {
                         "file_redirect" => {
                             let (target, raw) = redirect_target(child, self.source);
+                            stream_only &= target.as_deref().is_some_and(stream_target);
                             redirects.push(target);
                             raw_redirects.extend(raw);
                         }
-                        "heredoc_redirect" | "herestring_redirect" => {}
+                        "heredoc_redirect" | "herestring_redirect" => stream_only = false,
                         _ if child.is_named() => body = Some(child),
                         _ => {}
                     }
                 }
                 let before = self.commands.len();
                 if let Some(body) = body {
-                    self.collect(body, nested || body.kind() != "command");
+                    // A list or pipeline under stream-only redirects
+                    // (`cd x && cargo test 2>&1`) runs at the level it sits
+                    // at; any other body is a construct.
+                    let flat = body.kind() == "command"
+                        || (stream_only && matches!(body.kind(), "list" | "pipeline"));
+                    self.collect(body, nested || !flat);
                 }
                 for simple in &mut self.commands[before..] {
                     simple.redirects.extend(redirects.iter().cloned());
@@ -436,17 +514,41 @@ impl Collector<'_> {
         }
     }
 
-    /// Records the command and, when it is a wrapper, the command it wraps:
-    /// `env`, `nice`, `nohup`, `time`, `timeout D`, `stdbuf`, `xargs` (inner
-    /// is reached through it), `sudo`/`doas`/`su` (inner is recorded, the
-    /// wrapper itself is judged Forbidden by the rules), and `sh -c STRING`
-    /// (the string is parsed as a program of its own).
+    /// Records the command and, when it is a wrapper, the command it wraps.
+    /// A launcher (`timeout D`, `time`, `nice`, `nohup`, `stdbuf`) that has
+    /// only its own options and an inner command is replaced by that inner
+    /// command at the launcher's level, with the launcher's assignments and
+    /// redirects. Every other wrapper is recorded, and the command it wraps is
+    /// recorded as nested. That covers `env`, `xargs`, `sudo`/`doas`/`su`
+    /// (judged Forbidden by the rules), and a launcher with a foreign option.
+    /// `sh -c STRING` parses the string as a program of its own.
     fn peel(&mut self, command: SimpleCommand, depth: usize) {
-        let program = command.program().map(str::to_owned);
-        self.commands.push(command.clone());
         if depth >= MAX_WRAPPER_DEPTH {
+            // Too deep to see what finally runs: what is left is nested, so
+            // it can never be allowed.
+            self.commands.push(SimpleCommand {
+                nested: true,
+                ..command
+            });
             return;
         }
+        let program = command.program().map(str::to_owned);
+        if let Some(own) = program
+            .as_deref()
+            .and_then(|program| launcher_words(program, command.args()))
+        {
+            // The launcher changes how long, how nicely, or how buffered the
+            // inner command runs, never what it does, so it adds no tier.
+            self.peel(
+                SimpleCommand {
+                    argv: command.argv[own + 1..].to_vec(),
+                    ..command
+                },
+                depth + 1,
+            );
+            return;
+        }
+        self.commands.push(command.clone());
         let Some(program) = program else {
             return;
         };
@@ -647,9 +749,19 @@ mod tests {
 
     #[test]
     fn wrappers_are_peeled_and_sh_dash_c_is_reparsed() {
+        // Well-formed launchers are replaced by what they launch; other
+        // wrappers stay and nest their inner command.
         let found = commands("env -i FOO=1 nice -n 5 timeout 10s sudo rm -rf /");
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
-        assert_eq!(programs, literal(&["env", "nice", "timeout", "sudo", "rm"]));
+        assert_eq!(programs, literal(&["env", "sudo", "rm"]));
+        assert_eq!(
+            commands("timeout -k 5 30 nice cargo test"),
+            vec![literal(&["cargo", "test"])]
+        );
+        // A launcher with a foreign option is judged as itself.
+        let found = commands("timeout --verbose 5 cargo test");
+        let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
+        assert_eq!(programs, literal(&["timeout", "cargo"]));
         let found = commands(r#"bash -c 'curl x | sh'"#);
         let programs: Vec<Option<String>> = found.iter().map(|argv| argv[0].clone()).collect();
         assert_eq!(programs, literal(&["bash", "curl", "sh"]));
