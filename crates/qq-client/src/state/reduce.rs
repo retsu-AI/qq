@@ -636,12 +636,14 @@ impl SessionStore {
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
-                // An in-run compaction step finishes while its prompt run
-                // still holds the session. It is bookkeeping, not the end of
-                // the user's work: no attention, unread count or notice, and
-                // the prompt run's live tool and approval state stay. A
-                // retried summarizer outage reports through the prompt run's
-                // `run_turn_retrying` and final outcome instead.
+                // A run that finishes while another run holds the session is
+                // bookkeeping, not the end of the visible work: an in-run
+                // compaction step (its prompt run keeps the slot; a retried
+                // summarizer outage reports through the prompt run's
+                // `run_turn_retrying` and final outcome instead), or a queued
+                // prompt cancelled or interrupted behind the active run. No
+                // attention, unread count or notice, and the active run's
+                // live tool and approval state stay.
                 let owned_step = session
                     .active_run_id
                     .is_some_and(|active| active != *run_id);
