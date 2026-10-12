@@ -793,13 +793,27 @@ drift within a batch), diffs in `model_text`.
 ```
 
 **Two phases.** Phase 1, without the lock: group by path, read, prove
-currency (a recorded read of this exact content, or `if_hash` equal to the
-12-hex hash `read_file`'s header shows — the proof an `@`-mentioned file
-needs), and apply every edit in memory in order, so later edits see earlier
-results. A replacement whose match lands inside text an earlier edit wrote
+currency, and apply every edit in memory in order, so later edits see
+earlier results. Currency is a recorded read of this exact content, or
+`if_hash` equal to the 12-hex hash `read_file`'s header shows (the proof an
+`@`-mentioned file needs); every `if_hash` in the batch is checked, and a
+mismatch is `stale_file`. A file with neither (never read, or read at other
+content) takes only edits whose `old` occurs exactly once, byte for byte, in
+the plan-time content and in the text as earlier edits left it
+([ADR-0057](../adr/0057-edit-freshness-by-exact-match.md)): the model
+reproduced the bytes it replaces, so it has that region. An insert by
+anchor alone, an `old` that needs the fuzzy cascade, an absent `old`, and a
+repeated `old` (even under `replace_all`) prove nothing, and fail
+`not_read` for an unread file or `stale_file` for a changed one, never
+`ambiguous` or `not_found`. The header then says `note=unread` or
+`note=changed_since_read`. Every `not_read`/`stale_file` names the file's
+current `h:<12 hex>` so the retry can pass it as `if_hash` without a
+`read_file`. A replacement whose match lands inside text an earlier edit wrote
 is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2,
-under `apply_lock` for microseconds: re-hash every file, then temp+rename
-each in path order. A rename failure midway is reported as
+under `apply_lock` for microseconds: re-hash every file against its
+plan-time hash, then temp+rename each in path order. A file that changed
+between the phases fails the batch with `stale_file`, whichever way currency
+was proven. A rename failure midway is reported as
 `partial_apply{applied, failed}` — the applied files are written and their
 new hashes recorded, the rest are untouched. `dry_run` runs phase 1 only
 and returns the same result shape plus the diff.
@@ -829,7 +843,8 @@ the retry needs no read.
 
 **Result.** `edit ok files=2 edits=3` then one line per file in path order:
 `<path> h:<new12> L96 -1+1 | L140 -0+6 via=indent_flexible` (`x3` marks a
-`replace_all` count). The unified diff of what changed on disk — not of
+`replace_all` count). Notes join with a comma in the header
+(`note=empty_form_ignored,unread`). The unified diff of what changed on disk — not of
 what the model asked — rides in `ui_payload` for every file; the approval
 preview renders the request grouped by path with anchors as context.
 Failures abort the whole batch and name the edit index: `not_read`,
@@ -840,7 +855,10 @@ Failures abort the whole batch and name the edit index: `not_read`,
 **`write_file`** creates missing parents (≤ 8 components, never through
 `..`), refuses an existing file under `create_only` (`exists`), accepts
 `if_hash` as currency proof without a prior read, and answers
-`write <path> created|replaced bytes= lines= h:<new12>`. When the new
+`write <path> created|replaced bytes= lines= h:<new12>`. Overwriting an
+existing file still needs a recorded read of its content or a matching
+`if_hash`: no `old` vouches for the text it replaces. Its `not_read` and
+`stale_file` carry the current `h:` like `edit_file`'s. When the new
 content keeps more than 80 % of the old file's lines (line LCS, both under
 4 000 lines) the header adds `hint=use_edit_file`: the rewrite would have
 cost a fraction of the tokens as an edit. Rejected: `append` (an
@@ -853,19 +871,30 @@ long-held locks:
 
 1. `read_file` records the file's content hash in the session's file-state
    map.
-2. `edit_file` and `write_file` (of an existing file) require a prior read in
-   the same session, or an `if_hash` equal to the file's current hash.
+2. `write_file` of an existing file requires a prior read of its current
+   content in the same session, or an `if_hash` equal to the file's current
+   hash. `edit_file` requires the same, except that an edit whose `old`
+   occurs exactly once in the current content applies without either and
+   says `note=unread` or `note=changed_since_read` (§ Edit Semantics,
+   ADR-0057). An `if_hash` that does not match is always `stale_file`. A
+   refusal names the current hash.
 3. At apply time, under a short per-workspace exclusive section, the current
-   content is re-hashed. If it no longer matches what the session last read,
-   the call fails with a stale-file error and the agent re-reads.
+   content is re-hashed. If it no longer matches the content phase 1
+   planned against, the call fails with a stale-file error and the agent
+   re-reads.
 4. The apply itself writes a temp file in the same directory, preserves
    permissions, and renames atomically — per file, in path order for a batch.
 
 The exclusive section covers only the hash-check-and-rename — microseconds —
 so read-heavy parallelism across sessions is untouched and two writing
-sessions interleave safely at file granularity. Semantic conflicts surface as
-stale-file errors to the losing agent, which is the correct outcome: the
-model re-reads and reconciles, exactly as a human would after a rebase.
+sessions interleave safely at file granularity. When another session has
+already written the file, the losing agent's edit applies only if its `old`
+still occurs exactly once in the new content. That is a clean rebase of a
+disjoint change, and `note=changed_since_read` tells the model so. Any
+other edit fails `stale_file`, and the model re-reads and reconciles,
+exactly as a human would after a rebase. A writer that lands between
+planning and applying always fails the edit, because the apply re-hashes
+against the planned content.
 
 Concurrent sessions therefore share a checkout safely at file granularity.
 Worktree isolation for editing subagents is deferred (§ Intentionally
