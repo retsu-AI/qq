@@ -35,3 +35,27 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
   as a load flake and added as the first AF6 candidate.
 - The `--tui-qa-root` drive and the tmux recipe in `verify-qq/features/tui.md`
   are unverified: tmux is not installed here.
+
+#### 2026-10-12 review round
+
+- Two independent reviews: a code review of the xtask gates, and a
+  cold-start review of the skills and docs. Both asked for changes. All
+  blocking and should-fix findings are addressed in `261af47c`.
+- Real bugs found and fixed:
+  - A missing merge-base passed untested commits.
+  - The nextest parser saw nothing in the `ci` profile (`TRY n`, ANSI).
+  - `#[cfg(test)] mod tests;` exempted the rest of a file from lint.
+  - `--evidence` printed a stale report.
+  - The serve-sse resume check passed on a closed stream.
+  - The verify-qq fake's reply index never reset.
+  - The serve.md cursor format returned 400.
+- Lint now matches the old sleep count exactly, minus one false positive
+  inside a string: 70. The ceiling must equal the count.
+- Full gate after the round, at load ~11: 53.5 s with fmt, lint, clippy,
+  2242/2242 tests, doctests, and minimal-provider clippy and tests (211/211).
+  Smoke: 6/6 in 0.5 s.
+- The TUI drive in `verify-qq/features/tui.md` is now verified through
+  `script`.
+- Still unverified: the tmux recipe (tmux is not installed here),
+  `QQ_CONTEXT_WINDOW` auto-compaction, and the CI workflow itself (it
+  runs on the PR).
