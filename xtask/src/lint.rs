@@ -3,12 +3,13 @@
 //! Each rule exists because an agent or reviewer had to correct it by hand.
 //! A rule here is the enforcer named in `AGENTS.md` § Rules → enforcers; prose that a
 //! rule enforces is not repeated there. Rules read tracked files only (via
-//! `git ls-files`), so they run in well under a second and never see
-//! `target/` or untracked scratch files.
+//! `git ls-files`, plus untracked files git does not ignore, so a new file
+//! is checked before it is committed), so they run in well under a second
+//! and never see `target/`.
 //!
 //! Counted rules (`sleep-in-tests`) carry a ceiling in [`SLEEP_CEILING`]:
-//! existing violations are tolerated, new ones fail, and the ceiling only
-//! moves down.
+//! existing violations are tolerated, new ones fail, and the ceiling must
+//! equal the count, so removing a violation forces the ceiling down.
 
 use std::{
     fmt, fs, io,
@@ -23,7 +24,7 @@ use thiserror::Error;
 /// it. A sleep that is genuinely required (mtime granularity, a real
 /// process) is marked `// lint: allow(sleep) <reason>` on the same or the
 /// preceding line and is not counted.
-pub const SLEEP_CEILING: usize = 71;
+pub const SLEEP_CEILING: usize = 70;
 
 #[derive(Debug, Error)]
 pub enum LintError {
@@ -159,16 +160,16 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
             });
         }
         let test_file = is_test_path(path);
-        let test_start = if test_file {
-            0
+        let test_lines = if test_file {
+            vec![true; text.lines().count()]
         } else {
-            first_test_module_line(text).unwrap_or(usize::MAX)
+            inline_test_lines(text)
         };
         let mut previous = "";
+        let stripped = strip_strings(text);
         for (index, line) in text.lines().enumerate() {
             let number = index + 1;
-            let stripped = strip_strings(line);
-            let code = stripped.trim_start();
+            let code = stripped[index].trim_start();
             if code.starts_with("//") {
                 previous = line;
                 continue;
@@ -181,7 +182,7 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                     detail: "`#[ignore]` without a reason".to_owned(),
                 });
             }
-            let in_tests = index >= test_start;
+            let in_tests = test_lines.get(index).copied().unwrap_or(false);
             if !in_tests && code.contains("unbounded_channel") {
                 findings.push(Finding {
                     rule: Rule::UnboundedChannel,
@@ -222,6 +223,17 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
     }
 
     let counted = sleeps.len();
+    if counted < sleep_ceiling {
+        findings.push(Finding {
+            rule: Rule::SleepInTests,
+            path: "xtask/src/lint.rs".to_owned(),
+            line: 0,
+            detail: format!(
+                "{counted} fixed sleeps in test code is below the ceiling of {sleep_ceiling}; \
+                 lower SLEEP_CEILING to {counted} so the ceiling only moves down"
+            ),
+        });
+    }
     if counted > sleep_ceiling {
         findings.push(Finding {
             rule: Rule::SleepInTests,
@@ -252,52 +264,141 @@ fn is_test_path(path: &str) -> bool {
         || path.contains("test_support")
 }
 
-/// The line with string-literal contents removed, so a rule never matches
-/// text inside `"..."` (its own fixtures, messages). Raw strings spanning
-/// lines are rare enough here to ignore.
-fn strip_strings(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    for character in line.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-                out.push('"');
+/// The file's lines with string-literal contents removed, so rules never
+/// match text inside a literal (fixtures, messages). State carries across
+/// lines, so multi-line and `\`-continued literals stay literals. Handles
+/// `"..."`, raw `r#"..."#` (any number of `#`), and char literals such as
+/// `'"'`.
+fn strip_strings(text: &str) -> Vec<String> {
+    enum State {
+        Code,
+        Plain {
+            escaped: bool,
+        },
+        /// Inside a raw string closed by `"` plus this many `#`.
+        Raw(usize),
+    }
+    let mut lines = Vec::new();
+    let mut state = State::Code;
+    for line in text.lines() {
+        let bytes = line.as_bytes();
+        let mut out = String::with_capacity(line.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            match state {
+                State::Plain { escaped } => {
+                    if escaped {
+                        state = State::Plain { escaped: false };
+                    } else if byte == b'\\' {
+                        state = State::Plain { escaped: true };
+                    } else if byte == b'"' {
+                        state = State::Code;
+                        out.push('"');
+                    }
+                    index += 1;
+                }
+                State::Raw(hashes) => {
+                    let closes = byte == b'"'
+                        && bytes.len() >= index + 1 + hashes
+                        && bytes[index + 1..index + 1 + hashes]
+                            .iter()
+                            .all(|b| *b == b'#');
+                    if closes {
+                        state = State::Code;
+                        out.push('"');
+                        index += 1 + hashes;
+                    } else {
+                        index += 1;
+                    }
+                }
+                State::Code => {
+                    let raw_start = byte == b'r'
+                        && (index == 0
+                            || !(bytes[index - 1].is_ascii_alphanumeric()
+                                || bytes[index - 1] == b'_'));
+                    if raw_start {
+                        let hashes = bytes[index + 1..]
+                            .iter()
+                            .take_while(|b| **b == b'#')
+                            .count();
+                        if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                            state = State::Raw(hashes);
+                            out.push('"');
+                            index += 2 + hashes;
+                            continue;
+                        }
+                    }
+                    if byte == b'\'' {
+                        // A char literal holding a quote or escape: `'"'`, `'\''`.
+                        let literal = if bytes.get(index + 1) == Some(&b'\\') {
+                            4
+                        } else {
+                            3
+                        };
+                        if bytes.get(index + literal - 1) == Some(&b'\'')
+                            && literal <= bytes.len() - index
+                        {
+                            out.push_str("' '");
+                            index += literal;
+                            continue;
+                        }
+                    }
+                    if byte == b'"' {
+                        state = State::Plain { escaped: false };
+                    }
+                    // Only ASCII bytes change state; copy the rest verbatim.
+                    let width = line[index..].chars().next().map_or(1, char::len_utf8);
+                    out.push_str(&line[index..index + width]);
+                    index += width;
+                }
+            }
+        }
+        lines.push(out);
+    }
+    lines
+}
+
+/// Which lines sit inside an inline `#[cfg(test)] mod … { … }` block.
+/// Out-of-line `#[cfg(test)] mod tests;` declarations are not test code;
+/// their file is classified by its own path. Braces inside strings are
+/// ignored via [`strip_strings`]; char literals and comments containing
+/// braces are rare enough here to accept.
+fn inline_test_lines(text: &str) -> Vec<bool> {
+    let mut marks = Vec::new();
+    let mut cfg_test = false;
+    let mut depth: Option<i64> = None;
+    for code in strip_strings(text) {
+        let code = code.split("//").next().unwrap_or("").trim();
+        if let Some(open) = depth.as_mut() {
+            marks.push(true);
+            *open += code.matches('{').count() as i64 - code.matches('}').count() as i64;
+            if *open <= 0 {
+                depth = None;
             }
             continue;
         }
-        if character == '"' {
-            in_string = true;
-        }
-        out.push(character);
-    }
-    out
-}
-
-/// The first line of an in-file `#[cfg(test)]` module, if any. Everything
-/// after it is treated as test code; production code below a test module is
-/// rare enough here that the simplification holds.
-fn first_test_module_line(text: &str) -> Option<usize> {
-    let mut cfg_test = false;
-    for (index, line) in text.lines().enumerate() {
-        let code = line.trim();
         if code == "#[cfg(test)]" {
             cfg_test = true;
+            marks.push(false);
             continue;
         }
-        if cfg_test && (code.starts_with("mod ") || code.starts_with("pub(crate) mod ")) {
-            return Some(index);
+        let module = code.starts_with("mod ")
+            || code.starts_with("pub(crate) mod ")
+            || code.starts_with("pub mod ");
+        if cfg_test && module && code.contains('{') {
+            marks.push(true);
+            let open = code.matches('{').count() as i64 - code.matches('}').count() as i64;
+            depth = (open > 0).then_some(open);
+            cfg_test = false;
+            continue;
         }
         if !code.starts_with("#[") {
             cfg_test = false;
         }
+        marks.push(false);
     }
-    None
+    marks
 }
 
 pub fn tracked_files(root: &Path) -> Result<Vec<String>, LintError> {
@@ -463,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sleeps_fail_only_above_the_ceiling_and_allow_markers_are_not_counted() {
+    fn test_sleeps_must_equal_the_ceiling_and_allow_markers_are_not_counted() {
         let text = "fn prod() { std::thread::sleep(d); }\n#[cfg(test)]\nmod tests {\n\
                     fn a() { tokio::time::sleep(d).await; }\n\
                     // lint: allow(sleep) mtime granularity\n\
@@ -480,6 +581,58 @@ mod tests {
         assert_eq!(
             over[1],
             (Rule::SleepInTests, "crates/qq-x/src/store.rs".to_owned(), 4)
+        );
+        let (under, _) = evaluate(&files, 2);
+        assert_eq!(under.len(), 1, "a removed sleep forces the ceiling down");
+        assert!(under[0].detail.contains("lower SLEEP_CEILING to 1"));
+    }
+
+    #[test]
+    fn literals_never_trigger_rules_or_confuse_module_tracking() {
+        let text = concat!(
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    const A: &str = r#\"{\"path\":\"x\"#;\n",
+            "    const B: char = '\"';\n",
+            "    const C: &str = \"multi\n",
+            "        line } with a brace\";\n",
+            "    fn t() { std::thread::sleep(d); }\n",
+            "}\n",
+            "fn prod() { let msg = \"mpsc::unbounded_channel()\"; }\n",
+        );
+        let files = [Source {
+            path: "crates/qq-x/src/lib.rs",
+            text: Some(text),
+        }];
+        let (findings, counted) = evaluate(&files, 1);
+        assert_eq!(counted, 1, "the sleep inside the test module is counted");
+        assert_eq!(
+            findings
+                .into_iter()
+                .filter(|f| f.rule != Rule::ForbidUnsafe)
+                .count(),
+            0,
+            "a channel name inside a string is not code"
+        );
+    }
+
+    #[test]
+    fn an_out_of_line_test_module_does_not_exempt_the_rest_of_the_file() {
+        let text = "#[cfg(test)]\nmod tests;\n\nfn run() {\n    let (tx, rx) = mpsc::unbounded_channel();\n}\n\
+                    #[cfg(test)]\nmod inline {\n    fn t() { if x { y } }\n}\n\
+                    fn after() { mpsc::unbounded_channel(); }\n";
+        let files = [Source {
+            path: "crates/qq-x/src/lib.rs",
+            text: Some(text),
+        }];
+        assert_eq!(
+            rules(&files, 0)
+                .into_iter()
+                .filter(|(rule, ..)| *rule == Rule::UnboundedChannel)
+                .map(|(_, _, line)| line)
+                .collect::<Vec<_>>(),
+            [5, 11],
+            "production code before and after an inline test module is checked"
         );
     }
 

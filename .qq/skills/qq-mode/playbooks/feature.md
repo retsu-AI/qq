@@ -10,7 +10,8 @@
    bumps `PROTOCOL_VERSION` and regenerates fixtures
    (`QQ_UPDATE_FIXTURES=1 cargo nextest run -p qq-protocol`); a store change
    is a schema migration. Either one needs the plan to name it; stop and ask
-   if it does not.
+   if it does not. Then load the `protocol-bump` skill
+   (`.qq/packs/protocol/skills/protocol-bump/SKILL.md`).
 3. **Write the acceptance as tests first.** One test per user-observable
    behavior and one per failure mode, at the public boundary
    (`SessionRuntime`, the CLI, the server API, the provider trait). If users
@@ -18,16 +19,16 @@
    Commit them failing.
 4. **Implement the smallest version that passes.** No speculative options,
    no generic extension points, no new crate (`AGENTS.md` § Engineering
-   Priorities).
+   priorities).
 5. **Prove it on the real surface.** `cargo xtask smoke`, and the matching
    `verify-qq` feature file for anything smoke does not cover. Update that
    feature file if the way to reach or drive the feature changed.
 6. **Measure if it touches a hot path** (startup, first token, streaming,
-   persistence, rendering): `playbooks/perf.md` steps 1 and 5.
+   persistence, rendering): `.qq/skills/qq-mode/playbooks/perf.md` steps 1 and 5.
 7. **Document as built.** Amend `docs/design/` and `docs/guide/` in the same
    PR; `src/docs_truth.rs` tests fail when the guide misses a CLI flag.
 8. **Run `cargo xtask check`.**
-9. Run `playbooks/opening-a-pr.md`.
+9. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md`.
 
 **Reply:** what a user can now do and how, the data shape and compatibility
 consequence, evidence block, and smoke or `verify-qq` proof.

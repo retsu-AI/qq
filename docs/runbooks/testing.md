@@ -9,7 +9,7 @@ merge gate runs. Agents follow the procedure in the `qq-mode` skill
 | When | Command | Typical time |
 | --- | --- | --- |
 | While editing one area | `cargo nextest run -p <crate> -E 'test(/<pattern>/)'` | seconds |
-| Before every push | `cargo xtask check` | 10 s – 2 min, by blast radius |
+| Before every push | `cargo xtask check` | 10 s – 2 min warm, by blast radius |
 | User-visible behavior | `cargo xtask smoke` | ~2 s after the build |
 | A feature smoke does not cover | the `verify-qq` skill | minutes |
 | Merge (CI merge queue) | `cargo xtask check --full` plus platform jobs | ~3–5 min |
@@ -32,7 +32,17 @@ Runs only what your change can affect:
    2. `cargo xtask lint`
    3. `cargo clippy -p … --all-targets --all-features -D warnings`
    4. `cargo nextest run -p …`
-   5. the minimal `qq-provider` profile, when an AWS/Bedrock file changed
+   5. `cargo test --doc --workspace` (full scope only; nextest skips doctests)
+   6. the minimal `qq-provider` profile (Clippy and tests), when any
+      `qq-provider` file changed
+
+If the merge-base with `--base` cannot be found, the command fails rather
+than checking only the working tree. Fetch the base, or pass `--full`.
+
+An affected run builds a subset of packages, so Cargo's feature
+unification can differ from a `--workspace` build. A rare feature-only
+breakage passes the affected gate and fails the full gate in the merge
+queue.
 
 Flags:
 
@@ -43,12 +53,16 @@ Flags:
 | `--full` | runs the merge gate |
 | `--profile quick` | stops at the first failing test |
 | `--no-clippy` | skips Clippy (iteration only) |
-| `--evidence` | prints the last report as Markdown for a PR body |
+| `--evidence` | prints the last report as Markdown for a PR body; fails if the report is for another commit or tree state |
 
 ### Reading failures
 
 Every run writes `target/qq-check/last.json` plus one log per gate
-(`target/qq-check/<gate>.log`). For a test failure the report gives:
+(`target/qq-check/<gate>.log`, written while the gate runs). These always
+live in the checkout's own `target/`, even with a shared `CARGO_TARGET_DIR`.
+A run deletes the previous report first, so a stale pass never survives a
+failed run. Test gates record pass, run, and skip counts. For a test failure
+the report gives:
 
 - the package and test name;
 - the panic location and message;
@@ -61,7 +75,9 @@ jq '.gates[] | select(.passed|not) | .failures' target/qq-check/last.json
 
 ### `cargo xtask smoke`
 
-Builds `target/debug/qq` and runs each scenario in parallel. Each scenario
+Builds `target/debug/qq`, copies it to `target/qq-smoke/qq` (so a
+concurrent relink cannot swap it mid-run), and runs each scenario in
+parallel. Each scenario
 gets an isolated home (`HOME` and `XDG_*` under
 `target/qq-smoke/<scenario>/`), a git workspace, and an in-process fake
 OpenAI Responses endpoint on loopback. `--list` names the scenarios and what
@@ -69,7 +85,8 @@ each proves; `--only <name>` runs one; `--binary PATH` tests another build.
 
 A passing scenario deletes its directory. A failing one keeps:
 
-- `<command>.stdout` and `<command>.stderr`
+- `<n>-<command>.stdout` and `.stderr`, one pair per `qq` invocation
+  (`serve.stdout` and `serve.stderr` for the server)
 - `provider-requests.txt`: every HTTP request qq sent to the fake
 - the session store under `data/qq/`
 
@@ -84,15 +101,16 @@ function in `xtask/src/smoke.rs` plus a row in `SCENARIOS`.
 - No fixed sleeps. Wait on the signal, channel, or event; or use
   `#[tokio::test(start_paused = true)]`. `cargo xtask lint` counts fixed
   sleeps in test code against `SLEEP_CEILING` (`xtask/src/lint.rs`). New
-  sleeps fail. When you remove one, lower the ceiling. If a sleep is truly
+  sleeps fail, and so does a count below the ceiling, which forces the
+  ceiling down when a sleep is removed. If a sleep is truly
   needed (mtime granularity, a real child process), mark it
   `// lint: allow(sleep) <reason>`.
 - No wall-clock upper bounds in tests. Measure those in a bench or a perf
   budget.
 - Prefer adding a row to an existing table-driven test over writing a new
   test function.
-- A bug fix needs a regression test only when nothing existing fails
-  without the fix. Show it failing first.
+- Every bug fix has a test that fails before the fix and passes after.
+  Show it failing first.
 - `#[ignore]` needs a reason string that says how to run the test.
 
 Auditing existing tests (flakes, sleeps, mutation testing, duplicates) is
@@ -142,7 +160,8 @@ This enables `.githooks/pre-push`, which runs
 
 - Debug builds carry line tables only, and dependencies carry no debug info
   (`[profile.dev]` in `Cargo.toml`). For a debugger session, set
-  `CARGO_PROFILE_DEV_DEBUG=full`.
+  `CARGO_PROFILE_DEV_DEBUG=full`, and add
+  `--config 'profile.dev.package."*".debug="full"'` to cover dependencies.
 - `build.rs` watches every tracked file only for release builds. Debug
   builds rebuild the version string when `HEAD` moves. Set
   `QQ_EXACT_REVISION=1` to restore exact `-dirty` tracking in a debug build.

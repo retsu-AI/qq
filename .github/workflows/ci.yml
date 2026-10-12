@@ -48,10 +48,9 @@ jobs:
         run: cargo xtask smoke
       - name: Evidence
         if: always()
-        run: |
-          if [ -f target/qq-check/last.json ]; then
-            cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY"
-          fi
+        # check deletes the previous report at start, so a present report is
+        # this run's; --evidence also refuses one for another commit.
+        run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

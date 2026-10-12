@@ -72,6 +72,18 @@ pub enum CheckError {
     UnknownPackage(String),
     #[error("gate `{0}` failed; see {1}")]
     GateFailed(String, PathBuf),
+    #[error(
+        "cannot find the merge-base with {base} ({detail}); fetch it (`git fetch origin`) or pass --base <ref> or --full"
+    )]
+    NoMergeBase { base: String, detail: String },
+    #[error("the report at {path} is for {report}, but HEAD is {head}; rerun `cargo xtask check`")]
+    StaleReport {
+        path: PathBuf,
+        report: String,
+        head: String,
+    },
+    #[error("failed to read {0}")]
+    Read(PathBuf, #[source] io::Error),
 }
 
 /// A workspace package as the selection needs it.
@@ -111,9 +123,13 @@ const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     ("benchmarks/arms/", "qq-config"),
     ("docs/runbooks/tui-qa.md", "qq-tui"),
     ("crates/qq-protocol/tests/fixtures/", "qq-client"),
+    ("CHANGELOG.md", "qq"),
     ("CHANGELOG.md", "xtask"),
+    ("README.md", "qq"),
     ("README.md", "xtask"),
+    ("docs/guide/", "xtask"),
     ("src/docs_truth.rs", "xtask"),
+    ("build.rs", "qq"),
 ];
 
 /// Paths that can change the build or test behavior of every package.
@@ -123,19 +139,14 @@ const FULL_INPUTS: &[&str] = &[
     "rust-toolchain.toml",
     ".cargo/",
     ".config/",
-    "build.rs",
     "flake.nix",
     "flake.lock",
     "nix/",
 ];
 
-const MINIMAL_PROVIDER_INPUTS: &[&str] = &[
-    "crates/qq-provider/Cargo.toml",
-    "crates/qq-provider/src/aws.rs",
-    "crates/qq-provider/src/providers/bedrock.rs",
-    "crates/qq-provider/src/providers/mantle.rs",
-    "crates/qq-provider/src/bedrock_auth.rs",
-];
+/// Feature gates for the AWS family are spread across `qq-provider`, so any
+/// change there also checks the minimal (no Bedrock) profile.
+const MINIMAL_PROVIDER_INPUT: &str = "crates/qq-provider/";
 
 /// Pure selection: maps changed paths to the packages to check.
 pub fn select(packages: &[Package], changed: &[String], forced: &[String]) -> Selection {
@@ -145,12 +156,12 @@ pub fn select(packages: &[Package], changed: &[String], forced: &[String]) -> Se
     let mut minimal_provider = false;
 
     for path in changed {
-        if MINIMAL_PROVIDER_INPUTS.contains(&path.as_str()) {
+        if path.starts_with(MINIMAL_PROVIDER_INPUT) {
             minimal_provider = true;
         }
         if full.is_none() && FULL_INPUTS.iter().any(|input| matches_input(path, input)) {
-            // Only the root manifest is a full input; crate manifests map to
-            // their crate below.
+            // Only the root manifest is a full input (`matches_input` is
+            // exact); crate manifests map to their crate below.
             full = Some(path.clone());
             continue;
         }
@@ -317,29 +328,40 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
             .current_dir(root),
         "git merge-base",
     );
-    match merge_base {
-        Ok(merge_base) => {
-            let committed = capture(
-                ProcessCommand::new("git")
-                    .args(["diff", "--name-only", "-z", merge_base.trim(), "HEAD"])
-                    .current_dir(root),
-                "git diff",
-            )?;
-            changed.extend(
-                committed
-                    .split('\0')
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned),
-            );
-        }
+    // Without a merge-base the committed changes are unknown; checking only
+    // the working tree would pass untested commits, so refuse instead.
+    let merge_base = match merge_base {
+        Ok(merge_base) => merge_base,
         Err(error) => {
-            eprintln!(
-                "check: cannot diff against {base} ({error}); checking working-tree changes only"
-            );
+            return Err(CheckError::NoMergeBase {
+                base: base.to_owned(),
+                detail: error.to_string(),
+            });
         }
-    }
+    };
+    // `--no-renames` lists both sides of a move, so a file leaving a crate
+    // still selects that crate.
+    let committed = capture(
+        ProcessCommand::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                merge_base.trim(),
+                "HEAD",
+            ])
+            .current_dir(root),
+        "git diff",
+    )?;
+    changed.extend(
+        committed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned),
+    );
     for args in [
-        &["diff", "--name-only", "-z", "HEAD"][..],
+        &["diff", "--name-only", "--no-renames", "-z", "HEAD"][..],
         &["ls-files", "--others", "--exclude-standard", "-z"][..],
     ] {
         let paths = capture(
@@ -356,12 +378,21 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
     Ok(changed.into_iter().collect())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestCounts {
+    pub run: u32,
+    pub passed: u32,
+    pub skipped: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateReport {
     pub name: String,
     pub command: String,
     pub passed: bool,
     pub seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<TestCounts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -379,6 +410,10 @@ pub struct TestFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub head: String,
+    /// `git status --porcelain` was non-empty: the report covers
+    /// uncommitted changes that `head` does not contain.
+    #[serde(default)]
+    pub dirty: bool,
     pub base: String,
     pub changed: Vec<String>,
     pub selection: Selection,
@@ -387,41 +422,70 @@ pub struct Report {
     pub seconds: f64,
 }
 
-/// Parses failures from nextest's human output: each `FAIL [..] (..) <pkg>
-/// <test>` line, plus the first `panicked at` line and message that follow
-/// in the final failure output.
-pub fn parse_nextest_failures(output: &str) -> Vec<TestFailure> {
+/// nextest status words that end a test unsuccessfully (0.9.x human output,
+/// with `--color never`). `TRY n ` prefixes retries in the `ci` profile.
+const FAILURE_STATUSES: &[&str] = &[
+    "FAIL",
+    "SIGSEGV",
+    "SIGABRT",
+    "SIGBUS",
+    "SIGILL",
+    "SIGKILL",
+    "ABRT",
+    "TIMEOUT",
+    "TMT",
+    "LEAK-FAIL",
+];
+
+/// Lines that start another test's status block and so end a message.
+fn is_status_line(line: &str) -> bool {
+    let line = strip_retry(line.trim_start());
+    let word = line.split_whitespace().next().unwrap_or("");
+    line.contains(" [")
+        && (word == "PASS"
+            || word == "Summary"
+            || word == "FLAKY"
+            || FAILURE_STATUSES.contains(&word))
+}
+
+fn strip_retry(line: &str) -> &str {
+    line.strip_prefix("TRY ")
+        .and_then(|rest| rest.split_once(' ').map(|(_, rest)| rest.trim_start()))
+        .unwrap_or(line)
+}
+
+/// Parses failures from nextest's human output (`--color never`): each
+/// `<STATUS> [ time] (n/m) <binary> <test>` line with a failing status, plus
+/// the panic location and message that follow in the failure output.
+pub fn parse_nextest_failures(output: &str, rerun_flags: &str) -> Vec<TestFailure> {
     let mut failures: Vec<TestFailure> = Vec::new();
     let lines = output.lines().collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed
-            .strip_prefix("FAIL ")
-            .or_else(|| trimmed.strip_prefix("SIGSEGV "))
-            .or_else(|| trimmed.strip_prefix("SIGABRT "))
-            .or_else(|| trimmed.strip_prefix("TIMEOUT "))
-        else {
+        let trimmed = strip_retry(line.trim_start());
+        let Some((status, rest)) = trimmed.split_once(' ') else {
             continue;
         };
+        if !FAILURE_STATUSES.contains(&status) || !rest.trim_start().starts_with('[') {
+            continue;
+        }
         let Some(after) = rest.split_once(") ").map(|(_, after)| after.trim()) else {
             continue;
         };
-        let mut parts = after.splitn(2, ' ');
-        let (Some(binary), Some(test)) = (parts.next(), parts.next()) else {
+        let Some((binary, test)) = after.split_once(' ') else {
             continue;
         };
         let package = binary.split("::").next().unwrap_or(binary).to_owned();
         let test = test.trim().to_owned();
         let mut message = Vec::new();
         for following in lines.iter().skip(index + 1).take(200) {
-            let following = following.trim();
-            if following.starts_with("PASS [")
-                || following.starts_with("FAIL [")
-                || following.starts_with("Summary [")
-            {
+            if is_status_line(following) {
                 break;
             }
-            if following.contains("panicked at") {
+            let following = following.trim();
+            if following.contains("panicked at")
+                || following.starts_with("(test timed out)")
+                || following.starts_with("(test aborted")
+            {
                 message.push(following.to_owned());
                 continue;
             }
@@ -438,13 +502,9 @@ pub fn parse_nextest_failures(output: &str) -> Vec<TestFailure> {
                 }
             }
         }
-        if message.is_empty() && trimmed.starts_with("TIMEOUT") {
-            message.push("terminated by the nextest slow-timeout".to_owned());
-        }
         let message = message.join("\n");
         // nextest prints a failure once when it happens and again after the
-        // summary; with `failure-output = "final"` only the second carries
-        // the output, so merge rather than keep the first.
+        // summary; only one of the two may carry the output, so merge.
         if let Some(existing) = failures
             .iter_mut()
             .find(|failure| failure.package == package && failure.test == test)
@@ -455,13 +515,41 @@ pub fn parse_nextest_failures(output: &str) -> Vec<TestFailure> {
             continue;
         }
         failures.push(TestFailure {
-            rerun: format!("cargo nextest run -p {package} -E 'test(={test})' --no-capture"),
+            rerun: format!(
+                "cargo nextest run -p {package}{rerun_flags} -E 'test(={test})' --no-capture"
+            ),
             package,
             test,
             message,
         });
     }
     failures
+}
+
+/// Test counts from nextest's `Summary [ t] N tests run: P passed (…), …,
+/// S skipped` line.
+pub fn parse_nextest_counts(output: &str) -> Option<TestCounts> {
+    let line = output
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("Summary ["))?;
+    let words = line
+        .split_once("] ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let before = |label: &str| {
+        words.windows(2).find_map(|pair| {
+            (pair[1].trim_end_matches([',', ':']) == label)
+                .then(|| pair[0].parse::<u32>().ok())
+                .flatten()
+        })
+    };
+    Some(TestCounts {
+        run: before("tests")?,
+        passed: before("passed").unwrap_or(0),
+        skipped: before("skipped").unwrap_or(0),
+    })
 }
 
 fn cargo() -> std::ffi::OsString {
@@ -482,38 +570,35 @@ fn capture(command: &mut ProcessCommand, display: &str) -> Result<String, CheckE
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+enum GateKind {
+    /// A cargo subcommand run as a child process.
+    Cargo(Vec<String>),
+    /// `cargo xtask lint`, run in-process (no rebuild of the running xtask).
+    Lint,
+}
+
 struct Gate {
     name: &'static str,
-    program: String,
-    args: Vec<String>,
-    env: Vec<(&'static str, &'static str)>,
+    kind: GateKind,
+    /// Extra flags a rerun of one failing test needs (minimal profile).
+    rerun_flags: &'static str,
 }
 
 impl Gate {
     fn cargo(name: &'static str, args: Vec<String>) -> Self {
         Self {
             name,
-            program: cargo().to_string_lossy().into_owned(),
-            args,
-            env: Vec::new(),
+            kind: GateKind::Cargo(args),
+            rerun_flags: "",
         }
     }
 
     fn display(&self) -> String {
-        let mut text = String::new();
-        for (key, value) in &self.env {
-            if value.is_empty() {
-                text.push_str(&format!("env -u {key} "));
-            } else {
-                text.push_str(&format!("{key}={value} "));
-            }
-        }
-        text.push_str(if self.program.ends_with("cargo") {
-            "cargo"
-        } else {
-            &self.program
-        });
-        for arg in &self.args {
+        let GateKind::Cargo(args) = &self.kind else {
+            return "cargo xtask lint".to_owned();
+        };
+        let mut text = String::from("cargo");
+        for arg in args {
             if arg.contains(' ') || arg.contains('(') {
                 text.push_str(&format!(" '{arg}'"));
             } else {
@@ -536,86 +621,138 @@ fn package_args(scope: &Scope) -> Vec<String> {
     }
 }
 
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
 fn plan(selection: &Selection, args: &CheckArgs) -> Vec<Gate> {
     let mut gates = vec![
-        Gate::cargo(
-            "fmt",
-            vec!["fmt".into(), "--all".into(), "--".into(), "--check".into()],
-        ),
-        Gate::cargo("lint", vec!["xtask".into(), "lint".into()]),
+        Gate::cargo("fmt", strings(&["fmt", "--all", "--", "--check"])),
+        Gate {
+            name: "lint",
+            kind: GateKind::Lint,
+            rerun_flags: "",
+        },
     ];
     if selection.scope == Scope::None {
         return gates;
     }
     let packages = package_args(&selection.scope);
     if !args.no_clippy {
-        let mut clippy = vec!["clippy".into()];
+        let mut clippy = strings(&["clippy", "--color", "never"]);
         clippy.extend(packages.clone());
-        clippy
-            .extend(["--all-targets", "--all-features", "--", "-D", "warnings"].map(String::from));
+        clippy.extend(strings(&[
+            "--all-targets",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ]));
         gates.push(Gate::cargo("clippy", clippy));
     }
-    let mut test = vec![
-        "nextest".into(),
-        "run".into(),
-        "--profile".into(),
-        args.profile.clone(),
-    ];
+    let mut test = strings(&[
+        "nextest",
+        "run",
+        "--color",
+        "never",
+        "--profile",
+        &args.profile,
+    ]);
     test.extend(packages);
-    gates.push(Gate {
-        env: vec![("NO_COLOR", "")],
-        ..Gate::cargo("test", test)
-    });
-    if selection.minimal_provider {
+    gates.push(Gate::cargo("test", test));
+    if selection.scope == Scope::Full {
+        // nextest does not run doctests.
         gates.push(Gate::cargo(
-            "minimal-provider",
-            [
-                "nextest",
-                "run",
-                "--profile",
-                &args.profile,
-                "-p",
-                "qq-provider",
-                "--no-default-features",
-                "--features",
-                "test-support",
-            ]
-            .map(String::from)
-            .to_vec(),
+            "doctest",
+            strings(&["test", "--color", "never", "--workspace", "--doc"]),
         ));
+    }
+    if selection.minimal_provider {
+        let minimal = [
+            "-p",
+            "qq-provider",
+            "--no-default-features",
+            "--features",
+            "test-support",
+        ];
+        if !args.no_clippy {
+            let mut clippy = strings(&["clippy", "--color", "never"]);
+            clippy.extend(strings(&minimal));
+            clippy.extend(strings(&["--all-targets", "--", "-D", "warnings"]));
+            gates.push(Gate::cargo("minimal-clippy", clippy));
+        }
+        let mut test = strings(&[
+            "nextest",
+            "run",
+            "--color",
+            "never",
+            "--profile",
+            &args.profile,
+        ]);
+        test.extend(strings(&minimal));
+        gates.push(Gate {
+            rerun_flags: " --no-default-features --features test-support",
+            ..Gate::cargo("minimal-test", test)
+        });
     }
     gates
 }
+
+/// Lines of a failed gate's output kept in the report; the full output is
+/// in its log file.
+const TAIL_LINES: usize = 40;
 
 fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
     let started = Instant::now();
     println!("check: {:<16} {}", gate.name, gate.display());
     let log_path = log_dir.join(format!("{}.log", gate.name));
-    let mut command = ProcessCommand::new(&gate.program);
-    command
-        .args(&gate.args)
-        .current_dir(root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in &gate.env {
-        if value.is_empty() {
-            command.env_remove(key);
-        } else {
-            command.env(key, value);
+    let (passed, output) = match &gate.kind {
+        GateKind::Lint => match crate::lint::run(root) {
+            Ok(_) => (true, String::new()),
+            Err(error) => (false, error.to_string()),
+        },
+        GateKind::Cargo(args) => {
+            // Output goes straight to the log file (bounded memory, readable
+            // while the gate runs); the report parses it afterwards.
+            match fs::File::create(&log_path) {
+                Ok(log) => {
+                    let stderr = log.try_clone();
+                    let mut command = ProcessCommand::new(cargo());
+                    command
+                        .args(args)
+                        .current_dir(root)
+                        .env("CARGO_TERM_COLOR", "never")
+                        .env_remove("NO_COLOR")
+                        .stdin(Stdio::null())
+                        .stdout(log);
+                    match stderr {
+                        Ok(stderr) => {
+                            command.stderr(stderr);
+                        }
+                        Err(_) => {
+                            command.stderr(Stdio::null());
+                        }
+                    }
+                    let passed = match command.status() {
+                        Ok(status) => status.success(),
+                        Err(error) => {
+                            let _ =
+                                fs::write(&log_path, format!("failed to launch cargo: {error}"));
+                            false
+                        }
+                    };
+                    (passed, fs::read_to_string(&log_path).unwrap_or_default())
+                }
+                Err(error) => (
+                    false,
+                    format!("cannot create {}: {error}", log_path.display()),
+                ),
+            }
         }
-    }
-    let (passed, output) = match command.output() {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            (output.status.success(), text)
-        }
-        Err(error) => (false, format!("failed to launch: {error}")),
     };
-    // The log is evidence; losing it must not mask the gate result.
-    let _ = fs::write(&log_path, &output);
-    let failures = if gate.name == "test" || gate.name == "minimal-provider" {
-        parse_nextest_failures(&output)
+    let is_test = matches!(gate.name, "test" | "minimal-test");
+    let failures = if is_test && !passed {
+        parse_nextest_failures(&output, gate.rerun_flags)
     } else {
         Vec::new()
     };
@@ -623,20 +760,47 @@ fn run_gate(root: &Path, gate: &Gate, log_dir: &Path) -> GateReport {
         String::new()
     } else {
         let lines = output.lines().collect::<Vec<_>>();
-        lines[lines.len().saturating_sub(40)..].join("\n")
+        lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n")
     };
     GateReport {
         name: gate.name.to_owned(),
         command: gate.display(),
         passed,
         seconds: started.elapsed().as_secs_f64(),
+        tests: if is_test {
+            parse_nextest_counts(&output)
+        } else {
+            None
+        },
         failures,
         output_tail,
     }
 }
 
+/// Reports live in this checkout's `target/`, even when `CARGO_TARGET_DIR`
+/// points worktrees at a shared build cache, so agents in different
+/// worktrees never read each other's results.
 fn report_path(root: &Path) -> PathBuf {
-    crate::smoke::target_dir(root).join("qq-check/last.json")
+    root.join("target/qq-check/last.json")
+}
+
+fn git_head(root: &Path) -> (String, bool) {
+    let head = capture(
+        ProcessCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root),
+        "git rev-parse",
+    )
+    .map(|head| head.trim().to_owned())
+    .unwrap_or_default();
+    let dirty = capture(
+        ProcessCommand::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(root),
+        "git status",
+    )
+    .is_ok_and(|status| !status.trim().is_empty());
+    (head, dirty)
 }
 
 pub fn evidence_markdown(report: &Report) -> String {
@@ -647,14 +811,21 @@ pub fn evidence_markdown(report: &Report) -> String {
         Scope::Packages(packages) => packages.iter().cloned().collect::<Vec<_>>().join(", "),
     };
     text.push_str(&format!(
-        "Head `{}` vs `{}`; {} changed file(s); scope: {scope}.\n\n| Gate | Result | Time | Command |\n| --- | --- | --- | --- |\n",
-        &report.head[..report.head.len().min(12)],
+        "Head `{}`{} vs `{}`; {} changed file(s); scope: {scope}.\n\n| Gate | Result | Tests | Time | Command |\n| --- | --- | --- | --- | --- |\n",
+        short(&report.head),
+        if report.dirty { " + uncommitted changes" } else { "" },
         report.base,
         report.changed.len()
     ));
     for gate in &report.gates {
+        let tests = gate.tests.map_or(String::new(), |tests| {
+            format!(
+                "{}/{} passed, {} skipped",
+                tests.passed, tests.run, tests.skipped
+            )
+        });
         text.push_str(&format!(
-            "| {} | {} | {:.1}s | `{}` |\n",
+            "| {} | {} | {tests} | {:.1}s | `{}` |\n",
             gate.name,
             if gate.passed { "pass" } else { "**fail**" },
             gate.seconds,
@@ -687,13 +858,44 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
     let root = crate::smoke::root();
     let path = report_path(&root);
     if args.evidence {
-        let text = fs::read_to_string(&path).map_err(|_| CheckError::NoReport(path.clone()))?;
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(CheckError::NoReport(path));
+            }
+            Err(error) => return Err(CheckError::Read(path, error)),
+        };
         let report: Report =
             serde_json::from_str(&text).map_err(|error| CheckError::Report(path.clone(), error))?;
+        // Evidence for a commit the report did not check is false evidence.
+        let (head, dirty) = git_head(&root);
+        if report.head != head || report.dirty != dirty {
+            return Err(CheckError::StaleReport {
+                path,
+                report: format!(
+                    "{}{}",
+                    short(&report.head),
+                    if report.dirty { "+dirty" } else { "" }
+                ),
+                head: format!("{}{}", short(&head), if dirty { "+dirty" } else { "" }),
+            });
+        }
         print!("{}", evidence_markdown(&report));
         return Ok(());
     }
+    // A failed run must never leave the previous run's report behind.
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CheckError::Write(path, error)),
+    }
+    if !hooks_enabled(&root) {
+        println!(
+            "check: tip: `git config core.hooksPath .githooks` runs this gate before every push"
+        );
+    }
     let started = Instant::now();
+    let (head, dirty) = git_head(&root);
     let packages = workspace_packages(&root)?;
     for name in &args.packages {
         if !packages.iter().any(|package| &package.name == name) {
@@ -777,16 +979,9 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         }
     }
     let passed = reports.len() == gates.len() && reports.iter().all(|report| report.passed);
-    let head = capture(
-        ProcessCommand::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root),
-        "git rev-parse",
-    )
-    .map(|head| head.trim().to_owned())
-    .unwrap_or_default();
     let report = Report {
         head,
+        dirty,
         base: args.base.clone(),
         changed,
         selection,
@@ -814,6 +1009,20 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
     }
 }
 
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+fn hooks_enabled(root: &Path) -> bool {
+    capture(
+        ProcessCommand::new("git")
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(root),
+        "git config",
+    )
+    .is_ok_and(|path| path.trim() == ".githooks")
+}
+
 fn indent(text: &str) -> String {
     text.lines()
         .map(|line| format!("    {line}"))
@@ -825,7 +1034,7 @@ fn indent(text: &str) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Package, Scope, parse_nextest_failures, select};
+    use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};
 
     fn package(name: &str, dir: &str, deps: &[&str]) -> Package {
         Package {
@@ -891,8 +1100,10 @@ mod tests {
     }
 
     #[test]
-    fn guide_pages_are_inputs_of_the_root_docs_truth_tests() {
-        assert_eq!(scope(&["docs/guide/cli.md"]), packages(&["qq"]));
+    fn guide_pages_and_readme_reach_docs_truth_and_release_tests() {
+        assert_eq!(scope(&["docs/guide/cli.md"]), packages(&["qq", "xtask"]));
+        assert_eq!(scope(&["README.md"]), packages(&["qq", "xtask"]));
+        assert_eq!(scope(&["build.rs"]), packages(&["qq"]));
     }
 
     #[test]
@@ -928,10 +1139,11 @@ mod tests {
     }
 
     #[test]
-    fn only_aws_paths_add_the_minimal_provider_profile() {
+    fn any_provider_change_adds_the_minimal_provider_profile() {
         let select_one = |path: &str| select(&workspace(), &[path.to_owned()], &[]);
         assert!(select_one("crates/qq-provider/src/aws.rs").minimal_provider);
-        assert!(!select_one("crates/qq-provider/src/http.rs").minimal_provider);
+        assert!(select_one("crates/qq-provider/src/lib.rs").minimal_provider);
+        assert!(!select_one("crates/qq-core/src/lib.rs").minimal_provider);
     }
 
     #[test]
@@ -945,78 +1157,86 @@ mod tests {
         assert_eq!(selection.reasons["qq-client"], "depends on qq-server");
     }
 
+    /// Real nextest 0.9.140 output (`--color never`) for a crate with a
+    /// failing, an aborting, a timed-out, and a flaky test.
+    const DEFAULT_PROFILE: &str = include_str!("../tests/fixtures/nextest-default.txt");
+    const CI_PROFILE: &str = include_str!("../tests/fixtures/nextest-ci.txt");
+
+    fn names(output: &str) -> Vec<String> {
+        parse_nextest_failures(output, "")
+            .into_iter()
+            .map(|failure| failure.test)
+            .collect()
+    }
+
     #[test]
-    fn nextest_failures_carry_the_panic_and_a_rerun_command() {
-        let output = "\
-        PASS [   0.010s] (1/3) qq-core tools::tests::fine
-        FAIL [  33.042s] (2/3) qq-core sessions::tests::nonblocking::a_parent_replays
-  stdout ───
-
-    running 1 test
-    test sessions::tests::nonblocking::a_parent_replays ... FAILED
-
-  stderr ───
-
-    thread 'sessions::tests::nonblocking::a_parent_replays' (274229) panicked at crates/qq-core/src/sessions/tests.rs:5260:6:
-    timed out waiting for the run to finish: Elapsed(())
-    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
-        PASS [   0.014s] (3/3) qq-provider http::tests::ok
-     Summary [  95.653s] 3 tests run: 2 passed, 1 failed, 0 skipped
-        FAIL [  33.042s] (2/3) qq-core sessions::tests::nonblocking::a_parent_replays
-";
-        let failures = parse_nextest_failures(output);
-        assert_eq!(failures.len(), 1, "the summary repeat is deduplicated");
-        let failure = &failures[0];
-        assert_eq!(failure.package, "qq-core");
+    fn default_profile_failures_carry_the_panic_and_a_rerun_command() {
         assert_eq!(
-            failure.test,
-            "sessions::tests::nonblocking::a_parent_replays"
+            names(DEFAULT_PROFILE),
+            ["tests::bad", "tests::flaky", "tests::seg", "tests::slow"]
         );
-        assert!(failure.message.contains("tests.rs:5260:6"));
+        let failures = parse_nextest_failures(DEFAULT_PROFILE, "");
         assert!(
-            failure
-                .message
-                .contains("timed out waiting for the run to finish")
+            failures[0].message.contains("panicked at src/lib.rs"),
+            "{:?}",
+            failures[0]
         );
+        assert!(failures[0].message.contains("boom"), "{:?}", failures[0]);
+        assert_eq!(failures[2].message, "(test aborted with signal 6: SIGABRT)");
+        assert_eq!(failures[3].message, "(test timed out)");
         assert_eq!(
-            failure.rerun,
-            "cargo nextest run -p qq-core -E 'test(=sessions::tests::nonblocking::a_parent_replays)' --no-capture"
+            failures[0].rerun,
+            "cargo nextest run -p nx -E 'test(=tests::bad)' --no-capture"
         );
     }
 
     #[test]
-    fn final_failure_output_after_the_summary_is_attached() {
-        let output = "\
-        FAIL [   0.003s] (380/624) qq-tui render::probe_tests::probe_fails
-────────────
-     Summary [   6.741s] 624 tests run: 623 passed, 1 failed, 3 skipped
-        FAIL [   0.003s] (380/624) qq-tui render::probe_tests::probe_fails
-  stdout ───
-
-    test render::probe_tests::probe_fails ... FAILED
-
-  stderr ───
-
-    thread 'render::probe_tests::probe_fails' (604676) panicked at crates/qq-tui/src/render.rs:429:9:
-    assertion `left == right` failed: probe: arithmetic broke
-      left: 2
-     right: 3
-    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-";
-        let failures = parse_nextest_failures(output);
-        assert_eq!(failures.len(), 1);
+    fn ci_profile_retries_are_parsed_and_flaky_passes_are_not_failures() {
         assert_eq!(
-            failures[0].message,
-            "thread 'render::probe_tests::probe_fails' (604676) panicked at crates/qq-tui/src/render.rs:429:9:\n\
-             assertion `left == right` failed: probe: arithmetic broke\nleft: 2\nright: 3"
+            names(CI_PROFILE),
+            ["tests::bad", "tests::seg", "tests::slow"]
+        );
+        let failures = parse_nextest_failures(CI_PROFILE, " --no-default-features");
+        assert!(failures[0].message.contains("boom"));
+        assert_eq!(
+            failures[1].rerun,
+            "cargo nextest run -p nx --no-default-features -E 'test(=tests::seg)' --no-capture"
+        );
+    }
+
+    #[test]
+    fn summary_counts_are_read_from_either_profile() {
+        assert_eq!(
+            parse_nextest_counts(DEFAULT_PROFILE),
+            Some(TestCounts {
+                run: 5,
+                passed: 1,
+                skipped: 0
+            })
+        );
+        assert_eq!(
+            parse_nextest_counts(CI_PROFILE),
+            Some(TestCounts {
+                run: 5,
+                passed: 2,
+                skipped: 0
+            })
+        );
+        let workspace = "     Summary [  43.856s] 2219 tests run: 2219 passed, 14 skipped\n";
+        assert_eq!(
+            parse_nextest_counts(workspace),
+            Some(TestCounts {
+                run: 2219,
+                passed: 2219,
+                skipped: 14
+            })
         );
     }
 
     #[test]
     fn integration_test_binaries_report_their_package() {
         let output = "        FAIL [   0.1s] (1/1) qq-core::soak a_case\n";
-        let failures = parse_nextest_failures(output);
+        let failures = parse_nextest_failures(output, "");
         assert_eq!(failures[0].package, "qq-core");
         assert_eq!(failures[0].test, "a_case");
     }

@@ -14,10 +14,11 @@ worth repeating on every PR.
 
 ```sh
 cargo build --bin qq
-eval "$(.qq/skills/verify-qq/qq-home.sh new my-check)"   # sets QQ_HOME, QQ_ENV, QQ_FAKE_PORT
+eval "$(.qq/skills/verify-qq/qq-home.sh new my-check)"   # sets QQ_HOME, QQ_FAKE_PORT
 ```
 
-`qq-home.sh new <name>` creates `target/qq-verify/<name>/` with `HOME`,
+`qq-home.sh new <name>` creates `target/qq-verify/<name>/` (always in this
+checkout, even with a shared `CARGO_TARGET_DIR`) with `HOME`,
 `XDG_{CONFIG,DATA,STATE,RUNTIME}_HOME`, a git-initialized `workspace/`, and a
 fake OpenAI Responses endpoint on a free loopback port that serves the
 replies in `$QQ_HOME/script.jsonl` (one JSON reply per line; see *Scripting
@@ -39,8 +40,9 @@ Run first, and whenever anything looks off:
 .qq/skills/verify-qq/qq-home.sh qq my-check doctor --json | jq '{failed, version}'
 ```
 
-`failed` must be `0` (a `workspace` warning about a missing `AGENTS.md` is
-expected). `version.qq` must match `target/debug/qq --version`.
+`failed` must be `0`. A `workspace` warning about a missing `AGENTS.md` is
+expected. `version.qq` must equal the output of `target/debug/qq --version`
+with its leading `qq ` removed.
 
 ## 3. Drive
 
@@ -63,9 +65,9 @@ reply repeats when the script runs out:
 Every request is appended to `$QQ_HOME/provider-requests.txt`, so you can
 prove what qq sent (tool results, prior turns, tool schemas).
 
-The reply index counts requests for the life of the fake, across runs. Start
-a fresh home (`qq-home.sh new <name>`) for each scripted scenario, or write
-the script to cover every request the sequence of runs will make.
+The reply index restarts whenever `script.jsonl` changes. Rewrite the
+script before each scripted scenario. Within one script, replies are
+consumed in request order across every run in the home.
 
 ## 4. Evidence
 
@@ -94,7 +96,8 @@ whole home. Never `pkill qq`: other agents run qq on this machine.
 ## Isolation and concurrency
 
 Each home has its own data directory, so homes never share a session store
-or server. Two agents must use different names. `qq run` exits `4` if a
+or server. Two agents must use different names. `qq-home.sh new` refuses a
+name whose home still has live processes. `qq run` exits `4` if a
 `qq serve` from the same home is running; stop it first.
 
 ## Keeping the map honest

@@ -17,7 +17,7 @@ Run `qq init --model …`, then `qq auth login <provider>`, then `qq doctor`.
 ```sh
 H=.qq/skills/verify-qq/qq-home.sh
 $H qq <name> doctor --json | jq '{failed, checks: [.checks[]? | {name, status}]}'
-$H qq <name> config sources        # Applied	QQ_CONFIG_CONTENT
+$H qq <name> config sources        # lists compiled defaults, QQ_CONFIG_CONTENT, TUI defaults
 $H qq <name> config explain model  # model: QQ_CONFIG_CONTENT
 $H qq <name> config check
 ```

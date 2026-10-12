@@ -36,7 +36,17 @@
 | `{"tool":"shell","args":{"command":"rm -f gone.txt"}}` | `--approval auto` | `tool_approval_requested`, then `tool_approval_resolved` with `denied` |
 | `{"tool":"ask_user","args":{"questions":[{"prompt":"Which?","options":["a","b"]}]}}` | any | outcome `needs_input`, exit 5 |
 
-The side effect is the proof: check `workspace/` and
+Rewriting `script.jsonl` restarts the fake's reply sequence, so you can run
+the rows one after another in a single home. Read the state with:
+
+```sh
+jq -c 'select(.type=="event").envelope.event | select(.type|startswith("tool_")) | [.type, .tool_call.state]' run.jsonl
+```
+
+The `ask_user` row emits `tool_approval_requested`, then
+`tool_call_finished` with state `interrupted`.
+
+The side effect is the proof. Check `workspace/` and
 `select name, state from tool_calls` in the store.
 
 ## Gotchas

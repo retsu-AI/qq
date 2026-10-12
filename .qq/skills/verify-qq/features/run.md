@@ -38,7 +38,8 @@ The JSONL contains three record types:
 - `event`: the event is in `.envelope.event.type`.
 - `outcome`: carries `status`, `exit_code`, `message`, `usage`, and `final_output`.
 
-Golden examples are in `crates/qq-protocol/tests/fixtures/headless/v32/`.
+Golden examples are in
+`crates/qq-protocol/tests/fixtures/headless/v<PROTOCOL_VERSION>/`.
 
 | Behavior | How to trigger it | Expect |
 | --- | --- | --- |

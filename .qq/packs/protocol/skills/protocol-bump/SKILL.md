@@ -1,4 +1,5 @@
 ---
+name: protocol-bump
 description: Change a QQ wire type, plan descriptor, or store schema safely: every serialization site, version constant, golden, fixture, and doc that must move together. Load before editing qq-protocol, plan/descriptor.rs, or sessions/store/schema.rs.
 ---
 

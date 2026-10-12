@@ -7,9 +7,9 @@ bulk.
    Record its test count and time:
    `cargo nextest run -p <crate> -E 'test(/^<module path>::/)'`.
 2. **Find flakes.** Run the module 20 times under load:
-   `cargo nextest run -p <crate> -E '...' --stress-count 20` (or a shell loop
-   while `cargo xtask check --full` runs elsewhere). Every failure is a bug in
-   the test or the code; reproduce it like `playbooks/bug-fix.md` step 1.
+   `cargo nextest run -p <crate> -E '...' --stress-count 20`, and again while
+   `cargo xtask check --full` runs in another terminal to add load. Every failure is a bug in
+   the test or the code; reproduce it like `.qq/skills/qq-mode/playbooks/bug-fix.md` step 1.
 3. **Remove fixed sleeps.** Each `tokio::time::sleep`/`thread::sleep` that
    `cargo xtask lint` counts is either waiting for something (replace with
    the signal, channel, or `Notify` it is waiting for) or advancing time
@@ -17,8 +17,10 @@ bulk.
    Wall-clock upper bounds (`elapsed < 30ms`) move to a bench or a perf
    budget. Lower `SLEEP_CEILING` in `xtask/src/lint.rs` by the number you
    removed, in the same commit.
-4. **Measure value with mutants.** `cargo mutants -p <crate> -f <file>`
-   (install with `cargo install cargo-mutants` if missing). A test that
+4. **Measure value with mutants.**
+   `cargo mutants -p <crate> -f <file> --test-tool nextest`
+   (install with `cargo install cargo-mutants --locked` if missing; scope to
+   one file, since a whole `qq-core` run takes hours). A test that
    kills no mutant another test does not also kill is a deletion candidate.
 5. **Merge duplicates into tables.** Near-identical tests across files
    (for example the per-protocol provider tests) become one table-driven test
@@ -28,6 +30,6 @@ bulk.
    *Test behavior, not implementation*.
 7. **Prove no loss.** The mutation catch count for the module did not drop;
    the module is faster; `cargo xtask check` passes.
-8. Run `playbooks/opening-a-pr.md`: one module per PR, with before/after
+8. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md`: one module per PR, with before/after
    test count, time, mutants caught, and each deleted test named with its
    reason.

@@ -16,7 +16,7 @@
    answer is a regression.
 5. **Post-change measurement** next to the baseline, same host, same
    command. Budgets live in `benchmarks/perf/budgets-v1.json`.
-6. Run `playbooks/opening-a-pr.md` with before/after numbers and the noise
+6. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md` with before/after numbers and the noise
    floor in the body.
 
 **Reply:** the user-visible latency or resource change with before, after,

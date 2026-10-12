@@ -6,10 +6,14 @@
    (`.qq/skills/qq-mode/SKILL.md`). It picks the playbook, sets your todo
    list, and names the gates that prove the work. This file holds repository
    facts and rules; `qq-mode` holds the procedure.
-2. Work in your own worktree when another agent may be active:
+2. Run `git status` before editing. Work in your own worktree when another
+   agent may be active:
    `git worktree add .worktrees/<name> -b <type>/<eng-id>-<short> origin/main`.
    Never edit or revert another agent's uncommitted changes.
-3. The feedback loop (details: `docs/runbooks/testing.md`):
+3. Prerequisites: `nix develop` (provides `cargo-nextest`), or
+   `cargo install cargo-nextest --locked`. Enable the pre-push gate once per
+   clone with `git config core.hooksPath .githooks`.
+4. The feedback loop (details: `docs/runbooks/testing.md`):
 
 ```sh
 cargo nextest run -p <crate> -E 'test(/<pattern>/)'   # while editing
@@ -21,7 +25,12 @@ cargo xtask check --evidence                           # Markdown proof for the 
 When a gate fails, read `target/qq-check/last.json` (each failing test, its
 panic, and the exact rerun command) or `target/qq-smoke/<scenario>/`
 (stdout, stderr, provider requests, session store). Fix the cause; never
-weaken the gate. The merge queue runs `cargo xtask check --full`.
+weaken the gate. Prefer non-interactive commands, and report blockers and
+failed verification directly.
+
+The merge queue runs `cargo xtask check --full` once it is enabled in branch
+protection. Until then, run `--full` yourself before merging a change whose
+scope is not already the full workspace.
 
 ## Project
 
@@ -31,11 +40,13 @@ automation, and a long-running HTTP/SSE server. Speed and developer
 experience are product requirements; correctness, durability, and safe
 execution are baseline constraints.
 
-Read `docs/design/architecture.md` before changing system boundaries.
+Read `docs/design/architecture.md` before changing system boundaries. It
+records the initial direction, not a license to pre-build deferred features.
 Documentation is organized in `docs/README.md`: `design/` (as built),
 `adr/` (decisions), `plans/` (next), `plans/progress/` (in flight, one
-ledger per plan), `runbooks/` (procedures). Plan slices follow
-`docs/plans/workflow.md`; reserve ADR numbers in
+ledger per plan), `runbooks/` (procedures). Before starting or reviewing a
+unit of work, read `docs/plans/workflow.md`. Record progress in the plan's
+ledger every session, and reserve ADR numbers in
 `docs/plans/progress/root.md`.
 
 ## Repository map
@@ -54,12 +65,15 @@ ledger per plan), `runbooks/` (procedures). Plan slices follow
 - `crates/qq-reasoning/`: shared reasoning event vocabulary.
 - `crates/qq-server/`: HTTP/SSE server and local-instance discovery.
 - `crates/qq-tui/`: terminal UI and terminal-only client state.
-- `xtask/`: repository automation (`cargo xtask check|lint|smoke|perf|eval|release`).
-  Releases: `docs/runbooks/release.md`.
+- `xtask/`: repository automation (`cargo xtask --help`), including the
+  `check`, `lint`, and `smoke` gates. Releases: `docs/runbooks/release.md`.
 - `website/`: docs site generated from `docs/guide/`; edit the guide, not the
   site (`docs/runbooks/website.md`).
-- `.qq/skills/`: agent skills (`qq-mode`, `principles`, `verify-qq`), also
-  reachable as `.agents/skills/`.
+- `.qq/skills/`: agent skills (`qq-mode`, `principles`, `verify-qq`,
+  `design-skill-or-pack`), also reachable as `.agents/skills/`. Packs with
+  their own skills live in `.qq/packs/` (for example
+  `.qq/packs/protocol/skills/protocol-bump/` for wire, descriptor, and
+  schema changes).
 
 Dependencies point toward the narrow protocol and provider interfaces. The
 root package is the composition root and translates external configuration
@@ -113,8 +127,8 @@ only for behavior being shipped.
 - No unnecessary allocation, cloning, boxing, dynamic dispatch, or
   conversion in streaming and request hot paths.
 - Exhaustive `match`; never discard an error without a stated reason.
-- Blocking work off Tokio executor threads; long-running async work
-  supports cancellation.
+- Blocking work stays off Tokio executor threads, bounded when unavoidable.
+  Long-running async work supports cancellation.
 - Comments only for non-obvious invariants, safety constraints, or design
   decisions.
 - Modules: `src/providers.rs` plus `src/providers/openai.rs`, never
@@ -136,11 +150,12 @@ it. When the same correction happens twice, encode it
 | No new fixed sleeps in tests (ceiling only moves down) | `cargo xtask lint` `sleep-in-tests` |
 | `#[ignore]` carries a reason | `cargo xtask lint` `ignore-needs-reason` |
 | Every ADR has an index row | `cargo xtask lint` `adr-indexed` |
-| Guide documents every CLI flag and doctor check | `src/docs_truth.rs` tests |
-| Wire changes regenerate fixtures and bump `PROTOCOL_VERSION` | `crates/qq-protocol/tests/wire_fixtures.rs` |
+| Guide documents every CLI flag and doctor check | `src/docs_truth.rs`, driven from `cli::tests` and `doctor::tests` |
+| Wire changes regenerate fixtures and bump `PROTOCOL_VERSION` | `crates/qq-protocol/tests/{wire,headless}_fixtures.rs` |
 | The binary works end to end (ask, run, tools, 401, resume, serve) | `cargo xtask smoke` |
-| Startup, first token, size budgets | `cargo xtask perf check` (`benchmarks/perf/budgets-v1.json`) |
-| Minimal provider profile builds without the AWS SDK | `cargo xtask check` (minimal-provider gate on AWS paths), merge queue |
+| Startup, first token, size budgets | `cargo xtask perf check` against `benchmarks/perf/budgets-v1.json` (manual: `docs/runbooks/perf-recording.md`; not in CI) |
+| Minimal provider profile builds and passes without the AWS SDK | `cargo xtask check` (minimal-clippy and minimal-test gates on any `qq-provider` change) |
+| Doctests pass | `cargo xtask check --full` (doctest gate) |
 | Tests assert behavior, not implementation | prose only: `principles` skill |
 | No lock across `.await`, no blocking on Tokio workers | Clippy `await_holding_lock`; otherwise review |
 | Persist before publish | review; `crates/qq-core` session tests |
@@ -148,8 +163,8 @@ it. When the same correction happens twice, encode it
 ## Tests
 
 - Test public behavior and failure modes at the narrowest boundary that
-  proves it. A regression test for every bug fix that nothing existing
-  catches; show it failing first.
+  proves it. Every bug fix has a test that fails before the fix and passes
+  after; prefer a new row in an existing test over a new function.
 - Deterministic: no live network, no real credentials, no fixed sleeps, no
   wall-clock upper bounds. Loopback fakes live in
   `qq_provider::test_support` and `xtask/src/smoke.rs`.
@@ -162,11 +177,13 @@ Policy and tooling: `docs/runbooks/testing.md`.
 
 ## Git and reviews
 
-Linear is the work tracker (team `ENG`, project `qq`). Read the issue before
-implementing, link the PR to it, keep its state current, and query rather
-than guess issue or PR details.
+Linear is the work tracker (team `ENG`, project `qq`). Use the Executor
+MCP/tool integrations as the primary interface for both Linear and GitHub.
+Read the issue before implementing, link the PR to it, keep its state
+current, and query rather than guess issue or PR details.
 
-- Branches: `<type>/<eng-id>-<short-kebab>` (`feat/eng-123-provider-cache`).
+- Branches: `<type>/<eng-id>-<short-kebab>` (`feat/eng-123-provider-cache`);
+  without an issue, `<type>/<short-kebab>` (`docs/agent-guide`).
 - Commits and PR titles: Conventional Commits, `type(scope): imperative
   summary`; `!` plus an impact paragraph for breaking changes. Types: `feat`,
   `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`,

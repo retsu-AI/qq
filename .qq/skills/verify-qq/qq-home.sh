@@ -3,14 +3,16 @@
 # See .qq/skills/verify-qq/SKILL.md. Usage:
 #   qq-home.sh new <name>          create target/qq-verify/<name>, start the fake; prints env
 #   qq-home.sh qq <name> ARGS...   run target/debug/qq inside the home
+#                                  (QQ_CONTEXT_WINDOW=N sets the model's window; default 200000)
 #   qq-home.sh serve <name>        start `qq serve` in the background; prints its address
 #   qq-home.sh stop <name>         stop the fake and any serve this home started
 #   qq-home.sh rm <name>           stop, then delete the home
 set -euo pipefail
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
-target=${CARGO_TARGET_DIR:-$repo/target}
-qq_bin=${QQ_BIN:-$target/debug/qq}
+# Homes live in this checkout even when CARGO_TARGET_DIR is shared.
+target=$repo/target
+qq_bin=${QQ_BIN:-${CARGO_TARGET_DIR:-$repo/target}/debug/qq}
 
 die() { echo "qq-home: $*" >&2; exit 1; }
 home_of() { [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "name must be kebab-case: $1"; echo "$target/qq-verify/$1"; }
@@ -20,8 +22,8 @@ qq_env() {
   shift
   port=$(cat "$home/port")
   local config
-  config=$(printf '(version: 1, model: "verify/model", providers: {"verify": Custom(connection: (base_url: "http://127.0.0.1:%s/v1", api: OpenAiResponses, auth: NoAuth), models: {"model": (name: "Verify model", context_window: 200000)})})' "$port")
-  env -i PATH="$PATH" TERM="${TERM:-xterm-256color}" NO_COLOR=1 \
+  config=$(printf '(version: 1, model: "verify/model", providers: {"verify": Custom(connection: (base_url: "http://127.0.0.1:%s/v1", api: OpenAiResponses, auth: NoAuth), models: {"model": (name: "Verify model", context_window: %s)})})' "$port" "${QQ_CONTEXT_WINDOW:-200000}")
+  exec env -i PATH="$PATH" TERM="${TERM:-xterm-256color}" NO_COLOR=1 \
     HOME="$home" XDG_CONFIG_HOME="$home/config" XDG_DATA_HOME="$home/data" \
     XDG_STATE_HOME="$home/state" XDG_RUNTIME_DIR="$home/runtime" \
     QQ_CONFIG_CONTENT="$config" "$@"
@@ -32,7 +34,9 @@ fake_server() {
 import json, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 home, port = sys.argv[1], int(sys.argv[2])
-lock = threading.Lock(); served = [0]
+# The reply index restarts whenever script.jsonl changes, so each scripted
+# scenario starts from its first reply.
+lock = threading.Lock(); served = [0]; script_mtime = [None]
 done = {"type": "response.completed", "response": {"usage": {"input_tokens": 3, "output_tokens": 2}}}
 def sse(events):
     return "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode()
@@ -54,11 +58,15 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", "0")))
         with lock:
-            n = served[0]; served[0] += 1
+            import os
             try:
+                mtime = os.stat(f"{home}/script.jsonl").st_mtime_ns
                 script = [json.loads(l) for l in open(f"{home}/script.jsonl") if l.strip()]
             except FileNotFoundError:
-                script = []
+                mtime, script = None, []
+            if mtime != script_mtime[0]:
+                script_mtime[0] = mtime; served[0] = 0
+            n = served[0]; served[0] += 1
             spec = script[min(n, len(script) - 1)] if script else {"text": "(no script.jsonl)"}
             with open(f"{home}/provider-requests.txt", "a") as log:
                 log.write(f"----- request {n} {self.path} -----\n{body.decode(errors='replace')}\n\n")
@@ -70,8 +78,15 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
 }
 
+live_pids() {
+  local home=$1 pid
+  [[ -f $home/pids ]] || return 0
+  while read -r pid; do kill -0 "$pid" 2>/dev/null && echo "$pid"; done < "$home/pids"
+}
+
 stop_home() {
   local home=$1
+  [[ -n $home ]] || die "no home"
   [[ -f $home/pids ]] || return 0
   while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$home/pids"
   rm -f "$home/pids"
@@ -81,12 +96,14 @@ cmd=${1:-}; shift || true
 case $cmd in
   new)
     home=$(home_of "${1:?name}")
-    stop_home "$home"; rm -rf "$home"
+    # Another agent may be using this name; never stop what we did not start.
+    [[ -z $(live_pids "$home") ]] || die "home $1 is in use (live processes in $home/pids); pick another name or run: $0 stop $1"
+    rm -rf "$home"
     mkdir -p "$home"/{config,data,state,runtime,workspace,evidence}
     chmod 700 "$home/runtime"
     printf 'pub struct Widget;\npub struct Gadget;\n' > "$home/workspace/inventory.rs"
     git -C "$home/workspace" init -q
-    [[ -f $home/script.jsonl ]] || echo '{"text": "verify fake reply"}' > "$home/script.jsonl"
+    echo '{"text": "verify fake reply"}' > "$home/script.jsonl"
     port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
     echo "$port" > "$home/port"
     fake_server "$home" "$port" >"$home/fake.log" 2>&1 &
@@ -102,6 +119,7 @@ case $cmd in
     ;;
   serve)
     home=$(home_of "${1:?name}")
+    [[ -x $qq_bin ]] || die "$qq_bin missing; run cargo build --bin qq"
     cd "$home/workspace"
     qq_env "$home" "$qq_bin" serve --bind 127.0.0.1:0 >"$home/serve.log" 2>&1 &
     echo $! >> "$home/pids"
@@ -109,7 +127,7 @@ case $cmd in
     grep 'listening at' "$home/serve.log" || die "qq serve did not start; see $home/serve.log"
     echo "discovery: $home/runtime/qq/server.ron"
     ;;
-  stop) stop_home "$(home_of "${1:?name}")" ;;
+  stop) home=$(home_of "${1:?name}"); stop_home "$home" ;;
   rm) home=$(home_of "${1:?name}"); stop_home "$home"; rm -rf "$home" ;;
   *) sed -n '2,9p' "$0"; exit 2 ;;
 esac

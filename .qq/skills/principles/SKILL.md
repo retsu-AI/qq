@@ -43,8 +43,8 @@ replaced by `Default::default()`, rewrite the assertion or delete the test.
   `#[tokio::test(start_paused = true)]`. `cargo xtask lint` counts sleeps.
 - No wall-clock upper bounds in tests; those are benches or perf budgets.
 - Prefer a new row in an existing table-driven test over a new function.
-- A regression test is required only when nothing existing fails without
-  the fix. Show it failing first.
+- Every bug fix has a test that fails before the fix and passes after.
+  Show it failing first.
 
 ## Subtract before you add
 
@@ -53,7 +53,7 @@ replaced by `Default::default()`, rewrite the assertion or delete the test.
 Delete dead code, one-caller wrappers, duplicate tests, and stale
 compatibility paths first; then build on the smaller base. The smallest
 change that solves the problem wins. No placeholder crates, extension
-points, or options without a caller (`AGENTS.md` § Engineering Priorities).
+points, or options without a caller (`AGENTS.md` § Engineering priorities).
 
 ## Encode lessons in structure
 
@@ -61,7 +61,7 @@ points, or options without a caller (`AGENTS.md` § Engineering Priorities).
 
 Turn the rule into a type, a lint (`xtask/src/lint.rs`, `[workspace.lints]`),
 a CI step, or a test, in that order of preference. Add the rule and its
-enforcer to `AGENTS.md` § Rules → enforcers. Run `qq-mode/playbooks/correct.md`.
+enforcer to `AGENTS.md` § Rules → enforcers. Run `.qq/skills/qq-mode/playbooks/correct.md`.
 
 ## Explain the number
 
@@ -69,7 +69,7 @@ enforcer to `AGENTS.md` § Rules → enforcers. Run `qq-mode/playbooks/correct.m
 
 Find what limits it (CPU, I/O, a lock, allocation, the host's load), how
 much it varies run to run (repeat; A/A on one binary), and whether it
-measures the path users hit. A 5 % win inside 8 % noise is not a win. Record
+measures the path users hit. A 5% win inside 8% noise is not a win. Record
 the command, host load, and raw output path.
 
 ## Guard the context window
@@ -85,7 +85,7 @@ decisions in the main thread; not raw output. Read
 
 **When:** writing Rust here.
 
-`AGENTS.md` § Rust Style is the rule. The ones reviewers correct most:
+`AGENTS.md` § Rust style is the rule. The ones reviewers correct most:
 handle expected failures explicitly instead of a reflexive `?`; typed
 `thiserror` errors with sources; exhaustive `match` with no silent `_`
 fallback; no blocking work or sync lock across `.await` on a Tokio worker;

@@ -22,35 +22,37 @@ server cancels its runs.
 
 ## Driving it headlessly
 
+Verified end to end:
+
 ```sh
-.qq/skills/verify-qq/qq-home.sh serve <name>
+H=.qq/skills/verify-qq/qq-home.sh
+eval "$($H new <name>)"; $H serve <name>
 TOKEN=$(sed -n 's/.*token:"\([0-9a-f]*\)".*/\1/p' $QQ_HOME/runtime/qq/server.ron)
 ADDR=$(sed -n 's/.*address:"\([^"]*\)".*/\1/p' $QQ_HOME/runtime/qq/server.ron)
-curl -s -H "Authorization: Bearer $TOKEN" http://$ADDR/v1/health
+api() { curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' "http://$ADDR$1" -d "$2"; }
+cid() { openssl rand -hex 16; }
+
+WS=$(api /v1/workspaces/resolve "{\"command_id\":\"$(cid)\",\"command\":{\"type\":\"resolve_workspace\",\"path\":\"$QQ_HOME/workspace\"}}" | jq -r .outcome.workspace_id)
+# Last-Event-ID is the string store_id:workspace_id:sequence, not the JSON object.
+CUR=$(api /v1/workspaces/snapshot "{\"workspace_id\":\"$WS\",\"session_limit\":8,\"message_limit\":8}" \
+  | jq -r '.cursor|"\(.store_id):\(.workspace_id):\(.sequence)"')
+curl -sN -m 10 -H "Authorization: Bearer $TOKEN" -H 'Accept: text/event-stream' -H "Last-Event-ID: $CUR" \
+  http://$ADDR/v1/workspaces/$WS/events > $QQ_HOME/evidence/sse.txt &
+SID=$(api /v1/sessions "{\"command_id\":\"$(cid)\",\"command\":{\"type\":\"create_session\",\"workspace_id\":\"$WS\",\"model\":{\"model\":\"verify/model\"}}}" | jq -r .outcome.session_id)
+api /v1/sessions/prompts "{\"command_id\":\"$(cid)\",\"command\":{\"type\":\"submit_prompt\",\"session_id\":\"$SID\",\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]}}" | jq -c .outcome
+sleep 3; rg -o '"type":"(session_created|text_appended|run_finished)"' $QQ_HOME/evidence/sse.txt
 ```
 
-Steps for a full run:
-
-1. `POST /v1/workspaces/resolve` with
-   `{"command_id":"<32hex>","command":{"type":"resolve_workspace","path":"$QQ_HOME/workspace"}}`.
-2. `POST /v1/workspaces/snapshot` with
-   `{"workspace_id","session_limit":8,"message_limit":8}`. Read `cursor`
-   from the response.
-3. `GET /v1/workspaces/<id>/events` with `Last-Event-ID: <cursor>` (the
-   header is required) and `Accept: text/event-stream`.
-4. `POST /v1/sessions` with `create_session` and
-   `"model":{"model":"verify/model"}`.
-5. `POST /v1/sessions/prompts` with `submit_prompt` and
-   `input:[{"type":"text","text":"hi"}]`.
-
-SSE frames are `id: <cursor>`, `event: session_event`, `data: <envelope>`.
-To resume, reconnect with the last `id`; only events with a higher sequence
-come back. The smoke scenario `serve-sse` drives this sequence through
-`qq_client::SessionClient`.
+- SSE frames: `id: <cursor>`, `event: session_event`, `data: <envelope>`.
+- Resume: reconnect with the last `id`. Only events with a higher sequence
+  come back.
+- The smoke scenario `serve-sse` covers the same flow through
+  `qq_client::SessionClient`, including the reconnect.
 
 ## Gotchas
 
 - A request without the bearer token gets 401
   `{"error":"authentication required"}`.
+- `GET …/events` without `Last-Event-ID` gets 400 `Last-Event-ID is required`.
 - The server binds only to loopback. Keep-alive comments arrive every 15 s.
 - `qq run` exits 4 while this home's server is running. Stop the server first.

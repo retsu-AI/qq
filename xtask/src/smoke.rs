@@ -35,6 +35,8 @@ use tokio::{
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(60);
+/// One `qq` invocation; shorter than a scenario so its message wins.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Args)]
@@ -56,6 +58,8 @@ pub enum SmokeError {
     BuildLaunch(String, #[source] io::Error),
     #[error("`cargo build --bin qq` failed")]
     BuildFailed,
+    #[error("failed to prepare {0}")]
+    Prepare(PathBuf, #[source] io::Error),
     #[error("unknown scenario {0:?}; run `cargo xtask smoke --list`")]
     UnknownScenario(String),
     #[error("{failed} of {total} smoke scenario(s) failed")]
@@ -125,6 +129,12 @@ impl FakeProvider {
     /// Serves `script` and appends every request to `log_path` as it
     /// arrives, so a failing scenario's evidence shows what qq sent.
     async fn start(log_path: PathBuf, script: Vec<Reply>) -> io::Result<Self> {
+        if script.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a fake provider needs at least one reply",
+            ));
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}/v1", listener.local_addr()?);
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -216,6 +226,8 @@ struct Home {
     root: PathBuf,
     workspace: PathBuf,
     binary: PathBuf,
+    /// Numbers each `qq` invocation's evidence files (`1-run.stdout`, …).
+    invocations: std::sync::atomic::AtomicUsize,
 }
 
 struct Output {
@@ -253,6 +265,7 @@ impl Home {
             root,
             workspace,
             binary: binary.to_owned(),
+            invocations: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -289,12 +302,12 @@ impl Home {
     async fn run(&self, provider: &FakeProvider, args: &[&str]) -> Result<Output, String> {
         let mut command = self.command(provider);
         command.args(args);
-        let output = match tokio::time::timeout(SCENARIO_TIMEOUT, command.output()).await {
+        let output = match tokio::time::timeout(COMMAND_TIMEOUT, command.output()).await {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => return Err(format!("launch qq {args:?}: {error}")),
             Err(_) => {
                 return Err(format!(
-                    "qq {args:?} did not exit within {SCENARIO_TIMEOUT:?}"
+                    "qq {args:?} did not exit within {COMMAND_TIMEOUT:?}"
                 ));
             }
         };
@@ -303,7 +316,11 @@ impl Home {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         };
-        let name = args.first().copied().unwrap_or("qq");
+        let invocation = self
+            .invocations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let name = format!("{invocation}-{}", args.first().copied().unwrap_or("qq"));
         // Evidence for the failure report; a write failure only loses detail.
         let _ = fs::write(self.root.join(format!("{name}.stdout")), &output.stdout);
         let _ = fs::write(self.root.join(format!("{name}.stderr")), &output.stderr);
@@ -582,30 +599,78 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
     Ok(())
 }
 
+/// Collects one run's streamed text until its `RunFinished`, and the last
+/// cursor seen.
+async fn follow_run(
+    events: &mut qq_client::SessionEventStream,
+    run_id: qq_protocol::RunId,
+) -> Result<(RunOutcome, String, EventCursor, u64), String> {
+    let mut text = String::new();
+    let mut first_sequence = None;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(event) = events.next().await {
+            let event = event.map_err(|error| format!("event stream: {error}"))?;
+            first_sequence.get_or_insert(event.cursor.sequence);
+            match event.event {
+                SessionEvent::TextAppended { text: chunk, .. } => text.push_str(&chunk),
+                SessionEvent::RunFinished {
+                    run_id: done,
+                    outcome,
+                    ..
+                } if done == run_id => {
+                    return Ok((
+                        outcome,
+                        std::mem::take(&mut text),
+                        event.cursor,
+                        first_sequence.unwrap_or(0),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Err("event stream ended before the run finished".to_owned())
+    })
+    .await
+    .map_err(|_| "the run did not finish within 30s".to_owned())?
+}
+
 async fn serve_sse(home: &Home) -> Result<(), String> {
     let provider = home
-        .provider(vec![Reply::Text("served over sse")])
+        .provider(vec![
+            Reply::Text("served over sse"),
+            Reply::Text("after resume"),
+        ])
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
+    // Logs go to files: an unread pipe would block `qq serve` once full.
+    let stderr = fs::File::create(home.root.join("serve.stderr"))
+        .map_err(|error| format!("create serve.stderr: {error}"))?;
     let mut command = home.command(&provider);
-    command.args(["serve", "--bind", "127.0.0.1:0"]);
+    command
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .stderr(Stdio::from(stderr));
     let mut child = command
         .spawn()
         .map_err(|error| format!("launch qq serve: {error}"))?;
     let result = async {
         let stdout = child.stdout.take().ok_or("qq serve stdout unavailable")?;
+        let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        tokio::time::timeout(
-            Duration::from_secs(20),
-            BufReader::new(stdout).read_line(&mut line),
-        )
-        .await
-        .map_err(|_| "qq serve did not report readiness within 20s".to_owned())?
-        .map_err(|error| format!("read qq serve stdout: {error}"))?;
+        tokio::time::timeout(Duration::from_secs(20), reader.read_line(&mut line))
+            .await
+            .map_err(|_| "qq serve did not report readiness within 20s".to_owned())?
+            .map_err(|error| format!("read qq serve stdout: {error}"))?;
         ensure!(
             line.starts_with("qq server listening at "),
             "unexpected readiness line {line:?}"
         );
+        let stdout_log = home.root.join("serve.stdout");
+        tokio::spawn(async move {
+            // Drain stdout to a file so later output never hits a closed pipe.
+            if let Ok(mut file) = tokio::fs::File::create(stdout_log).await {
+                let _ = tokio::io::copy(&mut reader, &mut file).await;
+            }
+        });
         let paths = qq_server::ServerPaths::new(home.root.join("runtime/qq"));
         let connection = qq_server::discover_at(&paths)
             .await
@@ -642,60 +707,51 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
         let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
             return Err(format!("create session returned {:?}", receipt.outcome));
         };
-        let receipt = client
-            .submit(
-                session_id,
-                vec![InputPart::text("hello server")],
-                RunLimits::default(),
-                Correlation::default(),
-            )
-            .await
-            .map_err(|error| format!("submit prompt: {error}"))?;
-        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
-            return Err(format!("submit returned {:?}", receipt.outcome));
-        };
-        let mut text = String::new();
-        let mut last: Option<EventCursor> = None;
-        let finished = tokio::time::timeout(Duration::from_secs(30), async {
-            while let Some(event) = events.next().await {
-                let event = event.map_err(|error| format!("event stream: {error}"))?;
-                last = Some(event.cursor);
-                match event.event {
-                    SessionEvent::TextAppended { text: chunk, .. } => text.push_str(&chunk),
-                    SessionEvent::RunFinished {
-                        run_id: done,
-                        outcome,
-                        ..
-                    } if done == run_id => {
-                        return Ok(outcome);
-                    }
-                    _ => {}
+        let submit = |text: &'static str| {
+            let client = client.clone();
+            async move {
+                let receipt = client
+                    .submit(
+                        session_id,
+                        vec![InputPart::text(text)],
+                        RunLimits::default(),
+                        Correlation::default(),
+                    )
+                    .await
+                    .map_err(|error| format!("submit prompt: {error}"))?;
+                match receipt.outcome {
+                    CommandOutcome::PromptQueued { run_id, .. } => Ok(run_id),
+                    other => Err(format!("submit returned {other:?}")),
                 }
             }
-            Err("event stream ended before the run finished".to_owned())
-        })
-        .await
-        .map_err(|_| "the run did not finish within 30s".to_owned())??;
+        };
+        let run_id = submit("hello server").await?;
+        let (outcome, text, last, _) = follow_run(&mut events, run_id).await?;
         ensure!(
-            matches!(finished, RunOutcome::Completed),
-            "run outcome {finished:?}"
+            matches!(outcome, RunOutcome::Completed),
+            "run outcome {outcome:?}"
         );
         ensure!(text.contains("served over sse"), "streamed text {text:?}");
-        // Resume from the last cursor: a reconnecting client sees no replay
-        // of what it already has.
-        let cursor = last.ok_or("no events were received")?;
+        // Reconnect from the last cursor, as a client does after a drop:
+        // the next run's events arrive and nothing at or before the cursor
+        // is replayed.
+        drop(events);
         let mut resumed = client
-            .events(workspace_id, cursor)
+            .events(workspace_id, last)
             .await
             .map_err(|error| format!("resubscribe: {error}"))?;
-        let replay = tokio::time::timeout(Duration::from_millis(500), resumed.next()).await;
-        if let Ok(Some(Ok(event))) = replay {
-            ensure!(
-                event.cursor.sequence > cursor.sequence,
-                "resume replayed {:?}",
-                event.cursor
-            );
-        }
+        let run_id = submit("after the reconnect").await?;
+        let (outcome, text, _, first) = follow_run(&mut resumed, run_id).await?;
+        ensure!(
+            matches!(outcome, RunOutcome::Completed),
+            "resumed run outcome {outcome:?}"
+        );
+        ensure!(text.contains("after resume"), "resumed text {text:?}");
+        ensure!(
+            first > last.sequence,
+            "resume replayed sequence {first}, at or before the cursor {}",
+            last.sequence
+        );
         Ok(())
     }
     .await;
@@ -718,6 +774,12 @@ async fn doctor_and_config(home: &Home) -> Result<(), String> {
         check.stderr
     );
     let doctor = home.run(&provider, &["doctor", "--json"]).await?;
+    ensure!(
+        doctor.status == Some(0),
+        "doctor exit {:?}; stdout: {}",
+        doctor.status,
+        doctor.stdout
+    );
     let report: serde_json::Value = serde_json::from_str(doctor.stdout.trim())
         .map_err(|error| format!("doctor --json is not JSON ({error}): {}", doctor.stdout))?;
     ensure!(
@@ -802,7 +864,18 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             target_dir(&root).join("debug/qq")
         }
     };
-    let evidence_root = target_dir(&root).join("qq-smoke");
+    // Evidence stays in this checkout even when `CARGO_TARGET_DIR` is shared.
+    let evidence_root = root.join("target/qq-smoke");
+    if let Err(error) = fs::create_dir_all(&evidence_root) {
+        return Err(SmokeError::Prepare(evidence_root, error));
+    }
+    // Run a private copy: another worktree sharing the target directory may
+    // relink `debug/qq` while the scenarios run.
+    let private = evidence_root.join(if cfg!(windows) { "qq.exe" } else { "qq" });
+    if let Err(error) = fs::copy(&binary, &private) {
+        return Err(SmokeError::Prepare(binary, error));
+    }
+    let binary = private;
     let started = Instant::now();
     let mut handles = BTreeMap::new();
     for scenario in &selected {
@@ -813,14 +886,20 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             scenario.name,
             tokio::spawn(async move {
                 let started = Instant::now();
-                let result = match Home::create(directory.clone(), &binary) {
-                    Ok(home) => match tokio::time::timeout(SCENARIO_TIMEOUT, run(&home)).await {
-                        Ok(result) => result,
-                        Err(_) => Err(format!("scenario exceeded {SCENARIO_TIMEOUT:?}")),
-                    },
-                    Err(error) => Err(format!("create isolated home: {error}")),
+                let create = {
+                    let directory = directory.clone();
+                    tokio::task::spawn_blocking(move || Home::create(directory, &binary)).await
                 };
-
+                let result = match create {
+                    Ok(Ok(home)) => {
+                        match tokio::time::timeout(SCENARIO_TIMEOUT, run(&home)).await {
+                            Ok(result) => result,
+                            Err(_) => Err(format!("scenario exceeded {SCENARIO_TIMEOUT:?}")),
+                        }
+                    }
+                    Ok(Err(error)) => Err(format!("create isolated home: {error}")),
+                    Err(error) => Err(format!("create isolated home task: {error}")),
+                };
                 (started.elapsed(), result, directory)
             }),
         );

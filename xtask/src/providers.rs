@@ -437,7 +437,7 @@ enum XtaskError {
     Homebrew(#[from] crate::homebrew::HomebrewError),
     #[error(transparent)]
     Check(#[from] crate::check::CheckError),
-    #[error("check task stopped unexpectedly")]
+    #[error("check or lint task stopped unexpectedly")]
     CheckTask(#[source] tokio::task::JoinError),
     #[error(transparent)]
     Lint(#[from] crate::lint::LintError),
@@ -477,7 +477,9 @@ async fn try_run(cli: Cli) -> Result<(), XtaskError> {
             .await
             .map_err(XtaskError::CheckTask)?
             .map_err(Into::into),
-        Task::Lint => crate::lint::run(&crate::smoke::root())
+        Task::Lint => tokio::task::spawn_blocking(|| crate::lint::run(&crate::smoke::root()))
+            .await
+            .map_err(XtaskError::CheckTask)?
             .map(|_| ())
             .map_err(Into::into),
         Task::Smoke(args) => crate::smoke::run(args).await.map_err(Into::into),

@@ -18,5 +18,5 @@ process rules are in `docs/plans/workflow.md`.
    numbers before/after, deviations.
 8. A slice touching `sessions/`, `store/`, approvals, provider retry, or the
    plan cache needs an independent review by a second agent (workflow §4).
-9. Run `playbooks/opening-a-pr.md` with the body from
+9. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md` with the body from
    `docs/plans/templates/slice.md`.

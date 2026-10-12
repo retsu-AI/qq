@@ -8,8 +8,10 @@ Every other playbook ends here.
 2. **Gate.** `cargo xtask check` passes on the final head. For user-visible
    changes, `cargo xtask smoke` passes too.
 3. **Evidence block.** `cargo xtask check --evidence` prints Markdown for
-   the PR body. Paste it; do not retype results.
-4. **Branch name** `<type>/<eng-id>-<short-kebab>`; push with
+   the PR body. Paste it; do not retype results. It refuses a report for a
+   different commit or tree state, so commit first, then check, then paste.
+4. **Branch name** `<type>/<eng-id>-<short-kebab>` (`<type>/<short-kebab>`
+   without an issue); push with
    `git push -u origin HEAD` (the pre-push hook reruns `cargo xtask check`
    when enabled; see `docs/runbooks/testing.md`).
 5. **PR body** (`docs/plans/templates/slice.md` for plan slices), in this

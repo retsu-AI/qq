@@ -1,6 +1,6 @@
 ---
 name: qq-mode
-description: Start here for any non-trivial change in the qq repo (feature, bug fix, refactor, perf, test cleanup, review, PR). Picks the playbook, sets the todo list, and names the gates that prove the work.
+description: Start here for any non-trivial task in the qq repo (feature, bug fix, refactor, perf, tests, protocol change, review, PR). Picks the playbook, sets the todo list, and names the gates that prove the work.
 ---
 
 # qq mode
@@ -12,10 +12,10 @@ disagree on process, this skill wins; on Rust style or architecture,
 
 ## Non-negotiables
 
-1. **Pick a playbook first.** Match the task to one row below, open
-   `playbooks/<file>` next to this file, and copy its numbered steps into your
-   todo list verbatim as the first items. A step you skip stays in the list as
-   `skip: <reason>`.
+1. **Pick a playbook first.** Match the task to one row below, open the
+   file, and copy its numbered steps into your todo list verbatim as the
+   first items. The final "run opening-a-pr" step is one item; expand it when
+   you reach it. A step you skip stays in the list as `skip: <reason>`.
 2. **Every claim of "works" carries evidence from the real artifact.** A test
    name and its pass, `cargo xtask check` output, a `cargo xtask smoke`
    scenario, or a `verify-qq` drive. "It compiles" and "the change is small"
@@ -26,7 +26,8 @@ disagree on process, this skill wins; on Rust style or architecture,
    - Before every commit you push: `cargo xtask check`.
    - User-visible behavior: `cargo xtask smoke` (and the matching
      `verify-qq` feature when no scenario covers it).
-   - The merge queue runs `cargo xtask check --full`; you do not need to.
+   - The merge queue runs `cargo xtask check --full` once it is enabled;
+     until then, run it yourself before merging anything narrower.
 4. **Read failures from the report, not the scrollback.**
    `target/qq-check/last.json` lists each failing test, its first panic
    lines, and the exact rerun command. Smoke failures keep their evidence in
@@ -44,24 +45,31 @@ disagree on process, this skill wins; on Rust style or architecture,
 
 | Task | Playbook |
 | --- | --- |
-| A read-only question: how does X work, why, are we sure | `playbooks/investigation.md` |
-| A defect to reproduce, root-cause, and fix | `playbooks/bug-fix.md` |
-| New or changed behavior | `playbooks/feature.md` |
-| Behavior-preserving restructure (rename, extract, move, dedupe) | `playbooks/refactoring.md` |
-| A measured slowness or a hot-path change | `playbooks/perf.md` |
-| Flaky, slow, duplicated, or low-value tests | `playbooks/test-audit.md` |
-| A slice from a plan in `docs/plans/` | `playbooks/slice.md` (wraps one of the above) |
-| Drive an open PR to merge-ready | `playbooks/babysit.md` |
-| Resume another agent's work or hand yours off | `playbooks/session-pickup.md` |
-| A recurring mistake to encode as a rule | `playbooks/correct.md` |
-| Any of the above is ready for review | `playbooks/opening-a-pr.md` (every playbook ends here) |
+| A read-only question: how does X work, why, are we sure | `.qq/skills/qq-mode/playbooks/investigation.md` |
+| A defect to reproduce, root-cause, and fix | `.qq/skills/qq-mode/playbooks/bug-fix.md` |
+| New or changed behavior | `.qq/skills/qq-mode/playbooks/feature.md` |
+| Wire type, plan descriptor, or store schema change | `.qq/skills/qq-mode/playbooks/feature.md` plus the `protocol-bump` skill (`.qq/packs/protocol/skills/protocol-bump/SKILL.md`) |
+| Behavior-preserving restructure (rename, extract, move, dedupe) | `.qq/skills/qq-mode/playbooks/refactoring.md` |
+| A measured slowness or a hot-path change | `.qq/skills/qq-mode/playbooks/perf.md` |
+| Flaky, slow, duplicated, or low-value tests | `.qq/skills/qq-mode/playbooks/test-audit.md` |
+| TUI rendering or layout change | `.qq/skills/qq-mode/playbooks/feature.md`; goldens via `QQ_UPDATE_GOLDENS=1`, then review `git diff crates/qq-tui/tests/goldens/` |
+| Docs-only change | `cargo xtask check` (fmt and lint; guide edits also run `docs_truth`), then `.qq/skills/qq-mode/playbooks/opening-a-pr.md` |
+| CI, xtask, or skill change | `.qq/skills/qq-mode/playbooks/feature.md`; prove it with `cargo nextest run -p xtask` and one real run of the changed command |
+| A slice from a plan in `docs/plans/` | `.qq/skills/qq-mode/playbooks/slice.md` (wraps one of the above) |
+| Review someone else's PR | `.qq/skills/qq-mode/playbooks/review.md` |
+| Drive an open PR to merge-ready | `.qq/skills/qq-mode/playbooks/babysit.md` |
+| Resume another agent's work or hand yours off | `.qq/skills/qq-mode/playbooks/session-pickup.md` |
+| A recurring mistake to encode as a rule | `.qq/skills/qq-mode/playbooks/correct.md` |
+| Dependency bump or release | stop and ask; then `docs/runbooks/release.md` for releases |
+| Any of the above is ready for review | `.qq/skills/qq-mode/playbooks/opening-a-pr.md` (every playbook ends here) |
 
 No row fits: write a five-step plan in the same shape (reproduce or
 baseline, change, verify on the real surface, encode, PR) and say so.
 
 ## Principles
 
-Load the `principles` skill and read the section before you apply it. Name
+Load the `principles` skill (`.qq/skills/principles/SKILL.md`) and read
+the section before you apply it. Name
 the principle in your reply when it changed a decision.
 
 - **Prove it works**: before saying done.
@@ -71,7 +79,7 @@ the principle in your reply when it changed a decision.
 - **Encode lessons in structure**: correcting the same thing twice.
 - **Explain the number**: before trusting a timing or benchmark.
 - **Guard the context window**: large outputs, wide searches.
-- **Rust style**: writing Rust here (`AGENTS.md` § Rust Style is the rule).
+- **Rust style**: writing Rust here (`AGENTS.md` § Rust style is the rule).
 
 ## Autonomy
 
@@ -83,7 +91,9 @@ the principle in your reply when it changed a decision.
   plan that names it, or bumping a workspace dependency.
 - Reserve ADR numbers in `docs/plans/progress/root.md` before writing one.
 - Work in your own worktree when another agent is active
-  (`git worktree add .worktrees/<name> -b <branch> origin/main`).
+  (`git worktree add .worktrees/<name> -b <branch> origin/main`). Do not
+  share `CARGO_TARGET_DIR` with a worktree whose builds you depend on at the
+  same moment; `cargo xtask` reports and homes stay per checkout regardless.
 
 ## Subagents
 

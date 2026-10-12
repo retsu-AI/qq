@@ -19,4 +19,4 @@ or your own rework.
    Delete any prose the enforcer now makes redundant.
 5. Test the enforcer: it fails on a known bad example and passes on the
    tree.
-6. Run `playbooks/opening-a-pr.md` as its own PR (`build(lint): ...`).
+6. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md` as its own PR (`build(lint): ...`).

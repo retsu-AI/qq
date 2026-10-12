@@ -28,9 +28,9 @@ Run `/compact` on an idle session. A long run also compacts on its own.
    The response outcome is `compaction_queued`. SSE then shows `run_started`,
    `run_finished`, and `session_compacted`, which carries `before_bytes` and
    `after_bytes`.
-4. For automatic compaction, give the model a tiny window. Add
-   `context_window: 2000` to the model in the config `qq-home.sh` writes
-   (unverified).
+4. For automatic compaction, give the model a tiny window:
+   `QQ_CONTEXT_WINDOW=2000 .qq/skills/verify-qq/qq-home.sh qq <name> run …`
+   (and the same variable for `serve`). Not yet verified.
 
 ## Gotchas
 

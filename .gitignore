@@ -45,3 +45,6 @@ benchmarks/harbor/jobs/
 
 # Local-only configuration fragments (gateway hostnames, personal overrides)
 .qq/config.d/*-local.ron
+
+# Agent worktrees (`git worktree add .worktrees/<name>`)
+.worktrees/

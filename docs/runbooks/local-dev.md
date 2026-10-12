@@ -66,12 +66,12 @@ symlink to a regular file. Project `.qq/config.ron` still cannot be a symlink.
 Use one worktree per writing agent:
 
 ```sh
-git worktree add ../qq-<slice> -b <type>/<linear-id>-<slice>-<short> origin/main
+git worktree add .worktrees/<slice> -b <type>/<linear-id>-<slice>-<short> origin/main
 ```
 
 Each worktree builds into its own `target/` by default. Perf recordings go
 under that worktree's `target/qq-perf/` and are never committed. Remove with
-`git worktree remove ../qq-<slice>` when the slice merges.
+`git worktree remove .worktrees/<slice>` when the slice merges.
 
 With several worktrees (for example under `.worktrees/`), a full workspace
 build per checkout costs tens of gigabytes. Share one build cache instead by
@@ -81,7 +81,10 @@ exporting, in each worktree's shell,
 export CARGO_TARGET_DIR=<main-checkout>/target
 ```
 
-so every checkout reuses the same compiled dependencies. Concurrent builds
+so every checkout reuses the same compiled dependencies. `cargo xtask check`
+reports, `cargo xtask smoke` evidence, and `verify-qq` homes still live in
+each checkout's own `target/`, and smoke runs a private copy of the binary,
+so agents never read each other's results. Concurrent builds
 then serialize on the target directory's lock (cargo waits for the other
 build to finish rather than corrupting it), and a checkout on a different
 commit recompiles only the workspace crates that differ. This is a personal

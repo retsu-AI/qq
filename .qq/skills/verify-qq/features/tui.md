@@ -35,20 +35,24 @@ Bare `qq`, or `qq --session ID`. Both stdin and stdout must be a terminal.
    then review `git diff crates/qq-tui/tests/goldens/`. For ANSI frames you
    can `cat`, run `cargo test -p qq-tui --test gallery -- --ignored`, which
    writes to `target/qq-tui-gallery/`.
-2. **Live:** use the isolated fixture in `docs/runbooks/tui-qa.md`
-   (`qq --tui-qa-root $ROOT`). The root must be new, mode 700, and contain
-   only `config/config.ron`. Point that config at `$QQ_FAKE_PORT` from
-   `qq-home.sh new`. Drive it without a human through `script`:
+2. **Live** (verified): use the isolated `--tui-qa-root` fixture from
+   `docs/runbooks/tui-qa.md`, pointed at the fake from `qq-home.sh new`, and
+   drive it through `script`, with no human:
 
    ```sh
+   eval "$(.qq/skills/verify-qq/qq-home.sh new <name>)"
+   ROOT=$(mktemp -d /tmp/qq-tui-qa.XXXXXX); chmod 700 $ROOT; mkdir $ROOT/config
+   printf '(version: 1, model: "custom/qa-model", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:%s/v1", api: OpenAiResponses, auth: NoAuth), models: {"qa-model": (name: "QA")})})' \
+     $QQ_FAKE_PORT > $ROOT/config/config.ron
    (sleep 3; printf hello; sleep .5; printf '\r'; sleep 3; printf '\003') \
      | script -qfec "stty cols 100 rows 30; target/debug/qq --tui-qa-root $ROOT" /dev/null \
      > $QQ_HOME/evidence/tty.log
-   sed 's/\x1b\[[0-9;?<>]*[a-zA-Z]//g' $QQ_HOME/evidence/tty.log | rg 'verify fake reply|qq --session'
+   sed 's/\x1b\[[0-9;?<>]*[a-zA-Z]//g' $QQ_HOME/evidence/tty.log | rg -o 'verify fake reply|qq --session [0-9a-f]+'
+   case "$ROOT" in /tmp/qq-tui-qa.*) rm -rf -- "$ROOT";; esac
    ```
 
-   tmux `send-keys` and `capture-pane` work the same way where tmux is
-   installed.
+   The expected output is the fake's reply and the exit hint. tmux
+   `send-keys` and `capture-pane` work the same way where tmux is installed.
 
 ## Gotchas
 

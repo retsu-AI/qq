@@ -17,18 +17,18 @@ hypothesis, revert what it motivated.
    (`docs/runbooks/run-output-queries.md`). Confirm the surviving mechanism
    with evidence before writing the fix.
 3. **Commit the failing test first** (`test(<scope>): reproduce <bug>`), so
-   history shows red before green. Use the cheapest test that fails for the
-   right reason: prefer adding a case to an existing table or scenario over
-   a new test function.
+   history shows red before green. Every fix has one. Use the cheapest test
+   that fails for the right reason: prefer adding a case to an existing table
+   or scenario over a new test function.
 4. **Fix at the root.** The smallest change the evidence justifies. No
    defensive guards that silence the symptom, no retries that hide it, no
    sleeps.
 5. **Verify on the same surface.** The step-1 repro now passes; paste
    failing-then-passing output. A unit test passing elsewhere is not this.
 6. **Run `cargo xtask check`.** Fix everything it reports.
-7. **Ask: could a rule have caught this?** If yes, run `playbooks/correct.md`
-   in a separate commit.
-8. Run `playbooks/opening-a-pr.md`.
+7. **Ask: could a rule have caught this?** If yes, run the correct playbook
+   in a separate commit (`.qq/skills/qq-mode/playbooks/correct.md`).
+8. Run `.qq/skills/qq-mode/playbooks/opening-a-pr.md`.
 
 **Reply:** what was broken (user-visible), the root cause with
 `file:line`, the fix, failing-then-passing output, and the evidence block.

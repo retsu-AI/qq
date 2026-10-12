@@ -13,8 +13,8 @@
 
 ## Handing off or pausing
 
-1. Commit work in progress on the branch (`wip:` commits are fine on a
-   personal branch; squash before the PR).
+1. Commit work in progress on the branch as `chore(wip): <what>`; squash
+   those commits before opening the PR.
 2. Append to the ledger: what is done (with evidence), what is in flight,
    the next step, open questions, and the exact command to resume.
 3. Leave the worktree in place and name it in the ledger.
