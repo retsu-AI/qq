@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Enabled with `git config core.hooksPath .githooks` (see docs/runbooks/testing.md).
+# Runs the affected-only gate; the merge queue runs `cargo xtask check --full`.
+# Skip once with `git push --no-verify` only when the push is docs-only WIP.
+exec cargo xtask check --profile quick
