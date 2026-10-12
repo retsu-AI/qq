@@ -69,6 +69,7 @@ async fn compact_in_run(
         return Err(Error::Unavailable("session runtime failed".to_owned()));
     }
     let turn_cutoff = request.turn_cutoff;
+    let retained_bytes = request.retained_bytes;
     let started = inner
         .store
         .start_in_run_compaction(prompt_run, resolved_model, turn_cutoff)
@@ -194,6 +195,7 @@ async fn compact_in_run(
             summary,
             accounting,
             record_budget(resolved_model.context_window),
+            retained_bytes,
         )
         .await;
     match committed {

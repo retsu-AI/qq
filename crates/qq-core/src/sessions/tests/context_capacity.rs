@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn the_between_run_fold_still_stops_at_its_step_budget() {
+    // AC2: in-run compactions left `MAX_COMPACTION_STEPS`; the between-run
+    // fold keeps it. A prompt that has spent 31 steps with transcript left
+    // may take one more; at 32 the fold is exhausted.
+    let (_directory, _connection, _store_id, mut claimed, _, _) =
+        denial_capacity_fixture(DenialCapacityPath::Policy, 0);
+    claimed.context_compaction_remaining = true;
+    claimed.context_compaction_attempted = context::MAX_COMPACTION_STEPS - 1;
+    assert_eq!(
+        super::super::execution::compaction_disposition(&claimed),
+        context::CompactionDisposition::Eligible
+    );
+    claimed.context_compaction_attempted = context::MAX_COMPACTION_STEPS;
+    assert_eq!(
+        super::super::execution::compaction_disposition(&claimed),
+        context::CompactionDisposition::Exhausted(context::CompactionExhaustion::Attempted {
+            steps: context::MAX_COMPACTION_STEPS
+        })
+    );
+}
+#[test]
 fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
     let call = |id: &str, name: &str| {
         ContentBlock::tool_call(

@@ -3209,6 +3209,18 @@ enum AutoCompactScript {
         summary: String,
         overflows: Arc<AtomicUsize>,
     },
+    /// `ShellRepeatedlyWithSummaries` whose provider fails the request with a
+    /// transient 529 once, when `fault_at` results are in context and
+    /// nothing has been summarized: an empty faulted attempt that is stored
+    /// as a turn row but never joins the live transcript, inside the span
+    /// the first in-run compaction replaces (ENG-991).
+    ShellRepeatedlyWithEarlyFault {
+        turns: usize,
+        fault_at: usize,
+        text: String,
+        summary: String,
+        faults: Arc<AtomicUsize>,
+    },
     /// Sixteen `write_file` calls per turn, so a slice checkpoint arrives after
     /// sixteen turns; the checkpoint is answered with a text report, and the
     /// task ends once `calls` results are in context or summarized. The
@@ -3673,6 +3685,55 @@ impl Provider for AutoCompactProvider {
                 }
                 events.push(Ok(qq_provider::ProviderEvent::Completed { usage: None }));
                 Box::pin(stream::iter(events))
+            }
+            AutoCompactScript::ShellRepeatedlyWithEarlyFault {
+                turns,
+                fault_at,
+                text,
+                summary,
+                faults,
+            } => {
+                if last_text.contains("Summarize this conversation") {
+                    let summarized = prior_results.len() + summarized_before;
+                    return Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                            text: format!("{summary}\nturns_done={summarized}"),
+                        }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                if prior_results.len() == *fault_at
+                    && summarized_before == 0
+                    && faults.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    return Box::pin(stream::iter([Err(qq_provider::ProviderError::Api {
+                        status: 529,
+                        message: "scripted transient outage".to_owned(),
+                    })]));
+                }
+                let done = prior_results.len() + summarized_before;
+                if done >= *turns {
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                } else {
+                    let id = format!("call_shell_{done}");
+                    Box::pin(stream::iter([
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "shell".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(
+                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                            ),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
+                        Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+                    ]))
+                }
             }
             AutoCompactScript::ShellRepeatedlyWithProviderOverflow {
                 turns,

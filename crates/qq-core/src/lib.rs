@@ -187,11 +187,12 @@ const INTERRUPTED_TOOL_RESULT: &str =
 /// limit. The cap keeps a model that re-emits the same prefix from spending
 /// the whole budget; the typed failure names it.
 pub const MAX_OUTPUT_CONTINUATIONS: u16 = 3;
-/// Most times one run raises its output cap after a turn hit the limit with
-/// nothing visible streamed. Such a turn was spent entirely on hidden
-/// reasoning; resending the same request would only spend it again, so the
-/// retry doubles the cap (bounded by the model's ceiling) and a second empty
-/// turn settles the run with the cause named.
+/// Most times one streak of truncated turns raises its output cap after a turn
+/// hit the limit with nothing visible streamed. Such a turn was spent entirely
+/// on hidden reasoning; resending the same request would only spend it again,
+/// so the retry doubles the cap (bounded by the model's ceiling) and a second
+/// empty turn in the same streak settles the run with the cause named. Any
+/// completed turn ends the streak (ADR-0048 § 1).
 pub const MAX_EMPTY_OUTPUT_RETRIES: u16 = 1;
 
 /// The highest output cap the empty-truncation recovery may raise a turn to:

@@ -4782,6 +4782,30 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         .unwrap();
     assert!((1..=3).contains(&scoped), "{scoped}");
     assert_eq!(unscoped, 0);
+    // AC2: in-run steps do not draw on the between-run step budget, and
+    // each re-based the run's reservation to its new window: the final
+    // reservation covers one window (base plus this window's increments),
+    // not the run's lifetime output.
+    let (attempted, base, increment): (u32, u64, u64) = connection
+        .query_row(
+            "SELECT context_compaction_attempted, context_base_bytes, context_increment_bytes
+             FROM runs WHERE id = ?1",
+            [run.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(attempted, 0, "in-run steps are off the between-run budget");
+    let lifetime_result_bytes: u64 = connection
+        .query_row(
+            "SELECT SUM(length(CAST(result AS BLOB))) FROM tool_calls WHERE run_id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        base + increment < lifetime_result_bytes,
+        "reservation {base} + {increment} must be re-based below the run's lifetime {lifetime_result_bytes} result bytes"
+    );
     drop(connection);
 
     // Replay renders the same shape the live run saw: prompt, summary, then
@@ -5444,6 +5468,81 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
         &event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == next
     )));
+}
+
+#[tokio::test]
+async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live() {
+    // ENG-991: an empty faulted attempt is stored as a turn row but never
+    // joins the live transcript, so a cutoff counted from live assistant
+    // messages fell one short of the stored ordinal of the last replaced
+    // turn, and replay kept a turn the live run had summarized. The cutoff
+    // is now the stored ordinal the loop tracks per live turn.
+    let faults = Arc::new(AtomicUsize::new(0));
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithEarlyFault {
+                turns: 30,
+                fault_at: 2,
+                text: "task complete".to_owned(),
+                summary: valid_summary("work so far"),
+                faults: Arc::clone(&faults),
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    assert!(
+        faults.load(Ordering::SeqCst) >= 1,
+        "the scripted fault fired"
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "the run must compact in-run"
+    );
+    // The live run's last request is what the model saw; replaying the
+    // settled run renders it plus the final answer.
+    let live = {
+        let requests = harness.requests.lock().unwrap();
+        requests.last().unwrap().messages().to_vec()
+    };
+    let store = harness.runtime.inner.store.clone();
+    let session_id = harness.session_id;
+    let replayed = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction().unwrap();
+            load_model_context(&transaction, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    drop(store);
+    assert_eq!(
+        &replayed[..replayed.len() - 1],
+        live.as_slice(),
+        "replay keeps exactly the turns the live run kept"
+    );
+    harness.runtime.shutdown().await.unwrap();
+    assert_assembly_matches_reference(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
 }
 
 #[tokio::test]

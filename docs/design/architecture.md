@@ -865,8 +865,21 @@ One durable run follows a guarded loop:
    the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
-   with the next turns. Each in-run step counts against the same
-   `MAX_COMPACTION_STEPS` as between-run steps. A rejected or stalled
+   with the next turns. Each in-run compaction opens a new *window* for the
+   run's harness bounds (ADR-0048 § 1): the marker's transaction re-bases
+   the run's 4 MiB context reservation to the retained request plus the
+   framed summary (the loop sends the retained weight in
+   `InRunCompactionRequest`), and the loop zeroes its streamed-text count
+   (`MAX_RUN_MODEL_TEXT_BYTES`, 16 MiB per window). The marker's
+   `turn_cutoff` is the stored ordinal of the last replaced turn, which the
+   loop tracks per live assistant message, so a faulted attempt or a
+   reactive overflow that used an ordinal without adding a live message
+   cannot shift replay off the live splice (ENG-991). In-run steps do not
+   draw on `MAX_COMPACTION_STEPS`, which bounds one between-run fold; each
+   must still shrink the context and is charged to the caller's token and
+   cost limits like any turn. Empty-output cap raises
+   (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
+   completed turn restores the allowance. A rejected or stalled
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.
