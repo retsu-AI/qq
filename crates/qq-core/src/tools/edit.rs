@@ -172,6 +172,19 @@ struct Planned {
     before_hash: String,
     text: String,
     changes: Vec<Change>,
+    freshness: Freshness,
+}
+
+/// What proves the model saw the bytes a file's edits replace (ADR-0057).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    /// A recorded read of this exact content, or a matching `if_hash`.
+    Proven,
+    /// No recorded read and no `if_hash`: only edits whose `old` matches
+    /// exactly once by `exact` may apply.
+    Unread,
+    /// A recorded read of other content and no `if_hash`: the same rule.
+    ChangedSinceRead,
 }
 
 /// `L<line> -<removed>+<added>[ via=<strategy>]` for one applied edit,
@@ -241,35 +254,14 @@ pub(super) fn edit_file(
             };
             let before_hash = content_hash(&original.bytes);
             // Currency: a recorded read of this exact content, or an if_hash
-            // that proves the model saw it some other way (an @ mention).
-            let proven = match (&edit.if_hash, file_state.recorded(&key)) {
-                (Some(if_hash), _) => {
-                    if if_hash[2..] != before_hash[..12] {
-                        return ToolOutput::error(format!(
-                            "edit {index}: stale_file: {} is h:{} now, not {if_hash}; read it again",
-                            edit.path,
-                            &before_hash[..12]
-                        ));
-                    }
-                    true
-                }
-                (None, Some(recorded)) => {
-                    if recorded != before_hash {
-                        return ToolOutput::error(format!(
-                            "edit {index}: stale_file: {} changed since it was last read in this session; read it again and retry",
-                            edit.path
-                        ));
-                    }
-                    true
-                }
-                (None, None) => false,
+            // (checked per edit below) that proves the model saw it some
+            // other way (an @ mention). Without either, each edit must prove
+            // it on its own.
+            let freshness = match file_state.recorded(&key) {
+                Some(recorded) if recorded == before_hash => Freshness::Proven,
+                Some(_) => Freshness::ChangedSinceRead,
+                None => Freshness::Unread,
             };
-            if !proven {
-                return ToolOutput::error(format!(
-                    "edit {index}: not_read: {} has not been read in this session; call read_file on it first (or pass if_hash from its header)",
-                    edit.path
-                ));
-            }
             let text = match String::from_utf8(original.bytes.clone()) {
                 Ok(text) => text,
                 Err(_) => {
@@ -288,10 +280,56 @@ pub(super) fn edit_file(
                     before_hash,
                     text,
                     changes: Vec::new(),
+                    freshness,
                 },
             );
         }
         let file = planned.get_mut(&key).expect("just inserted");
+        // Every edit's if_hash is an assertion about the plan-time bytes, not
+        // only the first one for its file: a later mismatch is still stale,
+        // and a later match proves the file for the edits that follow.
+        if let Some(if_hash) = &edit.if_hash {
+            if if_hash[2..] != file.before_hash[..12] {
+                return ToolOutput::error(format!(
+                    "edit {index}: stale_file: {} is h:{} now, not {if_hash}; read it again",
+                    edit.path,
+                    &file.before_hash[..12]
+                ));
+            }
+            file.freshness = Freshness::Proven;
+        }
+        // ADR-0057: an `old` that occurs exactly once, byte for byte, shows
+        // the model has the region it replaces. An anchor, a fuzzy match,
+        // or a repeated `old` shows nothing, so those still need a read.
+        // It must be unique in the plan-time bytes (what the model can have
+        // seen) and in the text as earlier edits left it (so the apply takes
+        // the exact path, never the cascade). The apply re-hashes against
+        // `before_hash`, so a writer that lands after planning still fails.
+        let unique_exact = || match form {
+            Form::Replace { old, .. } => {
+                let once = |text: &str| text.match_indices(old).take(2).count() == 1;
+                once(&file.text)
+                    && (file.changes.is_empty()
+                        || std::str::from_utf8(&file.original.bytes).is_ok_and(once))
+            }
+            Form::InsertBefore { .. } | Form::InsertAfter { .. } => false,
+        };
+        let hash = &file.before_hash[..12];
+        let refusal = match file.freshness {
+            Freshness::Proven => None,
+            Freshness::Unread if !unique_exact() => Some(format!(
+                "edit {index}: not_read: {} is h:{hash} and has not been read in this session; old must match exactly once to edit without a read. Call read_file on it, or pass if_hash:\"h:{hash}\"",
+                edit.path
+            )),
+            Freshness::ChangedSinceRead if !unique_exact() => Some(format!(
+                "edit {index}: stale_file: {} is h:{hash} and changed since it was last read in this session; old must match exactly once to edit without a re-read. Read it again, or pass if_hash:\"h:{hash}\"",
+                edit.path
+            )),
+            Freshness::Unread | Freshness::ChangedSinceRead => None,
+        };
+        if let Some(refusal) = refusal {
+            return ToolOutput::error(refusal);
+        }
         if let Err(error) = apply_one(file, index, &form, edit.replace_all, arguments.fuzzy) {
             return ToolOutput::error(format!("edit {index}: {error}"));
         }
@@ -306,15 +344,28 @@ pub(super) fn edit_file(
 
     let edits_total: usize = planned.values().map(|file| file.changes.len()).sum();
     // `form()` succeeded for every edit, so an empty string left in any form
-    // field was an unused filled-in default.
-    let note = if arguments.edits.iter().any(|edit| {
+    // field was an unused filled-in default. Notes are header fields, built
+    // before the result is bounded so a spilled copy carries them too.
+    let mut notes: Vec<&str> = Vec::new();
+    if arguments.edits.iter().any(|edit| {
         [&edit.old, &edit.insert_before, &edit.insert_after]
             .into_iter()
             .any(|form| form.as_deref() == Some(""))
     }) {
-        " note=empty_form_ignored"
+        notes.push("empty_form_ignored");
+    }
+    for (freshness, name) in [
+        (Freshness::Unread, "unread"),
+        (Freshness::ChangedSinceRead, "changed_since_read"),
+    ] {
+        if planned.values().any(|file| file.freshness == freshness) {
+            notes.push(name);
+        }
+    }
+    let note = if notes.is_empty() {
+        String::new()
     } else {
-        ""
+        format!(" note={}", notes.join(","))
     };
     let mut diff = String::new();
     for file in planned.values() {
@@ -366,9 +417,11 @@ pub(super) fn edit_file(
             Ok(current) => current,
             Err(error) => return ToolOutput::error(error),
         };
-        if content_hash(&current.bytes) != file.before_hash {
+        let current_hash = content_hash(&current.bytes);
+        if current_hash != file.before_hash {
+            let hash = &current_hash[..12];
             return ToolOutput::error(format!(
-                "stale_file: {} changed since it was read; read it again and retry",
+                "stale_file: {} is h:{hash} and changed since it was read; read it again, or pass if_hash:\"h:{hash}\"",
                 file.key
             ));
         }
@@ -999,6 +1052,27 @@ mod tests {
             fs::read_to_string(directory.path().join("list.txt")).unwrap(),
             "item\nitem\n"
         );
+
+        // An earlier edit in the batch can make a repeated `old` unique; the
+        // model still could not tell which copy it saw.
+        fs::write(directory.path().join("keys.txt"), "x1\nkey\nkey\n").unwrap();
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"keys.txt","old":"x1\nkey","new":"x2\nval"},{"path":"keys.txt","old":"key","new":"lock"}]}"#,
+        );
+        assert!(
+            refused
+                .model_text
+                .starts_with("edit 1: not_read: keys.txt is h:"),
+            "{}",
+            refused.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("keys.txt")).unwrap(),
+            "x1\nkey\nkey\n"
+        );
     }
 
     /// (d) A fuzzy-only match means the model's text differs from the file:
@@ -1234,12 +1308,12 @@ mod tests {
             "edit_file",
             r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
         );
-        assert!(
-            refused
-                .model_text
-                .starts_with("stale_file: a.txt changed since it was read"),
-            "{}",
-            refused.model_text
+        let hash = short(b"alpha\nbeta\nwritten by another session\n");
+        assert_eq!(
+            refused.model_text,
+            format!(
+                "stale_file: a.txt is {hash} and changed since it was read; read it again, or pass if_hash:\"{hash}\""
+            )
         );
         assert_eq!(
             fs::read_to_string(&path).unwrap(),

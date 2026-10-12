@@ -1477,7 +1477,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+            "cc6306794d8c37ece25a19cb9a2210079ff4b95f4601793e68c596d370eb4ddf"
         );
     }
 
@@ -1659,11 +1659,12 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
+        // ADR-0057: a unique exact `old` is proof enough; an anchor is not.
         let edit = run_tool(
             &workspace,
             &state,
             "edit_file",
-            r#"{"edits":[{"path":"note.txt","old":"content","new":"changed"}]}"#,
+            r#"{"edits":[{"path":"note.txt","insert_after":"content","new":"changed"}]}"#,
         );
         assert!(edit.is_error);
         assert!(edit.model_text.contains("read_file"), "{}", edit.model_text);
