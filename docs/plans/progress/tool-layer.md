@@ -24,7 +24,7 @@ newest last.
 | T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
-| T18 | Classifier false prompts (D10) | Planned | | Replay harness method in the 2026-10-11 entry |
+| T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
 | T19 | Edit freshness by exact unique match (D10) | Planned | | ADR-0057 reserved |
 | T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
 
