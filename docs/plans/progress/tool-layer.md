@@ -452,3 +452,14 @@ Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/
 - Edits: 9 of 61 `edit_file`/`write_file` calls failed `not_read`/`stale_file`. Traces show the text was seen through shell `grep`/`sed -n` or the file was changed by the model's own `python3` rewrite. There were 59 shell writes against 51 `edit_file` calls. Lead decision: accept a unique exact match without a read (T19, ADR-0057), and allow `git fetch` under `auto` (T18).
 - Nudge: 1 hint across 348 shell calls, because `builtin_alternative` reads the first word, which is `cd` in 310 of them (T20).
 - No code change. T18–T20 opened.
+
+### 2026-10-11 — D10 plan repairs from PR #280 review
+
+Seven Codex findings on `9bcb60a6`; all were valid and the plan is amended:
+
+- T18 launchers are now a closed set (`timeout`, `time`, `nice`, `nohup`, `stdbuf`), each with its own option grammar and a required inner command. `ionice` and the other process-retargeting tools are excluded (`ionice -c 3 -p 123`).
+- T18 `git fetch` is allowlisted (`-q`, `-v`, `--all`, `--no-tags`, plain remote and branch names). Force, prune, prune-tags, tags, refspecs and config prefixes keep `GitRemote`.
+- T18 no longer relaxes globs: a workspace filename can be program syntax (`e touch PWN` turns `sed -n *` into a command). Simulated replay without globs or destructive fetch forms: 26 of 143 held become `Allow` (25 without `git fetch`), down from the 40 first reported. The D10 acceptance target for held shell calls is moved from 40 % to 50 % to match.
+- T18 acceptance is a checked-in `d10_held` table of sanitized shapes, not the private session corpus (the repository is public). The `/tmp` replay stays advisory.
+- T19 covers only the `old` form; anchor inserts are anchor-only in the schema and still need a read. Refusals no longer return `h:`, which would have authorized the refused edit on the next call. The existing `if_hash` weakness (`mode=info`, 44 placeholder hashes) is decisions-needed row 12.
+- T20 no longer lists recent handles: a zero handle gets a parse-time `handle_placeholder` correction and needs no store query. `qq-protocol` `ToolErrorKind::of` is added to T20's owned paths.
