@@ -1,7 +1,7 @@
 //! `cargo xtask lint`: repository rules that rustfmt and Clippy cannot see.
 //!
 //! Each rule exists because an agent or reviewer had to correct it by hand.
-//! A rule here is the enforcer named in `AGENTS.md` § Rules; prose that a
+//! A rule here is the enforcer named in `AGENTS.md` § Rules → enforcers; prose that a
 //! rule enforces is not repeated there. Rules read tracked files only (via
 //! `git ls-files`), so they run in well under a second and never see
 //! `target/` or untracked scratch files.

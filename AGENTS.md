@@ -1,212 +1,186 @@
 # AGENTS.md
 
+## Start here
+
+1. For any non-trivial task, load the **`qq-mode`** skill
+   (`.qq/skills/qq-mode/SKILL.md`). It picks the playbook, sets your todo
+   list, and names the gates that prove the work. This file holds repository
+   facts and rules; `qq-mode` holds the procedure.
+2. Work in your own worktree when another agent may be active:
+   `git worktree add .worktrees/<name> -b <type>/<eng-id>-<short> origin/main`.
+   Never edit or revert another agent's uncommitted changes.
+3. The feedback loop (details: `docs/runbooks/testing.md`):
+
+```sh
+cargo nextest run -p <crate> -E 'test(/<pattern>/)'   # while editing
+cargo xtask check                                      # before every push: affected packages only
+cargo xtask smoke                                      # real qq binary vs a loopback fake provider
+cargo xtask check --evidence                           # Markdown proof for the PR body
+```
+
+When a gate fails, read `target/qq-check/last.json` (each failing test, its
+panic, and the exact rerun command) or `target/qq-smoke/<scenario>/`
+(stdout, stderr, provider requests, session store). Fix the cause; never
+weaken the gate. The merge queue runs `cargo xtask check --full`.
+
 ## Project
 
-QQ is a local-first Rust toolkit for building, running, and orchestrating many AI
-agents. It ships as one `qq` binary for interactive terminal use, direct
-automation, and a long-running HTTP/SSE server. Speed and developer experience
-are product requirements; correctness, durability, and safe execution are
-baseline constraints.
+QQ is a local-first Rust toolkit for building, running, and orchestrating
+many AI agents. One `qq` binary serves interactive terminal use, direct
+automation, and a long-running HTTP/SSE server. Speed and developer
+experience are product requirements; correctness, durability, and safe
+execution are baseline constraints.
 
-Read `docs/design/architecture.md` before changing system boundaries. It
-records the initial direction, not a license to pre-build deferred features.
+Read `docs/design/architecture.md` before changing system boundaries.
+Documentation is organized in `docs/README.md`: `design/` (as built),
+`adr/` (decisions), `plans/` (next), `plans/progress/` (in flight, one
+ledger per plan), `runbooks/` (procedures). Plan slices follow
+`docs/plans/workflow.md`; reserve ADR numbers in
+`docs/plans/progress/root.md`.
 
-Documentation is organized in `docs/README.md`: `design/` for the system as
-built, `adr/` for decisions, `plans/` for what is next, `plans/progress/` for
-what is in flight, `runbooks/` for procedures. Before starting or reviewing a
-unit of work, read `docs/plans/workflow.md`; it defines slices, ledgers,
-review, and escalation. Record progress in the plan's ledger every session and
-reserve ADR numbers in `docs/plans/progress/root.md`.
+## Repository map
 
-## Repository Map
-
-- `src/`: binary, CLI, runtime composition, and authenticated model discovery.
+- `src/`: binary, CLI, runtime composition, authenticated model discovery.
 - `crates/qq-auth/`: provider OAuth flows and credential storage.
-- `crates/qq-client/`: HTTP/SSE client, reconnect/replay, client port, and the
-  shared session state/reducer (`state`).
-- `crates/qq-config/`: layered configuration, policy, and provider presets.
-- `crates/qq-core/`: agent runtime, sessions, tools, and persistence behavior.
-- `crates/qq-harness/`: shared configuration-driven hosting composition, plan cache,
-  and MCP bridge (runtime loading/outcome driving extraction in progress).
+- `crates/qq-client/`: HTTP/SSE client, reconnect/replay, client port, shared
+  session state/reducer (`state`).
+- `crates/qq-config/`: layered configuration, policy, provider presets.
+- `crates/qq-core/`: agent runtime, sessions, tools, persistence.
+- `crates/qq-harness/`: configuration-driven hosting composition, plan cache,
+  MCP bridge.
 - `crates/qq-mcp/`: MCP client transport and tool discovery.
-- `crates/qq-provider/`: provider-neutral model API and provider adapters.
-- `crates/qq-protocol/`: shared commands, events, identifiers, and wire types.
+- `crates/qq-provider/`: provider-neutral model API and adapters.
+- `crates/qq-protocol/`: shared commands, events, identifiers, wire types.
 - `crates/qq-reasoning/`: shared reasoning event vocabulary.
 - `crates/qq-server/`: HTTP/SSE server and local-instance discovery.
 - `crates/qq-tui/`: terminal UI and terminal-only client state.
-- `xtask/`: repository automation; invoke it with `cargo xtask`. Releases are
-  cut with `cargo xtask release X.Y.Z` in a PR, then `cargo xtask release
-  --tag` on the merged `main` (see `docs/runbooks/release.md`).
-- `website/`: the landing page and docs site (Astro + Starlight), generated
-  from `docs/guide/` at build time and deployed to GitHub Pages; run with
-  `nub` (see `docs/runbooks/website.md`). Edit the guide, not the site.
+- `xtask/`: repository automation (`cargo xtask check|lint|smoke|perf|eval|release`).
+  Releases: `docs/runbooks/release.md`.
+- `website/`: docs site generated from `docs/guide/`; edit the guide, not the
+  site (`docs/runbooks/website.md`).
+- `.qq/skills/`: agent skills (`qq-mode`, `principles`, `verify-qq`), also
+  reachable as `.agents/skills/`.
 
-Keep dependencies pointed toward the narrow protocol and provider interfaces.
-The root package is the composition root and translates external configuration
+Dependencies point toward the narrow protocol and provider interfaces. The
+root package is the composition root and translates external configuration
 into crate-specific settings.
 
-## Developer Workflow
+## Engineering priorities
 
-The pinned stable Rust toolchain includes `rustfmt` and Clippy. A Nix development
-shell is also available.
+1. Fast, responsive orchestration of many concurrent agents. No avoidable lag
+   in startup, time to first token, streaming, tools, persistence, replay, or
+   rendering.
+2. The simplest design that is fast and easy to maintain. No speculative
+   flexibility.
+3. Correct, durable state. Persist authoritative events before publishing
+   them; make retried work idempotent.
+4. Predictable resources. Bound tasks, queues, channels, caches, output, and
+   concurrency; apply backpressure and cancellation.
+5. Measure hot paths end to end; support performance complexity with
+   benchmarks.
 
-```sh
-nix develop
-cargo run -- ask "Reply with pong"
-cargo test --workspace
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --workspace
-cargo test -p qq-provider --no-default-features --features test-support
-```
-
-The last line covers the minimal embedding profile (no Amazon Bedrock family,
-no AWS SDK closure); run it when touching `qq-provider` manifests, features,
-or anything under `aws.rs`, `providers/bedrock.rs`, or `providers/mantle.rs`.
-
-Run the narrowest useful test while iterating, then run the workspace checks
-before opening a PR. Run
-`cargo bench -p qq-provider --bench provider_compiler` when changing provider
-compilation or its hot path.
-
-Never commit secrets, local credentials, `target/`, or generated build output.
-
-## Engineering Priorities
-
-1. Optimize for fast, responsive orchestration of many concurrent agents. No
-   avoidable lag in startup, time to first token, streaming, tools, persistence,
-   replay, or rendering.
-2. Prefer the simplest design that is fast and easy to use and maintain. Do not
-   trade developer speed for speculative flexibility or complex features.
-3. Preserve correctness and durable state. Persist authoritative events before
-   publishing them; make retries idempotent where work may be repeated.
-4. Keep resource use predictable. Bound tasks, queues, channels, caches, output,
-   and concurrency; apply backpressure and cancellation.
-5. Measure meaningful hot paths. Support performance complexity with benchmarks
-   and optimize end-to-end latency rather than isolated microbenchmarks.
-
-Do not introduce placeholder crates, framework layers, generic extension points,
-or alternate protocols without a concrete implemented need. Add dependencies
+No placeholder crates, framework layers, generic extension points, or
+alternate protocols without a concrete implemented need. Add dependencies
 only for behavior being shipped.
 
-## Rust Style
+## Architecture constraints
 
-- Write safe, stable, idiomatic Rust and retain `#![forbid(unsafe_code)]`.
-- Keep logic in one function or method unless an extracted unit is genuinely
-  reusable, composable, or creates a meaningful interface. Do not create helpers
-  merely to make a function shorter.
-- Do not reach for `?` by default. Handle expected failures explicitly. When
-  propagation is the correct behavior, preserve context and map the failure into
-  a specific error type rather than erasing it.
-- Prefer domain-specific error enums, normally derived with `thiserror`. Make
-  error variants actionable and preserve sources. Avoid stringly typed errors
-  and broad `Box<dyn Error>` in library interfaces.
-- Use structs and enums to encode invariants and impossible states. Keep public
-  interfaces small and choose ownership deliberately.
-- Avoid unnecessary allocation, cloning, boxing, dynamic dispatch, and data
-  conversion, especially in streaming and request hot paths. Share immutable
-  data when ownership is truly shared.
-- Prefer exhaustive `match` handling over silent fallbacks. Never discard an
-  error without an explicit reason.
-- Keep blocking work off Tokio executor threads. Use bounded blocking work when
-  unavoidable, and ensure long-running async work supports cancellation.
-- Format with rustfmt and fix Clippy findings rather than suppressing them unless
-  the lint is demonstrably inappropriate.
-- Add concise comments only for non-obvious invariants, safety constraints, or
-  design decisions. Do not narrate the code.
-
-### Modules
-
-Never create `mod.rs` files. Use a sibling module file plus a directory:
-
-```text
-src/providers.rs
-src/providers/openai.rs
-src/providers/anthropic.rs
-```
-
-Declare children from `providers.rs`. Prefer this layout over
-`src/providers/mod.rs` plus `src/providers/*.rs`.
-
-## Architecture Constraints
-
-- Reuse the same core runtime across TUI, server, and direct CLI paths; do not
-  create parallel agent implementations.
-- Keep provider protocol, authorization, transport, framing, and retry details
-  inside `qq-provider`. Provider identity must not branch in request hot paths.
-- Keep `qq-protocol` transport-neutral and version externally visible wire data.
-- Do not leak application configuration types throughout the workspace.
-- Keep queues bounded and session-aware. Never hold a synchronous lock across an
-  `.await` or perform blocking I/O directly on a Tokio worker.
-- Treat persisted session history as authoritative. A failed write must never be
+- One core runtime behind the TUI, server, and CLI; no parallel agent
+  implementations.
+- Provider protocol, authorization, transport, framing, and retry stay inside
+  `qq-provider`. Provider identity never branches in request hot paths.
+- `qq-protocol` is transport-neutral; externally visible wire data is
+  versioned (`PROTOCOL_VERSION`, fixtures under
+  `crates/qq-protocol/tests/fixtures/`).
+- Application configuration types do not leak through the workspace.
+- Queues are bounded and session-aware. No synchronous lock across `.await`;
+  no blocking I/O on a Tokio worker.
+- Persisted session history is authoritative. A failed write is never
   presented as durable output.
-- Keep tool paths within the selected workspace and require explicit approval
-  for destructive or externally visible actions.
+- Tool paths stay inside the selected workspace; destructive or externally
+  visible actions need explicit approval.
+
+## Rust style
+
+- Safe, stable, idiomatic Rust.
+- Keep logic in one function unless the extracted unit is genuinely
+  reusable or forms a meaningful interface.
+- Handle expected failures explicitly instead of a reflexive `?`. When
+  propagating, preserve context in a specific error type.
+- Domain error enums with `thiserror`, actionable variants, sources
+  preserved. No stringly typed errors or `Box<dyn Error>` in library APIs.
+- Encode invariants in types. Small public interfaces; deliberate ownership.
+- No unnecessary allocation, cloning, boxing, dynamic dispatch, or
+  conversion in streaming and request hot paths.
+- Exhaustive `match`; never discard an error without a stated reason.
+- Blocking work off Tokio executor threads; long-running async work
+  supports cancellation.
+- Comments only for non-obvious invariants, safety constraints, or design
+  decisions.
+- Modules: `src/providers.rs` plus `src/providers/openai.rs`, never
+  `src/providers/mod.rs`.
+
+## Rules → enforcers
+
+A rule with an enforcer is checked by a tool; do not rely on remembering
+it. When the same correction happens twice, encode it
+(`.qq/skills/qq-mode/playbooks/correct.md`) and add a row.
+
+| Rule | Enforced by |
+| --- | --- |
+| rustfmt formatting | `cargo xtask check` (fmt gate), CI |
+| Clippy clean, `-D warnings` | `cargo xtask check` (clippy gate), CI |
+| No `mod.rs` files | `cargo xtask lint` `no-mod-rs` |
+| `#![forbid(unsafe_code)]` in every crate root | `cargo xtask lint` `forbid-unsafe` |
+| No unbounded channels in production code | `cargo xtask lint` `unbounded-channel` |
+| No new fixed sleeps in tests (ceiling only moves down) | `cargo xtask lint` `sleep-in-tests` |
+| `#[ignore]` carries a reason | `cargo xtask lint` `ignore-needs-reason` |
+| Every ADR has an index row | `cargo xtask lint` `adr-indexed` |
+| Guide documents every CLI flag and doctor check | `src/docs_truth.rs` tests |
+| Wire changes regenerate fixtures and bump `PROTOCOL_VERSION` | `crates/qq-protocol/tests/wire_fixtures.rs` |
+| The binary works end to end (ask, run, tools, 401, resume, serve) | `cargo xtask smoke` |
+| Startup, first token, size budgets | `cargo xtask perf check` (`benchmarks/perf/budgets-v1.json`) |
+| Minimal provider profile builds without the AWS SDK | `cargo xtask check` (minimal-provider gate on AWS paths), merge queue |
+| Tests assert behavior, not implementation | prose only: `principles` skill |
+| No lock across `.await`, no blocking on Tokio workers | Clippy `await_holding_lock`; otherwise review |
+| Persist before publish | review; `crates/qq-core` session tests |
 
 ## Tests
 
-- Add a regression test for every bug fix and focused tests for new behavior.
-- Test public behavior and failure modes, not private implementation trivia.
-- Keep tests deterministic; avoid live network services and real credentials.
-- Include concurrency, cancellation, bounds, and replay/idempotency cases when a
-  change touches those guarantees.
+- Test public behavior and failure modes at the narrowest boundary that
+  proves it. A regression test for every bug fix that nothing existing
+  catches; show it failing first.
+- Deterministic: no live network, no real credentials, no fixed sleeps, no
+  wall-clock upper bounds. Loopback fakes live in
+  `qq_provider::test_support` and `xtask/src/smoke.rs`.
+- Cover concurrency, cancellation, bounds, and replay/idempotency when a
+  change touches them.
 - Benchmark changes that may affect startup, time to first token, streaming,
   provider compilation, persistence, or rendering latency.
 
-## Git And Reviews
+Policy and tooling: `docs/runbooks/testing.md`.
 
-Linear is the source of work tracking:
+## Git and reviews
 
-- Team: `ENG`
-- Project: `qq`
+Linear is the work tracker (team `ENG`, project `qq`). Read the issue before
+implementing, link the PR to it, keep its state current, and query rather
+than guess issue or PR details.
 
-Use the Executor MCP/tool integrations as the primary interface for both Linear
-and GitHub. Read the issue before implementation, link the PR to it, and keep its
-state current. Do not guess issue or PR details when they can be queried.
+- Branches: `<type>/<eng-id>-<short-kebab>` (`feat/eng-123-provider-cache`).
+- Commits and PR titles: Conventional Commits, `type(scope): imperative
+  summary`; `!` plus an impact paragraph for breaking changes. Types: `feat`,
+  `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`,
+  `style`, `revert`.
+- PRs explain user-visible behavior, design decisions, verification (the
+  `cargo xtask check --evidence` block), and performance or compatibility
+  impact. Procedure: `.qq/skills/qq-mode/playbooks/opening-a-pr.md`.
+- Keep changes narrow: no drive-by refactors or formatting churn outside the
+  issue's scope.
+- Never commit secrets, credentials, `target/`, or generated output.
 
-Branch names must start with a Conventional Commit type followed by `/` and a
-short kebab-case description. Include the Linear identifier when available:
+## Definition of done
 
-```text
-feat/eng-123-provider-cache
-fix/eng-456-sse-reconnect
-docs/agent-guide
-```
-
-Commit messages and PR titles use Conventional Commits:
-
-```text
-type(scope): imperative summary
-feat(provider): add compiled provider cache
-fix(runtime): preserve session context
-feat(protocol)!: replace the event envelope
-```
-
-Valid types include `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`,
-`ci`, `chore`, `style`, and `revert`. Use a focused scope such as `runtime`,
-`provider`, `protocol`, `tui`, `cli`, or `config`. Add `!` before `:` for a
-dangerous or potentially breaking change and explain the impact in the commit or
-PR body.
-
-Keep commits focused and reviewable. PRs must explain the user-visible behavior,
-important design decisions, verification performed, and performance or
-compatibility impact.
-
-## Concurrent Agent Work
-
-- Inspect the worktree before editing and never overwrite or revert unrelated
-  changes made by another agent or developer.
-- Parallelize independent read-only investigation. Do not let multiple writing
-  agents edit the same checkout concurrently; use isolated worktrees or
-  sandboxes and integrate reviewed patches.
-- Keep changes narrow. Avoid drive-by refactors, broad formatting churn, and
-  edits outside the issue's scope.
-- Prefer fast feedback loops and non-interactive commands. Report blockers and
-  failed verification directly.
-
-## Definition Of Done
-
-A change is complete when its behavior and failure paths are tested, workspace
-formatting and lint checks pass, relevant documentation is current, hot-path
-impact is measured when applicable, and the linked Linear issue and GitHub PR
-accurately describe the result.
+Behavior and failure paths are tested; `cargo xtask check` passes with its
+evidence in the PR; user-visible behavior is proven with `cargo xtask smoke`
+or `verify-qq`; documentation is current; hot-path impact is measured when
+applicable; the Linear issue and PR describe the result.

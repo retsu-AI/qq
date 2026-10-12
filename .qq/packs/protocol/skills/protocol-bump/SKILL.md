@@ -112,7 +112,7 @@ file goes stale.
 ## Before you finish
 
 - `cargo test -p qq-protocol && cargo test -p qq-core plan:: && cargo test -p qq-core migration`
-- Full gates (load the `qq-verify` skill).
+- Full gates: `cargo xtask check --full` (see the `qq-mode` skill).
 - Commit message: `feat(protocol)!: ...` if the wire version moved,
   `feat(protocol): ...` for additive; body states the compatibility
   consequence in one sentence and the new golden digest if the descriptor

@@ -219,7 +219,7 @@ enum Task {
     /// Fast affected-only gate: fmt, lint, clippy, and nextest on the
     /// packages your change can affect. `--full` is the merge gate.
     Check(crate::check::CheckArgs),
-    /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules).
+    /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules → enforcers).
     Lint,
     /// Drive the real `qq` binary end to end against a loopback fake provider.
     Smoke(crate::smoke::SmokeArgs),

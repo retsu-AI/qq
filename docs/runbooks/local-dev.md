@@ -15,20 +15,13 @@ nix develop
 
 ## Gates
 
-Run the narrowest useful test while iterating, then the workspace gates before
-every push. CI (`.github/workflows/ci.yml`) runs the test, format, and Clippy
-gates but not `cargo build --workspace` or the minimal `qq-provider` profile.
-It also runs the exact-test coverage guard, `tests/install_sh.sh`, the
-`qq-core` embedding example and minimal (`--no-default-features`) profile, the
-`qq-client` wasm32 build, the native Windows shell-teardown tests, and a
-release build-size report.
+The feedback loop, the merge gate, and how to read failures are in
+[`testing.md`](./testing.md). In short:
 
 ```sh
-cargo test --workspace
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --workspace
-cargo test -p qq-provider --no-default-features --features test-support   # when qq-provider changed
+cargo xtask check          # affected packages: fmt, lint, clippy, nextest
+cargo xtask smoke          # the real qq binary against a loopback fake provider
+cargo xtask check --full   # what the merge queue runs
 ```
 
 Run `cargo bench -p qq-provider --bench provider_compiler` when provider
@@ -39,19 +32,25 @@ compilation changes, and the focused fixtures in
 
 `build.rs` embeds the checked-out short SHA and commit date, with a `-dirty`
 suffix when the tree has uncommitted changes, so a binary can always be traced
-to its source. Cargo reruns the script when `HEAD` moves. See
+to its source. Cargo reruns the script when `HEAD` moves. Release builds (and
+`QQ_EXACT_REVISION=1`) also rerun it when any tracked file changes, so their
+`-dirty` flag is exact. A debug build's flag can lag until the next commit,
+because watching every file would relink `qq` on every edit. See
 [`release.md`](./release.md) for how releases pin this value.
 
 ## Test environment notes
 
 - Workspace tests bind loopback listeners for the HTTP/SSE server and the
   fake provider; a host that blocks loopback will fail them.
-- Some color-output tests fail if `NO_COLOR` is set in the environment. Unset
-  it for the test run: `env -u NO_COLOR cargo test --workspace`.
+- Some color-output tests fail if `NO_COLOR` is set in the environment.
+  `cargo xtask check` unsets it for the test gate; unset it yourself for a
+  direct run: `env -u NO_COLOR cargo nextest run -p qq-tui`.
 - Tests create temporary SQLite stores and workspaces; nothing touches the
   user's XDG state.
 
 ## Smoke
+
+`cargo xtask smoke` needs no model or credentials. Against a real provider:
 
 ```sh
 cargo run -- ask "Reply with pong"      # needs a configured model
