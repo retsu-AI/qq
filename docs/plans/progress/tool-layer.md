@@ -24,6 +24,9 @@ newest last.
 | T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
+| T18 | Classifier false prompts (D10) | Planned | | Replay harness method in the 2026-10-11 entry |
+| T19 | Edit freshness by exact unique match (D10) | Planned | | ADR-0057 reserved |
+| T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
 
 ## Entries
 
@@ -440,3 +443,12 @@ Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/
 - Release upgrade notes name protocol 31, descriptor 13, schema 43, and the new exact-content project-pack trust requirement; guide version pins intentionally remain v0.1.5 until assets publish.
 - Release docs verification: docs-truth 23/23, fmt, workspace all-target/all-feature Clippy, build, and final default-parallel workspace tests passed; `git diff --check` passed.
 - Two earlier workspace runs hit existing headless/progress timeout failures; the headless isolated rerun passed. Serial run was declined and not retried; final normal workspace run passed. Logs `target/release-0.1.6-{clippy,tests,tests-rerun,tests-final}.log`; no root-cause claim.
+### 2026-10-11 — post-v0.1.6 audit (plan § D10)
+
+- Window 2026-10-08 12:34 (v0.1.6 `fef41a4`) → 2026-10-11. The queries were read-only `sqlite3` over `tool_calls` joined to `runs` and `sessions` (`approval_mode`), plus `events` `tool_approval_requested` `shell.reasons`. 1,473 calls, 72 errors (4.9 %); `read_file` 0.9 %, `search` 1.3 %. No `{}` arguments, no ranges+offset or empty form failures: T15/T16 hold on live data. D9's week closes 2026-10-15.
+- Shell under `auto`: 143 of 226 held (115 reviewer, 25 human, 3 denied). Top reasons: `nested_construct` 105, `dynamic_word` 67, `git_mutation` 33, `unlisted` 29. Human holds totalled 11.6 h.
+- Replay: an untracked crate in `/tmp/opencode/replay` calls `qq_core::classify_bench::classify` over every shell command in the window. Rewriting each held command to strip `timeout N`/`time`/`nice`, stream-only redirects, contained globs and `git -C`, and to map `git worktree list` and `git fetch` to reads, moves 40 of the 143 to `Allow`. The remainder are real prompts (30 shell file writes, 22 git mutations, 15 loops or variables, 10 workspace redirects).
+- Root causes confirmed by single-command probes: `timeout 300 cargo test` → prompt while `cargo test` → allow. `cd src && cargo test 2>&1` → prompt while `cd src && cargo test` → allow, because a list-level `2>&1` makes the list a `redirected_statement` body and marks it nested. `grep -n x docs/*.md` → prompt. `git -C a status` → prompt.
+- Edits: 9 of 61 `edit_file`/`write_file` calls failed `not_read`/`stale_file`. Traces show the text was seen through shell `grep`/`sed -n` or the file was changed by the model's own `python3` rewrite. There were 59 shell writes against 51 `edit_file` calls. Lead decision: accept a unique exact match without a read (T19, ADR-0057), and allow `git fetch` under `auto` (T18).
+- Nudge: 1 hint across 348 shell calls, because `builtin_alternative` reads the first word, which is `cd` in 310 of them (T20).
+- No code change. T18–T20 opened.
