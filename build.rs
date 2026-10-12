@@ -97,10 +97,16 @@ fn from_git() -> Option<(String, String, String)> {
             }
         }
     }
-    // `git describe --dirty` covers tracked changes only. Watch the index and
-    // every tracked path so an incremental build cannot retain a clean source
-    // revision after one of those inputs becomes dirty (or vice versa).
-    if let Ok(output) = Command::new("git")
+    // `git describe --dirty` covers tracked changes only. Release builds (and
+    // `QQ_EXACT_REVISION=1`) watch the index and every tracked path so an
+    // incremental build cannot retain a clean source revision after one of
+    // those inputs becomes dirty (or vice versa). Debug builds skip this:
+    // watching every tracked file relinks `qq` on any edit, docs included, so
+    // a dev binary's `-dirty` flag may lag until the next commit or checkout.
+    println!("cargo:rerun-if-env-changed=QQ_EXACT_REVISION");
+    let exact = env::var("PROFILE").as_deref() == Ok("release")
+        || env::var("QQ_EXACT_REVISION").as_deref() == Ok("1");
+    if exact && let Ok(output) = Command::new("git")
         .args(["rev-parse", "--git-path", "index"])
         .current_dir(root)
         .output()
@@ -111,7 +117,7 @@ fn from_git() -> Option<(String, String, String)> {
             println!("cargo:rerun-if-changed={index}");
         }
     }
-    if let Ok(output) = Command::new("git")
+    if exact && let Ok(output) = Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()

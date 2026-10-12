@@ -1,0 +1,38 @@
+# Test runner configuration. `cargo xtask check` and CI drive nextest through
+# these profiles; plain `cargo nextest run` uses `default`.
+[store]
+dir = "target/nextest"
+
+[profile.default]
+# Report every failure in one run; agents fix them in a batch.
+fail-fast = false
+status-level = "fail"
+final-status-level = "slow"
+failure-output = "final"
+# A test still running after 60 s is reported; after 180 s it is killed.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The qq-core session suites are the long tail (7–13 s each alone, several
+# times that under full parallel load). Start them first so they overlap the
+# thousands of millisecond tests instead of running alone at the end.
+[[profile.default.overrides]]
+filter = 'package(qq-core) & test(/^sessions::tests::(compaction|progress|runs|delegation|feeds|nonblocking|settlement|approvals|commands)::/)'
+priority = 100
+
+[profile.quick]
+fail-fast = true
+status-level = "fail"
+final-status-level = "fail"
+
+[profile.ci]
+fail-fast = false
+status-level = "fail"
+final-status-level = "flaky"
+failure-output = "immediate-final"
+# A retried pass is reported as FLAKY in the summary and JUnit; it is a
+# signal to fix, not a pass to ignore.
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci.junit]
+path = "junit.xml"

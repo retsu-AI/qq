@@ -143,6 +143,15 @@ strip = "symbols"
 codegen-units = 1
 lto = "thin"
 
+# The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
+# ~600 MB. Line tables keep file:line backtraces for workspace code; deps
+# carry none. Use `CARGO_PROFILE_DEV_DEBUG=full` for a debugger session.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
 # every supported provider family. The minimal embedding profile is
