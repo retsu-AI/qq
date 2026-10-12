@@ -37,7 +37,8 @@ pub struct Script {
     pub truncate_at: Vec<usize>,
     pub fault_at: Option<usize>,
     pub fault_attempts: usize,
-    pub summary_fails: bool,
+    /// Summarizer requests answered with a 529 before one succeeds.
+    pub summary_faults: usize,
     pub empty_checkpoint: bool,
     pub repeat_arguments: bool,
     pub stall_after: Option<usize>,
@@ -62,7 +63,7 @@ impl Script {
             truncate_at: Vec::new(),
             fault_at: None,
             fault_attempts: 0,
-            summary_fails: false,
+            summary_faults: 0,
             empty_checkpoint: false,
             repeat_arguments: false,
             stall_after: None,
@@ -79,6 +80,7 @@ pub struct Observations {
     pub provider_requests: usize,
     pub truncations: HashSet<usize>,
     pub faults: usize,
+    pub summary_faults: usize,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -103,13 +105,14 @@ impl Provider for ScriptedProvider {
             })
         });
         if summarizing {
-            drop(observed);
-            if self.script.summary_fails {
+            if observed.summary_faults < self.script.summary_faults {
+                observed.summary_faults += 1;
                 return Box::pin(stream::iter([Err(ProviderError::Api {
                     status: 529,
                     message: "scripted summarizer outage".to_owned(),
                 })]));
             }
+            drop(observed);
             return text(
                 "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Open problems: none\n5. Next step: finish the scripted task",
             );

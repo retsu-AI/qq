@@ -1109,15 +1109,18 @@ impl Runtime {
     /// that calls tools gets a rejection result for each call and is asked
     /// again once, dropping what it wrote; a second such turn, a refusal, a
     /// protocol violation, or a transport failure is an error naming it, and
-    /// the caller settles the compaction run failed. Returns the joined text
-    /// and the summed usage. The provider owns retries as for any request.
+    /// the caller settles the compaction run failed. A provider fault the run
+    /// loop would retry for a model turn, or a stream that ends without a
+    /// terminal event, is `Transient`; everything else is `Rejected`. Returns
+    /// the joined text and the summed usage. The provider owns retries before
+    /// the stream starts, as for any request.
     pub(crate) async fn summarize(
         &self,
         messages: Vec<Message>,
         system: Arc<str>,
         tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
-    ) -> Result<(String, Option<TokenUsage>), String> {
+    ) -> Result<(String, Option<TokenUsage>), runtime::SummarizeError> {
         let mut messages = messages;
         let mut summary = String::new();
         let mut total_usage: Option<TokenUsage> = None;
@@ -1155,7 +1158,10 @@ impl Runtime {
             let mut replay = None;
             loop {
                 let Some(event) = events.next().await else {
-                    return Err("summarizer stream ended without completing".to_owned());
+                    return Err(runtime::SummarizeError::Transient {
+                        kind: RunFailureKind::ProviderTransport,
+                        message: "summarizer stream ended without completing".to_owned(),
+                    });
                 };
                 match event {
                     Ok(ProviderEvent::Replay { data }) => replay = Some(data),
@@ -1166,7 +1172,9 @@ impl Runtime {
                             .saturating_add(delta.len())
                             > MAX_RUN_MODEL_TEXT_BYTES
                         {
-                            return Err("summarizer output exceeded the run text bound".to_owned());
+                            return Err(runtime::SummarizeError::Rejected(
+                                "summarizer output exceeded the run text bound".to_owned(),
+                            ));
                         }
                         text.push_str(&delta);
                     }
@@ -1176,11 +1184,15 @@ impl Runtime {
                         | ProviderEvent::ReasoningCompleted { .. },
                     ) => {}
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
-                        return Err("summarizer refused".to_owned());
+                        return Err(runtime::SummarizeError::Rejected(
+                            "summarizer refused".to_owned(),
+                        ));
                     }
                     Ok(ProviderEvent::ToolCallStarted { id, name }) => {
                         if rejected_call_turn {
-                            return Err("summarizer called a tool on two turns".to_owned());
+                            return Err(runtime::SummarizeError::Rejected(
+                                "summarizer called a tool on two turns".to_owned(),
+                            ));
                         }
                         if calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN
                             || id.is_empty()
@@ -1189,7 +1201,9 @@ impl Runtime {
                             || name.len() > MAX_TOOL_NAME_BYTES
                             || calls.iter().any(|call| call.id == id)
                         {
-                            return Err("summarizer streamed a malformed tool call".to_owned());
+                            return Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed a malformed tool call".to_owned(),
+                            ));
                         }
                         calls.push(SummarizerCall {
                             id,
@@ -1199,13 +1213,15 @@ impl Runtime {
                     }
                     Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
                         let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
-                            return Err(
-                                "summarizer streamed arguments for an unknown call".to_owned()
-                            );
+                            return Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed arguments for an unknown call".to_owned(),
+                            ));
                         };
                         if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES
                         {
-                            return Err("summarizer tool arguments exceeded their bound".to_owned());
+                            return Err(runtime::SummarizeError::Rejected(
+                                "summarizer tool arguments exceeded their bound".to_owned(),
+                            ));
                         }
                         call.arguments.push_str(&json);
                     }
@@ -1218,7 +1234,18 @@ impl Runtime {
                         truncated = Some(reason);
                         break;
                     }
-                    Err(error) => return Err(error.to_string()),
+                    // A transient fault (overload, rate limit, transport loss)
+                    // is the provider's moment; the run loop retries the
+                    // summarizer like a model turn (ADR-0048 § 2).
+                    Err(error) => {
+                        let kind = run_failure_kind(error.kind());
+                        let message = error.to_string();
+                        return Err(if recoverable_turn_fault(kind) {
+                            runtime::SummarizeError::Transient { kind, message }
+                        } else {
+                            runtime::SummarizeError::Rejected(message)
+                        });
+                    }
                 }
             }
             // Overflowing the sum is a provider protocol fault; fail the
@@ -1226,7 +1253,11 @@ impl Runtime {
             total_usage = match (total_usage, usage) {
                 (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
                     Some(sum) => Some(sum),
-                    None => return Err("summarizer usage overflowed".to_owned()),
+                    None => {
+                        return Err(runtime::SummarizeError::Rejected(
+                            "summarizer usage overflowed".to_owned(),
+                        ));
+                    }
                 },
                 (Some(total), None) | (None, Some(total)) => Some(total),
                 (None, None) => None,
@@ -1236,7 +1267,9 @@ impl Runtime {
                 // abandoned its reply, so nothing written so far is kept. A
                 // cut turn's calls are incomplete and cannot be answered.
                 if truncated.is_some() {
-                    return Err("summarizer called a tool and was cut off".to_owned());
+                    return Err(runtime::SummarizeError::Rejected(
+                        "summarizer called a tool and was cut off".to_owned(),
+                    ));
                 }
                 rejected_call_turn = true;
                 summary.clear();
@@ -1258,9 +1291,9 @@ impl Runtime {
                         arguments
                     };
                     let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
-                        return Err(
-                            "summarizer streamed tool arguments that are not JSON".to_owned()
-                        );
+                        return Err(runtime::SummarizeError::Rejected(
+                            "summarizer streamed tool arguments that are not JSON".to_owned(),
+                        ));
                     };
                     blocks.push(ContentBlock::ToolCall {
                         id: id.clone(),
@@ -1291,15 +1324,15 @@ impl Runtime {
                 // Nothing visible: the cap went to hidden reasoning. A
                 // continuation would resend the same request. (A provider
                 // pause with no text is resent as the provider requires.)
-                return Err(format!(
+                return Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
-                ));
+                )));
             }
             if continuations >= MAX_OUTPUT_CONTINUATIONS {
-                return Err(format!(
+                return Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
                     u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
-                ));
+                )));
             }
             continuations += 1;
             messages.push(Message::assistant(text));
@@ -2386,7 +2419,8 @@ mod tests {
                 256,
             )
             .await
-            .map(|(summary, _)| summary);
+            .map(|(summary, _)| summary)
+            .map_err(|error| error.to_string());
         let requests = requests.lock().unwrap().clone();
         (result, requests)
     }

@@ -158,7 +158,21 @@ async fn compact_in_run(
     guard.disarm();
     let (summary, usage) = match reply {
         Ok(reply) => reply,
-        Err(message) => {
+        // The compaction run settles failed either way; a transient fault
+        // tells the loop the same step may be retried (ADR-0048 § 2).
+        Err(crate::runtime::SummarizeError::Transient { kind, message }) => {
+            settle_failed_with(
+                inner,
+                &compaction,
+                RunFailure {
+                    kind,
+                    message: message.clone(),
+                },
+            )
+            .await;
+            return Err(Error::SummarizerUnavailable { kind, message });
+        }
+        Err(crate::runtime::SummarizeError::Rejected(message)) => {
             settle_failed(inner, &compaction, message.clone()).await;
             return Err(Error::SummarizerFailed(message));
         }

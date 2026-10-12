@@ -167,20 +167,39 @@ async fn forty_mib_of_streamed_text_across_windows_completes() {
 }
 
 #[tokio::test]
-#[ignore = "AC0 single-shot summarizer outage baseline"]
-async fn summarizer_outage_characterizes_a_single_shot_fatal_fault() {
-    let mut script = Script::tools(120, 2_048, Some(16 * 1_024));
-    script.summary_fails = true;
+async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_the_run() {
+    // ADR-0048 § 2: the summarizer is under turn recovery. Three 529s, then
+    // a summary: the step is retried, commits, and the run completes.
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 3;
     let report = run(script).await;
-    receipt("summarizer_outage", &report);
+    receipt("summarizer_outage_recovered", &report);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert!(report.compactions >= 1, "{}", report.compactions);
+    assert_eq!(report.work_turns, 24);
+    assert_eq!(report.duplicate_sequences, 0);
+    assert_eq!(report.durable_calls, report.executed_calls);
+}
+
+#[tokio::test]
+async fn a_summarizer_outage_past_the_retry_allowance_pauses_with_prior_turns_durable() {
+    // Six 529s spend the first attempt and all `MAX_TURN_RETRIES` retries:
+    // the run pauses, never fails, and every turn before it is durable.
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 6;
+    let report = run(script).await;
+    receipt("summarizer_outage_paused", &report);
     assert_eq!(report.compactions, 0);
     assert_eq!(report.duplicate_sequences, 0);
     assert!(
-        matches!(&report.outcome, RunOutcome::Failed { failure }
-        if failure.message.contains("summariz")),
+        matches!(&report.outcome, RunOutcome::Paused { pause }
+            if pause.attempts == qq_protocol::MAX_TURN_RETRIES
+                && pause.message.contains("summarizer")),
         "{:?}",
         report.outcome
     );
+    assert!(report.work_turns > 0 && report.work_turns < 24);
+    assert_eq!(report.durable_calls, report.executed_calls);
 }
 
 #[tokio::test]

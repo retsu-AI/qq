@@ -879,7 +879,12 @@ One durable run follows a guarded loop:
    must still shrink the context and is charged to the caller's token and
    cost limits like any turn. Empty-output cap raises
    (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
-   completed turn restores the allowance. A rejected or stalled
+   completed turn restores the allowance. The summarizer is under the same
+   turn recovery as a model turn (ADR-0048 § 2): a transient provider fault
+   settles that compaction run failed and the loop re-issues the step after
+   the `TurnRecoveryPolicy` backoff (`run_turn_retrying`); once
+   `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
+   earlier turn durable. A rejected or stalled
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.
