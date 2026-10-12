@@ -636,12 +636,21 @@ impl SessionStore {
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
+                // An in-run compaction step finishes while its prompt run
+                // still holds the session. It is bookkeeping, not the end of
+                // the user's work: no attention, unread count or notice, and
+                // the prompt run's live tool and approval state stay. A
+                // retried summarizer outage reports through the prompt run's
+                // `run_turn_retrying` and final outcome instead.
+                let owned_step = session
+                    .active_run_id
+                    .is_some_and(|active| active != *run_id);
                 let cost_before = self
                     .get(&session_id)
                     .and_then(|view| view.runs.get(run_id))
                     .and_then(|stats| stats.cost_usd_nanos);
                 self.upsert_summary((**session).clone(), context.models, 0);
-                if !context.attentive {
+                if !context.attentive && !owned_step {
                     effects.push(StateEffect::Attention(Attention::RunFinished {
                         session_title: session.title.clone(),
                     }));
@@ -649,7 +658,7 @@ impl SessionStore {
                 let Some(view) = self.get_mut(&session_id) else {
                     return effects;
                 };
-                if !shown {
+                if !shown && !owned_step {
                     view.finished_unread = true;
                     view.unread += 1;
                 }
@@ -670,8 +679,10 @@ impl SessionStore {
                 if view.activity.is_some_and(|(active, _)| active == *run_id) {
                     view.activity = None;
                 }
-                view.live.active_tool = None;
-                view.live.awaiting_approval.clear();
+                if !owned_step {
+                    view.live.active_tool = None;
+                    view.live.awaiting_approval.clear();
+                }
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {
                     reasoning.streaming = false;
                 }
@@ -716,6 +727,9 @@ impl SessionStore {
                     && let Some(text) = view.drafts.pop_front()
                 {
                     effects.push(StateEffect::SubmitDraft { session_id, text });
+                }
+                if owned_step {
+                    return effects;
                 }
                 match outcome {
                     RunOutcome::Failed { failure } => effects.push(StateEffect::Notice {

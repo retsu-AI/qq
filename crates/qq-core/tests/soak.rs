@@ -179,6 +179,13 @@ async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_th
     assert_eq!(report.work_turns, 24);
     assert_eq!(report.duplicate_sequences, 0);
     assert_eq!(report.durable_calls, report.executed_calls);
+    // Every scripted fault was served and retried; each attempt is its own
+    // compaction run, three failed and the rest committed, all settled
+    // while the prompt run kept going.
+    assert_eq!(report.summarizer_faults, 3);
+    assert_eq!(report.turn_retries, 3);
+    assert_eq!(report.step_runs_started, 3 + report.compactions);
+    assert_eq!(report.step_runs_finished, report.step_runs_started);
 }
 
 #[tokio::test]
@@ -200,6 +207,78 @@ async fn a_summarizer_outage_past_the_retry_allowance_pauses_with_prior_turns_du
     );
     assert!(report.work_turns > 0 && report.work_turns < 24);
     assert_eq!(report.durable_calls, report.executed_calls);
+    assert_eq!(report.summarizer_faults, 6);
+    assert_eq!(report.turn_retries, 5);
+    assert_eq!(report.step_runs_started, 6);
+    assert_eq!(report.step_runs_finished, 6);
+}
+
+#[tokio::test]
+async fn a_summarizer_the_provider_rejects_fails_closed_without_retrying() {
+    // A 400 is the request's fault, not the provider's moment: no retry,
+    // and the run fails closed exactly as before AC3.
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 6;
+    script.summary_fault_status = 400;
+    let report = run(script).await;
+    assert!(
+        matches!(&report.outcome, RunOutcome::Failed { failure }
+            if failure.message.contains("summarizer failed")),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(report.summarizer_faults, 1);
+    assert_eq!(report.turn_retries, 0);
+    assert_eq!(report.compactions, 0);
+    assert_eq!(report.step_runs_started, 1);
+    assert_eq!(report.step_runs_finished, 1);
+    assert_eq!(report.durable_calls, report.executed_calls);
+}
+
+#[tokio::test]
+async fn cancelling_during_a_summarizer_backoff_cancels_the_run_and_starts_no_new_step() {
+    // The failed attempt's compaction run has settled before the backoff,
+    // so a cancel during the sleep leaves nothing running and no retry.
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 100;
+    script.retry_delay = Duration::from_secs(600);
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture.submit().await;
+    let mut started = 0;
+    let mut finished = 0;
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut cancelled = false;
+        loop {
+            let envelope = fixture.events.next().await.unwrap().unwrap();
+            match envelope.event {
+                SessionEvent::RunStarted { run_id: step, .. } if step != run_id => started += 1,
+                SessionEvent::RunFinished { run_id: step, .. } if step != run_id => finished += 1,
+                SessionEvent::RunTurnRetrying { .. } if !cancelled => {
+                    cancelled = true;
+                    fixture
+                        .runtime
+                        .command(
+                            qq_protocol::CommandId::generate().unwrap(),
+                            qq_protocol::SessionCommand::CancelRun { run_id },
+                        )
+                        .await
+                        .unwrap();
+                }
+                SessionEvent::RunFinished { outcome, .. } if envelope.run_id == Some(run_id) => {
+                    break outcome;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the cancel cuts the ten-minute backoff short");
+    assert_eq!(outcome, RunOutcome::Cancelled);
+    assert_eq!(started, 1);
+    assert_eq!(finished, 1);
+    assert_eq!(fixture.observed.lock().unwrap().summary_faults, 1);
+    fixture.runtime.close().await.unwrap();
 }
 
 #[tokio::test]

@@ -1214,6 +1214,8 @@ impl RunState {
                                                 message: format!("in-run compaction failed: {error}"),
                                             },
                                             runtime::InRunCompactionError::SummarizerFailed(_)
+                                            // Unreachable after the retry loop above, which
+                                            // pauses instead; kept for exhaustiveness.
                                             | runtime::InRunCompactionError::SummarizerUnavailable { .. }
                                             | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
                                                 kind: RunFailureKind::Policy,

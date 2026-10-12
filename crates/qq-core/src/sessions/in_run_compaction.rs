@@ -158,8 +158,9 @@ async fn compact_in_run(
     guard.disarm();
     let (summary, usage) = match reply {
         Ok(reply) => reply,
-        // The compaction run settles failed either way; a transient fault
-        // tells the loop the same step may be retried (ADR-0048 § 2).
+        // The compaction run is settled before the loop's backoff, so a retry
+        // never stacks a second running row; if that write fails the runtime
+        // is marked failed and the next attempt returns `Unavailable`.
         Err(crate::runtime::SummarizeError::Transient { kind, message }) => {
             settle_failed_with(
                 inner,

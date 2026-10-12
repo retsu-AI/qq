@@ -39,6 +39,10 @@ pub struct Script {
     pub fault_attempts: usize,
     /// Summarizer requests answered with a 529 before one succeeds.
     pub summary_faults: usize,
+    /// HTTP status of each scripted summarizer fault.
+    pub summary_fault_status: u16,
+    /// Backoff between turn and summarizer retries.
+    pub retry_delay: Duration,
     pub empty_checkpoint: bool,
     pub repeat_arguments: bool,
     pub stall_after: Option<usize>,
@@ -64,6 +68,8 @@ impl Script {
             fault_at: None,
             fault_attempts: 0,
             summary_faults: 0,
+            summary_fault_status: 529,
+            retry_delay: Duration::from_millis(1),
             empty_checkpoint: false,
             repeat_arguments: false,
             stall_after: None,
@@ -108,7 +114,7 @@ impl Provider for ScriptedProvider {
             if observed.summary_faults < self.script.summary_faults {
                 observed.summary_faults += 1;
                 return Box::pin(stream::iter([Err(ProviderError::Api {
-                    status: 529,
+                    status: self.script.summary_fault_status,
                     message: "scripted summarizer outage".to_owned(),
                 })]));
             }
@@ -320,8 +326,8 @@ impl RuntimeLoader for Loader {
                     policy_bound: false,
                 }))
                 .with_turn_recovery(TurnRecoveryPolicy::new(
-                    Duration::from_millis(1),
-                    Duration::from_millis(1),
+                    script.retry_delay,
+                    script.retry_delay,
                 ))
                 .with_tool_host(host);
                 LoadedRuntime::compile_blocking(
@@ -471,6 +477,9 @@ impl Fixture {
 
     pub async fn finish(&mut self, run_id: RunId) -> Report {
         let mut compactions = 0;
+        let mut turn_retries = 0;
+        let mut step_runs_started = 0;
+        let mut step_runs_finished = 0;
         let mut durable_calls = 0;
         let mut persisted_bytes = 0;
         let baseline_rss = self.initial_resources.rss_bytes;
@@ -488,6 +497,15 @@ impl Fixture {
                     serde_json::to_vec(&envelope).expect("event encoding").len() as u64;
                 match envelope.event {
                     SessionEvent::SessionCompacted { .. } => compactions += 1,
+                    SessionEvent::RunTurnRetrying { .. } if envelope.run_id == Some(run_id) => {
+                        turn_retries += 1
+                    }
+                    SessionEvent::RunStarted { run_id: step, .. } if step != run_id => {
+                        step_runs_started += 1
+                    }
+                    SessionEvent::RunFinished { run_id: step, .. } if step != run_id => {
+                        step_runs_finished += 1
+                    }
                     SessionEvent::ToolCallFinished { .. } if envelope.run_id == Some(run_id) => {
                         durable_calls += 1
                     }
@@ -532,6 +550,10 @@ impl Fixture {
             duplicate_sequences: observed.calls.len() - unique,
             durable_calls,
             compactions,
+            turn_retries,
+            step_runs_started,
+            step_runs_finished,
+            summarizer_faults: observed.summary_faults,
             persisted_event_bytes: persisted_bytes,
             baseline_rss_bytes: baseline_rss,
             peak,
@@ -601,6 +623,13 @@ pub struct Report {
     pub duplicate_sequences: usize,
     pub durable_calls: usize,
     pub compactions: usize,
+    /// `run_turn_retrying` events for the prompt run.
+    pub turn_retries: usize,
+    /// Internal (compaction) runs started and finished in the session.
+    pub step_runs_started: usize,
+    pub step_runs_finished: usize,
+    /// Scripted summarizer faults the provider actually served.
+    pub summarizer_faults: usize,
     pub persisted_event_bytes: u64,
     pub baseline_rss_bytes: Option<u64>,
     pub peak: Resources,
