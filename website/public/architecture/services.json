@@ -98,7 +98,7 @@
     {
       "id": "retsu",
       "title": "Retsu edge service implementation",
-      "ref": "Current remote Retsu source8d58080829231bb74e180c6de4e8f687c4606200, immutable git tree read2026-10-13. packages/api/src/{services,http,durable/AccountLedger.ts}, index.ts and wrangler.jsonc. Earlier localb889cd9 was superseded. Source is not deployed revision or paid/customer acceptance.",
+      "ref": "Current remote Retsu source 8d58080829231bb74e180c6de4e8f687c4606200, immutable git tree read 2026-10-13. packages/api/src/{services,http,durable/AccountLedger.ts}, index.ts and wrangler.jsonc. Earlier local b889cd9 was superseded. Source is not deployed revision or paid/customer acceptance.",
       "url": "https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200"
     },
     {
@@ -416,7 +416,7 @@
       "status": "source",
       "stateOwner": "AccountLedger customer money and exposure",
       "source": "retsu",
-      "detail": "Current8d580 AccountLedger source owns credit/reserve/settle plus refund/dispute operations. Only AccountLedger is the configured money Durable Object; PostgreSQL/Temporal/QQ cannot grant credit or release uncertain supplier effects.",
+      "detail": "Current 8d580 Billing verifies and handles Stripe refund/dispute events, applying idempotent money adjustments through AccountLedger. AccountLedger is the configured money Durable Object for credit, holds and once-only settlement; PostgreSQL/Temporal/QQ cannot grant credit or release uncertain supplier effects. IP/email counter instances are separate from customer-money instances.",
       "executionOwner": "Billing/API owner",
       "environment": "Cloudflare edge",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -862,9 +862,9 @@
       "name": "Turnstile and Edge abuse controls",
       "purpose": "Protect configured sign-in, waitlist and signup paths.",
       "status": "source",
-      "stateOwner": "Edge configuration and D1 throttling records",
+      "stateOwner": "Edge challenge configuration; separate IP/email AccountLedger DO counter instances",
       "source": "retsu",
-      "detail": "Current8d580 Edge.ts/account.ts implements optional Turnstile checks plus IP/email throttling and browser-origin guards. Anti-abuse checks do not grant account or paid admission.",
+      "detail": "Current 8d580 Edge/account source implements optional Turnstile checks and IP/email throttling. Fixed-window counters use Ledger.hit in separately named AccountLedger DO instances, not D1. Counter scopes do not grant customer money or paid admission.",
       "executionOwner": "Billing/API owner",
       "environment": "Cloudflare edge",
       "evidenceAt": "2026-10-13 immutable current remote source read; runtime unverified"
@@ -1330,6 +1330,13 @@
       "fromId": "metrics",
       "toId": "resend",
       "label": "use authorized transactional mail fallback",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "turnstile",
+      "toId": "ledger",
+      "label": "hit separately named IP/email counter instances, not customer-money admission",
       "status": "source",
       "source": "retsu"
     }
