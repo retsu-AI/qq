@@ -229,6 +229,24 @@ mod tests {
                 r#"{"query":"needle","offset":0}"#,
                 "offset_ignored",
             ),
+            (
+                "tree",
+                r#"{"path":"."}"#,
+                r#"{"path":".","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt"}"#,
+                r#"{"path":"input.txt","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":["*.txt"],"context":10}"#,
+                r#"{"query":"needle","include":"[\"*.txt\"]","context":10}"#,
+                "include_array_coerced",
+            ),
         ] {
             let expected = run_tool(&workspace, &state, name, valid);
             let repaired = run_tool(&workspace, &state, name, malformed);
@@ -356,6 +374,165 @@ mod tests {
             result.file_states[0].hash,
             content_hash(contents.as_bytes())
         );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_spilled_search_text_and_original_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let query = "needle";
+        let nested = directory.path().join(vec!["a".repeat(120); 15].join("/"));
+        fs::create_dir_all(&nested).unwrap();
+        for index in 0..20 {
+            fs::write(
+                nested.join(format!("input{index:02}.txt")),
+                "needle abcdefgh\n".repeat(50),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let baseline = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            &json!({
+                "query": query, "limit": 500, "include": ["**/*.txt"], "max_per_file": 50
+            })
+            .to_string(),
+        );
+        let arguments = json!({
+            "query": query,
+            "limit": 500,
+            "include": "[\"**/*.txt\"]",
+            "max_per_file": 50,
+            "cwd": ".",
+            "offset": 0,
+        })
+        .to_string();
+        let result = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.len() <= search::SEARCH_BOUNDS.max_bytes);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.contains("next="), "{header}");
+        assert!(
+            header.contains("note=include_array_coerced,cwd_ignored,offset_ignored"),
+            "{header}"
+        );
+        let spill = result
+            .spill
+            .as_ref()
+            .expect("long search header exceeds the reserved header budget");
+        let complete_header = spill.text.lines().next().unwrap();
+        assert!(complete_header.contains("note=include_array_coerced,cwd_ignored,offset_ignored"));
+        let encoded = complete_header
+            .split_once(" next=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let original = baseline.spill.as_ref().expect("baseline also spills");
+        assert_eq!(
+            spill
+                .text
+                .replace(" note=include_array_coerced,cwd_ignored,offset_ignored", ""),
+            original.text,
+            "repair must preserve complete spilled content"
+        );
+        let original_cursor = original
+            .text
+            .lines()
+            .next()
+            .unwrap()
+            .split_once(" next=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        assert_eq!(
+            encoded, original_cursor,
+            "repair must preserve the original cursor"
+        );
+        assert_eq!(spill.digest, content_hash(spill.text.as_bytes()));
+        assert!(spill.text.len() > result.model_text.len());
+        assert!(spill.omitted_from_line > 1);
+        assert!(spill.omitted_from_line <= spill.text.lines().count());
+    }
+
+    #[test]
+    fn readonly_argument_repairs_keep_search_pagination_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n".repeat(50)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let first = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({
+                "query": "needle", "include": "[\"*.txt\"]", "max_per_file": 50, "limit": 25
+            })
+            .to_string(),
+        );
+        assert!(!first.is_error, "{}", first.model_text);
+        let encoded = first
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_once(" next=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let cursor = search::Cursor::decode(encoded).expect("first page cursor is usable");
+        assert_eq!(cursor.path, "input.txt");
+        assert_eq!(cursor.line, 25);
+        let second = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({
+                "query": "needle", "include": "[\"*.txt\"]", "max_per_file": 50,
+                "limit": 25, "cursor": encoded
+            })
+            .to_string(),
+        );
+        assert!(!second.is_error, "{}", second.model_text);
+        assert!(
+            second.model_text.contains("matches=25/25"),
+            "{}",
+            second.model_text
+        );
+        assert!(!second.model_text.lines().next().unwrap().contains("next="));
+        assert!(second.model_text.contains("note=include_array_coerced"));
+    }
+
+    #[test]
+    fn readonly_argument_repairs_remain_visible_for_long_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let relative = vec!["a".repeat(120); 18].join("/");
+        let nested = directory.path().join(&relative);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for (name, path) in [
+            ("tree", relative.clone()),
+            ("read_file", format!("{relative}/input.txt")),
+        ] {
+            let arguments = json!({"path": path, "cwd": "."}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), name, &arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result
+                    .model_text
+                    .lines()
+                    .any(|line| line == "note=cwd_ignored"),
+                "{}",
+                result.model_text
+            );
+        }
     }
 
     #[test]

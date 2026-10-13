@@ -402,14 +402,36 @@ pub(super) fn execute_blocking(
         return ToolOutput::error("tool execution was cancelled");
     }
     match BuiltInTool::from_name(name) {
-        Some(BuiltInTool::ReadFile) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| {
-                read_file(workspace, file_state, args, cancelled)
-            }),
-        Some(BuiltInTool::Tree) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| tree(workspace, args, cancelled)),
-        Some(BuiltInTool::Search) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),
+        Some(BuiltInTool::ReadFile) => deserialize_read_only(name, arguments).map_or_else(
+            ToolOutput::error,
+            |(args, notes)| {
+                with_argument_notes(
+                    read_file(workspace, file_state, args, cancelled),
+                    &notes,
+                    &super::read::READ_BOUNDS,
+                )
+            },
+        ),
+        Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments).map_or_else(
+            ToolOutput::error,
+            |(args, notes)| {
+                with_argument_notes(
+                    tree(workspace, args, cancelled),
+                    &notes,
+                    &super::tree::TREE_BOUNDS,
+                )
+            },
+        ),
+        Some(BuiltInTool::Search) => deserialize_read_only(name, arguments).map_or_else(
+            ToolOutput::error,
+            |(args, notes)| {
+                with_argument_notes(
+                    search(workspace, args, cancelled),
+                    &notes,
+                    &super::search::SEARCH_BOUNDS,
+                )
+            },
+        ),
         // The applied change travels as a UI payload (the unified diff of what
         // actually changed on disk); the model gets the header summary.
         Some(BuiltInTool::EditFile) => deserialize(arguments)
@@ -475,4 +497,135 @@ pub(super) fn execute_blocking(
 
 fn deserialize<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, String> {
     serde_json::from_str(arguments).map_err(|error| format!("invalid arguments: {error}"))
+}
+
+// Value's default object decoder overwrites duplicate keys. A failed strict
+// decode must never turn an ambiguous path or query into an accepted call.
+struct ReadOnlyObject(serde_json::Map<String, serde_json::Value>);
+
+impl<'de> serde::Deserialize<'de> for ReadOnlyObject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+            type Value = ReadOnlyObject;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object with unique argument fields")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut access: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut object = serde_json::Map::new();
+                while let Some(key) = access.next_key::<String>()? {
+                    if object.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate argument field {key:?}"
+                        )));
+                    }
+                    object.insert(key, access.next_value()?);
+                }
+                Ok(ReadOnlyObject(object))
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+fn deserialize_read_only<T: serde::de::DeserializeOwned>(
+    name: &str,
+    arguments: &str,
+) -> Result<(T, Vec<&'static str>), String> {
+    let original_error = match serde_json::from_str(arguments) {
+        Ok(args) => return Ok((args, Vec::new())),
+        Err(error) => {
+            if !error.is_data() {
+                return Err(format!("invalid arguments: {error}"));
+            }
+            format!("invalid arguments: {error}")
+        }
+    };
+    let ReadOnlyObject(mut object) = match serde_json::from_str(arguments) {
+        Ok(object) => object,
+        Err(error) => return Err(format!("invalid arguments: {error}")),
+    };
+    let mut notes = Vec::new();
+    let arrays: &[(&str, &str)] = match name {
+        "search" => &[
+            ("include", "include_array_coerced"),
+            ("exclude", "exclude_array_coerced"),
+        ],
+        "read_file" => &[("ranges", "ranges_array_coerced")],
+        "tree" => &[],
+        _ => return Err(original_error),
+    };
+    for &(field, note) in arrays {
+        if let Some(serde_json::Value::String(encoded)) = object.get(field) {
+            let values: Vec<String> = match serde_json::from_str(encoded) {
+                Ok(values) => values,
+                Err(_) => return Err(original_error),
+            };
+            object.insert(field.to_owned(), serde_json::Value::from(values));
+            notes.push(note);
+        }
+    }
+    // These unknown values explicitly select the existing workspace root or
+    // first search page. Any non-neutral value still fails strict decoding.
+    if object
+        .get("cwd")
+        .is_some_and(|value| value.as_str() == Some("."))
+    {
+        object.remove("cwd");
+        notes.push("cwd_ignored");
+    }
+    if name == "search"
+        && object
+            .get("offset")
+            .is_some_and(|value| value.as_u64() == Some(0))
+    {
+        object.remove("offset");
+        notes.push("offset_ignored");
+    }
+    if notes.is_empty() {
+        return Err(original_error);
+    }
+    match serde_json::from_value(serde_json::Value::Object(object)) {
+        Ok(args) => Ok((args, notes)),
+        Err(error) => Err(format!("invalid arguments: {error}")),
+    }
+}
+
+fn with_argument_notes(mut output: ToolOutput, notes: &[&str], bounds: &Bounds) -> ToolOutput {
+    if notes.is_empty() || output.is_error {
+        return output;
+    }
+    let mut text = match output.spill.take() {
+        Some(spill) => spill.text,
+        None => std::mem::take(&mut output.model_text),
+    };
+    let end = text.find('\n').unwrap_or(text.len());
+    // Search cursors can exceed the per-line display cap. Put repair notes
+    // before its fixed mode field, ahead of the cursor that may be clipped.
+    let position = if text.starts_with("search ") {
+        text[..end].rfind(" mode=").unwrap_or(end)
+    } else {
+        end
+    };
+    let note = format!(" note={}", notes.join(","));
+    if position + note.len() > bounds.max_line_bytes {
+        // Preserve the path token used by clients while keeping the repair
+        // visible when the path already fills the header's display budget.
+        text.insert_str(end, &format!("\nnote={}", notes.join(",")));
+    } else {
+        text.insert_str(position, &note);
+    }
+    // Rebound the complete result, so notes and their digest/continuation are
+    // durable too. Valid calls never enter this allocation/formatting path.
+    let mut noted = ToolOutput::bounded(text, bounds, false);
+    noted.ui_payload = output.ui_payload;
+    noted.file_states = output.file_states;
+    noted
 }

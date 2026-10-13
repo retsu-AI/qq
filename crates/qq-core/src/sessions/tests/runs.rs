@@ -3215,3 +3215,51 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
     );
     assert_assembly_matches_reference(&database, session_id);
 }
+
+#[tokio::test]
+async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::ReadOnly,
+        vec![vec![(
+            "read_file",
+            r#"{"path":"note.txt","ranges":"[\"1\"]"}"#.to_owned(),
+        )]],
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
+    submit_prompt(&harness, "read the note").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(&event.event, SessionEvent::ToolCallStarted { .. }))
+            .count(),
+        1
+    );
+    let results = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    let result = results[0].result.as_deref().unwrap();
+    assert!(result.contains("note=ranges_array_coerced"));
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(harness.session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    let focused = snapshot.focused.unwrap();
+    assert_eq!(focused.tool_calls.len(), 1);
+    assert_eq!(focused.tool_calls[0].state, ToolCallState::Completed);
+    assert_eq!(focused.tool_calls[0].result.as_deref(), Some(result));
+}
