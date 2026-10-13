@@ -6499,6 +6499,107 @@ fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
 }
 
 #[tokio::test]
+async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("queued-summary.sqlite");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
+    let model = Arc::new(test_resolved_model(
+        "test/model",
+        "test-model",
+        256,
+        Some(budget_pricing()),
+    ));
+    let (summary, _) = store
+        .start_in_run_compaction(&parent, &model, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    store.start_in_run_summary_request(&summary).await.unwrap();
+    let mut accounting = RunAccountingAccumulator::new(
+        Some(budget_pricing()),
+        context_occupancy_basis(
+            qq_protocol::ContentHash::from_bytes([0; 32]),
+            crate::runtime::PreparedStaticPrefix::new(
+                qq_protocol::ContentHash::from_bytes([0; 32]),
+                None,
+            ),
+            0,
+        ),
+    );
+    accounting.record_turn(Some(usage(7, 3)));
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let blocked_store = store.clone();
+    let blocked = tokio::spawn(async move {
+        blocked_store
+            .call(Priority::Control, move |_| {
+                let _ = entered.send(());
+                wait.recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| SessionRuntimeError::Unavailable)
+            })
+            .await
+    });
+    held.await.unwrap();
+    let mut receipt = Box::pin(store.persist_in_run_summary_turn(
+        &summary,
+        ModelTurnCommit {
+            turn_ordinal: 1,
+            message: Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "measured prefix".to_owned(),
+                }],
+            ),
+            calls: Vec::new(),
+            turn_message: None,
+            context_tokens: None,
+            occupancy_basis: None,
+            usage: Some(usage(7, 3)),
+            estimated_cost_usd_nanos: Some(13_000),
+            accounting: Some(accounting.snapshot()),
+            truncated: false,
+            notice: None,
+        },
+    ));
+    assert!(futures_util::poll!(receipt.as_mut()).is_pending());
+    drop(receipt);
+    let mut settlement =
+        Box::pin(store.finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled));
+    assert!(futures_util::poll!(settlement.as_mut()).is_pending());
+    release.send(()).unwrap();
+    blocked.await.unwrap().unwrap();
+    let finished = settlement.await.unwrap();
+    assert_eq!(finished.iter().filter(|event| matches!(&event.event, SessionEvent::RunFinished { usage: Some(tokens), .. } if *tokens == usage(7, 3))).count(), 1);
+    assert!(
+        store
+            .finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.close().await.unwrap();
+    let connection = Connection::open(path).unwrap();
+    let (turns, encoded_usage, cost): (u64, String, u64) = connection.query_row(
+        "SELECT COUNT(*), r.usage_json, r.estimated_cost_usd_nanos FROM model_turns t JOIN runs r ON r.id = t.run_id WHERE r.id = ?1",
+        [summary.identity.run_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    assert_eq!(turns, 1);
+    assert_eq!(
+        serde_json::from_str::<TokenUsage>(&encoded_usage).unwrap(),
+        usage(7, 3)
+    );
+    assert_eq!(cost, 13_000);
+    let session_cost: u64 = connection
+        .query_row(
+            "SELECT estimated_cost_usd_nanos FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_cost, 13_000);
+}
+
+#[tokio::test]
 async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("settled-summary.sqlite"))
