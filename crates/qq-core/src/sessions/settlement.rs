@@ -251,6 +251,17 @@ pub(super) fn settle_run(
     } else {
         (current_cost, current_cost_known)
     };
+    // Internal in-run compaction owns spend but never owns the prompt's
+    // active slot. Charge the session under the same exact-once settlement
+    // guard independently of releasing that slot.
+    transaction.execute(
+        "UPDATE sessions SET estimated_cost_usd_nanos = ?2, cost_known = ?3 WHERE id = ?1",
+        params![
+            claimed.identity.session_id.to_string(),
+            next_cost,
+            next_cost_known
+        ],
+    )?;
     // Terminal accounting owns the final per-turn figure only when a model
     // turn completed. No completed turn preserves an earlier committed value;
     // an unmeasured completed turn explicitly clears it. Recovery never held
@@ -290,15 +301,13 @@ pub(super) fn settle_run(
         "UPDATE sessions
              SET active_run_id = NULL,
                   status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
-                  estimated_cost_usd_nanos = ?4,
-                  cost_known = ?5,
                   context_tokens = CASE
-                      WHEN ?6 AND ?7 AND model IS ?9
-                      THEN ?8
+                      WHEN ?4 AND ?5 AND model IS ?7
+                      THEN ?6
                       ELSE context_tokens
                   END,
                   pending_context_overflow_basis_json = COALESCE(
-                      ?10, pending_context_overflow_basis_json
+                      ?8, pending_context_overflow_basis_json
                   ),
                   updated_at_ms = ?2
              WHERE id = ?1 AND active_run_id = ?3",
@@ -306,8 +315,6 @@ pub(super) fn settle_run(
             claimed.identity.session_id.to_string(),
             now,
             claimed.identity.run_id.to_string(),
-            next_cost,
-            next_cost_known,
             claimed.identity.kind == RunKind::Prompt,
             saw_turn,
             reported_context_tokens,
