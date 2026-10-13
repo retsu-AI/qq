@@ -86,6 +86,26 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue((self.root / "result" / failed["log"]).exists())
         self.assertFalse((self.root / "result" / "summary.json").exists())
 
+    def test_nonzero_exit_preserves_output_and_failure(self):
+        self.candidate.write_text("#!/usr/bin/env python3\nprint('fixture failed')\nraise SystemExit(7)\n")
+        result = self.run_recorder()
+        self.assertNotEqual(result.returncode, 0)
+        raw = json.loads((self.root / "result" / "raw.json").read_text())
+        failed = raw["runs"][-1]
+        self.assertEqual(failed["exit_code"], 7)
+        self.assertEqual(failed["error"], "benchmark exit 7")
+        self.assertIn("fixture failed", (self.root / "result" / failed["log"]).read_text())
+        self.assertFalse(raw["complete"])
+
+    def test_oversized_output_never_qualifies_even_after_clean_exit(self):
+        self.candidate.write_text("#!/usr/bin/env python3\nprint('x' * (1024 * 1024 + 1))\n")
+        result = self.run_recorder()
+        self.assertNotEqual(result.returncode, 0)
+        raw = json.loads((self.root / "result" / "raw.json").read_text())
+        self.assertEqual(raw["runs"][-1]["error"], "benchmark output exceeds 1MiB")
+        self.assertFalse(raw["complete"])
+        self.assertFalse((self.root / "result" / "summary.json").exists())
+
     def test_nonimmutable_sha_is_rejected_before_running(self):
         result = self.run_recorder("--baseline-sha", "main")
         self.assertNotEqual(result.returncode, 0)

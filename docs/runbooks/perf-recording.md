@@ -98,6 +98,35 @@ qualification and H0 metric registration remain AC0.2. Store raw logs beneath
 
 ## Same-binary control
 
+### Isolated turn diagnostic recording
+
+The CI workflow accepts an optional `perf_baseline_sha` on manual dispatch.
+Both the baseline and candidate must be immutable forty-hex commits. Dispatch
+the candidate branch with a reviewed baseline:
+
+```sh
+gh workflow run ci.yml --ref ci/eng-1044-turn-overhead-recording \
+  -f perf_baseline_sha=<full-baseline-commit>
+gh run list --workflow ci.yml --branch ci/eng-1044-turn-overhead-recording
+gh run download <run-id> --name turn-overhead-<run-id>-<attempt> \
+  --dir target/qq-perf/<slice>-<date>/isolated-run
+```
+
+The manual turn job uses a separate hosted runner, identical pinned compiler,
+separate build targets and optimized profiles. Builds finish before recording.
+It saves 30 alternating baseline/candidate pairs, then 30 same-binary
+baseline/baseline pairs, using one benchmark iteration per invocation. Artifacts
+include build logs, compiler/profile identity, executable SHA-256 hashes,
+pressure readings, every sample log, raw receipts and milestone median/p95
+summaries. Interpret p95 as the distribution of diagnostic invocation samples,
+not individual turn latency. Retention is 30 days; download qualifying evidence.
+
+Launch, nonzero-exit, malformed-output, timeout and output-limit failures retain
+partial evidence and fail the job. An incomplete recording has no qualifying
+summary. This job neither registers an H0 budget nor qualifies concurrent
+streams, fsync, real provider outages or the integrated autonomy soak. Inspect
+A/A variation and host pressure before claiming a performance result.
+
 Tail gates (p95, p99) on a shared host are frequently not repeatable. For any
 tail gate the slice reports, also run a **same-binary A/A pair**: baseline
 against itself with the same procedure. If the A/A pair fails the same gate as

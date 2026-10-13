@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      perf_baseline_sha:
+        description: Immutable forty-hex baseline commit for controlled turn recording
+        required: false
+        default: ''
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +28,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
+      - name: Turn recorder CLI regressions
+        run: python3 .github/scripts/test-record-turn-overhead.py
       - name: install.sh against a local fixture release
         run: bash tests/install_sh.sh
       - name: Clippy
@@ -107,3 +115,89 @@ jobs:
           echo "### qq release binary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$(numfmt --to=iec "$size") ($size bytes)" >> "$GITHUB_STEP_SUMMARY"
+
+  turn-overhead:
+    name: controlled turn overhead (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.perf_baseline_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      BASELINE_SHA: ${{ inputs.perf_baseline_sha }}
+      CANDIDATE_SHA: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Require immutable inputs
+        shell: bash
+        run: |
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.perf_baseline_sha }}
+          path: baseline
+          persist-credentials: false
+      - name: Recorder CLI regression tests
+        run: python3 candidate/.github/scripts/test-record-turn-overhead.py
+      - name: Pin both arms to the candidate toolchain
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import os, re, tomllib
+          from pathlib import Path
+          channel = tomllib.loads(Path('candidate/rust-toolchain.toml').read_text())['toolchain']['channel']
+          if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', channel) is None:
+              raise SystemExit('recording requires a pinned stable toolchain')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'RUSTUP_TOOLCHAIN={channel}\n')
+          PYTHON
+      - name: Build both immutable arms separately
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/turn-recording"
+          rustc --version --verbose > "$RUNNER_TEMP/turn-recording/toolchain.txt"
+          cargo --version >> "$RUNNER_TEMP/turn-recording/toolchain.txt"
+          for arm in baseline candidate; do
+            cd "$GITHUB_WORKSPACE/$arm"
+            [[ "$(git rev-parse HEAD)" == "$(if [[ "$arm" == baseline ]]; then echo "$BASELINE_SHA"; else echo "$CANDIDATE_SHA"; fi)" ]]
+            CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo bench --locked -p qq-core --bench turn_overhead --no-run --message-format=json > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
+            python3 - "$arm" <<'PYTHON'
+          import json, os, shutil, sys
+          from pathlib import Path
+          arm = sys.argv[1]
+          root = Path(os.environ['RUNNER_TEMP']) / 'turn-recording'
+          rows = [json.loads(line) for line in (root / f'{arm}-build.jsonl').read_text().splitlines()]
+          artifacts = [row for row in rows if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'turn_overhead' and row.get('executable')]
+          if len(artifacts) != 1:
+              raise SystemExit('expected one optimized benchmark artifact')
+          artifact = artifacts[0]
+          profile = artifact['profile']
+          if profile['opt_level'] != '3' or profile['debug_assertions']:
+              raise SystemExit('benchmark is not the optimized profile')
+          with Path(artifact['executable']).open('rb') as source, (root / f'{arm}-bin').open('xb') as target:
+              shutil.copyfileobj(source, target)
+          (root / f'{arm}-bin').chmod(0o755)
+          (root / f'{arm}-artifact.json').write_text(json.dumps(artifact, indent=2))
+          if arm == 'candidate':
+              baseline = json.loads((root / 'baseline-artifact.json').read_text())
+              if baseline['profile'] != profile:
+                  raise SystemExit('benchmark profiles differ')
+          PYTHON
+          done
+      - name: Record thirty alternating and same-binary pairs
+        shell: bash
+        run: |
+          python3 candidate/.github/scripts/record-turn-overhead.py --baseline "$RUNNER_TEMP/turn-recording/baseline-bin" --candidate "$RUNNER_TEMP/turn-recording/candidate-bin" --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" --output "$RUNNER_TEMP/turn-recording/samples"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: turn-overhead-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/turn-recording
+          if-no-files-found: warn
+          retention-days: 30
