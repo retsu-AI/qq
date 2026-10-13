@@ -820,8 +820,10 @@ mod tests {
         assert!(first_close.is_finished() == false);
         let timeout_started = Instant::now();
         assert_eq!(first_close.join().unwrap(), CloseOutcome::Incomplete);
-        assert!(timeout_started.elapsed() >= Duration::from_millis(200));
-        assert!(timeout_started.elapsed() < Duration::from_millis(400));
+        let timeout_elapsed = timeout_started.elapsed();
+        eprintln!("blocked diagnostic close elapsed: {timeout_elapsed:?}");
+        assert!(timeout_elapsed >= Duration::from_millis(200));
+        assert!(timeout_elapsed < Duration::from_millis(400));
         release.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(1);
         while session
