@@ -250,6 +250,11 @@ answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 `prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
 `side_questions`, the isolated side-question rows behind protocol 32.
+Schema 45 adds the non-unique partial `runs_owned_compaction` index for
+exact owner-run accounting of internal compaction attempts. Completed, failed
+and cancelled attempts enter their owner's child-spend receipt; manual and
+unrelated compactions do not. Unknown usage or cost remains unknown. Internal
+attempts do not consume the child-count or depth allowance. No wire shape changes.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

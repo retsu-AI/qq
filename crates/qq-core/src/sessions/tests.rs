@@ -6503,6 +6503,13 @@ fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("owner-index.sqlite");
     let (connection, _) = super::bench_support::seed_compacted_session(&path, 3, 2, 2, 100);
+    let store_id: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'store_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let original: Vec<(String, Option<String>, Option<u64>)> = connection
         .prepare("SELECT id, usage_json, estimated_cost_usd_nanos FROM runs ORDER BY id")
         .unwrap()
@@ -6513,7 +6520,16 @@ fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
     connection.execute_batch("DROP INDEX IF EXISTS runs_owned_compaction; UPDATE metadata SET value = '44' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     for _ in 0..2 {
-        let (connection, _) = open_database(&path).unwrap();
+        let (connection, reopened_id) = open_database(&path).unwrap();
+        assert_eq!(reopened_id.to_string(), store_id);
+        let indexes: Vec<(String, bool, bool)> = connection
+            .prepare("PRAGMA index_list('runs')")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?, row.get(4)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(indexes.contains(&("runs_owned_compaction".to_owned(), false, true)));
         let plan: Vec<String> = connection
             .prepare("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE auto_compaction_for_run_id = ?1 AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL")
             .unwrap()
@@ -6546,6 +6562,58 @@ fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
 }
 
 #[test]
+fn owned_compaction_index_migration_failure_preserves_previous_version() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("owner-index-failure.sqlite");
+    let (connection, _) = open_database(&path).unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '44' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
+    drop(connection);
+    assert!(open_database(&path).is_err());
+    let connection = Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "44");
+    let protected: String = connection
+        .query_row("SELECT protected FROM runs_owned_compaction", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(protected, "retained");
+}
+
+#[test]
+fn owned_compaction_index_rejects_wrong_existing_predicate() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("wrong-owner-index.sqlite");
+    let (connection, _) = open_database(&path).unwrap();
+    connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '44' WHERE key = 'schema_version';").unwrap();
+    drop(connection);
+    assert!(open_database(&path).is_err());
+    let connection = Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "44");
+    connection
+        .execute(
+            "UPDATE metadata SET value = '45' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(open_database(&path).is_err());
+}
+
+#[test]
 fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("migration.sqlite");
@@ -6553,7 +6621,7 @@ fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(STORE_SCHEMA_VERSION, 44);
+    assert_eq!(STORE_SCHEMA_VERSION, 45);
     let count: u64 = connection
         .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
         .unwrap();

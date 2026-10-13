@@ -977,6 +977,9 @@ fn version_seventeen_migration_adds_preparation_and_exact_compaction_ownership()
         )
         .unwrap();
     connection
+        .execute("DROP INDEX runs_owned_compaction", [])
+        .unwrap();
+    connection
         .execute(
             "ALTER TABLE runs DROP COLUMN auto_compaction_for_run_id",
             [],
@@ -2104,6 +2107,9 @@ fn partially_applied_version_seventeen_migration_completes_atomically() {
             "UPDATE metadata SET value = '16' WHERE key = 'schema_version'",
             [],
         )
+        .unwrap();
+    connection
+        .execute("DROP INDEX runs_owned_compaction", [])
         .unwrap();
     connection
         .execute(
