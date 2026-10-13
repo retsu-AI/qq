@@ -857,3 +857,148 @@ async fn process_kill_worker() {
         .unwrap();
     std::future::pending::<()>().await;
 }
+
+#[test]
+fn process_kill_preserves_pending_summary_prefix_without_resending() {
+    let directory = tempfile::tempdir().unwrap();
+    for kill in 0..2 {
+        let workspace = directory.path().join(format!("summary-kill-{kill}"));
+        std::fs::create_dir(&workspace).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pending_summary_kill_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("QQ_SOAK_WORKER_DIR", &workspace)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut worker = WorkerGuard {
+            child,
+            reaped: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !workspace.join("ready").exists() {
+            if let Some(status) = worker.child.try_wait().unwrap() {
+                worker.reaped = true;
+                panic!("summary worker exited before durable barrier: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pending summary barrier timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!worker.terminate().unwrap().success());
+        let effects = std::fs::read_to_string(workspace.join("effects")).unwrap();
+        assert!(!effects.is_empty());
+        let observed = Arc::new(Mutex::new(support::Observations::default()));
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio.block_on(async {
+            let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+            script.journal = Some(workspace.join("effects"));
+            let runtime = SessionRuntime::open(
+                SessionRuntimeOptions::new(workspace.join("sessions.sqlite3")),
+                Arc::new(support::Loader {
+                    script,
+                    observed: Arc::clone(&observed),
+                }),
+            )
+            .await
+            .unwrap();
+            runtime.close().await.unwrap();
+        });
+        assert_eq!(
+            observed.lock().unwrap().provider_requests,
+            0,
+            "recovery must not send a provider request"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("effects")).unwrap(),
+            effects
+        );
+        let connection = rusqlite::Connection::open(workspace.join("sessions.sqlite3")).unwrap();
+        let rows: Vec<(String, Option<String>, Option<u64>)> = connection.prepare(
+            "SELECT status, usage_json, estimated_cost_usd_nanos FROM runs WHERE kind = 'compaction'").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+            .map(Result::unwrap).collect();
+        assert_eq!(rows, vec![("interrupted".to_owned(), None, None)]);
+        let prefix: (u64, String, u64) = connection.query_row(
+            "SELECT COUNT(*), t.usage_json, t.estimated_cost_usd_nanos FROM model_turns t JOIN runs r ON r.id = t.run_id WHERE r.kind = 'compaction'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let usage: qq_protocol::TokenUsage = serde_json::from_str(&prefix.1).unwrap();
+        assert_eq!(
+            (prefix.0, usage.input_tokens, usage.output_tokens, prefix.2),
+            (1, 7, 3, 13_000)
+        );
+        let events: Vec<qq_protocol::SessionEventEnvelope> = connection
+            .prepare("SELECT envelope_json FROM events ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+            .collect();
+        let finished: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::RunFinished {
+                    run_id, outcome, ..
+                } => Some((*run_id, outcome)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 2);
+        assert_ne!(finished[0].0, finished[1].0);
+        assert!(
+            finished
+                .iter()
+                .all(|(_, outcome)| **outcome == RunOutcome::Interrupted)
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "internal worker selected by process_kill_preserves_pending_summary_prefix_without_resending"]
+async fn pending_summary_kill_worker() {
+    let directory = match std::env::var_os("QQ_SOAK_WORKER_DIR") {
+        Some(value) => PathBuf::from(value),
+        None => return,
+    };
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.journal = Some(directory.join("effects"));
+    script.summary_prefix = Some(support::SummaryPrefix::Calls);
+    script.summary_hang_after_prefix = true;
+    script.summary_usage = Some(qq_provider::ProviderUsage {
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_tokens: None,
+    });
+    script.pricing = Some(qq_protocol::ModelPricing {
+        input_usd_nanos_per_token: 1_000,
+        output_usd_nanos_per_token: 2_000,
+        cache_read_usd_nanos_per_token: Some(0),
+        cache_write_usd_nanos_per_token: Some(0),
+        context_tier: None,
+        provenance: "deterministic test pricing".to_owned(),
+    });
+    let fixture = support::Fixture::open(&directory, script).await;
+    fixture.submit().await;
+    while fixture.observed.lock().unwrap().summary_requests < 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The provider is polled only after both the prefix receipt and next
+    // pending-unknown marker commit. The parent kills at this durable barrier.
+    tokio::fs::write(directory.join("ready"), b"ready")
+        .await
+        .unwrap();
+    std::future::pending::<()>().await;
+}
