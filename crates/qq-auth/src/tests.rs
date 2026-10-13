@@ -35,6 +35,7 @@ struct FakeKeyring {
     reads: Mutex<BTreeMap<String, usize>>,
     break_index_after_set: Mutex<Option<PathBuf>>,
     read_gate: Mutex<Option<Arc<ReadGate>>>,
+    entry_barrier: Mutex<Option<(Arc<Barrier>, usize)>>,
 }
 
 #[derive(Default)]
@@ -72,6 +73,10 @@ impl FakeKeyring {
         *self.read_gate.lock().unwrap() = Some(gate);
     }
 
+    fn gate_reads_until_both_enter(&self, barrier: Arc<Barrier>, count: usize) {
+        *self.entry_barrier.lock().unwrap() = Some((barrier, count));
+    }
+
     fn check_mode(&self) -> Result<(), KeyringError> {
         match *self.mode.lock().unwrap() {
             FakeMode::Available => Ok(()),
@@ -88,6 +93,18 @@ impl KeyringBackend for FakeKeyring {
             while !gate.release.load(Ordering::SeqCst) {
                 thread::yield_now();
             }
+        }
+        let entry_barrier = {
+            let mut gate = self.entry_barrier.lock().unwrap();
+            gate.as_mut().and_then(|(barrier, remaining)| {
+                (*remaining > 0).then(|| {
+                    *remaining -= 1;
+                    Arc::clone(barrier)
+                })
+            })
+        };
+        if let Some(barrier) = entry_barrier {
+            barrier.wait();
         }
         *self
             .reads
@@ -3137,6 +3154,7 @@ fn stored_keyring_resolution_keeps_distinct_keys_independent() {
     let (store, keyring, _directory) = test_store();
     store.set("provider/one", "one", false).unwrap();
     store.set("provider/two", "two", false).unwrap();
+    keyring.gate_reads_until_both_enter(Arc::new(Barrier::new(2)), 2);
     let start = Arc::new(Barrier::new(3));
     let mut workers = Vec::new();
     for name in ["provider/one", "provider/two"] {
@@ -3223,7 +3241,17 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
         let result = worker_store.resolve_with_epoch(&SecretRef::Stored(target.name.clone()), None);
         done_tx.send(result).unwrap();
     });
-    assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
+    while coordinator
+        .0
+        .lock()
+        .unwrap()
+        .capacity_waiters
+        .load(Ordering::SeqCst)
+        == 0
+    {
+        thread::yield_now();
+    }
+    assert_eq!(keyring.read_count("provider/target"), 0);
 
     // Rotate the index while the request is waiting. Releasing one flight must
     // cause the public call to reload the current epoch before reading.

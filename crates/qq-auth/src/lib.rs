@@ -369,6 +369,7 @@ struct StoredResolutionKey {
 struct StoredResolutionCoordinator {
     cache: StoredResolutionCache,
     flights: HashMap<StoredResolutionKey, Arc<StoredResolutionFlight>>,
+    capacity_waiters: AtomicUsize,
 }
 
 struct StoredResolutionFlight {
@@ -1053,6 +1054,7 @@ impl CredentialStore {
                 break (Arc::clone(flight), false);
             }
             if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                state.capacity_waiters.fetch_add(1, Ordering::SeqCst);
                 return Err(AuthError::CredentialCoordinator {
                     operation: "capacity_wait",
                 });
@@ -1155,6 +1157,7 @@ impl CredentialStore {
                     operation: "lock_poisoned",
                 })?;
         }
+        state.capacity_waiters.fetch_sub(1, Ordering::SeqCst);
         Ok(())
     }
 
