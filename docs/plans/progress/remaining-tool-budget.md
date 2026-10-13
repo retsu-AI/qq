@@ -17,7 +17,9 @@
   covers fresh one-, two-, and six-call bounds plus a seven-call batch;
   `caller_tool_budget_spends_remaining_calls_then_allows_one_final_response`
   covers four charged calls, two remaining calls, the tool-free final response,
-  terminal exhaustion, and three provider requests. Tests have not been run by
-  this author. Before TB1, the fixed sixteen-call preturn reservation is
-  expected to reject these bounded runs before their first tool turn; parent
-  owns the recorded baseline execution and raw/video evidence.
+  terminal exhaustion, and three provider requests. The caps test also checks
+  the final request declares no tool choice and emits exactly one terminal
+  exhaustion. Tests have not been run by this author. Before TB1, the fixed
+  sixteen-call preturn reservation is expected to reject these bounded runs
+  before their first tool turn; parent owns the recorded baseline execution and
+  raw/video evidence.

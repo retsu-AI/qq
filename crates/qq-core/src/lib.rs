@@ -10309,14 +10309,6 @@ mod tests {
 
     #[tokio::test]
     async fn caller_tool_budget_caps_each_batch_and_rejects_excess_before_execution() {
-        struct AllowAllGate;
-
-        impl ToolGate for AllowAllGate {
-            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
-                Box::pin(std::future::ready(GateDecision::Execute))
-            }
-        }
-
         struct BatchReadsThenAnswer {
             batch_size: usize,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
@@ -10390,10 +10382,6 @@ mod tests {
                 )
                 .collect::<Vec<_>>()
                 .await;
-            assert!(
-                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-                "{events:?}"
-            );
             let results: Vec<(&str, bool)> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -10420,19 +10408,31 @@ mod tests {
                     assert!(result.contains("hello"), "{result}");
                 }
             }
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2, "{events:?}");
+            assert_eq!(
+                requests[1].tool_choice(),
+                qq_provider::ToolChoice::None
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, RuntimeEvent::BudgetExhausted { .. }))
+                    .count(),
+                1,
+                "{events:?}"
+            );
+            assert!(matches!(
+                events.last(),
+                Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                    if exhaustion.limit == BudgetLimitKind::ToolCalls
+                        && exhaustion.final_response
+            ));
         }
     }
 
     #[tokio::test]
     async fn caller_tool_budget_spends_remaining_calls_then_allows_one_final_response() {
-        struct AllowAllGate;
-
-        impl ToolGate for AllowAllGate {
-            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
-                Box::pin(std::future::ready(GateDecision::Execute))
-            }
-        }
-
         struct ReadBatchesThenAnswer {
             batches: Vec<usize>,
             requests: Arc<Mutex<Vec<ModelRequest>>>,
