@@ -47,6 +47,25 @@ pub(crate) enum Endpoint {
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
+enum SummaryStatus {
+    Closed,
+    Failed,
+    BudgetExhausted,
+}
+
+#[derive(Serialize)]
+struct Summary {
+    kind: &'static str,
+    session_id: u64,
+    pid: u32,
+    monotonic_ns: u128,
+    emitted: u64,
+    dropped: u64,
+    bytes: u64,
+    status: SummaryStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "kind")]
 pub(crate) enum Event {
     OwnerAdmitted {
@@ -284,6 +303,12 @@ pub(crate) struct DiagnosticSession {
     started: Instant,
 }
 
+fn saturating_increment(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        value.checked_add(1)
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseOutcome {
     Closed,
@@ -363,27 +388,27 @@ impl DiagnosticSession {
         let mut line = match serde_json::to_vec(&event) {
             Ok(line) => line,
             Err(_) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                saturating_increment(&self.dropped);
                 return;
             }
         };
         line.push(b'\n');
         let line_bytes = line.len() as u64;
         if line.len() > MAX_LINE_BYTES || !self.reserve(line_bytes) {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            saturating_increment(&self.dropped);
             return;
         }
-        let tx = loop {
-            match self.tx.try_lock() {
-                Ok(tx) => break tx,
-                Err(_) => thread::yield_now(),
-            }
+        let Ok(tx) = self.tx.try_lock() else {
+            self.reserved_records.fetch_sub(1, Ordering::AcqRel);
+            self.reserved_bytes.fetch_sub(line_bytes, Ordering::AcqRel);
+            saturating_increment(&self.dropped);
+            return;
         };
         let Some(tx) = tx.as_ref() else { return };
         match tx.try_send(WriterMessage(line)) {
             Ok(()) => {}
             Err(_) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                saturating_increment(&self.dropped);
             }
         }
     }
@@ -496,23 +521,27 @@ fn write_records<W: Write + Send + 'static>(
         bytes.fetch_add(line.len() as u64, Ordering::Relaxed);
     }
     let status = if failed.load(Ordering::Acquire) {
-        "Failed"
+        SummaryStatus::Failed
     } else if budget_exhausted.load(Ordering::Acquire) {
-        "BudgetExhausted"
+        SummaryStatus::BudgetExhausted
     } else {
-        "Closed"
+        SummaryStatus::Closed
     };
-    let summary = format!(
-        "{{\"kind\":\"Summary\",\"session_id\":{},\"pid\":{},\"monotonic_ns\":{},\"emitted\":{},\"dropped\":{},\"bytes\":{},\"status\":\"{}\"}}\n",
+    let mut summary = serde_json::to_vec(&Summary {
+        kind: "Summary",
         session_id,
         pid,
-        started.elapsed().as_nanos().min(u64::MAX as u128),
-        emitted.load(Ordering::Relaxed),
-        dropped.load(Ordering::Relaxed),
-        bytes.load(Ordering::Relaxed),
+        monotonic_ns: started.elapsed().as_nanos(),
+        emitted: emitted.load(Ordering::Relaxed),
+        dropped: dropped.load(Ordering::Relaxed),
+        bytes: bytes.load(Ordering::Relaxed),
         status,
-    );
-    if !failed.load(Ordering::Relaxed) && file.write_all(summary.as_bytes()).is_err() {
+    })
+    .unwrap_or_default();
+    summary.push(b'\n');
+    if summary.len() > MAX_LINE_BYTES
+        || (!failed.load(Ordering::Relaxed) && file.write_all(&summary).is_err())
+    {
         failed.store(true, Ordering::Relaxed);
     }
     if file.flush().is_err() {
@@ -668,6 +697,27 @@ mod tests {
             1,
         );
         assert!(flush_failed);
+    }
+
+    #[test]
+    fn producer_drops_immediately_when_output_mutex_is_held() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let session = DiagnosticSession::open(&path).unwrap();
+        let _guard = session.tx.lock().unwrap();
+        let started = Instant::now();
+        session.emit(Event::CacheHit {
+            session_id: 1,
+            pid: 1,
+            monotonic_ns: 0,
+            store_id: 1,
+            coordinator_id: 1,
+            attempt_id: 1,
+            route: Route::StoredKeyring,
+            endpoint: Endpoint::Other,
+        });
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert_eq!(session.dropped.load(Ordering::Acquire), 1);
     }
 
     #[test]
