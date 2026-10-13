@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch or PR | Next action |
 | --- | --- | --- | --- | --- |
-| DOCS1 | Source-backed startup guides in the existing QQ website | In progress | `docs/startup-systems-20261013` | Repair the independent content findings, integrate reviewed architecture assets, and verify the final site before PR publication |
+| DOCS1 | Source-backed startup guides in the existing QQ website | Integrated candidate | `docs/startup-systems-20261013` | Verify this integrated candidate, obtain final independent acceptance, and publish the reviewable PR |
 
 ## 2026-10-13
 
@@ -11,3 +11,11 @@ Existing website identified and isolated branch created from QQ `9bae6937b50a013
 The writer committed thirteen guide pages and navigation in `21e62ad15`, then expanded source references and feature coverage in `74aa6c9b2`. The site build passed for that content revision. `3d9e47ede` added the header entry and eight semantic task cards. Its build passed, with 28 generated pages and 1,398 valid internal links. Ten actual Chromium workflow groups passed for that identity, covering navigation, all thirteen startup pages, search, deep links, keyboard use, themes, focus, missing-page behavior, and mobile layout. Browser screenshots, video, and raw results are retained privately by the documentation owner. They do not establish application behavior or deployment.
 
 The independent non-author source review returned `FOR_REVISION` for `74aa6c9b2`. Its four blockers cover an incorrect headless cost field, stale Retsu authentication and monitoring details, an ambiguous capability endpoint observation, and the same-app native mode contract. The same writer owns repairs. The documentation owner refreshed Retsu remote `main` to `8d58080829231bb74e180c6de4e8f687c4606200` for current source documentation and preserved the older local checkout. The reviewer uses the requested Fusion pair through a separate read-only session. No new provider plan, account configuration, unit or integration tests, merge, or deployment was performed.
+
+### Integrated candidate checkpoint
+
+The same writer repaired the source findings in `7826093f3` and mapped the current implemented Retsu SDK, model, product documentation, OpenAPI, and web sources in `1744ef703`. The assistant source pin is corrected and the normal Rust and website verification paths remain distinct. The existing Retsu product docs remain their own authoritative source; the QQ startup hub links them.
+
+The architecture owner published [PR #288](https://github.com/retsu-AI/qq/pull/288) at `fa9556f8a2845e8a5d06bda7c77f186185d0cd57`, with independent `ACCEPT_VISUAL_SCOPED`. Its four commits are incorporated without asset edits. The 55-component, 63-relationship registry distinguishes Better Auth/D1 identity, separate AccountLedger throttle counter instances, customer money, Billing webhook orchestration, monitoring cron, and the hosted Temporal target. Overview navigation opens the supplied module.
+
+This checkpoint precedes final integrated build, browser evidence, and content acceptance. Those receipts and the eventual PR postcondition are retained by the documentation delivery owner outside the public repository. Architecture acceptance does not establish site-wide acceptance, hosted CI, merge, deployment, provider execution, payment, or customer acceptance.

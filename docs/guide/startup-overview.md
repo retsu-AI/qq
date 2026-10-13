@@ -50,6 +50,10 @@ Choose a task card, then read the source and evidence boundary on its page.
 
 <p class="startup-task-links">More: <a href="../startup-feature-map/">full feature map</a> · <a href="../startup-mcp-acp/">protocol boundaries</a> · <a href="../startup-maintenance/">documentation maintenance</a></p>
 
+## Master architecture
+
+<p><a href="../../architecture/index.html">Open the master architecture</a> to explore 55 components and 63 relationships, their technical names, state owners, and source boundaries. The same view includes the paid request and QQ development journeys. Its source, dated runtime observations, and planned wiring retain separate labels.</p>
+
 ## Source snapshots
 
 These identities are the basis for this guide family. A source revision does

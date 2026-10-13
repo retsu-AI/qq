@@ -7,6 +7,11 @@ repository access required). The earlier `b889cd9e531438e4c54b25aa5ff9dc281c5e68
 snapshot is historical context only; its cookie and account route details must
 not be read as the current implementation.
 
+For API examples, SDK usage, schemas, limits, and error handling, use the
+existing [Retsu product documentation source](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/packages/docs/src/content/docs)
+(repository access required). [Data and models](startup-data-models.md)
+maps its OpenAPI, SDK, and web entrypoints alongside the startup components.
+
 ## Retsu request path
 
 The current Effect Worker in
