@@ -31,3 +31,8 @@
 - Candidate `be8af4fac449180142ac21f5f483b937d99d03b5` adds process/session/PID/monotonic metadata, typed stored-keyring owner/join/read/finish events, atomic ordinary-record/byte reservation, open-time private exclusive creation, and concurrent budget/symlink regressions.
 - Focused evidence is retained at `.../qq-credential-preparation-20261013/DI1-auth-focused-final.log` and `DI1-cli-focused-final.log`; the auth selector executed 1 test and the CLI selector executed 5 tests, all passed. Earlier failed selector/assertion logs remain retained with their original outcomes.
 - Current limits remain material: TypeSafe reviewer construction, Codex/XAI OAuth hooks, full route admission/owner/unwind variants, and a real public CLI composition fixture are not yet demonstrated. This checkpoint is therefore pending same-reviewer repair/acceptance; parent owns broad gates.
+
+## 2026-10-13 — hook expansion checkpoint
+
+- Candidate `3df536d2077bdceeb4abd6a6a8559a38f32ae02d` adds distinct reviewer-store construction for opt-in runtime factories and typed Codex/XAI request-time read start/return events, while preserving the no-diagnostic `RuntimeFactory::system()` path.
+- Stored events now include owner/join/finish lifecycle records; endpoint classification remains enum-only and never serializes URLs. Focused auth and CLI selectors passed after this change (1 and 5 executed tests respectively); parent still requires a real public composition fixture and same-reviewer exact-head assessment.
