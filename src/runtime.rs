@@ -7027,8 +7027,8 @@ mod tests {
             version: 1, model: "cp-profile/test",
             policy: (allowed_providers: ["cp-profile", "cp-chain"]),
             providers: {
-                "cp-profile": AmazonBedrock(region: "us-east-1", auth: Aws(Profile("work")), models: {"test": ()}),
-                "cp-chain": AmazonBedrock(region: "us-east-1", auth: Aws(DefaultChain), models: {"test": ()}),
+                "cp-profile": AmazonBedrock(region: "us-east-1", auth: Aws(Profile("work")), models: {"test": (name: "Profile fixture")}),
+                "cp-chain": AmazonBedrock(region: "us-east-1", auth: Aws(DefaultChain), models: {"test": (name: "Chain fixture")}),
             },
         )"#);
         AWS_PROFILE_FILE_READS.with(|reads| reads.set(0));
