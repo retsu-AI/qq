@@ -77,7 +77,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         Some(cli::Command::Jev {
             command: cli::JevCommand::Observe(args),
-        }) => advisory::run(args).await?,
+        }) => advisory::run(args, overrides.diagnostic.clone()).await?,
         Some(cli::Command::Jev {
             command: cli::JevCommand::Setup { allow_file },
         }) => run_blocking_command(move || jev_setup(allow_file)).await?,
@@ -2490,7 +2490,11 @@ mod tests {
         let root = private_tempdir();
         let path = root.path().join("diagnostic.jsonl");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::credential_diagnostic_cli_child", "--nocapture"])
+            .args([
+                "--exact",
+                "tests::credential_diagnostic_cli_child",
+                "--nocapture",
+            ])
             .env("QQ_DIAGNOSTIC_CHILD_PATH", &path)
             .env_remove("QQ_JEV_API_KEY")
             .env_remove("TYPESAFE_API_KEY")
@@ -2516,10 +2520,9 @@ mod tests {
             "version",
         ])
         .unwrap();
-        let session = diagnostic::DiagnosticSession::open(
-            cli.credential_diagnostics.as_deref().unwrap(),
-        )
-        .unwrap();
+        let session =
+            diagnostic::DiagnosticSession::open(cli.credential_diagnostics.as_deref().unwrap())
+                .unwrap();
         assert_eq!(session.close(), diagnostic::CloseOutcome::Closed);
     }
 
@@ -2587,14 +2590,45 @@ mod tests {
             .filter(|record| record["kind"] == "BackendReadStarted")
             .collect();
         assert_eq!(starts.len(), 2);
-        assert!(starts.iter().all(|record| record["pid"] == std::process::id()));
+        assert!(
+            starts
+                .iter()
+                .all(|record| record["pid"] == std::process::id())
+        );
         assert_eq!(
-            starts[0]["session_id"],
-            starts[1]["session_id"],
+            starts[0]["session_id"], starts[1]["session_id"],
             "both stores must use one diagnostic session"
         );
         assert_ne!(starts[0]["store_id"], starts[1]["store_id"]);
         assert_ne!(starts[0]["coordinator_id"], starts[1]["coordinator_id"]);
+        let attempts: std::collections::HashSet<_> = records
+            .iter()
+            .filter(|record| record["kind"] == "OwnerAdmitted")
+            .map(|record| record["attempt_id"].clone())
+            .collect();
+        let flights: std::collections::HashSet<_> = starts
+            .iter()
+            .map(|record| record["flight_id"].clone())
+            .collect();
+        let reads: std::collections::HashSet<_> = starts
+            .iter()
+            .map(|record| record["read_id"].clone())
+            .collect();
+        assert_eq!(
+            attempts.len(),
+            2,
+            "caller IDs must share one non-reusing allocator"
+        );
+        assert_eq!(
+            flights.len(),
+            2,
+            "flight IDs must share one non-reusing allocator"
+        );
+        assert_eq!(
+            reads.len(),
+            2,
+            "read IDs must share one non-reusing allocator"
+        );
         assert!(!text.contains("first-secret"));
         assert!(!text.contains("second-secret"));
     }

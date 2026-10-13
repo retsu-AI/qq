@@ -3629,8 +3629,15 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(value);
 }
 
-pub(crate) fn advisory_reviewer() -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {
+pub(crate) fn advisory_reviewer(
+    diagnostic: Option<Arc<dyn qq_auth::CredentialDiagnosticSink>>,
+) -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {
     let store = CredentialStore::system()?;
+    let store = match diagnostic {
+        Some(sink) => store
+            .with_diagnostic_sink_as(sink, qq_auth::CredentialDiagnosticRoute::TypesafeReviewer),
+        None => store,
+    };
     Ok(Arc::new(TypeSafeCheckpointReviewer::from_credentials(
         &store,
         qq_config::JevReviewMode::Final,

@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use super::{
     AuthError, CredentialBackend, CredentialDiagnosticEndpoint, CredentialDiagnosticRoute,
-    CredentialStore, MissingCredentialRemedies, Secret,
-    resolve_provider_credential, validate_credential_name,
+    CredentialStore, MissingCredentialRemedies, Secret, resolve_provider_credential,
+    validate_credential_name,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,

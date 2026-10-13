@@ -2995,11 +2995,21 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
     assert_eq!(keyring.read_count("provider/work"), 1);
 }
 
-struct DiagnosticCollector(Mutex<Vec<CredentialDiagnosticEvent>>);
+struct DiagnosticCollector(Mutex<Vec<CredentialDiagnosticEvent>>, AtomicU64);
 
 impl CredentialDiagnosticSink for DiagnosticCollector {
     fn emit(&self, event: CredentialDiagnosticEvent) {
         self.0.lock().unwrap().push(event);
+    }
+
+    fn allocate_id(&self) -> Option<u64> {
+        let current = self
+            .1
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value != u64::MAX).then_some(value + 1)
+            })
+            .ok()?;
+        Some(current)
     }
 }
 
@@ -3015,7 +3025,10 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
             Some("https://provider.example"),
         )
         .unwrap();
-    let collector = Arc::new(DiagnosticCollector(Mutex::new(Vec::new())));
+    let collector = Arc::new(DiagnosticCollector(
+        Mutex::new(Vec::new()),
+        AtomicU64::new(1),
+    ));
     let store = store.with_diagnostic_sink(collector.clone());
     let secret = store
         .resolve_with_endpoint(
@@ -3026,12 +3039,15 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
     assert_eq!(secret.expose_secret_bytes(), b"secret");
     assert_eq!(keyring.read_count("provider/diagnostic"), 1);
     let events = collector.0.lock().unwrap();
-    assert!(matches!(events.as_slice(), [
-        CredentialDiagnosticEvent::OwnerAdmitted { .. },
-        CredentialDiagnosticEvent::BackendReadStarted { .. },
-        CredentialDiagnosticEvent::BackendReadReturned { .. },
-        CredentialDiagnosticEvent::ResolutionFinished { .. },
-    ]));
+    assert!(matches!(
+        events.as_slice(),
+        [
+            CredentialDiagnosticEvent::OwnerAdmitted { .. },
+            CredentialDiagnosticEvent::BackendReadStarted { .. },
+            CredentialDiagnosticEvent::BackendReadReturned { .. },
+            CredentialDiagnosticEvent::ResolutionFinished { .. },
+        ]
+    ));
     assert!(events.iter().all(|event| match event {
         CredentialDiagnosticEvent::BackendReadStarted {
             store_id,

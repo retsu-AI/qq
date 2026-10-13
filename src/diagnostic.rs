@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,19 @@ const MAX_ORDINARY_BYTES: u64 = 130_560;
 const MAX_LINE_BYTES: usize = 512;
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+fn allocate_saturating(next: &AtomicU64) -> Option<u64> {
+    let mut current = next.load(Ordering::Acquire);
+    loop {
+        if current == u64::MAX {
+            return None;
+        }
+        match next.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) enum Route {
@@ -219,6 +232,10 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
         };
         self.emit(event);
     }
+
+    fn allocate_id(&self) -> Option<u64> {
+        self.allocate_id()
+    }
 }
 
 impl From<auth::CredentialDiagnosticEndpoint> for Endpoint {
@@ -239,6 +256,11 @@ impl From<auth::CredentialDiagnosticRoute> for Route {
             auth::CredentialDiagnosticRoute::StoredKeyring => Self::StoredKeyring,
             auth::CredentialDiagnosticRoute::CodexOAuth => Self::CodexOAuth,
             auth::CredentialDiagnosticRoute::XaiOAuth => Self::XaiOAuth,
+            auth::CredentialDiagnosticRoute::DirectConfiguredKeyring => {
+                Self::DirectConfiguredKeyring
+            }
+            auth::CredentialDiagnosticRoute::TypesafeReviewer => Self::TypesafeReviewer,
+            auth::CredentialDiagnosticRoute::OtherKnown => Self::OtherKnown,
         }
     }
 }
@@ -247,6 +269,7 @@ struct WriterMessage(Vec<u8>);
 
 pub(crate) struct DiagnosticSession {
     session_id: u64,
+    next_id: AtomicU64,
     pid: u32,
     tx: Mutex<Option<mpsc::SyncSender<WriterMessage>>>,
     dropped: Arc<AtomicU64>,
@@ -299,7 +322,8 @@ impl DiagnosticSession {
                 )
             })?;
         Ok(Self {
-            session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            session_id: allocate_saturating(&NEXT_SESSION_ID).unwrap_or(0),
+            next_id: AtomicU64::new(1),
             pid: std::process::id(),
             tx: Mutex::new(Some(tx)),
             dropped,
@@ -311,6 +335,15 @@ impl DiagnosticSession {
             done: Mutex::new(done_rx),
             started: Instant::now(),
         })
+    }
+
+    #[cfg(test)]
+    fn set_next_id_for_test(&self, value: u64) {
+        self.next_id.store(value, Ordering::Release);
+    }
+
+    pub(crate) fn allocate_id(&self) -> Option<u64> {
+        allocate_saturating(&self.next_id)
     }
 
     pub(crate) fn emit(&self, event: Event) {
@@ -481,6 +514,18 @@ mod tests {
     }
 
     #[test]
+    fn session_allocator_saturates_without_reusing_ids() {
+        let dir = tempdir().unwrap();
+        let session = DiagnosticSession::open(&dir.path().join("events.jsonl")).unwrap();
+        let first = session.allocate_id().unwrap();
+        assert_eq!(first, 1);
+        session.set_next_id_for_test(u64::MAX - 1);
+        assert_eq!(session.allocate_id(), Some(u64::MAX - 1));
+        assert_eq!(session.allocate_id(), None);
+        assert_eq!(session.allocate_id(), None);
+    }
+
+    #[test]
     fn concurrent_emit_reserves_the_inclusive_ordinary_budget() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
@@ -506,7 +551,13 @@ mod tests {
         }
         assert_eq!(session.close(), CloseOutcome::Closed);
         let lines = fs::read_to_string(&path).unwrap();
-        assert_eq!(lines.lines().filter(|line| line.contains("CacheHit")).count(), 255);
+        assert_eq!(
+            lines
+                .lines()
+                .filter(|line| line.contains("CacheHit"))
+                .count(),
+            255
+        );
         assert!(lines.lines().any(|line| line.contains("Summary")));
     }
 

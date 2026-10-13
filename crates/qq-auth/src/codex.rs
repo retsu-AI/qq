@@ -15,8 +15,7 @@ use thiserror::Error;
 
 use super::{
     AuthError, CredentialBackend, CredentialDiagnosticEndpoint, CredentialDiagnosticRoute,
-    CredentialStore, MissingCredentialRemedies, Secret,
-    validate_credential_name,
+    CredentialStore, MissingCredentialRemedies, Secret, validate_credential_name,
 };
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
@@ -1352,19 +1351,20 @@ impl RequestCredentialProvider for CodexRequestCredentials {
                     CredentialDiagnosticRoute::CodexOAuth,
                     CredentialDiagnosticEndpoint::ChatGpt,
                     move |store| {
-                    let now = unix_time()?;
-                    let epoch = store.epoch()?;
-                    let cache_valid = cached_state.is_some_and(|(cached_epoch, refresh_after)| {
-                        cached_epoch == epoch && now < refresh_after
-                    });
-                    if cache_valid {
-                        return Ok(None);
-                    }
-                    if cached_state.is_some() {
-                        store.resolve_codex_with_epoch_fresh(&profile).map(Some)
-                    } else {
-                        store.resolve_codex_with_epoch(&profile).map(Some)
-                    }
+                        let now = unix_time()?;
+                        let epoch = store.epoch()?;
+                        let cache_valid =
+                            cached_state.is_some_and(|(cached_epoch, refresh_after)| {
+                                cached_epoch == epoch && now < refresh_after
+                            });
+                        if cache_valid {
+                            return Ok(None);
+                        }
+                        if cached_state.is_some() {
+                            store.resolve_codex_with_epoch_fresh(&profile).map(Some)
+                        } else {
+                            store.resolve_codex_with_epoch(&profile).map(Some)
+                        }
                     },
                 )
                 .await?
