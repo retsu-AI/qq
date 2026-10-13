@@ -30,7 +30,7 @@ newest last.
   - wall time: 23.7 min without spawning, 145.4 min with;
   - children account for 73 % of built-in reads.
 - No code changed. ADR-0059 reserved in `root.md`. Linear program issue
-  ENG-1037 is under milestone `Action Bias`.
+  ENG-1037 is under milestone `Action Bias`. Plan PR: [#295](https://github.com/retsu-AI/qq/pull/295).
 - Two independent read-only reviews of the plan against `ce768bb`. The
   first returned Request changes, with one blocking item: AB5's unknown
   notice fails assembly with `CODEC`, so it needs store schema 45. The
