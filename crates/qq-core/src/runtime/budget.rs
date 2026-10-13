@@ -324,9 +324,8 @@ impl BudgetMeter {
             .max_model_turns
             .is_some_and(|limit| self.turns.saturating_add(1) >= limit);
         let tool_call_allowance = limits.max_tool_calls.map_or(next_turn_tools, |limit| {
-            next_turn_tools.min(
-                usize::try_from(limit.saturating_sub(self.tool_calls)).unwrap_or(usize::MAX),
-            )
+            next_turn_tools
+                .min(usize::try_from(limit.saturating_sub(self.tool_calls)).unwrap_or(usize::MAX))
         });
         let tools_spent = limits
             .max_tool_calls

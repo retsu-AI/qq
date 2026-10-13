@@ -10412,10 +10412,7 @@ mod tests {
             }
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 2, "{events:?}");
-            assert_eq!(
-                requests[1].tool_choice(),
-                qq_provider::ToolChoice::None
-            );
+            assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
             assert_eq!(
                 events
                     .iter()

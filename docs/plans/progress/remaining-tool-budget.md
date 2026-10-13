@@ -29,5 +29,10 @@
   cast, runtime log, and checks receipt). The implementation draft now carries
   a typed per-turn allowance from `BudgetMeter` into dispatch, preserves the
   tool-free final-response boundary, and keeps rejected calls out of charging.
-  Focused tests and formatting remain pending; this author has not rerun them
-  after implementation.
+- Parent verified candidate `2813717` with the two runtime regressions and ten
+  budget unit tests passing; the recorded baseline remains labeled separately.
+  Baseline files are `baseline.cast`, `baseline-runtime-regressions.log`, and
+  `baseline-checks.json` under `evidence/qq-tool-budget-20261013`; rendered
+  candidate footage is retained by the parent. Pinned formatting was then
+  applied to the two owned layouts in `lib.rs` and `runtime/budget.rs`; no
+  tests or builds were rerun by this author.
