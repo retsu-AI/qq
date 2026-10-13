@@ -3054,6 +3054,72 @@ impl CredentialDiagnosticSink for DiagnosticCollector {
 }
 
 #[test]
+fn diagnostic_route_view_preserves_store_and_default_off_resources() {
+    let (store, keyring, _directory) = test_store();
+    assert!(matches!(
+        store.for_diagnostic_route(CredentialDiagnosticRoute::TypesafeReviewer),
+        std::borrow::Cow::Borrowed(original) if std::ptr::eq(original, &store)
+    ));
+    store
+        .set_with_metadata(
+            "typesafe-jev",
+            b"secret",
+            false,
+            Some("typesafe-jev"),
+            Some("https://api.typesafe.ai"),
+        )
+        .unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+    let next = collector.1.load(Ordering::Acquire);
+    let view = store.for_diagnostic_route(CredentialDiagnosticRoute::TypesafeReviewer);
+    assert!(Arc::ptr_eq(&store.keyring, &view.keyring));
+    assert!(Arc::ptr_eq(
+        &store.stored_resolution,
+        &view.stored_resolution
+    ));
+    assert!(Arc::ptr_eq(
+        &store.request_credential_permits,
+        &view.request_credential_permits
+    ));
+    let original = store.diagnostic.as_ref().unwrap();
+    let scoped = view.diagnostic.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&original.sink, &scoped.sink));
+    assert!(Arc::ptr_eq(&original.disabled, &scoped.disabled));
+    assert_eq!(original.store_id, scoped.store_id);
+    assert_eq!(original.coordinator_id, scoped.coordinator_id);
+    assert_eq!(original.route, CredentialDiagnosticRoute::StoredKeyring);
+    assert_eq!(scoped.route, CredentialDiagnosticRoute::TypesafeReviewer);
+    assert_eq!(collector.1.load(Ordering::Acquire), next);
+    let reference = SecretRef::Stored("typesafe-jev".into());
+    for current in [&*view, &store] {
+        assert_eq!(
+            current
+                .resolve_with_endpoint(&reference, Some("https://api.typesafe.ai"))
+                .unwrap()
+                .expose_secret_bytes(),
+            b"secret"
+        );
+    }
+    assert_eq!(keyring.read_count("typesafe-jev"), 1);
+    let events = collector.0.lock().unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CredentialDiagnosticEvent::BackendReadStarted {
+            route: CredentialDiagnosticRoute::TypesafeReviewer,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CredentialDiagnosticEvent::CacheHit {
+            route: CredentialDiagnosticRoute::StoredKeyring,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
     let (store, keyring, _directory) = test_store();
     store

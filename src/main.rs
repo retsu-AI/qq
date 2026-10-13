@@ -106,12 +106,24 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiagnosticActivationFailure;
+
+impl std::fmt::Display for DiagnosticActivationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("credential diagnostic activation failed; output unavailable")
+    }
+}
+
+impl Error for DiagnosticActivationFailure {}
+
 fn activate_credential_diagnostics(
     path: Option<&Path>,
-) -> io::Result<Option<Arc<diagnostic::DiagnosticSession>>> {
+) -> Result<Option<Arc<diagnostic::DiagnosticSession>>, DiagnosticActivationFailure> {
     path.map(diagnostic::DiagnosticSession::open)
         .transpose()
         .map(|session| session.map(Arc::new))
+        .map_err(|_| DiagnosticActivationFailure)
 }
 fn finish_credential_diagnostics<T>(
     session: Option<&diagnostic::DiagnosticSession>,
@@ -2497,6 +2509,35 @@ mod tests {
             models[0].selection.model.as_deref(),
             Some("custom/test-model")
         );
+    }
+
+    #[test]
+    fn credential_diagnostic_activation_refusals_are_fixed_and_pre_runtime() {
+        let root = private_tempdir();
+        let existing = root.path().join("private-path-marker");
+        std::fs::write(&existing, b"preserved-file-marker").unwrap();
+        let before = diagnostic::resource_counts();
+        assert!(activate_credential_diagnostics(None).unwrap().is_none());
+        for path in [
+            existing.clone(),
+            root.path().to_owned(),
+            root.path().join("missing-parent-marker/output"),
+        ] {
+            let error = match activate_credential_diagnostics(Some(&path)) {
+                Err(error) => error,
+                Ok(_) => panic!("activation unexpectedly accepted a rejected path"),
+            };
+            assert_eq!(error, DiagnosticActivationFailure);
+            assert_eq!(
+                error.to_string(),
+                "credential diagnostic activation failed; output unavailable"
+            );
+            assert!(error.source().is_none());
+            assert_eq!(format!("{error:?}"), "DiagnosticActivationFailure");
+            assert!(!error.to_string().contains("marker"));
+        }
+        assert_eq!(before, diagnostic::resource_counts());
+        assert_eq!(std::fs::read(existing).unwrap(), b"preserved-file-marker");
     }
 
     #[test]

@@ -729,6 +729,12 @@ fn write_records<W: Write + Send + 'static>(
         emitted = emitted.saturating_add(1);
         bytes = bytes.saturating_add(line.len() as u64);
     }
+    // Flush ordinary output before choosing its status. Production uses an
+    // unbuffered File: the reserved footer is one final direct write, whose
+    // failure is reported by close rather than by an impossible second footer.
+    if file.flush().is_err() {
+        state.failed.store(true, Ordering::Release);
+    }
     let status = if state.failed.load(Ordering::Acquire) {
         SummaryStatus::Failed
     } else if state.budget_exhausted.load(Ordering::Acquire) {
@@ -755,9 +761,6 @@ fn write_records<W: Write + Send + 'static>(
         Err(_) => {
             state.failed.store(true, Ordering::Release);
         }
-    }
-    if file.flush().is_err() {
-        state.failed.store(true, Ordering::Release);
     }
     file
 }
@@ -903,7 +906,7 @@ mod tests {
         );
         assert!(summary_write_failed);
 
-        let (_, flush_failed) = run_writer(
+        let (writer, flush_failed) = run_writer(
             FailingWriter {
                 writes: 0,
                 fail_after: None,
@@ -913,6 +916,16 @@ mod tests {
             1,
         );
         assert!(flush_failed);
+        let text = std::str::from_utf8(&writer.bytes).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["kind"], "Summary");
+        assert_eq!(rows[1]["sink"], "Failed");
+        assert_eq!(rows[1]["emitted"], 1);
+        assert!(!text.contains("Closed"));
     }
 
     #[test]

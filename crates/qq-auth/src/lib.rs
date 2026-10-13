@@ -158,7 +158,7 @@ struct CredentialDiagnosticContext {
     store_id: u64,
     coordinator_id: u64,
     route: CredentialDiagnosticRoute,
-    disabled: std::sync::atomic::AtomicBool,
+    disabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CredentialDiagnosticContext {
@@ -1140,7 +1140,7 @@ impl CredentialStore {
             store_id,
             coordinator_id,
             route: CredentialDiagnosticRoute::StoredKeyring,
-            disabled: std::sync::atomic::AtomicBool::new(false),
+            disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         self
     }
@@ -1161,9 +1161,30 @@ impl CredentialStore {
             store_id,
             coordinator_id,
             route,
-            disabled: std::sync::atomic::AtomicBool::new(false),
+            disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         self
+    }
+
+    /// Attributes one known caller without changing the store's identity,
+    /// coordinator, cache, backend, or the route of other concurrent callers.
+    /// Disabled diagnostics borrow the store without cloning or allocation.
+    pub fn for_diagnostic_route(
+        &self,
+        route: CredentialDiagnosticRoute,
+    ) -> std::borrow::Cow<'_, Self> {
+        let Some(context) = &self.diagnostic else {
+            return std::borrow::Cow::Borrowed(self);
+        };
+        let mut view = self.clone();
+        view.diagnostic = Some(Arc::new(CredentialDiagnosticContext {
+            sink: Arc::clone(&context.sink),
+            store_id: context.store_id,
+            coordinator_id: context.coordinator_id,
+            route,
+            disabled: Arc::clone(&context.disabled),
+        }));
+        std::borrow::Cow::Owned(view)
     }
 
     async fn load_request_credential<T, F>(

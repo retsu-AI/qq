@@ -3652,8 +3652,9 @@ pub(crate) fn advisory_reviewer_from_store(
 }
 
 fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
+    let store = store.for_diagnostic_route(qq_auth::CredentialDiagnosticRoute::TypesafeReviewer);
     let secret = resolve_provider_credential(
-        store,
+        &store,
         None,
         "typesafe-jev",
         "TYPESAFE_API_KEY",
@@ -4225,6 +4226,104 @@ mod tests {
                     Err(actual) => current = actual,
                 }
             }
+        }
+    }
+
+    #[test]
+    fn credential_diagnostic_normal_checkpoint_uses_scoped_reviewer_route() {
+        let root = tempdir().unwrap();
+        let keyring = Arc::new(CountingKeyring::default());
+        let events = Arc::new(DiagnosticEvents::default());
+        let store = CredentialStore::with_backend(
+            CredentialPaths::new(root.path().join("credentials")),
+            keyring.clone(),
+        )
+        .with_diagnostic_sink(events.clone());
+        for (name, endpoint) in [
+            ("typesafe-jev", "https://api.typesafe.ai"),
+            ("ordinary", "https://provider.example"),
+        ] {
+            store
+                .set_with_metadata(
+                    name,
+                    b"fixture-secret",
+                    false,
+                    Some("provider"),
+                    Some(endpoint),
+                )
+                .unwrap();
+        }
+        // The normal checkpoint consumes the factory's store, while another
+        // caller concurrently retains its ordinary stored-keyring attribution.
+        std::thread::scope(|scope| {
+            let checkpoint = scope.spawn(|| {
+                TypeSafeCheckpointReviewer::from_credentials(
+                    &store,
+                    qq_config::JevReviewMode::Final,
+                )
+                .unwrap()
+            });
+            let ordinary = scope.spawn(|| {
+                store
+                    .resolve_with_endpoint(
+                        &SecretRef::Stored("ordinary".into()),
+                        Some("https://provider.example"),
+                    )
+                    .unwrap()
+            });
+            checkpoint.join().unwrap();
+            assert_eq!(
+                ordinary.join().unwrap().expose_secret_bytes(),
+                b"fixture-secret"
+            );
+        });
+        assert_eq!(keyring.read_count(), 2);
+        TypeSafeCheckpointReviewer::from_credentials(&store, qq_config::JevReviewMode::Final)
+            .unwrap();
+        store
+            .resolve_with_endpoint(
+                &SecretRef::Stored("typesafe-jev".into()),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        assert_eq!(
+            keyring.read_count(),
+            2,
+            "reviewer view must reuse the existing cache"
+        );
+        let events = events.events.lock().unwrap();
+        let mut identity = None;
+        for event in events.iter() {
+            if let qq_auth::CredentialDiagnosticEvent::BackendReadStarted {
+                store_id,
+                coordinator_id,
+                route,
+                endpoint,
+                ..
+            } = event
+            {
+                assert_eq!(
+                    identity.get_or_insert((*store_id, *coordinator_id)),
+                    &(*store_id, *coordinator_id)
+                );
+                assert!(matches!(
+                    (route, endpoint),
+                    (
+                        qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
+                        qq_auth::CredentialDiagnosticEndpoint::Typesafe
+                    ) | (
+                        qq_auth::CredentialDiagnosticRoute::StoredKeyring,
+                        qq_auth::CredentialDiagnosticEndpoint::Other
+                    )
+                ));
+            }
+        }
+        assert!(identity.is_some());
+        for expected in [
+            qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
+            qq_auth::CredentialDiagnosticRoute::StoredKeyring,
+        ] {
+            assert!(events.iter().any(|e| matches!(e, qq_auth::CredentialDiagnosticEvent::CacheHit {route, endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe, ..} if *route == expected)));
         }
     }
 
