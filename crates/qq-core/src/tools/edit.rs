@@ -1203,6 +1203,37 @@ mod tests {
         assert_no_current_hash(&refused, b"alpha\nbeta\n");
     }
 
+    /// Review (#280): every edit's if_hash is checked, not only the one that
+    /// first plans the file. A correct hash first and a stale one second
+    /// refuses the whole batch.
+    #[test]
+    fn a_later_same_file_if_hash_mismatch_refuses_the_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let before = b"alpha\nbeta\n";
+        fs::write(directory.path().join("a.txt"), before).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"alpha","new":"one","if_hash":"{}"}},{{"path":"a.txt","old":"beta","new":"two","if_hash":"h:000000000000"}}]}}"#,
+                short(before)
+            ),
+        );
+        assert!(
+            refused
+                .model_text
+                .starts_with("edit 1: stale_file: a.txt is not h:000000000000 now"),
+            "{}",
+            refused.model_text
+        );
+        assert_no_current_hash(&refused, before);
+        assert_eq!(fs::read(directory.path().join("a.txt")).unwrap(), before);
+    }
+
     /// Review (#281): overlapping occurrences are repeats. `aa` occurs at
     /// offsets 0 and 1 of `aaa`; `match_indices` would report it once.
     #[test]

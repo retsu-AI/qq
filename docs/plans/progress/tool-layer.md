@@ -518,3 +518,7 @@ Six Codex findings on `9e3da002`, all reproduced against the branch before any f
 - The three new regressions failed against the pre-repair implementation and pass now. `qq-core` 929 passed; workspace fmt, clippy, test, and build are green.
 - The CI failure on `3b068a5d` was `wall_clock_budget_settles_a_hanging_provider_without_a_final_response`, the same flaky timing test noted in the T15 entries. It is not in this slice's paths.
 - `edit_batch` A/B on a loaded host (2 runs each, µs): exact dry 8525/8711 → 8973/8891, single 1462/1474 → 1525/1521. The bench reads the file first, so it never takes the uniqueness scan; the difference is noise.
+
+### 2026-10-13 — T19 review follow-up (#280 second round)
+
+- Two #280 findings concerned T19's behavior. Per-edit `if_hash` checking and `replace_all` with a duplicate `old` on an unread file (which refuses `not_read`) were already implemented and tested, the latter in `a_duplicate_old_on_an_unread_file_is_not_read`. Added `a_later_same_file_if_hash_mismatch_refuses_the_batch`: a correct hash on edit 0 and a stale one on edit 1 refuse the batch, with no hash in the text and the file untouched.
