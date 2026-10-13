@@ -576,3 +576,11 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `INSTA_UPDATE` was removed from the harmless set: `always` rewrites snapshots.
 - `git --html-path`/`--man-path`/`--info-path`/`--version`/`--help` print and exit, so the words after them are not judged as a subcommand. `git --html-path push --force` is now Prompt, not a false Forbidden.
 - `approval` 93 tests pass.
+
+### 2026-10-13 — T18 residuals, round 11 (#283); merge
+
+- Bounded suffix starts now skip literal options and assignments (never a launched program), so `nice` ×8 `env A=1 … P=1 sudo ls` reaches `sudo`. This replaces the taskset-specific start offset.
+- `env -S` expands `${NAME}` from the command's literal assignments and the `NAME=VALUE` words before `-S`, so `CMD=sudo env -S '${CMD} ls'` is Forbidden.
+- `git -h`/`-v` are terminal like `--help`/`--version`.
+- `approval` 93 tests pass; the size regression runs in 0.06 s.
+- Merge state: #280 (38 threads) and #281 (7) are fully resolved; #283 is resolved after this push. Lead decision: merge now. Any later Codex finding on the classifier is filed against ENG-1033 with its command string and wrong verdict.
