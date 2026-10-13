@@ -3384,10 +3384,9 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
             .flights
             .values()
             .next()
+            && flight.followers.load(Ordering::SeqCst) >= 1
         {
-            if flight.followers.load(Ordering::SeqCst) >= 1 {
-                break Arc::clone(flight);
-            }
+            break Arc::clone(flight);
         }
         thread::yield_now();
     };

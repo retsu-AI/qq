@@ -1034,7 +1034,7 @@ impl CredentialStore {
             epoch,
         };
         let (coordinator, wake) = &*self.stored_resolution;
-        let (flight, owner) = loop {
+        let (flight, owner) = {
             let mut state = coordinator
                 .lock()
                 .map_err(|_| AuthError::CredentialCoordinator {
@@ -1055,21 +1055,22 @@ impl CredentialStore {
                 return Ok(secret);
             }
             if let Some(flight) = state.flights.get(&key) {
-                break (Arc::clone(flight), false);
-            }
-            if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
-                return Err(AuthError::CredentialCoordinator {
-                    operation: "capacity_wait",
+                (Arc::clone(flight), false)
+            } else {
+                if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                    return Err(AuthError::CredentialCoordinator {
+                        operation: "capacity_wait",
+                    });
+                }
+                let flight = Arc::new(StoredResolutionFlight {
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    #[cfg(test)]
+                    followers: AtomicUsize::new(0),
                 });
+                state.flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
             }
-            let flight = Arc::new(StoredResolutionFlight {
-                result: Mutex::new(None),
-                ready: std::sync::Condvar::new(),
-                #[cfg(test)]
-                followers: AtomicUsize::new(0),
-            });
-            state.flights.insert(key.clone(), Arc::clone(&flight));
-            break (flight, true);
         };
 
         if !owner {
