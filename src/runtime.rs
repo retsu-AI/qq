@@ -9850,6 +9850,10 @@ mod tests {
         let verdict = parse_typesafe_checkpoint(&uncertain);
         assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
         assert!(verdict.feedback.contains("direct_evidence"));
+        assert!(verdict.feedback.contains("choice=supported"));
+        assert!(verdict.feedback.contains("confidence=0.2"));
+        assert!(verdict.feedback.contains("winner=0.8"));
+        assert!(verdict.feedback.contains("classified=insufficient_evidence"));
         assert_eq!(verdict.spend.usage.unwrap().input_tokens, 10);
         assert_eq!(verdict.spend.estimated_cost_usd_nanos, Some(420));
         let mut conflicting = valid.clone();
@@ -9860,10 +9864,36 @@ mod tests {
         let verdict = parse_typesafe_checkpoint(&conflicting);
         assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
         assert!(verdict.feedback.contains("consistency=contradicted"));
+        assert!(verdict.feedback.contains("confidence=0.8"));
+        assert!(verdict.feedback.contains("winner=0.85"));
         assert_eq!(
             parse_typesafe_checkpoint(&valid).outcome,
             CheckpointOutcome::Supported
         );
+
+        let mut mixed = valid.clone();
+        mixed["answers"]["direct_evidence"]["confidence"] = serde_json::json!(0.23);
+        mixed["answers"]["consistency"]["choice"] = serde_json::json!("contradicted");
+        mixed["answers"]["consistency"]["probabilities"] = serde_json::json!({
+            "supported": 0.02, "partially_supported": 0.03, "contradicted": 0.9, "insufficient_evidence": 0.05,
+        });
+        let verdict = parse_typesafe_checkpoint(&mixed);
+        assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
+        assert_eq!(verdict.confidence, Some(0.23));
+        assert!(verdict.feedback.contains("direct_evidence(choice=supported, confidence=0.23"));
+        assert!(verdict.feedback.contains("consistency(choice=contradicted, confidence=0.8, winner=0.9, classified=contradicted)"));
+
+        let mut tiny = valid.clone();
+        tiny["answers"]["task_coverage"]["confidence"] = serde_json::json!(0.00000001);
+        tiny["answers"]["task_coverage"]["probabilities"]["supported"] = serde_json::json!(0.00000001);
+        tiny["answers"]["task_coverage"]["probabilities"]["partially_supported"] = serde_json::json!(0.99999997);
+        tiny["answers"]["task_coverage"]["probabilities"]["contradicted"] = serde_json::json!(0.0);
+        tiny["answers"]["task_coverage"]["probabilities"]["insufficient_evidence"] = serde_json::json!(0.0);
+        tiny["answers"]["task_coverage"]["choice"] = serde_json::json!("partially_supported");
+        let verdict = parse_typesafe_checkpoint(&tiny);
+        assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
+        assert!(verdict.feedback.contains("confidence=1e-8"));
+        assert!(verdict.feedback.contains("winner=0.99999997"));
 
         for invalid in [
             serde_json::json!({"model":"other","answers":valid["answers"].clone()}),
