@@ -1007,6 +1007,24 @@ mod tests {
     }
 
     #[test]
+    fn env_split_expansion_overflow_preserves_the_forbidden_floor() {
+        for command in [
+            format!("A=xxxxxxxx env -S 'sudo {}'", "${A}".repeat(2049)),
+            format!(
+                "A=xxxxxxxx env -S 'git push {} --force'",
+                "${A}".repeat(2049)
+            ),
+            format!("A=xxxxxxxx env -S '-u {} sudo ls'", "${A}".repeat(2049)),
+        ] {
+            assert!(command.len() <= MAX_CLASSIFIED_BYTES);
+            assert_eq!(
+                classify_command(&command, None).decision,
+                Decision::Forbidden
+            );
+        }
+    }
+
+    #[test]
     fn env_split_expansion_does_not_rescan_inserted_values() {
         let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(40));
         let found = commands(&command);
