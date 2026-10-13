@@ -639,3 +639,9 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git -h`/`-v` are terminal like `--help`/`--version`.
 - `approval` 93 tests pass; the size regression runs in 0.06 s.
 - Merge state: #280 (38 threads) and #281 (7) are fully resolved; #283 is resolved after this push. Lead decision: merge now. Any later Codex finding on the classifier is filed against ENG-1033 with its command string and wrong verdict.
+
+### 2026-10-13 — T20 prerequisite expansion repair
+
+- T18 `89a5582f` fixes the three tracked residual verdicts but introduced recursive `env -S` expansion. Independent review found repeated `A='${A}${A}'` assignments double intermediate text; a bounded eight-assignment regression failed before the fix (`c612655`).
+- Substitution now reads only the original string, uses the last assignment, and refuses to expand beyond the classifier's existing 16 KiB bound. Regression enlarged to 40 repetitions after repair, plus last-assignment and cap cases. No huge input expansion executed.
+- This new resource regression is repaired before stack merge, rather than waived as a follow-up. Ownership recorded in root ledger; independent re-review and final gates pending.

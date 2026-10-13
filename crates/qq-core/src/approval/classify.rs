@@ -740,22 +740,41 @@ impl Collector<'_> {
                         // `sudo`), so they are removed before splitting on
                         // whitespace and the `\_` separator. Escapes other
                         // than `\_` are dropped to their character.
-                        let mut text = string.unwrap_or_default().replace("\\_", " ");
-                        // `${NAME}` expands from the environment `env` sees:
-                        // the command's own literal assignments and the
-                        // `NAME=VALUE` words before `-S` (`CMD=sudo env -S
-                        // '${CMD} ls'`). A name with no literal value stays
-                        // as written, and the split command is unknown
-                        // either way.
-                        for assignment in command
-                            .assignments
-                            .iter()
-                            .map(String::as_str)
-                            .chain(args[..skip].iter().filter_map(|a| a.as_deref()))
-                        {
-                            if let Some((name, value)) = assignment.split_once('=') {
-                                text = text.replace(&format!("${{{name}}}"), value);
+                        let source = string.unwrap_or_default().replace("\\_", " ");
+                        let mut text = String::with_capacity(source.len());
+                        let mut rest = source.as_str();
+                        // Expand each source placeholder once. Inserted values
+                        // are not env syntax, and the last assignment wins.
+                        while !rest.is_empty() {
+                            let (piece, next) = match rest.find("${") {
+                                Some(start) if start > 0 => (&rest[..start], &rest[start..]),
+                                Some(_) => match rest.find('}') {
+                                    Some(end) => {
+                                        let name = &rest[2..end];
+                                        let value = command
+                                            .assignments
+                                            .iter()
+                                            .map(String::as_str)
+                                            .chain(args[..skip].iter().filter_map(|a| a.as_deref()))
+                                            .rev()
+                                            .find_map(|assignment| {
+                                                let (key, value) = assignment.split_once('=')?;
+                                                (key == name).then_some(value)
+                                            })
+                                            .unwrap_or(&rest[..=end]);
+                                        (value, &rest[end + 1..])
+                                    }
+                                    None => (rest, ""),
+                                },
+                                None => (rest, ""),
+                            };
+                            // The unknown command above keeps this held if
+                            // expansion exceeds the classifier's byte bound.
+                            if piece.len() > MAX_CLASSIFIED_BYTES.saturating_sub(text.len()) {
+                                return;
                             }
+                            text.push_str(piece);
+                            rest = next;
                         }
                         let mut unquoted = String::with_capacity(text.len());
                         let mut chars = text.chars();
@@ -989,11 +1008,23 @@ mod tests {
 
     #[test]
     fn env_split_expansion_does_not_rescan_inserted_values() {
-        let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(8));
+        let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(40));
         let found = commands(&command);
         assert!(found.iter().flatten().flatten().all(|word| word.len() < 32));
-        assert!(commands("CMD=echo CMD=sudo env -S '${CMD} ls'")
-            .iter().any(|argv| argv.first().and_then(|word| word.as_deref()) == Some("sudo")));
+        let value = "x".repeat(1024);
+        let command = format!("A={value} env -S '{}'", "${A}".repeat(32));
+        assert!(
+            commands(&command)
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|word| word.len() <= MAX_CLASSIFIED_BYTES)
+        );
+        assert!(
+            commands("CMD=echo CMD=sudo env -S '${CMD} ls'")
+                .iter()
+                .any(|argv| argv.first().and_then(|word| word.as_deref()) == Some("sudo"))
+        );
     }
 
     #[test]

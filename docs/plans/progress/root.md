@@ -496,3 +496,8 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 
 - The task index limited `runtime/run_loop.rs` to `read_tool_result` dispatch, but T20 also explicitly requires strict refusals to distinguish hint-only prefixed/outside-path commands. Its existing refusal lives in the same file. Extend ownership to that refusal expression; no classifier or broader dispatch changes.
 - Acceptance harness ownership includes `lib.rs` (one test-module declaration), `src/tests/t20.rs`, and `tools.rs` bounds tests. Independent second-agent review approved these policy changes; no shared manifest, dependency, CI, or system boundary change.
+
+### 2026-10-13 — T20 prerequisite resource repair
+
+- Integrated T18 `89a5582f` during qualification. Independent reviewer found its repeated `env -S` substitution can recursively double inserted assignment values. This new resource regression blocks the stack merge, outside the existing follow-up decision.
+- Extend this integration's ownership narrowly to `approval/classify.rs`: test-first bounded reproduction, one-pass substitution with last-assignment precedence, and `MAX_CLASSIFIED_BYTES` expansion cap. Carry the repair through the stack before main; no changes in another author's checkout.
