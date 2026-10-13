@@ -2048,15 +2048,7 @@ mod tests {
     /// third. A turn budget must observe the provider request boundary rather
     /// than waiting for text or a tool call that may never arrive.
     struct ReadsThenHangsProvider {
-        turn: Mutex<usize>,
-    }
-
-    impl ReadsThenHangsProvider {
-        fn new() -> Self {
-            Self {
-                turn: Mutex::new(0),
-            }
-        }
+        turn: Arc<Mutex<usize>>,
     }
 
     impl Provider for ReadsThenHangsProvider {
@@ -4322,19 +4314,24 @@ mod tests {
 
     #[tokio::test]
     async fn turn_budget_cancels_before_a_silent_over_budget_turn_can_hang() {
-        let fixture = fixture(ReadsThenHangsProvider::new).await;
+        let turns = Arc::new(Mutex::new(0));
+        let provider_turns = Arc::clone(&turns);
+        let fixture = fixture(move || ReadsThenHangsProvider {
+            turn: Arc::clone(&provider_turns),
+        })
+        .await;
         std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
         let mut options = options(&fixture.workspace);
         options.max_turns = Some(2);
 
-        let (status, stdout, _stderr) = tokio::time::timeout(
-            Duration::from_secs(1),
-            run_to_end(&fixture, options, std::future::pending()),
-        )
-        .await
-        .expect("the turn budget must cancel before the silent third turn stalls");
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
 
         assert_eq!(status, HeadlessStatus::BudgetExhausted);
+        assert_eq!(
+            *turns.lock().unwrap(),
+            2,
+            "the third provider request must never start"
+        );
         let records = parse_records(&stdout);
         assert_eq!(records.last().unwrap()["status"], "budget_exhausted");
         assert_no_active_run(&fixture).await;

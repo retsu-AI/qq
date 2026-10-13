@@ -1,5 +1,9 @@
 # Remaining tool allowance progress
 
+| Journey | Source | Verification |
+| --- | --- | --- |
+| Headless model-turn limit before a silent third request | `src/headless.rs` | `headless::tests::turn_budget_cancels_before_a_silent_over_budget_turn_can_hang` asserts exactly two provider requests, a budget terminal and no active run using the established bounded headless consumer |
+
 | Slice | Goal | Status | Branch | Notes |
 | --- | --- | --- | --- | --- |
 | TB1 | Admit and cap remaining executable calls consistently | Session regression repaired; parent full gates pending | fix/qq-tool-budget-20261013 | Baseline recorded on d223bf0; root owns live integration |
