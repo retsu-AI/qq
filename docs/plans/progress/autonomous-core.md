@@ -102,7 +102,7 @@ appended below, newest last.
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
 | AC16 | Retention (ENG-803) | Planned | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) | | Evidence from AC0 |
-| AC17 | Tolerant read-only arguments (was RR10) | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
+| AC17 | Tolerant read-only arguments (was RR10) | In progress | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | `fix/eng-872-ac17-tolerant-arguments` | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
 | AC18 | Truncated-call recovery and honest exhaustion outcome (RR8 residuals) | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | Synthetic re-issue missing; exhaustion still fails; ADR-0048 outcome decision before implementation |
 | AC19 | Bounded stream repair (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | Normal completion, missing ids, reasoning display cap remain |
 | AC20 | Evidence-led latency diagnostics (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | No permanent stats or wire/schema work without a measured consumer |
@@ -1254,3 +1254,9 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Docs-only: no new tests or performance measurement warranted; workspace gates and independent plan review run before push. No protocol/schema/descriptor change.
 - Validation: workspace fmt, all-target/all-feature Clippy `-D warnings`, build and tests pass (2,243 passed / 0 failed / 14 ignored; nested embedding child invocation excluded). RR11 restart/edit regression passes. Independent review: Approve after integer-scope/amplification corrections. 166 relative doc links resolve; no live references to retired files; `git diff --check` passes. Logs: `target/qq-perf/reliability-consolidation-2026-10-13/` (untracked).
 - Tracker reconciliation: ENG-870/872/874 now point here under ENG-978; stale attachments removed. ENG-873 Done as verified existing behavior; AC2 remains in review for outstanding performance evidence. ENG-1036 docs [PR #291](https://github.com/retsu-AI/qq/pull/291) is open; not merged.
+
+### 2026-10-13 — Full stack kickoff; AC17 argument repair (ENG-872)
+
+- User requests the entire autonomous-core document completed as stacked PRs with actual Codex bot thumbs-up on each opening message. Worktree `.worktrees/autonomous-core-stack`, initial reviewed parent #291 (`ee8bffa5`, bot +1 verified). AC3 source/review stays separately owned.
+- AC17 baseline capture started before code changes: `cargo bench -p qq-core --bench tool_dispatch`; evidence `target/qq-perf/ac17-2026-10-13/`. Host I/O pressure initially ~41%; record controls and do not qualify unstable tails.
+- Whole-plan audit includes goals G0/G2/G3/G4/G5, AC0.2/AC1/AC2 performance evidence, AC12.2/.3 embedding, continuation, retention, state surfaces and AP5/Goal7 live windows. No fixture substitutes for normal-use or paid-live evidence; no plan deletion until every acceptance item is proven.

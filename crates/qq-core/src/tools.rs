@@ -193,6 +193,172 @@ mod tests {
     }
 
     #[test]
+    fn readonly_argument_repairs_are_noted_without_changing_the_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\nsecond\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, valid, malformed, note) in [
+            (
+                "search",
+                r#"{"query":"needle","include":["*.txt"]}"#,
+                r#"{"query":"needle","include":"[\"*.txt\"]"}"#,
+                "include_array_coerced",
+            ),
+            (
+                "search",
+                r#"{"query":"needle","exclude":["*.rs"]}"#,
+                r#"{"query":"needle","exclude":"[\"*.rs\"]"}"#,
+                "exclude_array_coerced",
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt","ranges":["1-2"]}"#,
+                r#"{"path":"input.txt","ranges":"[\"1-2\"]"}"#,
+                "ranges_array_coerced",
+            ),
+            (
+                "search",
+                r#"{"query":"needle"}"#,
+                r#"{"query":"needle","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "search",
+                r#"{"query":"needle"}"#,
+                r#"{"query":"needle","offset":0}"#,
+                "offset_ignored",
+            ),
+        ] {
+            let expected = run_tool(&workspace, &state, name, valid);
+            let repaired = run_tool(&workspace, &state, name, malformed);
+            assert!(!expected.is_error, "{}", expected.model_text);
+            assert!(!repaired.is_error, "{name}: {}", repaired.model_text);
+            assert_eq!(
+                repaired.model_text.replace(&format!(" note={note}"), ""),
+                expected.model_text,
+                "{name}: repair changed the result"
+            );
+            assert_eq!(repaired.file_states, expected.file_states);
+        }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_authority_duplicates_and_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments) in [
+            ("search", r#"{"query":"needle","cwd":".."}"#),
+            ("search", r#"{"query":"needle","cwd":"sub"}"#),
+            ("search", r#"{"query":"needle","offset":1}"#),
+            ("search", r#"{"query":"needle","include":"[1]"}"#),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","query":"other"}"#,
+            ),
+            (
+                "search",
+                r#"{"include":"[\"*.txt\"]","path":".","path":"..","query":"needle"}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","max_per_file":51}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","include_ignored":"true"}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","approval":"allow"}"#,
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt","ranges":"[\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\"]"}"#,
+            ),
+            ("read_file", r#"{"path":"../input.txt","ranges":"[\"1\"]"}"#),
+            (
+                "read_file",
+                r#"{"path":"input.txt","include_ignored":true}"#,
+            ),
+            (
+                "exec",
+                r#"{"program":"printf","args":"[\"bad\"]","command":"echo bad"}"#,
+            ),
+            (
+                "write_file",
+                r#"{"path":"new.txt","content":"bad","cwd":"."}"#,
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(
+                result.is_error,
+                "accepted {arguments}: {}",
+                result.model_text
+            );
+        }
+        assert!(!directory.path().join("new.txt").exists());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("input.txt")).unwrap(),
+            "needle\n"
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_keep_continuation_and_hashes_when_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let contents = ("a".repeat(100) + "\n").repeat(1_000);
+        fs::write(directory.path().join("input.txt"), &contents).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let expected = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":["1-1000"]}"#,
+        );
+        let result = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":"[\"1-1000\"]"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.len() <= read::READ_BOUNDS.max_bytes);
+        assert!(
+            result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .contains("note=ranges_array_coerced")
+        );
+        assert!(result.model_text.contains("continue from offset="));
+        assert_eq!(
+            result.model_text.replace(" note=ranges_array_coerced", ""),
+            expected.model_text
+        );
+        if let Some(spill) = &result.spill {
+            assert!(
+                spill
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains("note=ranges_array_coerced")
+            );
+            assert_eq!(spill.digest, content_hash(spill.text.as_bytes()));
+        }
+        assert_eq!(result.file_states.len(), 1);
+        assert_eq!(
+            result.file_states[0].hash,
+            content_hash(contents.as_bytes())
+        );
+    }
+
+    #[test]
     fn read_and_list_are_bounded_and_deterministic() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("b.txt"), "one\ntwo\nthree\n").unwrap();
