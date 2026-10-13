@@ -208,7 +208,7 @@ async fn in_run_summary_spend_exhausts_the_callers_token_allowance() {
 #[tokio::test]
 async fn a_measured_summarizer_prefix_survives_retry_exhaustion_in_the_store() {
     let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
-    script.summary_tool_prefix = true;
+    script.summary_prefix = Some(support::SummaryPrefix::Calls);
     script.summary_faults = 6;
     script.summary_usage = Some(qq_provider::ProviderUsage {
         input_tokens: 7,
@@ -226,7 +226,7 @@ async fn a_measured_summarizer_prefix_survives_retry_exhaustion_in_the_store() {
         "{:?}",
         report.outcome
     );
-    assert!(fixture.observed.lock().unwrap().summary_tool_prefix_served);
+    assert!(fixture.observed.lock().unwrap().summary_prefix_served);
     assert_eq!(report.summarizer_faults, 6);
     assert_eq!(report.step_runs_started, report.step_runs_finished);
     assert_eq!(report.durable_calls, report.executed_calls);
@@ -248,6 +248,141 @@ async fn a_measured_summarizer_prefix_survives_retry_exhaustion_in_the_store() {
     );
     assert_eq!(reported[0].input_tokens, 7);
     assert_eq!(reported[0].output_tokens, 3);
+}
+
+#[tokio::test]
+async fn summarizer_subrequests_honor_token_and_cost_remainders() {
+    for cost_bound in [false, true] {
+        let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+        script.measure_work_usage = true;
+        script.summary_prefix = Some(support::SummaryPrefix::Calls);
+        script.summary_faults = 6;
+        script.summary_usage = Some(qq_provider::ProviderUsage {
+            input_tokens: 600_000,
+            output_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_tokens: None,
+        });
+        script.pricing = Some(qq_protocol::ModelPricing {
+            input_usd_nanos_per_token: 1_000,
+            output_usd_nanos_per_token: 1_000,
+            cache_read_usd_nanos_per_token: Some(1_000),
+            cache_write_usd_nanos_per_token: Some(1_000),
+            context_tier: None,
+            provenance: "scripted local fixture".to_owned(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut fixture = support::Fixture::open(directory.path(), script).await;
+        let run_id = fixture
+            .submit_with_limits(qq_protocol::RunLimits {
+                max_total_tokens: (!cost_bound).then_some(500_000),
+                max_cost_usd_nanos: cost_bound.then_some(500_000_000),
+                max_duration_ms: Some(60_000),
+                ..qq_protocol::RunLimits::default()
+            })
+            .await;
+        let report = fixture.finish(run_id).await;
+        let expected = if cost_bound {
+            qq_protocol::BudgetLimitKind::Cost
+        } else {
+            qq_protocol::BudgetLimitKind::TotalTokens
+        };
+        assert!(
+            matches!(&report.outcome, RunOutcome::BudgetExhausted { exhaustion } if exhaustion.limit == expected),
+            "{:?}",
+            report.outcome
+        );
+        assert_eq!(
+            fixture.observed.lock().unwrap().summary_requests,
+            1,
+            "no second summarizer send"
+        );
+        assert_eq!(report.summarizer_faults, 0);
+        assert_eq!(report.step_runs_started, 1);
+        assert_eq!(report.step_runs_finished, 1);
+        assert_eq!(report.durable_calls, report.executed_calls);
+        assert_eq!(report.duplicate_sequences, 0);
+        let database = fixture.database.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            let cost: u64 = connection.query_row("SELECT t.estimated_cost_usd_nanos FROM model_turns t JOIN runs r ON r.id=t.run_id WHERE r.kind='compaction'", [], |row| row.get(0)).unwrap();
+            assert_eq!(cost, 600_001_000, "price the reported prefix once");
+            let (session_cost, run_cost): (u64,u64) = connection.query_row("SELECT s.estimated_cost_usd_nanos, (SELECT SUM(r.estimated_cost_usd_nanos) FROM runs r WHERE r.session_id=s.id) FROM sessions s", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(session_cost, run_cost, "internal spend must not be double-charged into session totals");
+        }).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unknown_summary_usage_refuses_another_bounded_subrequest() {
+    for cost_bound in [false, true] {
+        let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+        script.measure_work_usage = true;
+        script.summary_prefix = Some(support::SummaryPrefix::Calls);
+        script.summary_faults = 6;
+        script.pricing = Some(qq_protocol::ModelPricing {
+            input_usd_nanos_per_token: 1_000,
+            output_usd_nanos_per_token: 1_000,
+            cache_read_usd_nanos_per_token: None,
+            cache_write_usd_nanos_per_token: None,
+            context_tier: None,
+            provenance: "scripted local fixture".to_owned(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut fixture = support::Fixture::open(directory.path(), script).await;
+        let run_id = fixture
+            .submit_with_limits(qq_protocol::RunLimits {
+                max_total_tokens: (!cost_bound).then_some(500_000),
+                max_cost_usd_nanos: cost_bound.then_some(500_000_000),
+                max_duration_ms: Some(60_000),
+                ..qq_protocol::RunLimits::default()
+            })
+            .await;
+        let report = fixture.finish(run_id).await;
+        let expected = if cost_bound {
+            qq_protocol::BudgetLimitKind::CostUnknown
+        } else {
+            qq_protocol::BudgetLimitKind::TokensUnknown
+        };
+        assert!(
+            matches!(&report.outcome, RunOutcome::BudgetExhausted { exhaustion } if exhaustion.limit == expected),
+            "{:?}",
+            report.outcome
+        );
+        assert_eq!(fixture.observed.lock().unwrap().summary_requests, 1);
+        assert_eq!(report.summarizer_faults, 0);
+        assert_eq!(report.step_runs_started, report.step_runs_finished);
+    }
+}
+
+#[tokio::test]
+async fn measured_truncated_summary_usage_survives_a_later_fault() {
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_prefix = Some(support::SummaryPrefix::Truncated);
+    script.summary_faults = 6;
+    script.summary_usage = Some(qq_provider::ProviderUsage {
+        input_tokens: 11,
+        output_tokens: 13,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_tokens: None,
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture.submit().await;
+    let report = fixture.finish(run_id).await;
+    assert!(matches!(report.outcome, RunOutcome::Paused { .. }));
+    let database = fixture.database.clone();
+    tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let (usage,truncated): (String,bool) = connection.query_row("SELECT t.usage_json,t.truncated FROM model_turns t JOIN runs r ON r.id=t.run_id WHERE r.kind='compaction'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        let usage: qq_protocol::TokenUsage = serde_json::from_str(&usage).unwrap();
+        assert_eq!((usage.input_tokens,usage.output_tokens),(11,13));
+        assert!(truncated);
+        let measured_total: Option<String> = connection.query_row("SELECT r.usage_json FROM runs r JOIN model_turns t ON t.run_id=r.id WHERE r.kind='compaction'", [], |row| row.get(0)).unwrap();
+        assert!(measured_total.is_none(), "a later fault leaves the whole attempt unmeasured");
+    }).await.unwrap();
 }
 
 #[tokio::test]

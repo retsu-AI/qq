@@ -28,6 +28,12 @@ use serde::Serialize;
 
 const TOOL: &str = "ext__soak__step";
 
+#[derive(Clone, Copy)]
+pub enum SummaryPrefix {
+    Calls,
+    Truncated,
+}
+
 #[derive(Clone)]
 pub struct Script {
     pub turns: usize,
@@ -42,7 +48,9 @@ pub struct Script {
     /// HTTP status of each scripted summarizer fault.
     pub summary_fault_status: u16,
     /// One measured call-bearing summarizer turn before a later fault.
-    pub summary_tool_prefix: bool,
+    pub summary_prefix: Option<SummaryPrefix>,
+    pub summary_hang_after_prefix: bool,
+    pub pricing: Option<qq_protocol::ModelPricing>,
     /// Backoff between turn and summarizer retries.
     pub retry_delay: Duration,
     pub empty_checkpoint: bool,
@@ -75,7 +83,9 @@ impl Script {
             fault_attempts: 0,
             summary_faults: 0,
             summary_fault_status: 529,
-            summary_tool_prefix: false,
+            summary_prefix: None,
+            summary_hang_after_prefix: false,
+            pricing: None,
             retry_delay: Duration::from_millis(1),
             empty_checkpoint: false,
             repeat_arguments: false,
@@ -97,7 +107,8 @@ pub struct Observations {
     pub truncations: HashSet<usize>,
     pub faults: usize,
     pub summary_faults: usize,
-    pub summary_tool_prefix_served: bool,
+    pub summary_prefix_served: bool,
+    pub summary_requests: usize,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -122,24 +133,41 @@ impl Provider for ScriptedProvider {
             })
         });
         if summarizing {
-            if self.script.summary_tool_prefix && !observed.summary_tool_prefix_served {
-                observed.summary_tool_prefix_served = true;
-                return Box::pin(stream::iter([
-                    Ok(ProviderEvent::ToolCallStarted {
-                        id: "summary-read".to_owned(),
-                        name: TOOL.to_owned(),
-                    }),
-                    Ok(ProviderEvent::ToolCallArgumentsDelta {
-                        id: "summary-read".to_owned(),
-                        json: "{\"sequence\":0}".to_owned(),
-                    }),
-                    Ok(ProviderEvent::ToolCallCompleted {
-                        id: "summary-read".to_owned(),
-                    }),
-                    Ok(ProviderEvent::Completed {
-                        usage: self.script.summary_usage,
-                    }),
-                ]));
+            observed.summary_requests += 1;
+            if let Some(prefix) = self.script.summary_prefix
+                && !observed.summary_prefix_served
+            {
+                observed.summary_prefix_served = true;
+                return match prefix {
+                    SummaryPrefix::Calls => Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "summary-read".to_owned(),
+                            name: TOOL.to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "summary-read".to_owned(),
+                            json: "{\"sequence\":0}".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "summary-read".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed {
+                            usage: self.script.summary_usage,
+                        }),
+                    ])),
+                    SummaryPrefix::Truncated => Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "1. Intent: keep the task".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Incomplete {
+                            usage: self.script.summary_usage,
+                            reason: IncompleteReason::OutputTokens,
+                        }),
+                    ])),
+                };
+            }
+            if self.script.summary_hang_after_prefix && observed.summary_prefix_served {
+                return Box::pin(stream::pending());
             }
             if observed.summary_faults < self.script.summary_faults {
                 observed.summary_faults += 1;
@@ -387,7 +415,7 @@ impl RuntimeLoader for Loader {
                         credential_profile: None,
                         max_output_tokens: 1_024,
                         context_window: script.context_window,
-                        pricing: None,
+                        pricing: script.pricing.clone(),
                         output_token_control: CapabilitySupport::Native,
                         generation: GenerationCapabilities {
                             reasoning_effort: CapabilitySupport::Unsupported,
