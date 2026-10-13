@@ -3596,8 +3596,8 @@ impl plan::CompiledAgentPlan {
                         // A review the harness could not run is recorded as
                         // `Unavailable` and the candidate completes: the
                         // verdict is evidence for the user, not the run's
-                        // outcome. Only the reviewer's own RED verdict, within
-                        // the repair allowance, redirects the run.
+                        // outcome. Only a policy-selected correction outcome,
+                        // within the repair allowance, redirects the run.
                         let final_evidence = if context.task_overflow {
                             Err("JEV final checkpoint was not sent because the original task exceeded the exact review bound")
                         } else {
@@ -7504,7 +7504,8 @@ mod tests {
         // Regression (RR3): 9 real runs on 2026-09-19/20 ended as `Failed`
         // with "Jev exhausted its two correction attempts" after the model
         // had produced an answer. The reviewer's disagreement is now evidence
-        // in the transcript: two RED verdicts redirect, the third completes.
+        // in the transcript: two correction-required verdicts redirect, the
+        // third completes.
         struct AnswerProvider(AtomicUsize);
         impl Provider for AnswerProvider {
             fn stream(&self, _: ModelRequest) -> ProviderStream {
