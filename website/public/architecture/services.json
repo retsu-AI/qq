@@ -98,8 +98,8 @@
     {
       "id": "retsu",
       "title": "Retsu edge service implementation",
-      "ref": "retsu-AI/retsu source head b889cd9e531438e4c54b25aa5ff9dc281c5e6888; packages/api/src/{services,http,durable/AccountLedger.ts}, packages/api/wrangler.jsonc, packages/web. Source wiring, not paid-composition acceptance.",
-      "url": "https://github.com/retsu-AI/retsu"
+      "ref": "Current remote Retsu source8d58080829231bb74e180c6de4e8f687c4606200, immutable git tree read2026-10-13. packages/api/src/{services,http,durable/AccountLedger.ts}, index.ts and wrangler.jsonc. Earlier localb889cd9 was superseded. Source is not deployed revision or paid/customer acceptance.",
+      "url": "https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200"
     },
     {
       "id": "grip",
@@ -355,12 +355,12 @@
       "id": "auth",
       "zone": "edge",
       "alias": "Cerberus",
-      "name": "Auth, Sessions and Better Auth target",
+      "name": "Auth, Better Auth Identity and Sessions",
       "purpose": "Bind the active account and organization.",
       "status": "source",
-      "stateOwner": "D1 identity; current Auth/Sessions services",
+      "stateOwner": "D1 user/session identity via Better Auth; API-key Auth service",
       "source": "retsu",
-      "detail": "Current Auth/Sessions source is present. D113 selects Better Auth identity path; do not infer its full deployed composition from the design.",
+      "detail": "Current8d580 source implements Better Auth Identity on D1 with magic links, admin and multi-session plugins. Device session revoke, signup modes, confirmed email change/deletion are source behavior; hosted acceptance remains unverified.",
       "executionOwner": "Billing/API owner",
       "environment": "Cloudflare edge",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -416,7 +416,7 @@
       "status": "source",
       "stateOwner": "AccountLedger customer money and exposure",
       "source": "retsu",
-      "detail": "Cloudflare Durable Object binding exists. PostgreSQL/Temporal/QQ cannot grant credit or release uncertain effects.",
+      "detail": "Current8d580 AccountLedger source owns credit/reserve/settle plus refund/dispute operations. Only AccountLedger is the configured money Durable Object; PostgreSQL/Temporal/QQ cannot grant credit or release uncertain supplier effects.",
       "executionOwner": "Billing/API owner",
       "environment": "Cloudflare edge",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -439,12 +439,12 @@
       "id": "support",
       "zone": "edge",
       "alias": "Eunomia",
-      "name": "Accounts, Audit, Waitlist and Crypto",
+      "name": "Accounts, Audit, Waitlist, Crypto and Settings",
       "purpose": "Support account policy and lifecycle.",
       "status": "source",
       "stateOwner": "Retsu service owners with D1/audit state",
       "source": "retsu",
-      "detail": "Actual source modules are enumerated here. Supporting services do not establish activation or customer acceptance.",
+      "detail": "Current8d580 source supports signup modes, account settings, device session lifecycle, admin APIs and audit. Turnstile/throttling and monitoring are explicit separate records. Customer activation remains unaccepted.",
       "executionOwner": "Billing/API owner",
       "environment": "Cloudflare edge",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -780,7 +780,7 @@
       "status": "source",
       "stateOwner": "Service-owned events, audit and metrics",
       "source": "qq",
-      "detail": "QQ snapshots/session events, Retsu Audit and Grip OTel source. Telemetry does not admit work or accept a customer outcome.",
+      "detail": "QQ snapshots/events, Retsu Audit and Grip OTel source. Current Retsu Analytics Engine and Monitor cron are separate below; Sentry ingestion remains unproved. Telemetry never admits work or accepts outcomes.",
       "executionOwner": "Infrastructure/integration owner",
       "environment": "Repository/operations",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -854,6 +854,48 @@
       "executionOwner": "Acquisition/integration owner",
       "environment": "Third-party integration",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
+    },
+    {
+      "id": "turnstile",
+      "zone": "edge",
+      "alias": "Sphinx",
+      "name": "Turnstile and Edge abuse controls",
+      "purpose": "Protect configured sign-in, waitlist and signup paths.",
+      "status": "source",
+      "stateOwner": "Edge configuration and D1 throttling records",
+      "source": "retsu",
+      "detail": "Current8d580 Edge.ts/account.ts implements optional Turnstile checks plus IP/email throttling and browser-origin guards. Anti-abuse checks do not grant account or paid admission.",
+      "executionOwner": "Billing/API owner",
+      "environment": "Cloudflare edge",
+      "evidenceAt": "2026-10-13 immutable current remote source read; runtime unverified"
+    },
+    {
+      "id": "metrics",
+      "zone": "ops",
+      "alias": "Metis watch",
+      "name": "Cloudflare Analytics Engine and Monitor",
+      "purpose": "Record requests and run bounded alert checks/digests.",
+      "status": "source",
+      "stateOwner": "Analytics Engine metric dataset; D1 alert history and cooldown",
+      "source": "retsu",
+      "detail": "Current8d580 index.ts, Metrics/Analytics/Monitor source and wrangler cron configuration exist. Workers Cron handles monitoring only; Temporal remains the durable hosted-run scheduler. Live ingestion, cron execution and alert delivery are unproved.",
+      "executionOwner": "API/observability owner",
+      "environment": "Cloudflare monitoring",
+      "evidenceAt": "2026-10-13 immutable current remote source read; runtime unverified"
+    },
+    {
+      "id": "alertchannels",
+      "zone": "growth",
+      "alias": "Pheme",
+      "name": "Slack / Discord alert integrations",
+      "purpose": "Deliver configured operational alerts with mail fallback.",
+      "status": "source",
+      "stateOwner": "Monitor D1 alert records plus actual channel delivery receipts",
+      "source": "retsu",
+      "detail": "Current8d580 Monitor source supports optional Slack/Discord webhooks and Mailer fallback. No webhook identity, credential, destination, send or live receipt is disclosed or inferred.",
+      "executionOwner": "API/observability owner",
+      "environment": "Third-party alert services",
+      "evidenceAt": "2026-10-13 immutable current remote source read; runtime unverified"
     }
   ],
   "edges": [
@@ -1248,6 +1290,48 @@
       "label": "Direct CLI ask/run: compose the shared QQ runtime without HTTP",
       "status": "source",
       "source": "qq"
+    },
+    {
+      "fromId": "auth",
+      "toId": "turnstile",
+      "label": "require configured challenge before sign-in",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "support",
+      "toId": "turnstile",
+      "label": "throttle and verify configured signup/waitlist challenge",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "api",
+      "toId": "metrics",
+      "label": "write bounded request metrics",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "metrics",
+      "toId": "d1",
+      "label": "persist alert state and cooldown",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "metrics",
+      "toId": "alertchannels",
+      "label": "attempt configured operational alert",
+      "status": "source",
+      "source": "retsu"
+    },
+    {
+      "fromId": "metrics",
+      "toId": "resend",
+      "label": "use authorized transactional mail fallback",
+      "status": "source",
+      "source": "retsu"
     }
   ],
   "journeys": [

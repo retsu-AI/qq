@@ -12,10 +12,10 @@ for(const s of data.services){
 }
 for(const e of data.edges)if(!ids.has(e.fromId)||!ids.has(e.toId)||!sourceIds.has(e.source)||!labels[e.status]||!e.label)throw Error('Invalid relationship');
 for(const j of data.journeys)for(const [id] of j.steps)if(!ids.has(id))throw Error('Invalid journey reference');
-const layout={clients:[30,40,430,510],local:[505,40,430,510],edge:[980,40,430,510],data:[30,655,430,425],models:[505,655,430,425],cloud:[980,655,430,425],growth:[30,1190,665,440],ops:[745,1190,665,440]};
+const layout={clients:[30,40,430,510],local:[505,40,430,510],edge:[980,40,430,510],data:[30,655,430,425],models:[505,655,430,425],cloud:[980,655,430,425],growth:[30,1190,665,510],ops:[745,1190,665,510]};
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+'…':s;
 function overview(){
- let svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1690" role="img" aria-labelledby="map-title map-desc"><title id="map-title">Retsu and QQ master startup architecture</title><desc id="map-desc">Eight trust zones enumerate ${data.services.length} sourced components. Solid arrows show source wiring, dashed arrows show design targets. Select a service in the interactive version for state ownership and evidence.</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#b7c3d8"/></marker></defs><rect width="1440" height="1690" fill="#111724"/>`;
+ let svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1790" role="img" aria-labelledby="map-title map-desc"><title id="map-title">Retsu and QQ master startup architecture</title><desc id="map-desc">Eight trust zones enumerate ${data.services.length} sourced components. Solid arrows show source wiring, dashed arrows show design targets. Select a service in the interactive version for state ownership and evidence.</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#b7c3d8"/></marker></defs><rect width="1440" height="1790" fill="#111724"/>`;
  const bus=(d,text,x,y,planned=false)=>`<path d="${d}" fill="none" stroke="#b7c3d8" stroke-width="2" ${planned?'stroke-dasharray="8 6"':''} marker-end="url(#arrow)"/><rect x="${x-8}" y="${y-18}" width="${text.length*9+16}" height="26" rx="4" fill="#111724"/><text x="${x}" y="${y}" fill="#dce6f4" font-size="17" font-family="system-ui,sans-serif">${esc(text)}</text>`;
  svg+=bus('M245 40V20H1195V40','Web: selected-account requests',520,17);
  svg+=bus('M245 550V583H645V550','Direct QQ / assistant mode',245,581,true);
@@ -30,7 +30,7 @@ function overview(){
  svg+=`<g class="service" data-service="${s.id}" tabindex="0" role="button" aria-label="${esc(s.alias+'; '+s.name+'; '+labels[s.status])}"><title>${esc(s.alias+' | '+s.name+'\n'+s.purpose+'\n'+labels[s.status]+'\nState owner: '+s.stateOwner)}</title><rect x="${x+14}" y="${sy-3}" width="${w-28}" height="${step-4}" rx="6" fill="#222d40"/><text x="${x+24}" y="${sy+16}" fill="${z.color}" font-size="14" font-family="system-ui,sans-serif">${esc(s.alias)}</text><text x="${x+w-25}" y="${sy+15}" text-anchor="end" fill="#ccd7e9" font-size="10" letter-spacing="1" font-family="system-ui,sans-serif">${txt}</text><text x="${x+24}" y="${sy+37}" fill="#f2f5fb" font-size="17" font-family="system-ui,sans-serif">${esc(clip(s.name,w>500?69:42))}</text></g>`;
  });svg+='</g>';
  }
- svg+='<text x="30" y="1668" fill="#aebbd0" font-size="15" font-family="system-ui,sans-serif">SOURCE means code exists, not deployed or journey accepted. TARGET means specified wiring still needs proof.</text></svg>';
+ svg+='<text x="30" y="1768" fill="#aebbd0" font-size="15" font-family="system-ui,sans-serif">SOURCE means code exists, not deployed or journey accepted. TARGET means specified wiring still needs proof.</text></svg>';
  return svg;
 }
 const svg=overview();fs.writeFileSync(path.join(dir,'master.svg'),svg+'\n');
