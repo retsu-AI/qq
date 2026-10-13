@@ -53,8 +53,8 @@ pub async fn render(
                 };
                 writeln!(
                     notices,
-                    "[jev] {} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}",
-                    checkpoint_label(outcome)
+                    "[jev] {} {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}",
+                    checkpoint_label(outcome),
                 )?;
                 notices.flush()?;
             }
@@ -273,6 +273,24 @@ mod tests {
                 confidence_basis_points: None,
                 feedback: "reviewer unavailable".to_owned(),
             },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:partial".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::PartiallySupported,
+                confidence_basis_points: None,
+                feedback: "candidate only partly supported".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:contradicted".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                confidence_basis_points: None,
+                feedback: "candidate contradicted".to_owned(),
+            },
             RunEvent::OutputTextDelta {
                 text: "literal answer".to_owned(),
             },
@@ -287,8 +305,12 @@ mod tests {
 
         assert_eq!(output, b"literal answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] NEEDS EVIDENCE FinalCandidate final:gap"));
-        assert!(notices.contains("[jev] UNAVAILABLE FinalCandidate final:unavailable"));
+        assert!(
+            notices.contains("[jev] NEEDS EVIDENCE InsufficientEvidence FinalCandidate final:gap")
+        );
+        assert!(notices.contains("[jev] UNAVAILABLE Unavailable FinalCandidate final:unavailable"));
+        assert!(notices.contains("[jev] RED PartiallySupported FinalCandidate final:partial"));
+        assert!(notices.contains("[jev] RED Contradicted FinalCandidate final:contradicted"));
         assert!(!notices.contains("literal answer"));
     }
 }

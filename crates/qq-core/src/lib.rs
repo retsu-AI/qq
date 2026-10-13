@@ -7511,7 +7511,9 @@ mod tests {
                 let attempt = self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {
-                        text: format!("target.txt changed and verification passed (attempt {attempt})"),
+                        text: format!(
+                            "target.txt changed and verification passed (attempt {attempt})"
+                        ),
                     }),
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]))
@@ -7657,7 +7659,11 @@ mod tests {
 
             fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                 assert_eq!(request.task, "Change target.txt and run verification");
-                assert!(request.evidence.contains("final candidate:\ntarget.txt changed"));
+                assert!(
+                    request
+                        .evidence
+                        .contains("final candidate:\ntarget.txt changed")
+                );
                 Box::pin(std::future::ready(CheckpointVerdict {
                     outcome: CheckpointOutcome::InsufficientEvidence,
                     confidence: Some(0.5),
@@ -7702,7 +7708,10 @@ mod tests {
             }
         )));
         assert_eq!(std::fs::read_to_string(target).unwrap(), "original\n");
-        assert!(matches!(events.last(), Some(RuntimeEvent::Completed { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
     }
 
     #[tokio::test(start_paused = true)]

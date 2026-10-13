@@ -321,7 +321,9 @@ pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
+    use super::{
+        CheckpointOutcome, CheckpointRepairPolicy, MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits,
+    };
 
     #[test]
     fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
@@ -336,5 +338,40 @@ mod tests {
         let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
         let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
         assert!(!checkpoint_text_fits(&payload));
+    }
+
+    #[test]
+    fn repair_policy_keeps_strict_gaps_and_advisory_red_outcomes_distinct() {
+        assert!(
+            CheckpointRepairPolicy::Strict
+                .requests_correction(CheckpointOutcome::InsufficientEvidence)
+        );
+        assert!(
+            CheckpointRepairPolicy::Strict
+                .requests_correction(CheckpointOutcome::PartiallySupported)
+        );
+        assert!(
+            CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Contradicted)
+        );
+        assert!(
+            !CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Unavailable)
+        );
+
+        assert!(
+            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::InsufficientEvidence)
+        );
+        assert!(
+            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::Unavailable)
+        );
+        assert!(
+            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::PartiallySupported)
+        );
+        assert!(
+            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::Contradicted)
+        );
     }
 }
