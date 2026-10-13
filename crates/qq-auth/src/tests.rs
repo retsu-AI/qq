@@ -3046,7 +3046,7 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
             flight_id,
             read_id,
             ..
-        } => *store_id != 0 && *coordinator_id != 0 && *flight_id == *read_id,
+        } => *store_id != 0 && coordinator_id.is_some() && *flight_id == Some(*read_id),
         CredentialDiagnosticEvent::CacheHit { .. } => false,
         CredentialDiagnosticEvent::OwnerAdmitted {
             store_id,

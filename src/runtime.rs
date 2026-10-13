@@ -173,7 +173,6 @@ pub struct RuntimeFactory {
 struct RuntimeFactoryInner {
     config: ConfigLoader,
     credentials: CredentialStore,
-    reviewer_credentials: Option<CredentialStore>,
     mode: RuntimeMode,
     providers: ProviderCompiler,
     discovery: ModelDiscovery,
@@ -248,20 +247,11 @@ impl RuntimeFactory {
             return Self::system();
         }
         let credentials = CredentialStore::system()?;
-        let reviewer_diagnostic = diagnostic.clone();
         let credentials = match diagnostic {
             Some(sink) => credentials.with_diagnostic_sink(sink),
             None => credentials,
         };
-        let reviewer_credentials = reviewer_diagnostic.map(|sink| {
-            CredentialStore::with_paths(credentials.paths().clone()).with_diagnostic_sink(sink)
-        });
-        Self::with_mode_and_reviewer(
-            ConfigLoader::system()?,
-            credentials,
-            RuntimeMode::Standard,
-            reviewer_credentials,
-        )
+        Self::new(ConfigLoader::system()?, credentials)
     }
 
     pub fn new(
@@ -308,20 +298,10 @@ impl RuntimeFactory {
         credentials: CredentialStore,
         mode: RuntimeMode,
     ) -> Result<Self, RuntimeBuildError> {
-        Self::with_mode_and_reviewer(config, credentials, mode, None)
-    }
-
-    fn with_mode_and_reviewer(
-        config: ConfigLoader,
-        credentials: CredentialStore,
-        mode: RuntimeMode,
-        reviewer_credentials: Option<CredentialStore>,
-    ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
                 config,
                 credentials,
-                reviewer_credentials,
                 mode,
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
@@ -1798,10 +1778,7 @@ impl RuntimeFactory {
             }
             profile = profile.with_checkpoint_reviewer(Arc::new(
                 TypeSafeCheckpointReviewer::from_credentials(
-                    self.inner
-                        .reviewer_credentials
-                        .as_ref()
-                        .unwrap_or(&self.inner.credentials),
+                    &self.inner.credentials,
                     snapshot.jev_review(),
                 )?,
             ));

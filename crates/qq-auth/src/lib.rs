@@ -85,16 +85,16 @@ pub enum CredentialDiagnosticEvent {
     },
     BackendReadStarted {
         store_id: u64,
-        coordinator_id: u64,
-        flight_id: u64,
+        coordinator_id: Option<u64>,
+        flight_id: Option<u64>,
         read_id: u64,
         route: CredentialDiagnosticRoute,
         endpoint: CredentialDiagnosticEndpoint,
     },
     BackendReadReturned {
         store_id: u64,
-        coordinator_id: u64,
-        flight_id: u64,
+        coordinator_id: Option<u64>,
+        flight_id: Option<u64>,
         read_id: u64,
         route: CredentialDiagnosticRoute,
         endpoint: CredentialDiagnosticEndpoint,
@@ -1050,16 +1050,6 @@ impl CredentialStore {
         F: FnOnce(CredentialStore) -> Result<T, AuthError> + Send + 'static,
     {
         let read_id = self.diagnostic.as_ref().map(|context| context.id());
-        if let (Some(context), Some(read_id)) = (self.diagnostic.as_ref(), read_id) {
-            context.sink.emit(CredentialDiagnosticEvent::BackendReadStarted {
-                store_id: context.store_id,
-                coordinator_id: context.coordinator_id,
-                flight_id: 0,
-                read_id,
-                route,
-                endpoint,
-            });
-        }
         let permit = tokio::time::timeout(
             REQUEST_CREDENTIAL_CAPACITY_TIMEOUT,
             Arc::clone(&self.request_credential_permits).acquire_owned(),
@@ -1070,23 +1060,34 @@ impl CredentialStore {
         let store = self.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            operation(store)
+            let diagnostic = store.diagnostic.clone();
+            if let (Some(context), Some(read_id)) = (diagnostic.as_ref(), read_id) {
+                context.sink.emit(CredentialDiagnosticEvent::BackendReadStarted {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    route,
+                    endpoint,
+                });
+            }
+            let result = operation(store);
+            if let (Some(context), Some(read_id)) = (diagnostic.as_ref(), read_id) {
+                context.sink.emit(CredentialDiagnosticEvent::BackendReadReturned {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    route,
+                    endpoint,
+                });
+            }
+            result
         });
-        let result = tokio::time::timeout(REQUEST_CREDENTIAL_LOAD_TIMEOUT, worker)
+        tokio::time::timeout(REQUEST_CREDENTIAL_LOAD_TIMEOUT, worker)
             .await
             .map_err(|_| qq_provider::RequestCredentialError::TimedOut)?
-            .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed);
-        if let (Some(context), Some(read_id)) = (self.diagnostic.as_ref(), read_id) {
-            context.sink.emit(CredentialDiagnosticEvent::BackendReadReturned {
-                store_id: context.store_id,
-                coordinator_id: context.coordinator_id,
-                flight_id: 0,
-                read_id,
-                route,
-                endpoint,
-            });
-        }
-        result
+            .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed)
     }
 
     fn replace_with_metadata_normalized(
@@ -1329,8 +1330,8 @@ impl CredentialStore {
         if let Some(context) = self.diagnostic.as_ref() {
             context.sink.emit(CredentialDiagnosticEvent::BackendReadStarted {
                 store_id: context.store_id,
-                coordinator_id: context.coordinator_id,
-                flight_id: flight.flight_id,
+                coordinator_id: Some(context.coordinator_id),
+                flight_id: Some(flight.flight_id),
                 read_id: flight.flight_id,
                 route: CredentialDiagnosticRoute::StoredKeyring,
                 endpoint: diagnostic_endpoint(expected_endpoint),
@@ -1342,8 +1343,8 @@ impl CredentialStore {
         if let Some(context) = self.diagnostic.as_ref() {
             context.sink.emit(CredentialDiagnosticEvent::BackendReadReturned {
                 store_id: context.store_id,
-                coordinator_id: context.coordinator_id,
-                flight_id: flight.flight_id,
+                coordinator_id: Some(context.coordinator_id),
+                flight_id: Some(flight.flight_id),
                 read_id: flight.flight_id,
                 route: CredentialDiagnosticRoute::StoredKeyring,
                 endpoint: diagnostic_endpoint(expected_endpoint),
