@@ -10,5 +10,6 @@ Attached clients keep models and selection empty until the server's `Models` res
 | Failure, retry, unwind and poison | `crates/qq-auth/src/lib.rs` | Joined follower and cleanup regressions in auth tests |
 | Distinct-key capacity and epoch changes | `crates/qq-auth/src/lib.rs` | Capacity-entry and target-rotation cases in auth tests |
 | Server-authoritative model selection | `crates/qq-tui/src/app.rs` | Client bootstrap and trust cases in `app/tests.rs` |
+| Initial-loader deadline | `crates/qq-core/src/sessions/execution.rs` | Existing deadline cases and [settlement specification](../credential-preparation-deadline.md) |
 
 Each check and independent verdict applies to its recorded revision. Source checks do not establish live Keychain consent, provider execution or native TUI acceptance.

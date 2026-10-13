@@ -778,6 +778,195 @@ impl RuntimeLoader for HeldDeadlineLoader {
     }
 }
 
+struct TwoStageDeadlineLoader {
+    first_entered: Arc<tokio::sync::Notify>,
+    first_release: Arc<tokio::sync::Notify>,
+    second_entered: Arc<tokio::sync::Notify>,
+    second_release: Arc<tokio::sync::Notify>,
+    requests: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+    first_outcome: TwoStageFirstOutcome,
+}
+
+#[derive(Clone, Copy)]
+enum TwoStageFirstOutcome {
+    Runtime,
+    Error,
+    Panic,
+}
+
+impl RuntimeLoader for TwoStageDeadlineLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        let first_entered = Arc::clone(&self.first_entered);
+        let first_release = Arc::clone(&self.first_release);
+        let second_entered = Arc::clone(&self.second_entered);
+        let second_release = Arc::clone(&self.second_release);
+        let requests = Arc::clone(&self.requests);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let first_outcome = self.first_outcome;
+        Box::pin(async move {
+            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            let (entered, release) = if call == 0 {
+                (first_entered, first_release)
+            } else {
+                (second_entered, second_release)
+            };
+            entered.notify_one();
+            release.notified().await;
+            if call == 0 {
+                match first_outcome {
+                    TwoStageFirstOutcome::Runtime => {}
+                    TwoStageFirstOutcome::Error => {
+                        return Err(RuntimeLoadError {
+                            kind: RunFailureKind::Configuration,
+                            message: "first continuation loader failure".to_owned(),
+                        });
+                    }
+                    TwoStageFirstOutcome::Panic => panic!("first continuation loader panic"),
+                }
+            }
+            CountingTextLoader {
+                provider_calls: requests,
+            }
+            .load(request)
+            .await
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PostDrainLoaderOutcome {
+    Error,
+    Panic,
+}
+
+struct PostDrainLoader {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    outcome: PostDrainLoaderOutcome,
+}
+
+impl RuntimeLoader for PostDrainLoader {
+    fn load(&self, _request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        let outcome = self.outcome;
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            match outcome {
+                PostDrainLoaderOutcome::Error => Err(RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    message: "late test loader failure".to_owned(),
+                }),
+                PostDrainLoaderOutcome::Panic => panic!("late test loader panic"),
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn late_loader_failure_or_panic_preserves_duration_terminal() {
+    for outcome in [PostDrainLoaderOutcome::Error, PostDrainLoaderOutcome::Panic] {
+        let directory = tempfile::tempdir().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(PostDrainLoader {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                outcome,
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("late loader".to_owned())],
+                    limits: RunLimits {
+                        max_duration_ms: Some(100),
+                        ..RunLimits::default()
+                    },
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+            panic!("prompt")
+        };
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::BudgetExhausted { .. },
+                ..
+            }
+        ));
+        release.notify_one();
+        let late = tokio::time::timeout(Duration::from_millis(250), events.next()).await;
+        assert!(late.is_err());
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+fn persisted_deadline_terminal(directory: &std::path::Path, run_id: RunId) -> String {
+    let connection = rusqlite::Connection::open(directory.join("sessions.sqlite3")).unwrap();
+    let outcome: String = connection
+        .query_row(
+            "SELECT outcome_json FROM runs WHERE id = ?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let terminals: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE json_extract(envelope_json, '$.run_id') = ?1 AND json_extract(envelope_json, '$.event.type') = 'run_finished'",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(terminals, 1, "one durable terminal event for {run_id}");
+    outcome
+}
+
 #[tokio::test]
 async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     let directory = tempfile::tempdir().unwrap();
@@ -827,48 +1016,500 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    let premature = tokio::time::timeout(Duration::from_millis(250), async {
+    let early_terminal = tokio::time::timeout(Duration::from_millis(250), async {
         loop {
             let event = events.next().await.unwrap().unwrap();
             if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
-                break;
+                break event;
             }
         }
     }).await;
-    release.notify_one();
     assert!(
-        premature.is_err(),
-        "loader ownership must outlive expiry until it exits"
+        early_terminal.is_ok(),
+        "duration settlement must be published while the loader remains held"
     );
-    let observed = collect_until(&mut events, finished_for(run_id)).await;
-    runtime.shutdown().await.unwrap();
-    let exhaustion = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::BudgetExhausted { exhaustion },
-                ..
-            } if exhaustion.limit == BudgetLimitKind::Duration => Some(exhaustion),
-            _ => None,
+    let early_terminal = early_terminal.unwrap();
+    assert!(matches!(
+        early_terminal.event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::BudgetExhausted { ref exhaustion },
+            ..
+        } if exhaustion.limit == BudgetLimitKind::Duration
+            && exhaustion.message.contains("resolving checkpoint reviewer credentials")
+            && exhaustion.message.contains("no model request was started")
+    ));
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 16,
         })
-        .unwrap_or_else(|| panic!("{observed:?}"));
-    assert!(
-        exhaustion
-            .message
-            .contains("resolving checkpoint reviewer credentials"),
-        "{}",
-        exhaustion.message
-    );
-    assert!(
-        exhaustion.message.contains("no model request was started"),
-        "{}",
-        exhaustion.message
-    );
+        .await
+        .unwrap();
+    let run = snapshot
+        .focused
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|run| run.id == run_id)
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BudgetExhausted);
+    assert!(run.plan.is_none());
+    let connection = rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let (started_at_ms, finished_at_ms, status): (Option<i64>, Option<i64>, String) = connection
+        .query_row(
+            "SELECT started_at_ms, finished_at_ms, status FROM runs WHERE id = ?1",
+            [run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(started_at_ms.is_none());
+    assert!(finished_at_ms.is_some());
+    assert_eq!(status, "budget_exhausted");
+    assert_eq!(runtime.inner.permits.available_permits(), 7);
+    release.notify_one();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(runtime.inner.permits.available_permits(), 8);
     assert_eq!(
         requests.load(Ordering::SeqCst),
         0,
         "expired preparation must not send a model request"
     );
+}
+
+#[tokio::test]
+async fn cancellation_during_held_preparation_drains_before_one_terminal_event() {
+    for scenario in ["before", "cancel_first", "duration_first"] {
+        let directory = tempfile::tempdir().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(HeldDeadlineLoader {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("cancel while preparing".to_owned())],
+                    limits: RunLimits {
+                        max_duration_ms: Some(if scenario == "before" { 1_000 } else { 100 }),
+                        ..RunLimits::default()
+                    },
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+            panic!("prompt")
+        };
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        if scenario == "before" {
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun { run_id },
+                )
+                .await
+                .unwrap();
+        } else {
+            let (entered, entered_rx) = oneshot::channel();
+            let (unblock, unblock_rx) = std::sync::mpsc::channel();
+            let store = runtime.inner.store.clone();
+            let blocked = tokio::spawn(async move {
+                store
+                    .call(Priority::Control, move |_| {
+                        let _ = entered.send(());
+                        unblock_rx
+                            .recv()
+                            .map_err(|_| SessionRuntimeError::Unavailable)
+                    })
+                    .await
+            });
+            entered_rx.await.unwrap();
+            if scenario == "duration_first" {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            let cancelling_runtime = runtime.clone();
+            let cancellation = tokio::spawn(async move {
+                cancelling_runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::CancelRun { run_id },
+                    )
+                    .await
+            });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            unblock.send(()).unwrap();
+            blocked.await.unwrap().unwrap();
+            cancellation.await.unwrap().unwrap();
+        }
+        let before_release = tokio::time::timeout(Duration::from_millis(250), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
+                break event;
+            }
+        }
+    })
+    .await;
+        let terminal = before_release.unwrap();
+        match terminal.event {
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Cancelled,
+                ..
+            } => assert_ne!(scenario, "duration_first"),
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::BudgetExhausted { exhaustion },
+                ..
+            } => {
+                assert_eq!(scenario, "duration_first");
+                assert_eq!(exhaustion.limit, BudgetLimitKind::Duration);
+            }
+            other => panic!("unexpected race winner {other:?}"),
+        }
+        let durable_winner = persisted_deadline_terminal(directory.path(), run_id);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        let late_event = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let _ = events.next().await.unwrap().unwrap();
+            }
+        })
+        .await;
+        assert!(late_event.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        runtime.shutdown().await.unwrap();
+        assert_eq!(
+            persisted_deadline_terminal(directory.path(), run_id),
+            durable_winner
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_duration_keeps_the_committed_duration_outcome() {
+    let directory = tempfile::tempdir().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(HeldDeadlineLoader {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("expire then cancel".to_owned())],
+                limits: RunLimits {
+                    max_duration_ms: Some(100),
+                    ..RunLimits::default()
+                },
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+        panic!("prompt")
+    };
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        terminal.event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::BudgetExhausted { .. },
+            ..
+        }
+    ));
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+        .unwrap();
+    release.notify_one();
+    let late = tokio::time::timeout(Duration::from_millis(250), events.next()).await;
+    assert!(late.is_err());
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+async fn assert_expired_loader_drain_does_not_clobber_a_continuation_run(
+    max_active_runs: usize,
+    first_outcome: TwoStageFirstOutcome,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let first_entered = Arc::new(tokio::sync::Notify::new());
+    let first_release = Arc::new(tokio::sync::Notify::new());
+    let second_entered = Arc::new(tokio::sync::Notify::new());
+    let second_release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = max_active_runs;
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(TwoStageDeadlineLoader {
+            first_entered: Arc::clone(&first_entered),
+            first_release: Arc::clone(&first_release),
+            second_entered: Arc::clone(&second_entered),
+            second_release: Arc::clone(&second_release),
+            requests: Arc::clone(&requests),
+            calls,
+            first_outcome,
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let first = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("expire".to_owned())],
+                limits: RunLimits {
+                    max_duration_ms: Some(100),
+                    ..RunLimits::default()
+                },
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued {
+        run_id: first_id, ..
+    } = first.outcome
+    else {
+        panic!("first prompt")
+    };
+    tokio::time::timeout(Duration::from_secs(2), first_entered.notified())
+        .await
+        .unwrap();
+    let first_terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::RunFinished { run_id, .. } if run_id == first_id)
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        first_terminal.event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::BudgetExhausted { .. },
+            ..
+        }
+    ));
+    let second = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("continue".to_owned())],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued {
+        run_id: second_id, ..
+    } = second.outcome
+    else {
+        panic!("second prompt")
+    };
+    if max_active_runs == 1 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), second_entered.notified())
+                .await
+                .is_err()
+        );
+    } else {
+        tokio::time::timeout(Duration::from_secs(2), second_entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(runtime.inner.permits.available_permits(), 0);
+    }
+    let preparing: Option<String> = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection
+                .query_row(
+                    "SELECT preparing_run_id FROM sessions WHERE id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(SessionRuntimeError::from)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        preparing,
+        (max_active_runs != 1).then(|| second_id.to_string())
+    );
+    let durable_winner = persisted_deadline_terminal(directory.path(), first_id);
+    first_release.notify_one();
+    let still_held = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            let _ = events.next().await.unwrap().unwrap();
+        }
+    })
+    .await;
+    assert!(still_held.is_err());
+    if max_active_runs == 1 {
+        tokio::time::timeout(Duration::from_secs(2), second_entered.notified())
+            .await
+            .unwrap();
+        let preparing: Option<String> = runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                connection
+                    .query_row(
+                        "SELECT preparing_run_id FROM sessions WHERE id = ?1",
+                        [session_id.to_string()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .map_err(SessionRuntimeError::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(preparing, Some(second_id.to_string()));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while runtime.inner.permits.available_permits() != max_active_runs - 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let preparing: Option<String> = connection
+        .query_row(
+            "SELECT preparing_run_id FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preparing, Some(second_id.to_string()));
+    assert_eq!(
+        persisted_deadline_terminal(directory.path(), first_id),
+        durable_winner
+    );
+    second_release.notify_one();
+    let observed = tokio::time::timeout(
+        Duration::from_secs(3),
+        collect_until(&mut events, finished_for(second_id)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        finished_outcome(&observed, second_id),
+        Some(RunOutcome::Completed)
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(!observed.iter().any(|event| matches!(
+        event.event,
+        SessionEvent::RunFinished { run_id, .. } if run_id == first_id
+    )));
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        persisted_deadline_terminal(directory.path(), first_id),
+        durable_winner
+    );
+}
+
+#[tokio::test]
+async fn expired_loader_continuation_matrix_preserves_first_terminal() {
+    for max_active_runs in [1, 2] {
+        for first_outcome in [
+            TwoStageFirstOutcome::Runtime,
+            TwoStageFirstOutcome::Error,
+            TwoStageFirstOutcome::Panic,
+        ] {
+            assert_expired_loader_drain_does_not_clobber_a_continuation_run(
+                max_active_runs,
+                first_outcome,
+            )
+            .await;
+        }
+    }
 }
 
 struct DeadlineLoader {

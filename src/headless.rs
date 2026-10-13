@@ -3888,22 +3888,110 @@ mod tests {
         assert!(!stderr.contains("To continue this session"), "{stderr}");
     }
 
+    struct HeldHeadlessDeadlineLoader {
+        release: Arc<tokio::sync::Notify>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct CountedDeadlineProvider(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Provider for CountedDeadlineProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            TextProvider.stream(request)
+        }
+    }
+
+    impl RuntimeLoader for HeldHeadlessDeadlineLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            self.load_with_progress(request, qq_core::RuntimeLoadProgress::default())
+        }
+
+        fn load_with_progress(
+            &self,
+            request: RuntimeLoadRequest,
+            progress: qq_core::RuntimeLoadProgress,
+        ) -> RuntimeLoadFuture {
+            let release = Arc::clone(&self.release);
+            let active = Arc::clone(&self.active);
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
+                active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                release.notified().await;
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                ProviderLoader(move || CountedDeadlineProvider(Arc::clone(&requests)))
+                    .load(request)
+                    .await
+            })
+        }
+    }
+
     #[tokio::test]
     async fn timeout_sends_cancellation_and_leaves_no_active_run() {
-        let fixture = fixture(|| HangingProvider).await;
-        let mut options = options(&fixture.workspace);
-        options.timeout = Some(Duration::from_millis(100));
-
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-
-        assert_eq!(status, HeadlessStatus::TimedOut);
-        assert_eq!(status.code(), 3);
-        let records = parse_records(&stdout);
-        let outcome = records.last().unwrap();
-        assert_eq!(outcome["type"], "outcome");
-        assert_eq!(outcome["status"], "timed_out");
-        assert_eq!(outcome["exit_code"], 3);
-        assert_no_active_run(&fixture).await;
+        for preparation in [false, true] {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let fixture = if preparation {
+                fixture_with_loader(Arc::new(HeldHeadlessDeadlineLoader {
+                    release: Arc::clone(&release),
+                    active: Arc::clone(&active),
+                    requests: Arc::clone(&requests),
+                }))
+                .await
+            } else {
+                fixture(|| HangingProvider).await
+            };
+            let mut options = options(&fixture.workspace);
+            options.timeout = Some(Duration::from_millis(100));
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                run_to_end(&fixture, options, std::future::pending()),
+            )
+            .await;
+            if result.is_err() {
+                release.notify_one();
+                fixture.sessions.shutdown().await.unwrap();
+            }
+            let (status, stdout, _stderr) =
+                result.expect("the real headless consumer settles before loader release");
+            assert_eq!(status, HeadlessStatus::TimedOut);
+            assert_eq!(status.code(), 3);
+            let records = parse_records(&stdout);
+            let outcome = records.last().unwrap();
+            assert_eq!(outcome["type"], "outcome");
+            assert_eq!(outcome["status"], "timed_out");
+            assert_eq!(outcome["exit_code"], 3);
+            if preparation {
+                let message = outcome["message"].as_str().unwrap();
+                assert!(
+                    message.contains("resolving checkpoint reviewer credentials"),
+                    "{stdout}"
+                );
+                assert!(message.contains("no model request was started"), "{stdout}");
+                assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(
+                    event_records(&records)
+                        .iter()
+                        .filter(|record| record["envelope"]["event"]["type"] == "run_finished")
+                        .count(),
+                    1
+                );
+                assert!(
+                    !event_records(&records)
+                        .iter()
+                        .any(|record| record["envelope"]["event"]["type"] == "run_started")
+                );
+            }
+            assert_no_active_run(&fixture).await;
+            release.notify_one();
+            fixture.sessions.shutdown().await.unwrap();
+            assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]

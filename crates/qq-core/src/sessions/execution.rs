@@ -848,8 +848,6 @@ pub(super) async fn execute_run(
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
-            // The loader owns construction until it returns, even after expiry.
-            let _ = load.await;
             let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
             exhaustion.message.push_str("; runtime preparation was still ");
             exhaustion.message.push_str(unfinished_stage.description());
@@ -857,6 +855,7 @@ pub(super) async fn execute_run(
             finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
                 exhaustion: Box::new(exhaustion),
             }).await;
+            let _ = load.await;
             return;
         }
         result = &mut load => match result {
