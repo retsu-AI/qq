@@ -26,6 +26,11 @@ QQ_VERSION=0.1.5 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
 `sh install.sh --help` lists the options. To upgrade, run it again.
+The installer keeps each executable in `.qq-versions` beside `qq` and selects
+it through a symbolic link. A legacy regular executable is copied into that
+store before the first successful migration. Retained files are read-only;
+the installer never overwrites their bytes. Existing retained executables remain
+available to processes that started before an update.
 
 ## Homebrew (macOS, Linux)
 
@@ -126,11 +131,36 @@ qq config paths     # where QQ will look for configuration and keep sessions
 
 ## Upgrade
 
+Save any unsent composer text before closing a client. Wait for an active run
+to finish, or cancel it and wait until the session is idle. Record the session
+ID so you can reopen it with `qq --session ID`. Exit the clients and stop the
+owned `qq serve` process normally before changing versions. If shutdown does
+not finish, resolve that process before replacing its executable.
+
 Rerun the route you installed with (`install.sh`, `brew upgrade qq`,
 `nix profile upgrade`, `cargo binstall --git … qq`). Sessions and
 configuration are forward-compatible within a major version; `qq version`
 shows the store schema QQ will migrate to on first open. Release notes are on
 the [releases page](https://github.com/retsu-AI/qq/releases).
+
+On macOS, the first installer upgrade from a regular `qq` file checks whether
+that executable is still in use. The installer reports the process IDs and
+leaves the installed file untouched if it finds users. This check is a snapshot;
+do not start another client during the transition. Later installer updates
+select a retained executable without rewriting older payloads. Other install
+routes own their executable lifecycle.
+
+The installer refuses unexpected files at `qq`, foreign selection links, and
+executables with multiple hard links. It verifies the checksum of an existing
+retained payload before using it. These checks protect the installer transition;
+the same user can still deliberately change permissions or replace files.
+To return to an earlier release, rerun the installer with its `--version` after
+the same quiescent transition. The matching retained executable is reused.
+
+The installer preserves credentials and does not change Keychain access
+control. Stable signing identity and a compatible designated requirement are
+separate release requirements. Keychain authorization belongs to individual
+items, and macOS can still require an unlock or deliberate authorization.
 
 ## Uninstall
 
@@ -142,5 +172,6 @@ remove`, or `cargo uninstall qq`), then optionally:
 | configuration | the `global:` directory |
 | sessions and trust state | the `data:` directory |
 | credentials | `qq auth list`, then `qq auth logout <name>` for each |
+| installer payloads | `.qq-versions` beside the installed `qq`, after all processes using those executables have exited |
 
 Next: [Quickstart](quickstart.md).
