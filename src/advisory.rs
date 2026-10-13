@@ -111,6 +111,12 @@ struct Journal {
     echo: bool,
 }
 
+impl Drop for Journal {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 fn tokens(usage: Option<TokenUsage>) -> Option<u64> {
     let usage = usage?;
     usage
@@ -135,29 +141,29 @@ impl Journal {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        let mut file = options.open(path)?;
+        let file = options.open(path)?;
         file.try_lock().map_err(|_| {
             AdvisoryError::Journal("receipt file is already locked by another observer")
         })?;
-        let bytes = file.metadata()?.len();
-        if bytes > JOURNAL_LIMIT {
-            return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
-        }
-        let mut contents = String::new();
-        (&mut file)
-            .take(JOURNAL_LIMIT + 1)
-            .read_to_string(&mut contents)?;
-        if contents.len() as u64 > JOURNAL_LIMIT {
-            return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
-        }
         let mut journal = Self {
             file,
             cursor,
             limits,
             records: BTreeMap::new(),
-            bytes,
+            bytes: 0,
             echo,
         };
+        journal.bytes = journal.file.metadata()?.len();
+        if journal.bytes > JOURNAL_LIMIT {
+            return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
+        }
+        let mut contents = String::new();
+        (&mut journal.file)
+            .take(JOURNAL_LIMIT + 1)
+            .read_to_string(&mut contents)?;
+        if contents.len() as u64 > JOURNAL_LIMIT {
+            return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
+        }
         if contents.is_empty() {
             journal.write_row(&Row::Header {
                 version: 1,
@@ -759,8 +765,11 @@ mod tests {
             Journal::open(&path, cursor(), None, limits(), false).is_err(),
             "second writer must not open the journal"
         );
+        let retained_descriptor = journal.file.try_clone().unwrap();
         drop(journal);
-        let mut recovered = Journal::open(&path, cursor(), None, limits(), false).unwrap();
+        let mut recovered = Journal::open(&path, cursor(), None, limits(), false)
+            .expect("owner drop must release the journal lock");
+        drop(retained_descriptor);
         assert_eq!(recovered.records.len(), 1);
         assert!(
             !recovered.can_dispatch(Some(42)),

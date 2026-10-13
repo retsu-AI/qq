@@ -1184,7 +1184,10 @@ async fn cancellation_after_durable_tool_result_records_unavailable_checkpoint()
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(BlockingCheckpointLoader { requests }),
+        Arc::new(BlockingCheckpointLoader {
+            requests,
+            review_entered: Arc::new(tokio::sync::Notify::new()),
+        }),
     )
     .await
     .unwrap();
@@ -1255,6 +1258,7 @@ async fn runtime_failure_after_durable_tool_result_records_unavailable_checkpoin
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(BlockingCheckpointLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
+            review_entered: Arc::new(tokio::sync::Notify::new()),
         }),
     )
     .await
