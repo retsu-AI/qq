@@ -25,3 +25,9 @@
 - Removed all `qq-core` execution-hook/test allowance and any implication that run/thread/cancel context is available; the route table now states it is unavailable and omitted.
 - Defined each JSONL line as <=512 bytes including newline; ordinary events are capped at 255 records/130560 bytes, with one 512-byte summary reserved inside inclusive 256-record/131072-byte totals. `Summary.bytes` excludes itself; line-cap rejection is typed and input-free.
 - No source, Cargo, credential, provider, live process, or recording action performed. Frozen for final independent exact-design review.
+
+## 2026-10-13 — implementation repair checkpoint
+
+- Candidate `be8af4fac449180142ac21f5f483b937d99d03b5` adds process/session/PID/monotonic metadata, typed stored-keyring owner/join/read/finish events, atomic ordinary-record/byte reservation, open-time private exclusive creation, and concurrent budget/symlink regressions.
+- Focused evidence is retained at `.../qq-credential-preparation-20261013/DI1-auth-focused-final.log` and `DI1-cli-focused-final.log`; the auth selector executed 1 test and the CLI selector executed 5 tests, all passed. Earlier failed selector/assertion logs remain retained with their original outcomes.
+- Current limits remain material: TypeSafe reviewer construction, Codex/XAI OAuth hooks, full route admission/owner/unwind variants, and a real public CLI composition fixture are not yet demonstrated. This checkpoint is therefore pending same-reviewer repair/acceptance; parent owns broad gates.
