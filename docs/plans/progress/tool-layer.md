@@ -619,3 +619,15 @@ The last two rounds kept finding new names for the same three classes, so each i
 - Test-first commit `cc481b02`: placeholder dispatch and leading-cd strict/hint tests failed on T19; oversized bounds guard passed. Four focused regressions now pass, including lexical prefix and attached option paths.
 - Hint and strict refusal eligibility are separate; no classifier reparse. Zero handles return `handle_placeholder` before a spill lookup, graded Correction. Prompt/marker already use symbolic handles and need no version change.
 - Independent second-agent review requested changes for attached `grep -f/tmp/patterns`; fixed conservatively for dash-prefixed slash operands and covered absolute/parent forms. Re-review verdict Approve implementation; qualification remains pending.
+
+### 2026-10-13 — T19 adjacency (#281)
+
+- The deletion-boundary guard used strict comparisons, so an edit adjacent to an earlier replacement (`abcd`: `ab`→`AB` then `cd`→`CD`) was refused. Written spans now use ordinary half-open overlap, and an empty deletion point counts only when it lies strictly inside the later match. `A--AB--B` is still refused. Adjacent and post-deletion edits apply (new rows).
+
+### 2026-10-13 — T18 last residuals (#283)
+
+- `env -S 'su\cdo'`: `\c` now ends the split string.
+- taskset scanning starts at the last leading option word, so 16 repeated `-a` cannot use up the bounded starts.
+- `INSTA_UPDATE` was removed from the harmless set: `always` rewrites snapshots.
+- `git --html-path`/`--man-path`/`--info-path`/`--version`/`--help` print and exit, so the words after them are not judged as a subcommand. `git --html-path push --force` is now Prompt, not a false Forbidden.
+- `approval` 93 tests pass.

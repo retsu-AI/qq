@@ -738,6 +738,8 @@ impl Collector<'_> {
                         while let Some(c) = chars.next() {
                             match c {
                                 '\'' | '"' => {}
+                                // `\c` ends the string: the rest is ignored.
+                                '\\' if chars.clone().next() == Some('c') => break,
                                 '\\' => unquoted.extend(chars.next()),
                                 c => unquoted.push(c),
                             }
@@ -805,7 +807,16 @@ impl Collector<'_> {
                 // "$(printf -o)" 0 sudo ls`), so where the command starts is
                 // not knowable. Each candidate is nested, so this only ever
                 // adds strictness.
-                for argv in bounded_suffixes(args, 0) {
+                // The leading dash words are the wrapper's (dynamic ones
+                // aside), so the scan starts at the first word that could be
+                // the mask or the command. A run of options cannot spend the
+                // bounded starts.
+                let first = args
+                    .iter()
+                    .position(|a| !a.as_deref().is_some_and(|w| w.starts_with('-')))
+                    .unwrap_or(args.len())
+                    .saturating_sub(1);
+                for argv in bounded_suffixes(args, first) {
                     self.peel(
                         SimpleCommand {
                             argv,
