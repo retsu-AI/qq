@@ -109,7 +109,7 @@ appended below, newest last.
 | RR11 baseline | Session read-hash persistence | Shipped (existing behavior) | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | Durable `session_files`, claim reload, restart/edit regression; obsolete hash-return acceptance superseded by ADR-0058 |
 | RR baseline | RR1–RR7, RR4.1/RR7.1, RR8.1–RR8.4, RR9 | Shipped | | | Receipt mapping below; RR8 residuals remain AC18 |
 | Goal 7 | Seven-day integrated reliability qualification | Planned | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | | Distinct from AP5; no live acceptance claimed |
-| Docs consolidation | Absorb reliability plan and remove stale ownership | In review | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | `docs/eng-1036-reliability-consolidation` | Docs only; existing open performance/live gates preserved |
+| Docs consolidation | Absorb reliability plan and remove stale ownership | In review | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | [#291](https://github.com/retsu-AI/qq/pull/291) (`docs/eng-1036-reliability-consolidation`) | Docs only; existing open performance/live gates preserved |
 
 ## Entries
 
@@ -1253,4 +1253,4 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Reconciled source/tracker: AC2 shipped #278 (`9bae6937`), AC3 in review #279 (ENG-1029). AC1/AC2 performance qualification, AP5, AC0.2 and Goal 7 live evidence remain open; no historical test receipt establishes the live targets.
 - Docs-only: no new tests or performance measurement warranted; workspace gates and independent plan review run before push. No protocol/schema/descriptor change.
 - Validation: workspace fmt, all-target/all-feature Clippy `-D warnings`, build and tests pass (2,243 passed / 0 failed / 14 ignored; nested embedding child invocation excluded). RR11 restart/edit regression passes. Independent review: Approve after integer-scope/amplification corrections. 166 relative doc links resolve; no live references to retired files; `git diff --check` passes. Logs: `target/qq-perf/reliability-consolidation-2026-10-13/` (untracked).
-- Tracker reconciliation: ENG-870/872/874 now point here under ENG-978; stale attachments removed. ENG-873 Done as verified existing behavior; AC2 remains in review for outstanding performance evidence. ENG-1036 docs PR pending publication.
+- Tracker reconciliation: ENG-870/872/874 now point here under ENG-978; stale attachments removed. ENG-873 Done as verified existing behavior; AC2 remains in review for outstanding performance evidence. ENG-1036 docs [PR #291](https://github.com/retsu-AI/qq/pull/291) is open; not merged.
