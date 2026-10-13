@@ -42,12 +42,20 @@ const MAX_NESTED_SHELLS: usize = 4;
 /// user sees the whole string before approving it.
 const MAX_SUFFIX_STARTS: usize = 16;
 
-/// The first `MAX_SUFFIX_STARTS` suffixes of `words` from `first`.
+/// Suffixes of `words` from `first` that start at a word which could be a
+/// program, at most `MAX_SUFFIX_STARTS` of them. A literal option (`-a`) or
+/// assignment (`A=1`) is never a launched program, so a run of them cannot
+/// spend the bound and push the real command past it.
 fn bounded_suffixes(
     words: &[Option<String>],
     first: usize,
 ) -> impl Iterator<Item = Vec<Option<String>>> + '_ {
     (first..words.len())
+        .filter(|&start| {
+            !words[start]
+                .as_deref()
+                .is_some_and(|w| w.starts_with('-') || w.contains('='))
+        })
         .take(MAX_SUFFIX_STARTS)
         .map(|start| words[start..].to_vec())
 }
@@ -732,7 +740,23 @@ impl Collector<'_> {
                         // `sudo`), so they are removed before splitting on
                         // whitespace and the `\_` separator. Escapes other
                         // than `\_` are dropped to their character.
-                        let text = string.unwrap_or_default().replace("\\_", " ");
+                        let mut text = string.unwrap_or_default().replace("\\_", " ");
+                        // `${NAME}` expands from the environment `env` sees:
+                        // the command's own literal assignments and the
+                        // `NAME=VALUE` words before `-S` (`CMD=sudo env -S
+                        // '${CMD} ls'`). A name with no literal value stays
+                        // as written, and the split command is unknown
+                        // either way.
+                        for assignment in command
+                            .assignments
+                            .iter()
+                            .map(String::as_str)
+                            .chain(args[..skip].iter().filter_map(|a| a.as_deref()))
+                        {
+                            if let Some((name, value)) = assignment.split_once('=') {
+                                text = text.replace(&format!("${{{name}}}"), value);
+                            }
+                        }
                         let mut unquoted = String::with_capacity(text.len());
                         let mut chars = text.chars();
                         while let Some(c) = chars.next() {
@@ -807,16 +831,7 @@ impl Collector<'_> {
                 // "$(printf -o)" 0 sudo ls`), so where the command starts is
                 // not knowable. Each candidate is nested, so this only ever
                 // adds strictness.
-                // The leading dash words are the wrapper's (dynamic ones
-                // aside), so the scan starts at the first word that could be
-                // the mask or the command. A run of options cannot spend the
-                // bounded starts.
-                let first = args
-                    .iter()
-                    .position(|a| !a.as_deref().is_some_and(|w| w.starts_with('-')))
-                    .unwrap_or(args.len())
-                    .saturating_sub(1);
-                for argv in bounded_suffixes(args, first) {
+                for argv in bounded_suffixes(args, 0) {
                     self.peel(
                         SimpleCommand {
                             argv,

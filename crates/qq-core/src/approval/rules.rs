@@ -297,7 +297,10 @@ pub(crate) fn judge(
                 }
                 Some("--no-pager" | "-P" | "--no-optional-locks") => skip += 1,
                 // Queries that print and exit: nothing after them runs.
-                Some("--html-path" | "--man-path" | "--info-path" | "--version" | "--help") => {
+                Some(
+                    "--html-path" | "--man-path" | "--info-path" | "--version" | "--help" | "-h"
+                    | "-v",
+                ) => {
                     args.truncate(skip + 1);
                     break;
                 }
@@ -1631,6 +1634,8 @@ mod tests {
             "INSTA_UPDATE=always cargo test",
             // A terminal query: nothing after it runs, so no false Forbidden.
             "git --html-path push --force",
+            "git -h push --force",
+            "git -v push --force",
             // T18 review round 8 (final): only enumerated QQ_ knobs; a value
             // option eats the next word; the boundary wrapper is judged.
             "QQ_UPDATE_FIXTURES=1 cargo test -p qq-protocol --test wire_fixtures",
@@ -1873,6 +1878,11 @@ mod tests {
             "env -S 'su\"\"do ls'",
             "env -S 'su\\do ls'",
             "nice nice nice nice nice nice nice nice sudo ls",
+            // T18 review round 11: options and assignments do not spend the
+            // suffix bound; env -S expands literal assignments.
+            "nice nice nice nice nice nice nice nice env A=1 B=1 C=1 D=1 E=1 F=1 G=1 H=1 I=1 J=1 K=1 L=1 M=1 N=1 O=1 P=1 sudo ls",
+            "CMD=sudo env -S '${CMD} ls'",
+            "env CMD=sudo -S '${CMD} ls'",
             // T18 review round 10: env -S `\c` ends the string; taskset's
             // tail is judged past the start cap.
             "env -S 'su\\cdo'",
