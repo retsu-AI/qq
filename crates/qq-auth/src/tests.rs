@@ -3092,3 +3092,84 @@ fn stored_keyring_resolution_keeps_distinct_keys_independent() {
     assert_eq!(keyring.read_count("provider/one"), 1);
     assert_eq!(keyring.read_count("provider/two"), 1);
 }
+
+#[test]
+fn stored_keyring_resolution_fails_closed_when_coordinator_is_poisoned() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/work", "secret", false).unwrap();
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("poison coordinator for test");
+        })
+        .join()
+        .is_err()
+    );
+
+    let result = store.resolve(&SecretRef::Stored("provider/work".to_owned()));
+    assert!(matches!(
+        result,
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert_eq!(keyring.read_count("provider/work"), 0);
+}
+
+#[test]
+fn stored_keyring_resolution_revalidates_after_capacity_wait() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/target", "target", false).unwrap();
+    let epoch = store.epoch().unwrap();
+    let target = StoredResolutionKey {
+        name: "provider/target".to_owned(),
+        endpoint: None,
+        epoch,
+    };
+    let coordinator = Arc::clone(&store.stored_resolution);
+    let mut held = Vec::new();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            let key = StoredResolutionKey {
+                name: format!("held/{index}"),
+                endpoint: None,
+                epoch,
+            };
+            let flight = Arc::new(StoredResolutionFlight {
+                result: Mutex::new(None),
+                ready: std::sync::Condvar::new(),
+            });
+            state.flights.insert(key.clone(), Arc::clone(&flight));
+            held.push((key, flight));
+        }
+    }
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_store = store.clone();
+    let worker = thread::spawn(move || {
+        let result = worker_store.resolve(&SecretRef::Stored(target.name.clone()));
+        done_tx.send(result).unwrap();
+    });
+    assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
+
+    // Rotate the index while the request is waiting. Releasing one flight must
+    // cause the public call to reload the current epoch before reading.
+    store.set("provider/epoch", "rotated", false).unwrap();
+    let (key, flight) = held.pop().unwrap();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        state.flights.remove(&key);
+    }
+    flight.ready.notify_all();
+    coordinator.1.notify_all();
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("capacity wait must recover after a flight is released")
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(result.expose_secret_bytes(), b"target");
+    assert_eq!(keyring.read_count("provider/target"), 1);
+}

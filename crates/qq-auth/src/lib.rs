@@ -481,7 +481,10 @@ impl CredentialStore {
                         self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
                     };
                     match result {
-                        Err(error) if is_resolution_capacity_wait(&error) => continue,
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
                         result => return result,
                     }
                 }
@@ -536,7 +539,10 @@ impl CredentialStore {
                             .map(|secret| (secret, epoch))
                     };
                     match result {
-                        Err(error) if is_resolution_capacity_wait(&error) => continue,
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
                         result => return result,
                     }
                 }
@@ -985,7 +991,10 @@ impl CredentialStore {
                     .map(Some)
             };
             match result {
-                Err(error) if is_resolution_capacity_wait(&error) => continue,
+                Err(error) if is_resolution_capacity_wait(&error) => {
+                    self.wait_for_resolution_capacity()?;
+                    continue;
+                }
                 result => return result,
             }
         }
@@ -1108,6 +1117,23 @@ impl CredentialStore {
         wake.notify_all();
         owner_guard.completed = true;
         outcome.map_err(|failure| failure.into_auth_error(name))
+    }
+
+    fn wait_for_resolution_capacity(&self) -> Result<(), AuthError> {
+        let (coordinator, wake) = &*self.stored_resolution;
+        let mut state = coordinator
+            .lock()
+            .map_err(|_| AuthError::CredentialCoordinator {
+                operation: "lock_poisoned",
+            })?;
+        while state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            state = wake
+                .wait(state)
+                .map_err(|_| AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                })?;
+        }
+        Ok(())
     }
 
     fn resolve_stored_from_index(

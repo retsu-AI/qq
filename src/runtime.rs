@@ -325,10 +325,9 @@ impl RuntimeFactory {
     }
 
     /// What the interactive client needs from a loaded configuration: the
-    /// configured route (if any), whether it is usable as the client default,
-    /// the catalog, the credential remedies, and the server's approval wait.
-    /// Blocking: probes credentials. Computed at startup and again after the
-    /// trust prompt is answered, so both paths agree.
+    /// configured route (if any), the catalog, credential remedies, and the
+    /// server's approval wait. Client model selection stays empty until the
+    /// server-authoritative catalog; configured routes remain metadata only.
     pub fn tui_model_state(
         &self,
         snapshot: &ClientSnapshot,
@@ -355,23 +354,10 @@ impl RuntimeFactory {
                 .iter()
                 .any(|option| option.selection.model == configured_model.model))
         .then(|| configured_model.clone());
-        // The TUI's client default. An unusable route is normally withheld so
-        // Alt-N asks for a model; a route whose provider merely lacks a
-        // credential is kept so the empty state and Alt-N can name it.
-        let configured_provider_unauthenticated = configured_model
-            .model
-            .as_deref()
-            .and_then(|route| route.split_once('/'))
-            .is_some_and(|(provider, _)| {
-                unauthenticated_providers
-                    .iter()
-                    .any(|remedy| remedy.provider == provider)
-            });
-        let tui_model = match &model {
-            Some(model) => model.clone(),
-            None if configured_provider_unauthenticated => configured_model.clone(),
-            None => ModelSelection::default(),
-        };
+        // Local presence/remedies cannot create a selectable or apparently
+        // authenticated default. The attached client receives selection from
+        // the server's Models response after attach.
+        let tui_model = ModelSelection::default();
         TuiModelState {
             configured_model,
             model,
@@ -6978,11 +6964,11 @@ mod tests {
             .resolve_trust(&request, TrustResolution::Session, &reviewed)
             .unwrap();
         assert_eq!(granted.trusted, [pending[0].source().label().to_owned()]);
-        assert_eq!(
-            granted.state.tui_model.model.as_deref(),
-            Some("openai/gpt-5.6")
+        assert!(granted.state.tui_model.model.is_none());
+        assert!(
+            granted.state.model.is_none(),
+            "catalog remains server-authoritative"
         );
-        assert!(granted.state.model.is_some(), "credential present: usable");
         assert!(!fixture.path("data/trust.ron").exists());
         // The factory's own request path (what the embedded server uses for
         // `models`, `capabilities`, and plans) carries the grant.
