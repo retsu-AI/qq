@@ -638,12 +638,9 @@ impl RuntimeFactory {
                     ProviderAccess::AmazonBedrock { auth, .. }
                     | ProviderAccess::AmazonBedrockMantle { auth, .. },
                 ) => match auth {
-                    BedrockAuth::Aws(AwsAuth::DefaultChain) => {
-                        "set AWS_PROFILE or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY".to_owned()
-                    }
-                    BedrockAuth::Aws(AwsAuth::Profile(profile)) => {
-                        format!("configure the AWS profile {profile}")
-                    }
+                    // Profile/default-chain availability is unknown without
+                    // reading AWS files; defer classification to the server.
+                    BedrockAuth::Aws(_) => continue,
                     BedrockAuth::ApiKey(_) => continue,
                 },
                 None => continue,
