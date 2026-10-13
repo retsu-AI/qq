@@ -2926,3 +2926,45 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
 
     assert_eq!(keyring.read_count("provider/work"), 1);
 }
+
+#[test]
+fn stored_keyring_resolution_failure_is_shared_and_retryable() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    keyring.set_mode(FakeMode::Failure);
+
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        }));
+    }
+    for worker in workers {
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(AuthError::KeyringFailure { .. })
+        ));
+    }
+
+    keyring.set_mode(FakeMode::Available);
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert!(keyring.read_count("provider/work") >= 1);
+}

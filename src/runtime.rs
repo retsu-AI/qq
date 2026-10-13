@@ -592,7 +592,11 @@ impl RuntimeFactory {
                 .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
                 .unwrap_or_default();
         }
-        self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+        // The interactive client must not turn local credential presence into
+        // selectable or apparently authenticated models. The server's Models
+        // response is authoritative after attach; bootstrap keeps this empty.
+        let _ = snapshot;
+        Vec::new()
     }
 
     /// Built-in providers the policy admits that have no resolvable
@@ -607,6 +611,12 @@ impl RuntimeFactory {
         }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
+        let registered: BTreeSet<String> = self
+            .inner
+            .credentials
+            .list()
+            .map(|records| records.into_iter().map(|record| record.name).collect())
+            .unwrap_or_default();
         let mut remedies = Vec::new();
         for (provider_id, provider) in snapshot.providers() {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
@@ -651,7 +661,7 @@ impl RuntimeFactory {
                 },
                 None => continue,
             };
-            if self.provider_authenticated(provider_id, provider) {
+            if provider_credential_present(provider, &registered) {
                 continue;
             }
             remedies.push(ProviderRemedy {
@@ -6850,8 +6860,7 @@ mod tests {
         let client = factory.load_for_client(&request).unwrap();
         assert!(client.model().is_none());
         let options = factory.client_model_options(&client);
-        assert!(!options.is_empty());
-        assert!(options.iter().all(|option| option.provider == "anthropic"));
+        assert!(options.is_empty());
 
         let served = factory
             .models_for(&ModelCatalogRequest {
@@ -6859,7 +6868,8 @@ mod tests {
                 selection: ModelSelection::default(),
             })
             .unwrap();
-        assert_eq!(served, options);
+        assert!(!served.is_empty());
+        assert!(served.iter().all(|option| option.provider == "anthropic"));
     }
 
     #[test]
@@ -6923,12 +6933,7 @@ mod tests {
         let remedies = factory.unauthenticated_providers(&client);
         assert!(remedies.iter().all(|remedy| remedy.provider != "openai"));
         assert!(remedies.iter().any(|remedy| remedy.provider == "anthropic"));
-        assert!(
-            factory
-                .client_model_options(&client)
-                .iter()
-                .any(|option| option.selection.model.as_deref() == Some("openai/gpt-5.6"))
-        );
+        assert!(factory.client_model_options(&client).is_empty());
     }
 
     #[test]
