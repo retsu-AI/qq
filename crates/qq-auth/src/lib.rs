@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -374,6 +374,7 @@ struct StoredResolutionCoordinator {
 struct StoredResolutionFlight {
     result: Mutex<Option<Result<Secret, StoredResolutionFailure>>>,
     ready: std::sync::Condvar,
+    followers: AtomicUsize,
 }
 
 struct StoredResolutionOwnerGuard {
@@ -1058,12 +1059,14 @@ impl CredentialStore {
             let flight = Arc::new(StoredResolutionFlight {
                 result: Mutex::new(None),
                 ready: std::sync::Condvar::new(),
+                followers: AtomicUsize::new(0),
             });
             state.flights.insert(key.clone(), Arc::clone(&flight));
             break (flight, true);
         };
 
         if !owner {
+            flight.followers.fetch_add(1, Ordering::SeqCst);
             let mut result =
                 flight
                     .result

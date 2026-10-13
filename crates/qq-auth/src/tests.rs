@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2973,6 +2973,18 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
     while !gate.entered.load(Ordering::SeqCst) {
         thread::yield_now();
     }
+    while store
+        .stored_resolution
+        .0
+        .lock()
+        .unwrap()
+        .flights
+        .values()
+        .next()
+        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 3)
+    {
+        thread::yield_now();
+    }
     gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert!(matches!(
@@ -3168,6 +3180,7 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
             let flight = Arc::new(StoredResolutionFlight {
                 result: Mutex::new(None),
                 ready: std::sync::Condvar::new(),
+                followers: AtomicUsize::new(0),
             });
             state.flights.insert(key.clone(), Arc::clone(&flight));
             held.push((key, flight));
