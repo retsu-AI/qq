@@ -1,6 +1,6 @@
 # ADR-0058 — Edit freshness: a unique exact match proves the region was seen
 
-**Status:** Proposed
+**Status:** Accepted (2026-10-13, #281)
 **Date:** 2026-10-11
 **Deciders:** lead; second reviewer required (changes a safety rule)
 **Implements:** [`tool-layer.md`](../plans/tool-layer.md) § D10, T19 (ENG-1030). Amends [`tools.md`](../design/tools.md) § Edit Semantics and § Optimistic Concurrency step 2
