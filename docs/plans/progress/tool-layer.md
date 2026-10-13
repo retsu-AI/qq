@@ -26,7 +26,7 @@ newest last.
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
 | T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
-| T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
+| T20 | Nudge past leading cd; placeholder handle (D10) | In progress | `fix/eng-1035-t20-builtin-hints` | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
 
 ## Entries
 
@@ -607,3 +607,9 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git branch --contains=HEAD created` is a listing. The attached filter forms now select list mode, like the separated forms.
 - `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
 - `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.
+
+### 2026-10-13 — T20 started (ENG-1035)
+
+- Isolated worktree `.worktrees/t20`, base T19 `db44ecf2`; current tightened D10 spec governs.
+- Preserve oversized search/ranges corrections, skip only lexical relative unquoted `cd DIR &&`, correct zero handles before store lookup.
+- Pre-change `tool_dispatch` captured in `target/qq-perf/t20-2026-10-13/baseline.log`; focused regressions and workspace qualification next.

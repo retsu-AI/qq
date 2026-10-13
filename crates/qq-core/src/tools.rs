@@ -276,6 +276,34 @@ mod tests {
     }
 
     #[test]
+    fn t20_oversized_search_and_ranges_keep_lossless_corrections() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), "x\n".repeat(100)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments, code) in [
+            (
+                "search",
+                r#"{"query":"x","max_per_file":80}"#,
+                "invalid_max_per_file:",
+            ),
+            (
+                "read_file",
+                r#"{"path":"a","ranges":["1","2","3","4","5","6","7","8","9"]}"#,
+                "invalid_ranges:",
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(result.is_error, "{}", result.model_text);
+            assert!(result.model_text.starts_with(code), "{}", result.model_text);
+            assert_eq!(
+                qq_protocol::ToolErrorKind::of(name, &result.model_text),
+                qq_protocol::ToolErrorKind::Correction
+            );
+        }
+    }
+
+    #[test]
     fn read_file_ranges_merge_align_and_report_bounds() {
         let directory = tempfile::tempdir().unwrap();
         let content: String = (1..=120).map(|n| format!("line {n}\n")).collect();
