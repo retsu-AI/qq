@@ -3084,6 +3084,18 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
             )
         })
     };
+    while store
+        .stored_resolution
+        .0
+        .lock()
+        .unwrap()
+        .flights
+        .values()
+        .next()
+        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 1)
+    {
+        thread::yield_now();
+    }
     keyring.release.store(true, Ordering::SeqCst);
     assert!(owner.join().is_err());
     assert!(matches!(

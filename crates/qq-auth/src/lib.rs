@@ -381,6 +381,7 @@ struct StoredResolutionOwnerGuard {
     coordinator: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
     key: StoredResolutionKey,
     flight: Arc<StoredResolutionFlight>,
+    failure: StoredResolutionFailure,
     completed: bool,
 }
 
@@ -398,7 +399,7 @@ impl Drop for StoredResolutionOwnerGuard {
             Ok(result) => result,
             Err(poisoned) => poisoned.into_inner(),
         };
-        *result = Some(Err(StoredResolutionFailure::Coordinator("owner_panic")));
+        *result = Some(Err(self.failure.clone()));
         self.flight.ready.notify_all();
         self.coordinator.1.notify_all();
     }
@@ -1094,16 +1095,21 @@ impl CredentialStore {
             coordinator: Arc::clone(&self.stored_resolution),
             key: key.clone(),
             flight: Arc::clone(&flight),
+            failure: StoredResolutionFailure::Coordinator("owner_panic"),
             completed: false,
         };
         let outcome = self
             .resolve_stored_from_index(index, name, expected_endpoint)
             .map_err(StoredResolutionFailure::from_auth_error);
-        let mut state = coordinator
-            .lock()
-            .map_err(|_| AuthError::CredentialCoordinator {
-                operation: "lock_poisoned",
-            })?;
+        let mut state = match coordinator.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                owner_guard.failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                return Err(AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                });
+            }
+        };
         if let Ok(secret) = &outcome {
             state.cache.entries.push_back(StoredResolutionCacheEntry {
                 name: name.to_owned(),
@@ -1117,10 +1123,19 @@ impl CredentialStore {
             }
         }
         state.flights.remove(&key);
-        if let Ok(mut result) = flight.result.lock() {
-            *result = Some(outcome.clone());
-            flight.ready.notify_all();
-        }
+        let mut result = match flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => {
+                let mut result = poisoned.into_inner();
+                let failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                *result = Some(Err(failure.clone()));
+                flight.ready.notify_all();
+                owner_guard.completed = true;
+                return Err(failure.into_auth_error(name));
+            }
+        };
+        *result = Some(outcome.clone());
+        flight.ready.notify_all();
         wake.notify_all();
         owner_guard.completed = true;
         outcome.map_err(|failure| failure.into_auth_error(name))
