@@ -168,6 +168,9 @@ impl SessionStore {
                         .unwrap_or(view.summary.estimated_cost_usd_nanos);
                     let stats = view.runs.entry(*run_id).or_default();
                     stats.started_at_ms = Some(envelope.occurred_at_ms);
+                    stats.owned_step = session
+                        .active_run_id
+                        .is_some_and(|active| active != *run_id);
                     stats.cost_usd_nanos = cost_before;
                     stats.plan = plan.as_deref().map(plan_label);
                     if let Some(messages) = view.messages.as_mut() {
@@ -646,7 +649,11 @@ impl SessionStore {
                 // live tool and approval state stay.
                 let owned_step = session
                     .active_run_id
-                    .is_some_and(|active| active != *run_id);
+                    .is_some_and(|active| active != *run_id)
+                    || self
+                        .get(&session_id)
+                        .and_then(|view| view.runs.get(run_id))
+                        .is_some_and(|stats| stats.owned_step);
                 let cost_before = self
                     .get(&session_id)
                     .and_then(|view| view.runs.get(run_id))
@@ -694,7 +701,9 @@ impl SessionStore {
                     let retained: HashSet<_> =
                         messages.iter().map(|message| message.run_id).collect();
                     view.reasoning.retain(|run, _| retained.contains(run));
-                    view.runs.retain(|run, _| retained.contains(run));
+                    view.runs.retain(|run, stats| {
+                        retained.contains(run) || (stats.owned_step && stats.outcome.is_none())
+                    });
                     let state = match outcome {
                         RunOutcome::Completed => MessageState::Complete,
                         RunOutcome::Cancelled => MessageState::Cancelled,

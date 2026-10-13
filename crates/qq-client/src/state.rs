@@ -364,6 +364,10 @@ impl SessionStore {
         view.live = LiveStatus::from_body(&messages, &tool_calls, self.sanitizer);
         for run in &snapshot.runs {
             let stats = view.runs.entry(run.id).or_default();
+            // A running run outside the session's active slot is internal.
+            // Keep that identity if the prompt settles before its step does.
+            stats.owned_step = run.status == qq_protocol::RunStatus::Running
+                && view.summary.active_run_id != Some(run.id);
             stats.outcome = run.outcome.clone();
             stats.usage = run.usage;
             stats.cost_usd_nanos = run.estimated_cost_usd_nanos;
@@ -668,6 +672,9 @@ impl Reasoning {
 /// outcome and usage until the protocol records run timing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
+    /// An internal step observed outside the session's active-run slot.
+    /// Its finish remains bookkeeping after the active prompt settles.
+    pub owned_step: bool,
     pub started_at_ms: Option<u64>,
     /// When the first assistant text of the run arrived: time to first token.
     pub first_token_at_ms: Option<u64>,

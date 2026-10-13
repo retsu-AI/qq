@@ -531,3 +531,5 @@ AC3 reserves session-store schema 44 → 45 for a non-unique partial `runs_owned
 AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existing ModelTurnCompleted/RunFinished projection: internal measured summarizer turns must remain scoped to their run, serialized replay must match live application, and internal failure must preserve the prompt's activity/approval state. No client wire or production seam change is authorized absent a concrete failing regression.
 
 AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
+
+AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
