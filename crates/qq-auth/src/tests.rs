@@ -3273,3 +3273,136 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
     assert!(result.1 > epoch);
     assert_eq!(keyring.read_count("provider/target"), 1);
 }
+
+#[test]
+fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/active", "secret", false).unwrap();
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    while !gate.entered.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    while store
+        .stored_resolution
+        .0
+        .lock()
+        .unwrap()
+        .flights
+        .values()
+        .next()
+        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 1)
+    {
+        thread::yield_now();
+    }
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("active coordinator poison");
+        })
+        .join()
+        .is_err()
+    );
+    gate.release.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    owner.join().unwrap();
+    follower.join().unwrap();
+    assert!(store.stored_resolution.0.lock().is_err());
+}
+
+#[test]
+fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/result", "secret", false).unwrap();
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    while !gate.entered.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    let flight = loop {
+        if let Some(flight) = store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+        {
+            if flight.followers.load(Ordering::SeqCst) >= 1 {
+                break Arc::clone(flight);
+            }
+        }
+        thread::yield_now();
+    };
+    let poisoned_result = Arc::clone(&flight);
+    assert!(
+        thread::spawn(move || {
+            let _guard = poisoned_result.result.lock().unwrap();
+            panic!("active result poison");
+        })
+        .join()
+        .is_err()
+    );
+    gate.release.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    owner.join().unwrap();
+    follower.join().unwrap();
+    let secret = store
+        .resolve(&SecretRef::Stored("provider/result".to_owned()))
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+}
