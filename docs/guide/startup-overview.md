@@ -58,7 +58,7 @@ not prove deployment or customer acceptance.
 | Area | Snapshot | Access and limit |
 | --- | --- | --- |
 | QQ | `9bae6937b50a013f652db8963ac3590103eb4b84`, origin `main` | Public source; [QQ source](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84) |
-| Retsu | `b889cd9e531438e4c54b25aa5ff9dc281c5e6888`, local `main`, 2026-09-30 snapshot | Private repository access required; local snapshot was 65 commits behind its remote at review |
+| Retsu | `8d58080829231bb74e180c6de4e8f687c4606200`, origin `main`, 2026-10-09 fetched snapshot | Private repository access required; `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` is historical and older auth/session source |
 | Assistant Rust | `ebd0dbb39cdb63cdc5eb9968366a568c442289b8`, branch `codex/rust-assistant-slice` | Private candidate source; provider and hosted acceptance unverified |
 | Assistant Mac | `a4a1d247a26c7019e4d4cec1ea84f3cd4ed309cd`, branch `feat/local-mac-assistant` | Private candidate source; native acceptance unverified |
 | Assistant iOS | `a3ef908573b73fbc3fe35dd00336fa4ef2eab21a`, branch `feat/ios-paired-continuation` | Private candidate source; device and remote acceptance unverified |

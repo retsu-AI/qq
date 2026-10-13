@@ -1,7 +1,8 @@
 # Direct and assistant modes
 
-The native candidates are clients of QQ. The reviewed sources do not establish
-that both direct and assistant UI modes are currently shipped.
+The native candidates are clients of QQ. The same Mac and iOS clients are
+intended to offer both direct and assistant modes. Neither mode is shipped in
+the reviewed candidates.
 
 ## Current client source
 

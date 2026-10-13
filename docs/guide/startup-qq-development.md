@@ -30,9 +30,12 @@ and the local server boundary in
    cleanup when those paths are part of the claim.
 7. Adopt the candidate explicitly, or retain the prior revision and record why.
 
-For documentation-only work, a guide sync and site check are the relevant
-local checks; Rust workspace suites belong to source changes. Do not turn a
-green build into provider, deployment, payment, or customer acceptance.
+For a QQ source change, follow the repository runbook, including its `nub run
+build` path and docs-truth checks over every guide. Those checks parse command
+examples and compatibility labels; they are part of normal repository guidance.
+For this documentation-only delivery, the scoped checks are the guide sync and
+site check, and no Cargo suite was run. A green check still does not establish
+provider, deployment, payment, or customer acceptance.
 
 ## Evidence and delivery
 

@@ -26,9 +26,13 @@ pnpm check
 pnpm build
 ```
 
-The build runs guide sync, Astro checks, static generation, and internal link
-and fragment validation. Run the narrowest check while editing; the release
-owner runs the full site and browser checks on the integrated revision.
+The repository website runbook uses `nub run build` for the full docs and site
+path; it includes the docs-truth checks that parse every guide. `pnpm sync` and
+`pnpm check` are focused site checks for local iteration, while `pnpm build`
+checks static generation and internal links. Run the narrowest relevant check
+while editing; the release owner runs the full site and browser checks on the
+integrated revision. This documentation task intentionally runs no Cargo or
+unit/integration suite.
 
 ## Preserve and roll back
 

@@ -17,8 +17,10 @@ pending intent. QQ owns provider credentials, session and run state, tool
 execution, and authoritative events. A lost response stays uncertain. The
 assistant does not invent a replacement request or silently replay it.
 
-This is a private candidate source at observed head
-`ebd0dbb39cdb63cdc5eb9968366a568c442289b8` on `codex/rust-assistant-slice`.
+This is a private candidate source pinned for this guide at
+`ebd0dbb39cdb63cdc5eb9966a568c442289b8` on `codex/rust-assistant-slice`; a
+later moving branch head is not used as acceptance evidence. The converse
+binary is `src/bin/qq-assistant-converse.rs` in that candidate.
 Repository access is required. Local source checks do not prove useful model
 output, a hosted gateway, or a shipped assistant.
 
@@ -29,8 +31,10 @@ dashboard, and memory, context, tool, plugin, and model boundaries. Those are
 planned composition surfaces. They are not all implemented in the reviewed
 candidate.
 
-The Mac and iOS candidates own client selection, local memory, drafts, and
-pending command identities. QQ remains the host authority. The clients do not
+The Mac and iOS candidates currently contain client-side selection, memory,
+drafts, and pending command identities. In the selected design, the Rust
+assistant owns product project and memory records; the native clients retain
+local UI and journal state. QQ remains the host authority. The clients do not
 own a second agent engine or provider key store.
 
 ## Acceptance boundary

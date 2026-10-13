@@ -24,17 +24,16 @@ A pin records the reviewed descriptor set; it does not guarantee the server's
 future behavior. See the detailed [MCP servers](mcp.md) guide for stdio,
 streamable HTTP, credentials, and grant configuration.
 
-The `qq-development` MCP server helper is separate development tooling. It
-may help a developer inspect or exercise a repository, but it is not QQ's
-runtime client, does not grant QQ tools, and is not evidence of a hosted MCP
-service. Candidate or private helper source requires repository access.
+A local development MCP helper may assist repository inspection, but it is
+separate development tooling rather than QQ's runtime client. It does not
+grant QQ tools and is not evidence of a hosted MCP service. Its source and
+availability require the relevant private development checkout.
 
 ## ACP status
 
 The reviewed QQ snapshot is `9bae6937b50a013f652db8963ac3590103eb4b84`
 (origin/main). It contains no accepted ACP endpoint, adapter, or operator
-workflow. Do not infer ACP compatibility from an unrelated editor or agent
-project, including a Devin ACP implementation. ACP remains a candidate
+workflow. Do not infer ACP compatibility from another editor or agent project. ACP remains a candidate
 compatibility surface until a source implementation, protocol identity,
 conformance check, and runtime evidence are accepted.
 

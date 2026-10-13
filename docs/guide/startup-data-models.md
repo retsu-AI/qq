@@ -17,10 +17,10 @@ credentials or copy the authoritative QQ transcript.
 
 ## Grip model and API data
 
-The private Retsu source separates request text and schema, model output,
+The current private Retsu source pin is `8d58080829231bb74e180c6de4e8f687c4606200` (origin/main fetched 2026-10-09; repository access required). The earlier `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` snapshot is historical. The current source separates request text and schema, model output,
 usage, API keys, accounts, credits, and billing ledger records. `grip serve`
 is a stateless model backend. The gateway owns customer identity, rate limits,
-credits, and usage. [The Retsu API reference](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/docs/reference/api.md)
+credits, and usage. [The Retsu API reference](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/docs/reference/api.md)
 requires repository access and describes the request and response contract.
 
 ## Platform2 local workflow

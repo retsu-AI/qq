@@ -26,10 +26,13 @@ store. Staging and production branches, DNS automation, and the
 staging-to-production path are planned source work. They are not established
 by the Cloudflare or Modal files above.
 
-The capabilities API route was observed returning 404 during review. The
-proposed staging and Mesh DNS names did not resolve (NXDOMAIN). Treat those
-capabilities and hostnames as unverified until a current route read, DNS read,
-deployment identity, health result, and rollback record are available.
+The hosted Retsu capabilities endpoint, whose source candidate is PR31 and is
+not in the reviewed snapshot or deployed, returned 404 during the
+specification owner's review. This is unrelated to QQ's local implemented
+`POST /v1/capabilities`. The proposed staging and Mesh DNS names did not
+resolve (NXDOMAIN). Treat those capabilities and hostnames as unverified until
+a current route read, DNS read, deployment identity, health result, and
+rollback record are available.
 
 ## What an operational claim needs
 
