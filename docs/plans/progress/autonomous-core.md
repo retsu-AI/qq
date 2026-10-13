@@ -102,7 +102,7 @@ appended below, newest last.
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
 | AC16 | Retention (ENG-803) | Planned | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) | | Evidence from AC0 |
-| AC17 | Tolerant read-only arguments (was RR10) | In progress | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | `fix/eng-872-ac17-tolerant-arguments` | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
+| AC17 | Tolerant read-only arguments (was RR10) | In review | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | [#294](https://github.com/retsu-AI/qq/pull/294) | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
 | AC18 | Truncated-call recovery and honest exhaustion outcome (RR8 residuals) | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | Synthetic re-issue missing; exhaustion still fails; ADR-0048 outcome decision before implementation |
 | AC19 | Bounded stream repair (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | Normal completion, missing ids, reasoning display cap remain |
 | AC20 | Evidence-led latency diagnostics (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | No permanent stats or wire/schema work without a measured consumer |
@@ -1272,3 +1272,5 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Commits: regression-first `33f402b8`, implementation `5f86e9f`. Six tools regressions and one session regression added. Workspace: **2,250 passed / 0 failed / 14 ignored** (one nested embedding child invocation excluded). Final focused repair suite: 6 passed.
 - Commands passed: `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo build --workspace`; `cargo test --workspace -- --test-threads=4`; `git diff --check`. Final fmt/Clippy/focused tests rerun after strengthening the complete-spill comparison. No provider files/features changed.
 - Performance and independent review receipts above. Protocol/descriptor/schema unchanged; tools design amended. AC17 ready to submit on reviewed consolidation parent #291. Full-plan gates remain open.
+
+- AC17 submitted as ready [PR #294](https://github.com/retsu-AI/qq/pull/294), base consolidation branch #291. ENG-872 In Review. Awaiting Codex opening-description thumbs-up; not merged.
