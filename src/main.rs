@@ -42,19 +42,35 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let cli = cli::Cli::parse();
     validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
+    let diagnostic = cli
+        .credential_diagnostics
+        .as_deref()
+        .map(diagnostic::DiagnosticSession::open)
+        .transpose()?;
+    let diagnostic = diagnostic.map(Arc::new);
+    let diagnostic_sink: Option<Arc<dyn auth::CredentialDiagnosticSink>> = diagnostic
+        .as_ref()
+        .map(|session| Arc::clone(session) as Arc<dyn auth::CredentialDiagnosticSink>);
     let overrides = CliOverrides {
         model: cli.model,
         max_output_tokens: cli.max_output_tokens,
         organization: cli.organization,
+        diagnostic: diagnostic_sink,
     };
 
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-        Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Run(args)) => {
+            let code = headless_run(args, &overrides).await;
+            if let Some(session) = diagnostic {
+                session.close();
+            }
+            return Ok(code);
+        }
         Some(cli::Command::Serve {
             bind,
             allow_origins,
-        }) => serve(bind, &allow_origins).await?,
+        }) => serve(bind, &allow_origins, overrides.diagnostic.clone()).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -87,6 +103,10 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
 
+    if let Some(session) = diagnostic {
+        session.close();
+    }
+
     Ok(ExitCode::SUCCESS)
 }
 
@@ -113,11 +133,12 @@ fn version_report() -> String {
     )
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct CliOverrides {
     model: Option<String>,
     max_output_tokens: Option<u32>,
     organization: Option<String>,
+    diagnostic: Option<Arc<dyn auth::CredentialDiagnosticSink>>,
 }
 
 impl CliOverrides {
@@ -150,7 +171,7 @@ impl CliOverrides {
 }
 
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
-    let factory = runtime::RuntimeFactory::system()?;
+    let factory = runtime::RuntimeFactory::system_with_diagnostic(overrides.diagnostic.clone())?;
     let load = overrides.load_request()?;
     let compiler = factory.clone();
     let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
@@ -322,7 +343,8 @@ async fn prepare_headless(
         }
     };
 
-    let factory = runtime::RuntimeFactory::system().map_err(|error| invalid(error.to_string()))?;
+    let factory = runtime::RuntimeFactory::system_with_diagnostic(overrides.diagnostic.clone())
+        .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
@@ -435,7 +457,11 @@ async fn prepare_headless(
     Ok((handler.sessions().clone(), options))
 }
 
-async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(), Box<dyn Error>> {
+async fn serve(
+    bind: std::net::SocketAddr,
+    allow_origins: &[String],
+    diagnostic: Option<Arc<dyn auth::CredentialDiagnosticSink>>,
+) -> Result<(), Box<dyn Error>> {
     let options = server::ServerOptions::for_user()?
         .with_bind_address(bind)
         .with_version(cli::BUILD_VERSION)
@@ -445,7 +471,7 @@ async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
-            let factory = runtime::RuntimeFactory::system()?;
+            let factory = runtime::RuntimeFactory::system_with_diagnostic(diagnostic)?;
             // The server's own configuration decides the approval wait for
             // every session it serves: a server-side control like the Jev
             // settings, not one a client forwards. Absent is no deadline. A
@@ -814,8 +840,12 @@ impl InteractiveEnvironment {
     ) -> Result<Self, Box<dyn Error>> {
         let Some(root) = tui_qa_root else {
             let config = config::ConfigLoader::system()?;
-            let factory =
-                runtime::RuntimeFactory::new(config.clone(), auth::CredentialStore::system()?)?;
+            let credentials = auth::CredentialStore::system()?;
+            let credentials = match overrides.diagnostic.clone() {
+                Some(sink) => credentials.with_diagnostic_sink(sink),
+                None => credentials,
+            };
+            let factory = runtime::RuntimeFactory::new(config.clone(), credentials)?;
             return Ok(Self {
                 factory,
                 config,
@@ -833,6 +863,10 @@ impl InteractiveEnvironment {
         ));
         let credentials =
             auth::CredentialStore::with_paths(auth::CredentialPaths::new(root.join("credentials")));
+        let credentials = match overrides.diagnostic.clone() {
+            Some(sink) => credentials.with_diagnostic_sink(sink),
+            None => credentials,
+        };
         let workspace = root.join("workspace");
         let factory = runtime::RuntimeFactory::isolated_tui_qa(
             config.clone(),

@@ -2995,6 +2995,60 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
     assert_eq!(keyring.read_count("provider/work"), 1);
 }
 
+struct DiagnosticCollector(Mutex<Vec<CredentialDiagnosticEvent>>);
+
+impl CredentialDiagnosticSink for DiagnosticCollector {
+    fn emit(&self, event: CredentialDiagnosticEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/diagnostic",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    let collector = Arc::new(DiagnosticCollector(Mutex::new(Vec::new())));
+    let store = store.with_diagnostic_sink(collector.clone());
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/diagnostic".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/diagnostic"), 1);
+    let events = collector.0.lock().unwrap();
+    assert!(matches!(events.as_slice(), [
+        CredentialDiagnosticEvent::BackendReadStarted { .. },
+        CredentialDiagnosticEvent::BackendReadReturned { .. },
+    ]));
+    assert!(events.iter().all(|event| match event {
+        CredentialDiagnosticEvent::BackendReadStarted {
+            store_id,
+            coordinator_id,
+            flight_id,
+            read_id,
+            ..
+        }
+        | CredentialDiagnosticEvent::BackendReadReturned {
+            store_id,
+            coordinator_id,
+            flight_id,
+            read_id,
+            ..
+        } => *store_id != 0 && *coordinator_id != 0 && *flight_id == *read_id,
+        CredentialDiagnosticEvent::CacheHit { .. } => false,
+    }));
+}
+
 #[test]
 fn stored_keyring_resolution_failure_is_shared_and_retryable() {
     let (store, keyring, _directory) = test_store();
@@ -3238,6 +3292,7 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
                 epoch,
             };
             let flight = Arc::new(StoredResolutionFlight {
+                flight_id: 0,
                 result: Mutex::new(None),
                 ready: std::sync::Condvar::new(),
                 followers: AtomicUsize::new(0),
@@ -3403,6 +3458,7 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
                     epoch,
                 },
                 Arc::new(StoredResolutionFlight {
+                    flight_id: 0,
                     result: Mutex::new(None),
                     ready: std::sync::Condvar::new(),
                     followers: AtomicUsize::new(0),

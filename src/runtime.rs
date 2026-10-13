@@ -240,6 +240,17 @@ impl RuntimeFactory {
         Self::new(ConfigLoader::system()?, CredentialStore::system()?)
     }
 
+    pub fn system_with_diagnostic(
+        diagnostic: Option<std::sync::Arc<dyn qq_auth::CredentialDiagnosticSink>>,
+    ) -> Result<Self, RuntimeBuildError> {
+        let credentials = CredentialStore::system()?;
+        let credentials = match diagnostic {
+            Some(sink) => credentials.with_diagnostic_sink(sink),
+            None => credentials,
+        };
+        Self::new(ConfigLoader::system()?, credentials)
+    }
+
     pub fn new(
         config: ConfigLoader,
         credentials: CredentialStore,
