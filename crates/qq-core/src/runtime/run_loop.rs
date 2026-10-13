@@ -2806,9 +2806,11 @@ impl RunState {
                                         runtime::builtin_alternative(&command)
                                     })
                                     .flatten()
-                                    .map(|(program, builtin)| {
+                                    .filter(|alternative| alternative.refuse)
+                                    .map(|alternative| {
                                         format!(
-                                            "use_builtin: {program} is refused under policy.builtin_preference=strict; use {builtin} instead"
+                                            "use_builtin: {} is refused under policy.builtin_preference=strict; use {} instead",
+                                            alternative.program, alternative.builtin
                                         )
                                     });
                                 let result = match call.rejection.clone().or(strict_refusal) {
@@ -2984,6 +2986,10 @@ impl RunState {
                                             Ok(arguments) => match runtime::SpillHandle::parse(&arguments.handle) {
                                                 None => tools::bounded_result(
                                                     "handle_invalid: expected t:<tool>:<call8>:<digest8>".to_owned(),
+                                                    true,
+                                                ),
+                                                Some(handle) if handle.call_prefix == "00000000" && handle.digest_prefix == "00000000" => tools::bounded_result(
+                                                    "handle_placeholder: t:<tool>:<call8>:<digest8> is the example shape; copy the handle from the …[qq: … t:…]… marker of the result you want".to_owned(),
                                                     true,
                                                 ),
                                                 Some(handle) => match spills.read(handle).await {

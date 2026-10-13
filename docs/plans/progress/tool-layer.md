@@ -26,7 +26,7 @@ newest last.
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
 | T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
-| T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
+| T20 | Nudge past leading cd; placeholder handle (D10) | In review | `fix/eng-1035-t20-builtin-hints` [#285](https://github.com/retsu-AI/qq/pull/285) | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
 
 ## Entries
 
@@ -608,6 +608,18 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
 - `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.
 
+### 2026-10-13 — T20 started (ENG-1035)
+
+- Isolated worktree `.worktrees/t20`, base T19 `db44ecf2`; current tightened D10 spec governs.
+- Preserve oversized search/ranges corrections, skip only lexical relative unquoted `cd DIR &&`, correct zero handles before store lookup.
+- Pre-change `tool_dispatch` captured in `target/qq-perf/t20-2026-10-13/baseline.log`; focused regressions and workspace qualification next.
+
+### 2026-10-13 — T20 implementation and independent review
+
+- Test-first commit `cc481b02`: placeholder dispatch and leading-cd strict/hint tests failed on T19; oversized bounds guard passed. Four focused regressions now pass, including lexical prefix and attached option paths.
+- Hint and strict refusal eligibility are separate; no classifier reparse. Zero handles return `handle_placeholder` before a spill lookup, graded Correction. Prompt/marker already use symbolic handles and need no version change.
+- Independent second-agent review requested changes for attached `grep -f/tmp/patterns`; fixed conservatively for dash-prefixed slash operands and covered absolute/parent forms. Re-review verdict Approve implementation; qualification remains pending.
+
 ### 2026-10-13 — T19 adjacency (#281)
 
 - The deletion-boundary guard used strict comparisons, so an edit adjacent to an earlier replacement (`abcd`: `ab`→`AB` then `cd`→`CD`) was refused. Written spans now use ordinary half-open overlap, and an empty deletion point counts only when it lies strictly inside the later match. `A--AB--B` is still refused. Adjacent and post-deletion edits apply (new rows).
@@ -627,3 +639,41 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git -h`/`-v` are terminal like `--help`/`--version`.
 - `approval` 93 tests pass; the size regression runs in 0.06 s.
 - Merge state: #280 (38 threads) and #281 (7) are fully resolved; #283 is resolved after this push. Lead decision: merge now. Any later Codex finding on the classifier is filed against ENG-1033 with its command string and wrong verdict.
+
+### 2026-10-13 — T20 prerequisite expansion repair
+
+- T18 `89a5582f` fixes the three tracked residual verdicts but introduced recursive `env -S` expansion. Independent review found repeated `A='${A}${A}'` assignments double intermediate text; a bounded eight-assignment regression failed before the fix (`c612655`).
+- Substitution now reads only the original string, uses the last assignment, and refuses to expand beyond the classifier's existing 16 KiB bound. Regression enlarged to 40 repetitions after repair, plus last-assignment and cap cases. No huge input expansion executed.
+- This new resource regression is repaired before stack merge, rather than waived as a follow-up. Ownership recorded in root ledger; independent re-review and final gates pending.
+
+
+### 2026-10-13 — T20 qualification receipt (ENG-1035)
+
+Commit: source head `e58074c0`; prerequisite test-first `c612655` / repair `4dbf121`; T20 test-first `cc481b02`.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=2`: 2242 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 94 passed.
+Checks: `cargo fmt --all -- --check`; `CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --all-features -- -D warnings`; `CARGO_BUILD_JOBS=2 cargo build --workspace`: pass. Exact-test guard: 10 fixtures pass.
+Gate: `tool_dispatch`, 30 alternating saved-binary pairs, median 66.828 → 64.088 µs/iteration; paired ratio median 1.036, same-binary A/A 0.969 (30 pairs). Budget unchanged; no regression demonstrated within control noise (A/A ratio MAD 0.186).
+Gate: final `classify_command` 1 KiB median of 3: 163.433 µs ≤ 200 µs. This characterizes the inherited approval repair; T18 baseline receipt remains above.
+Host: no concurrent builds/tests/reviews during paired recording; IO some avg10 45.23 → 39.64 %. No tail or speedup claim.
+Review: independent agent `t20_review` Approve T20 and bounded prerequisite repair; attached absolute options and recursive expansion findings repaired.
+Earlier qualification runs hit headless timeouts under contention and TUI ANSI assertions with inherited `NO_COLOR=1`; final full rerun above is green, with no failed gate waived.
+Docs: tools design, plan ownership/wording, root ownership request, and this ledger; no protocol/schema/prompt version change from T20.
+Open: [#285](https://github.com/retsu-AI/qq/pull/285) hosted CI and main merge; D10 week-after-landing observation, ENG-1032 and ENG-1033 follow-ups remain separate.
+Evidence: `target/qq-perf/t20-2026-10-13/` (untracked; initial baseline recorded before first edit, original binary retained).
+
+### 2026-10-13 — T20 expansion-overflow refusal repair
+
+- Late #285 review found that the cap's early return dropped a visible `sudo` prefix, newly downgrading Forbidden to Prompt. Test-first `99a07e4` reproduced it below the raw-source limit; no merge was attempted after the finding.
+- Preserve and classify the bounded prefix, propagate overflow through nested collectors, and refuse every expanded-over-limit command with `command_too_long`, including under `full`. This also preserves the floor when a forbidden flag/program lies beyond the cap. Raw source over 16 KiB still prompts as before.
+- Focused `cargo test -p qq-core approval -- --test-threads=4`: 95 passed, 0 failed, including sudo, benign echo, late force, env option operands, and nested echo overflow. Independent `t20_review` verified this log and approved; design amended in the same repair. Final workspace and measurements are rerun before push.
+
+### 2026-10-13 — T20 final overflow qualification (supersedes earlier receipt)
+
+Commit: source `4f0185f1`; overflow test-first `99a07e4`, independent `t20_review` Approve.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=4`: 2243 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 95 passed.
+Checks: workspace formatting, all-target/all-feature Clippy with warnings denied, and workspace build pass; build jobs bounded to 2. Earlier exact-test guard's 10 fixtures remain applicable (script unchanged).
+Gate: `tool_dispatch`, 30 saved-baseline/candidate pairs: medians 58.888 → 59.162 µs; paired ratio median 0.974, same-binary A/A ratio median 1.036, A/A ratio MAD 0.124. No regression demonstrated within control noise; unchanged budget, no tail or speedup claim.
+Gate: `classify_command` 1 KiB median of 3: 167.050 µs ≤ 200 µs.
+Host: no concurrent session-owned build/test/review during measurement; shared-host IO pressure recorded in `pressure-overflow-{before,after}.txt`. Other workloads are outside this session's control.
+Evidence: `target/qq-perf/t20-2026-10-13/{workspace-test-overflow-qualified,clippy-overflow-qualified,build-overflow-qualified}.log`, `paired-overflow-{raw.log,summary.json}` (untracked).
+Open: final hosted CI, native stack merge, and immediate shipped-status reconciliation; D9/D10 observation and ENG-1032/ENG-1033 remain separate.

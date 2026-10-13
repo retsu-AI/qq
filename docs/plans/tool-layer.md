@@ -524,7 +524,7 @@ unread file does not qualify (whole batch refused, nothing written), an
 `if_hash` mismatch (unchanged), and a refusal text that contains no `h:`
 of the current content. Gate: `edit_batch` unchanged.
 
-**T20 — the nudge reaches compound commands; small clamps.**
+**T20 — nudge past leading cd; placeholder spill correction.**
 
 - `builtin_alternative` skips a leading `cd DIR &&` and then judges the
   first program, as today. `DIR` must be relative with no `..`, since
@@ -542,7 +542,7 @@ of the current content. Gate: `edit_batch` unchanged.
   hints `read_file ranges`. A replaceable program later in a list or
   pipeline (`cargo test && grep x log`) gets no hint and no `strict`
   refusal: the compound needs the shell. The skip uses no classifier
-  reparse, so `approval/classify.rs` is untouched. It accepts only a
+  reparse. It accepts only a
   leading `cd` whose operand is one unquoted word with no shell
   metacharacters. A quoted or escaped operand (`cd 'x;grep y z' && …`) is
   not skipped, so that command gets no hint and no refusal, and is a
@@ -616,7 +616,7 @@ table is `tools.md` § Approval Policy.
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
 | T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools/specs.rs` (`edit_file` description), `runtime/prompt.rs` (read-before-edit bullet, prompt version), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
-| T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (`read_tool_result` dispatch only), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
+| T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (strict built-in refusal and `read_tool_result` dispatch), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9 → T15 → T16 → T17 (v0.1.6);

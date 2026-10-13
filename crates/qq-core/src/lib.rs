@@ -1970,6 +1970,7 @@ pub enum RuntimeConfigError {
 #[cfg(test)]
 mod tests {
     mod progress;
+    mod t20;
 
     use std::{
         sync::{
