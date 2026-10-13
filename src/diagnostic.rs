@@ -113,7 +113,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
             } => Event::OwnerAdmitted {
                 session_id,
@@ -123,7 +123,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
             },
             auth::CredentialDiagnosticEvent::FlightJoined {
@@ -131,7 +131,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
             } => Event::FlightJoined {
                 session_id,
@@ -141,14 +141,14 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
             },
             auth::CredentialDiagnosticEvent::CacheHit {
                 store_id,
                 coordinator_id,
                 attempt_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
             } => Event::CacheHit {
                 session_id,
@@ -157,7 +157,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 store_id,
                 coordinator_id,
                 attempt_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
             },
             auth::CredentialDiagnosticEvent::BackendReadStarted {
@@ -165,7 +165,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
             } => Event::BackendReadStarted {
                 session_id,
@@ -175,7 +175,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
             },
             auth::CredentialDiagnosticEvent::BackendReadReturned {
@@ -183,7 +183,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
             } => Event::BackendReadReturned {
                 session_id,
@@ -193,7 +193,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
             },
             auth::CredentialDiagnosticEvent::ResolutionFinished {
@@ -201,7 +201,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                route,
                 endpoint,
                 outcome,
             } => Event::ResolutionFinished {
@@ -212,7 +212,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 attempt_id,
                 flight_id,
-                route: Route::StoredKeyring,
+                route: route.into(),
                 endpoint: endpoint.into(),
                 outcome,
             },
@@ -229,6 +229,16 @@ impl From<auth::CredentialDiagnosticEndpoint> for Endpoint {
             auth::CredentialDiagnosticEndpoint::Xai => Self::Xai,
             auth::CredentialDiagnosticEndpoint::CustomLoopback => Self::CustomLoopback,
             auth::CredentialDiagnosticEndpoint::Other => Self::Other,
+        }
+    }
+}
+
+impl From<auth::CredentialDiagnosticRoute> for Route {
+    fn from(route: auth::CredentialDiagnosticRoute) -> Self {
+        match route {
+            auth::CredentialDiagnosticRoute::StoredKeyring => Self::StoredKeyring,
+            auth::CredentialDiagnosticRoute::CodexOAuth => Self::CodexOAuth,
+            auth::CredentialDiagnosticRoute::XaiOAuth => Self::XaiOAuth,
         }
     }
 }

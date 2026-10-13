@@ -44,6 +44,8 @@ pub trait CredentialDiagnosticSink: Send + Sync {
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum CredentialDiagnosticRoute {
     StoredKeyring,
+    CodexOAuth,
+    XaiOAuth,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1039,12 +1041,25 @@ impl CredentialStore {
 
     async fn load_request_credential<T, F>(
         &self,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
         operation: F,
     ) -> Result<Result<T, AuthError>, qq_provider::RequestCredentialError>
     where
         T: Send + 'static,
         F: FnOnce(CredentialStore) -> Result<T, AuthError> + Send + 'static,
     {
+        let read_id = self.diagnostic.as_ref().map(|context| context.id());
+        if let (Some(context), Some(read_id)) = (self.diagnostic.as_ref(), read_id) {
+            context.sink.emit(CredentialDiagnosticEvent::BackendReadStarted {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                flight_id: 0,
+                read_id,
+                route,
+                endpoint,
+            });
+        }
         let permit = tokio::time::timeout(
             REQUEST_CREDENTIAL_CAPACITY_TIMEOUT,
             Arc::clone(&self.request_credential_permits).acquire_owned(),
@@ -1057,10 +1072,21 @@ impl CredentialStore {
             let _permit = permit;
             operation(store)
         });
-        tokio::time::timeout(REQUEST_CREDENTIAL_LOAD_TIMEOUT, worker)
+        let result = tokio::time::timeout(REQUEST_CREDENTIAL_LOAD_TIMEOUT, worker)
             .await
             .map_err(|_| qq_provider::RequestCredentialError::TimedOut)?
-            .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed)
+            .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed);
+        if let (Some(context), Some(read_id)) = (self.diagnostic.as_ref(), read_id) {
+            context.sink.emit(CredentialDiagnosticEvent::BackendReadReturned {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                flight_id: 0,
+                read_id,
+                route,
+                endpoint,
+            });
+        }
+        result
     }
 
     fn replace_with_metadata_normalized(

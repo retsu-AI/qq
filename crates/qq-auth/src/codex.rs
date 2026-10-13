@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
+    AuthError, CredentialBackend, CredentialDiagnosticEndpoint, CredentialDiagnosticRoute,
+    CredentialStore, MissingCredentialRemedies, Secret,
     validate_credential_name,
 };
 use qq_protocol::CredentialEpoch;
@@ -1347,7 +1348,10 @@ impl RequestCredentialProvider for CodexRequestCredentials {
             let profile = self.profile.clone();
             let resolved = self
                 .store
-                .load_request_credential(move |store| {
+                .load_request_credential(
+                    CredentialDiagnosticRoute::CodexOAuth,
+                    CredentialDiagnosticEndpoint::ChatGpt,
+                    move |store| {
                     let now = unix_time()?;
                     let epoch = store.epoch()?;
                     let cache_valid = cached_state.is_some_and(|(cached_epoch, refresh_after)| {
@@ -1361,7 +1365,8 @@ impl RequestCredentialProvider for CodexRequestCredentials {
                     } else {
                         store.resolve_codex_with_epoch(&profile).map(Some)
                     }
-                })
+                    },
+                )
                 .await?
                 .map_err(|error| map_request_credential_error(error, &self.remedies))?;
             let Some((credential, epoch)) = resolved else {
