@@ -79,6 +79,13 @@ answer is always treated as "no decision", never as a positive one.
 | Approval delegate | `jev_approval`, `QQ_JEV_APPROVAL` | A call the approval mode already holds, before `reviewer_model` and the human | 8 KiB per section, 64 KiB request, 5 s; confidence and winning probability ≥ 0.7 | Falls through to `reviewer_model`, then the human (ADR-0041) |
 | Advisory observer | `qq jev observe` (explicit command) | Completed runs on a running server | Finite request, token and cost allowance; synced JSONL journal | Records an unavailable receipt; never changes run outcomes |
 
+Checkpoint outcomes remain typed in client notices. Supported is `GREEN` at
+info level, insufficient evidence is `NEEDS EVIDENCE` at warning level, and
+reviewer unavailability is `UNAVAILABLE` at warning level. Partial support and
+contradiction remain `RED` errors. Final-mode evidence gaps do not spend a
+correction turn; enforce mode and consequential contradictory or partial
+outcomes retain bounded correction behavior.
+
 Where each is specified in full:
 
 - Review: [ADR-0028](../adr/0028-mandatory-typed-jev-checkpoints.md).

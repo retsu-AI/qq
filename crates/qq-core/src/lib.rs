@@ -83,10 +83,10 @@ pub use hosts::{
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
     BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
-    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
-    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    CheckpointRepairPolicy, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
+    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
@@ -3691,8 +3691,9 @@ impl plan::CompiledAgentPlan {
                         // verdict redirects the run while a correction attempt
                         // remains; once both are spent the run completes with
                         // the verdict on record rather than failing.
-                        if !verdict.outcome.allows_progress()
-                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                        if reviewer
+                            .repair_policy()
+                            .requests_correction(verdict.outcome)
                             && checkpoint_context.as_mut().expect("enabled review context").repair()
                         {
                             irreducible_message_bytes = irreducible_message_bytes
@@ -4479,7 +4480,13 @@ impl plan::CompiledAgentPlan {
                             confidence: verdict.confidence,
                             feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
                         };
-                        let marker = if verdict.outcome.allows_progress() { "GREEN" } else { "RED" };
+                        let marker = match verdict.outcome {
+                            runtime::CheckpointOutcome::Supported => "GREEN",
+                            runtime::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
+                            runtime::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+                            runtime::CheckpointOutcome::PartiallySupported
+                            | runtime::CheckpointOutcome::Contradicted => "RED",
+                        };
                         retained.model_text.push_str(&format!(
                             "\n\n[JEV {marker} {}: {}]",
                             verdict.outcome.label(),
@@ -4492,8 +4499,9 @@ impl plan::CompiledAgentPlan {
                         // An unavailable reviewer leaves its marker on the
                         // retained result and the run continues; only a RED
                         // verdict asks for correction.
-                        if !verdict.outcome.allows_progress()
-                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                        if reviewer
+                            .repair_policy()
+                            .requests_correction(verdict.outcome)
                         {
                             correction.push(format!("{}: {}", call.name, verdict.feedback));
                         }
@@ -7555,6 +7563,66 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::OutputTextDelta { text } if text == "answer 2"
+        )));
+    }
+
+    #[tokio::test]
+    async fn advisory_final_evidence_gap_keeps_one_greeting_and_completes() {
+        struct GreetingProvider;
+        impl Provider for GreetingProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "Hello".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct AdvisoryReviewer(Arc<AtomicUsize>);
+        impl CheckpointReviewer for AdvisoryReviewer {
+            fn repair_policy(&self) -> runtime::CheckpointRepairPolicy {
+                runtime::CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+            }
+
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.task, "Say hello");
+                assert!(request.evidence.contains("final candidate:\nHello"));
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::InsufficientEvidence,
+                    confidence: Some(0.6),
+                    feedback: "no external evidence was requested".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+
+        let reviews = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(GreetingProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(AdvisoryReviewer(Arc::clone(&reviews))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("Say hello")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(reviews.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, RuntimeEvent::OutputTextDelta { text } if text == "Hello"))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::OutputTextDelta { text } if text.contains("Correct the candidate")
         )));
     }
 

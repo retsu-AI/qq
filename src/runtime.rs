@@ -20,12 +20,13 @@ use qq_config::{
     ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
-    ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
-    CheckpointVerdict, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
-    ReviewDecision, ReviewFuture, ReviewRequest, ReviewVerdict, RuntimeConfigError,
-    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest, RuntimeLoader, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SpawnModelValidationFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRepairPolicy,
+    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, GrantPromotionFuture,
+    GrantSeedFuture, LoadedRuntime, PublishedEventStream, ReviewDecision, ReviewFuture,
+    ReviewRequest, ReviewVerdict, RuntimeConfigError, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadRequest, RuntimeLoader, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SpawnModelValidationFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed,
     plan::{
         AgentProfile, CompiledAgentPlan, CredentialReference, HostSnapshot, PackSelection,
         PlanCompileError, ProviderDescriptor, SourceFingerprint,
@@ -3656,6 +3657,14 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
 
     fn reviews_tools(&self) -> bool {
         self.mode == qq_config::JevReviewMode::Enforce
+    }
+
+    fn repair_policy(&self) -> CheckpointRepairPolicy {
+        match self.mode {
+            qq_config::JevReviewMode::Final => CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps,
+            qq_config::JevReviewMode::Enforce => CheckpointRepairPolicy::Strict,
+            qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
+        }
     }
 
     fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
@@ -9866,6 +9875,29 @@ mod tests {
                 CheckpointOutcome::Unavailable
             );
         }
+    }
+
+    #[test]
+    fn typesafe_reviewer_selects_advisory_policy_only_for_final_mode() {
+        let final_reviewer = TypeSafeCheckpointReviewer {
+            client: reqwest::Client::new(),
+            endpoint: "http://127.0.0.1/".into(),
+            mode: qq_config::JevReviewMode::Final,
+        };
+        assert_eq!(
+            final_reviewer.repair_policy(),
+            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+        );
+
+        let enforce_reviewer = TypeSafeCheckpointReviewer {
+            client: reqwest::Client::new(),
+            endpoint: "http://127.0.0.1/".into(),
+            mode: qq_config::JevReviewMode::Enforce,
+        };
+        assert_eq!(
+            enforce_reviewer.repair_policy(),
+            CheckpointRepairPolicy::Strict
+        );
     }
 
     #[test]
