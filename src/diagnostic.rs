@@ -325,6 +325,10 @@ impl DiagnosticSession {
             options.mode(0o600);
         }
         let file = options.open(path)?;
+        Self::from_writer(file)
+    }
+
+    fn from_writer<W: Write + Send + 'static>(file: W) -> io::Result<Self> {
         let (tx, rx) = mpsc::sync_channel(255);
         let (done_tx, done_rx) = mpsc::channel();
         let emitted = Arc::new(AtomicU64::new(0));
@@ -373,6 +377,11 @@ impl DiagnosticSession {
             done: Mutex::new(done_rx),
             started,
         })
+    }
+
+    #[cfg(test)]
+    fn open_with_writer<W: Write + Send + 'static>(writer: W) -> Self {
+        Self::from_writer(writer).expect("diagnostic writer fixture must start")
     }
 
     #[cfg(test)]
@@ -459,21 +468,35 @@ impl DiagnosticSession {
 
     pub(crate) fn close(&self) -> CloseOutcome {
         if self.closed.swap(true, Ordering::AcqRel) {
+            if self.close_outcome.load(Ordering::Acquire) == 0 {
+                return CloseOutcome::Incomplete;
+            }
+            if let Ok(done) = self.done.try_lock() {
+                if done.try_recv().is_ok() {
+                    if let Ok(mut join) = self.join.try_lock() {
+                        if let Some(join) = join.take() {
+                            let _ = join.join();
+                        }
+                    }
+                }
+            }
             return match self.close_outcome.load(Ordering::Acquire) {
                 2 => CloseOutcome::Incomplete,
                 _ => CloseOutcome::Closed,
             };
         }
-        if let Ok(mut tx) = self.tx.lock() {
+        if let Ok(mut tx) = self.tx.try_lock() {
             tx.take();
+        } else {
+            self.failed.store(true, Ordering::Release);
         }
         let done = self
             .done
-            .lock()
+            .try_lock()
             .ok()
             .and_then(|done| done.recv_timeout(CLOSE_TIMEOUT).ok());
         if done.is_some() {
-            if let Ok(mut join) = self.join.lock() {
+            if let Ok(mut join) = self.join.try_lock() {
                 if let Some(join) = join.take() {
                     let _ = join.join();
                 }
@@ -563,6 +586,27 @@ mod tests {
         fail_after: Option<usize>,
         fail_flush: bool,
         bytes: Vec<u8>,
+    }
+
+    struct HeldWriter {
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for HeldWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.entered.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl Write for FailingWriter {
@@ -718,6 +762,57 @@ mod tests {
         });
         assert!(started.elapsed() < Duration::from_millis(50));
         assert_eq!(session.dropped.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn close_deadline_and_repeated_close_remain_incomplete_until_writer_finishes() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let session = Arc::new(DiagnosticSession::open_with_writer(HeldWriter {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            bytes: Vec::new(),
+        }));
+        session.emit(Event::CacheHit {
+            session_id: 1,
+            pid: 1,
+            monotonic_ns: 0,
+            store_id: 1,
+            coordinator_id: 1,
+            attempt_id: 1,
+            route: Route::StoredKeyring,
+            endpoint: Endpoint::Other,
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !entered.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "writer did not enter");
+            thread::yield_now();
+        }
+        let close_started = Instant::now();
+        assert_eq!(session.close(), CloseOutcome::Incomplete);
+        assert!(close_started.elapsed() < Duration::from_millis(500));
+        assert_eq!(session.close(), CloseOutcome::Incomplete);
+        let second = thread::spawn({
+            let session = Arc::clone(&session);
+            move || session.close()
+        });
+        assert_eq!(second.join().unwrap(), CloseOutcome::Incomplete);
+        assert!(!release.load(Ordering::Acquire));
+        release.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while session
+            .join
+            .try_lock()
+            .ok()
+            .is_none_or(|join| join.is_some())
+        {
+            let _ = session.close();
+            assert!(
+                Instant::now() < deadline,
+                "writer did not finish after release"
+            );
+            thread::yield_now();
+        }
     }
 
     #[test]
