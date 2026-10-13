@@ -434,8 +434,9 @@ remaining friction has moved:
   (`ionice -c 3 -p 123`). `sudo`/`doas`/`su` stay `Forbidden`, and
   `xargs` stays `Prompt`.
 - A `redirected_statement` whose redirects all write nothing does not
-  mark its body `nested`. Writing nothing means `/dev/null`, `/dev/std*`,
-  or a real descriptor duplication (`>&`/`<&` with a number). `>1` and
+  mark its body `nested`. Writing nothing means exactly `/dev/null`,
+  `/dev/stdin|stdout|stderr`, or duplicating descriptor 0–2 (`2>&1`).
+  `>&3` copies an inherited descriptor and is a write. `>1` and
   `2> 1` write a file named `1` and stay `Prompt`.
 - `git -C <dir>`: skip the hops before reading the subcommand, so
   `git -C sub push --force` stays `Forbidden`. A `-C` command is never
@@ -448,7 +449,10 @@ remaining friction has moved:
   `bin/cargo`, `./timeout`) is never `Allow`, and a path-qualified
   launcher is never peeled. `git -C` into `/tmp` counts as an escape.
   `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`, and their kin make a `git`
-  command `Prompt`. `git branch` is a read only when every option is a
+  command `Prompt`. Every `GIT_*` assignment on `git` prompts, because
+  several run programs (`GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`,
+  `GIT_CONFIG_PARAMETERS` with `core.fsmonitor`) and an allowlist of
+  harmless ones is not worth its risk. `git branch` is a read only when every option is a
   listing option, because `--list --no-list name` creates `name`.
 - Globs are unchanged and keep `dynamic_word` (see observation 1).
 - Every case above is a `match`/`not_match` row in `rule_examples_hold`,
@@ -507,7 +511,11 @@ of the current content. Gate: `edit_batch` unchanged.
 **T20 — the nudge reaches compound commands; small clamps.**
 
 - `builtin_alternative` skips a leading `cd DIR &&` and then judges the
-  first program, as today. `cd DIR;` is not skipped, because with `;` the
+  first program, as today. `DIR` must be relative with no `..`, since
+  `read_file` is workspace-confined. Even then, under `strict` a skipped
+  prefix only hints and never refuses, because the classifier cannot
+  prove `DIR` is not a symlink out of the workspace. Only a command with
+  no prefix is refused under `strict`. `cd DIR;` is not skipped, because with `;` the
   next command runs in either directory depending on whether `cd`
   succeeded. `cd x && sed -n 1,20p a.rs`
   hints `read_file ranges`. A replaceable program later in a list or
@@ -537,9 +545,11 @@ of the current content. Gate: `edit_batch` unchanged.
   handle; any example uses `t:<tool>:<call8>:<digest8>`.
 - `read_file.include_ignored` and similar unknown fields belong to RR10
   (ENG-872). T20 does not take them.
-- Regressions: `cd x && sed -n 1,5p a` hints and `strict` refuses;
+- Regressions: `sed -n 1,5p a` hints and `strict` refuses;
   `cargo test && grep x log`, `cd 'x;grep y z' && cargo test`, and
-  `cd missing; sed -n 1,5p a` neither hint nor refuse; `max_per_file=80`
+  `cd missing; sed -n 1,5p a` neither hint nor refuse; `cd /tmp && sed
+  -n 1,5p log` neither hints nor refuses; `cd x && sed -n 1,5p a` hints but
+  is not refused under `strict`; `max_per_file=80`
   and a 9-range read still fail with their corrections; a zero handle
   returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`
   grades it `Correction`.
