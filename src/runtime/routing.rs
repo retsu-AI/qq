@@ -114,7 +114,10 @@ impl TypeSafeTaskRouter {
         }
         Ok(Self {
             configuration_identity: format!("{:x}", digest.finalize()),
-            client: typesafe_http_client(&factory.inner.credentials)?,
+            client: typesafe_http_client(
+                &factory.inner.credentials,
+                qq_auth::CredentialDiagnosticRoute::OtherKnown,
+            )?,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             candidates: candidates.into(),
         })

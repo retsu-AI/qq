@@ -3651,8 +3651,11 @@ pub(crate) fn advisory_reviewer_from_store(
     )?))
 }
 
-fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
-    let store = store.for_diagnostic_route(qq_auth::CredentialDiagnosticRoute::TypesafeReviewer);
+fn typesafe_http_client(
+    store: &CredentialStore,
+    route: qq_auth::CredentialDiagnosticRoute,
+) -> Result<reqwest::Client, RuntimeBuildError> {
+    let store = store.for_diagnostic_route(route);
     let secret = resolve_provider_credential(
         &store,
         None,
@@ -3692,7 +3695,8 @@ impl TypeSafeCheckpointReviewer {
         store: &CredentialStore,
         mode: qq_config::JevReviewMode,
     ) -> Result<Self, RuntimeBuildError> {
-        let client = typesafe_http_client(store)?;
+        let client =
+            typesafe_http_client(store, qq_auth::CredentialDiagnosticRoute::TypesafeReviewer)?;
         Ok(Self {
             client,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
@@ -4142,7 +4146,7 @@ mod tests {
         }
     }
 
-    struct CountingKeyring {
+    pub(super) struct CountingKeyring {
         values: Mutex<BTreeMap<String, Vec<u8>>>,
         reads: AtomicU64,
     }
@@ -4157,7 +4161,7 @@ mod tests {
     }
 
     impl CountingKeyring {
-        fn read_count(&self) -> u64 {
+        pub(super) fn read_count(&self) -> u64 {
             self.reads.load(Ordering::Acquire)
         }
     }
@@ -4191,8 +4195,8 @@ mod tests {
         }
     }
 
-    struct DiagnosticEvents {
-        events: Mutex<Vec<qq_auth::CredentialDiagnosticEvent>>,
+    pub(super) struct DiagnosticEvents {
+        pub(super) events: Mutex<Vec<qq_auth::CredentialDiagnosticEvent>>,
         next_id: AtomicU64,
     }
 
@@ -4325,6 +4329,67 @@ mod tests {
         ] {
             assert!(events.iter().any(|e| matches!(e, qq_auth::CredentialDiagnosticEvent::CacheHit {route, endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe, ..} if *route == expected)));
         }
+    }
+
+    #[test]
+    fn credential_diagnostic_task_router_does_not_claim_reviewer_reads() {
+        let fixture = RuntimeFixture::new();
+        let keyring = Arc::new(CountingKeyring::default());
+        let events = Arc::new(DiagnosticEvents::default());
+        let store = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            keyring.clone(),
+        )
+        .with_diagnostic_sink(events.clone());
+        store
+            .set_with_metadata(
+                "typesafe-jev",
+                b"fixture-secret",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let factory = fixture.factory_with_credentials(store);
+        let request = fixture.request(r#"(
+            version: 1, model: "custom/test",
+            providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test": (name: "test") }) },
+        )"#);
+        let snapshot = factory.load(&request).unwrap();
+        routing::TypeSafeTaskRouter::from_snapshot(&factory, &snapshot, true).unwrap();
+        TypeSafeCheckpointReviewer::from_credentials(
+            &factory.inner.credentials,
+            qq_config::JevReviewMode::Final,
+        )
+        .unwrap();
+        assert_eq!(keyring.read_count(), 1);
+        let events = events.events.lock().unwrap();
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    qq_auth::CredentialDiagnosticEvent::BackendReadStarted { .. }
+                )
+            })
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert!(matches!(
+            starts[0],
+            qq_auth::CredentialDiagnosticEvent::BackendReadStarted {
+                route: qq_auth::CredentialDiagnosticRoute::OtherKnown,
+                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
+                ..
+            }
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            qq_auth::CredentialDiagnosticEvent::CacheHit {
+                route: qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
+                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
+                ..
+            }
+        )));
     }
 
     #[test]
