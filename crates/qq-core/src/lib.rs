@@ -7511,7 +7511,7 @@ mod tests {
                 let attempt = self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(stream::iter([
                     Ok(ProviderEvent::OutputTextDelta {
-                        text: format!("answer {attempt}"),
+                        text: format!("target.txt changed and verification passed (attempt {attempt})"),
                     }),
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]))
@@ -7521,6 +7521,9 @@ mod tests {
         impl CheckpointReviewer for RedReviewer {
             fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
                 assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                assert_eq!(request.task, "Change target.txt and run verification");
+                assert!(request.evidence.contains("final candidate:"));
+                assert!(request.evidence.contains("target.txt changed"));
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(std::future::ready(CheckpointVerdict {
                     outcome: CheckpointOutcome::InsufficientEvidence,
@@ -7535,8 +7538,13 @@ mod tests {
             .unwrap()
             .with_checkpoint_reviewer(Arc::new(RedReviewer(Arc::clone(&reviews))));
         let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.txt");
+        std::fs::write(&target, "original\n").unwrap();
         let events = runtime
-            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
+            .run_messages_in_workspace(
+                vec![Message::user("Change target.txt and run verification")],
+                directory.path().into(),
+            )
             .collect::<Vec<_>>()
             .await;
         assert_eq!(reviews.load(Ordering::SeqCst), 3);
@@ -7559,10 +7567,12 @@ mod tests {
             "{:?}",
             events.last()
         );
-        // The third candidate is the one that stands.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+        // The third candidate is the one that stands, still marked as an
+        // evidence gap because no tool actually changed or verified the file.
         assert!(events.iter().any(|event| matches!(
             event,
-            RuntimeEvent::OutputTextDelta { text } if text == "answer 2"
+            RuntimeEvent::OutputTextDelta { text } if text.contains("target.txt changed")
         )));
     }
 
@@ -7624,6 +7634,75 @@ mod tests {
             event,
             RuntimeEvent::OutputTextDelta { text } if text.contains("Correct the candidate")
         )));
+    }
+
+    #[tokio::test]
+    async fn advisory_coding_evidence_gap_does_not_invent_supported() {
+        struct CodingProvider;
+        impl Provider for CodingProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "target.txt changed".into(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct AdvisoryReviewer;
+        impl CheckpointReviewer for AdvisoryReviewer {
+            fn repair_policy(&self) -> runtime::CheckpointRepairPolicy {
+                runtime::CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+            }
+
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.task, "Change target.txt and run verification");
+                assert!(request.evidence.contains("final candidate:\ntarget.txt changed"));
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::InsufficientEvidence,
+                    confidence: Some(0.5),
+                    feedback: "the claimed edit has no direct evidence".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+
+        let runtime = Runtime::new(CodingProvider, "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(AdvisoryReviewer));
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("Change target.txt and run verification")],
+                directory.path().into(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::CheckpointReviewed {
+                        outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::CheckpointReviewed {
+                outcome: qq_protocol::CheckpointOutcome::Supported,
+                ..
+            }
+        )));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "original\n");
+        assert!(matches!(events.last(), Some(RuntimeEvent::Completed { .. })));
     }
 
     #[tokio::test(start_paused = true)]
