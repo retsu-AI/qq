@@ -81,7 +81,7 @@ may append a **request** row; only root changes a request's status.
 | 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
 | 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
-| 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Proposed 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
+| 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -501,3 +501,7 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 
 - Integrated T18 `89a5582f` during qualification. Independent reviewer found its repeated `env -S` substitution can recursively double inserted assignment values. This new resource regression blocks the stack merge, outside the existing follow-up decision.
 - Extend this integration's ownership narrowly to `approval/classify.rs`: test-first bounded reproduction, one-pass substitution with last-assignment precedence, and `MAX_CLASSIFIED_BYTES` expansion cap. Carry the repair through the stack before main; no changes in another author's checkout.
+
+### 2026-10-13 — T18–T20 shipped-status reconciliation ownership
+
+T20 owns the immediate docs follow-up for tool-layer plan/ledger status and ADR-0058 acceptance in the ADR file, index, and root reservation after native stack merge. Source unchanged; remaining observations and ENG-1032/ENG-1033 stay open.

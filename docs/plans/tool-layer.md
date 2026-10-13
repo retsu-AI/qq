@@ -4,12 +4,12 @@
 
 | | |
 | --- | --- |
-| Now | T15–T17 shipped in v0.1.6. The read side is at about 1 % in the first three days after release (D9 open until 2026-10-15). The D10 audit (2026-10-11) shows the remaining friction is the shell approval path and edit freshness, not read-side contracts. T18 is next, then T19 → T20 → T13 |
-| Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
-| Open | D9 post-merge qualification; D10 T18 classifier false prompts, T19 edit freshness by exact match, T20 nudge and bound clamps; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
+| Now | T15–T17 shipped in v0.1.6. The read side is at about 1 % in the first three days after release (D9 open until 2026-10-15). The D10 audit (2026-10-11) shows the remaining friction is the shell approval path and edit freshness, not read-side contracts. T18–T20 shipped (#283, #281, #285); T13 is next |
+| Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). T15–T17 shipped in v0.1.6; T18–T20 shipped in #283/#281/#285. Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
+| Open | D9 post-merge qualification; D10 week-after-landing observation; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
 
-Updated 2026-10-11. Opened 2026-09-11; supersedes the R6 search/patch/terminal
+Updated 2026-10-13. Opened 2026-09-11; supersedes the R6 search/patch/terminal
 candidates in `terminal-bench.md` § Phase 6 (which keep their
 evaluation method and acceptance targets). The per-feature harness catalog
 that motivated it is superseded by
@@ -614,21 +614,14 @@ table is `tools.md` § Approval Policy.
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
-| T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
-| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools/specs.rs` (`edit_file` description), `runtime/prompt.rs` (read-before-edit bullet, prompt version), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
-| T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (strict built-in refusal and `read_tool_result` dispatch), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
+| T18 (shipped #283) | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no replay row crosses Forbidden (integration expansion overflow refuses) |
+| T19 (shipped #281) | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools/specs.rs` (`edit_file` description), `runtime/prompt.rs` (read-before-edit bullet, prompt version), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
+| T20 (shipped #285) | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (strict built-in refusal and `read_tool_result` dispatch), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9 → T15 → T16 → T17 (v0.1.6);
-remaining: T18 → T19 → T20 → T13 → T14 → T11 → T10. T18–T20 come ahead of
-T13 for the same reason T15–T17 did: the ablations should measure the
-corrected contract, and A4's `auto` prompt rate is meaningless while 28 of
-every 143 holds are classifier bugs. T18 and T19 touch disjoint code and
-may be built in parallel worktrees. They share `tools.md` and the one
-ledger, so they integrate as a stack (T19 on T18). The T19 branch takes
-the T18 branch by merge, and each slice appends only its own dated
-ledger entries. T20 follows T18 and T19. T13 runs paired evaluations over the shipped
-arms and again after T12; T10 waits for its evidence.
+then T18 → T19 → T20 (#283, #281, #285). Remaining: T13 → T14 → T11 → T10.
+T13 measures the corrected T18–T20 contracts; T10 waits for its evidence.
 
 ## Ablation Plan
 

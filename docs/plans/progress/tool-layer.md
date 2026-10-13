@@ -24,9 +24,9 @@ newest last.
 | T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
-| T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
-| T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
-| T20 | Nudge past leading cd; placeholder handle (D10) | In review | `fix/eng-1035-t20-builtin-hints` [#285](https://github.com/retsu-AI/qq/pull/285) | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
+| T18 | Classifier false prompts (D10) | Shipped (`e2253704`) | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review approved (approval) |
+| T19 | Edit freshness by exact unique match (D10) | Shipped (`e2253704`) | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Accepted; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
+| T20 | Nudge past leading cd; placeholder handle (D10) | Shipped (`e2253704`) | `fix/eng-1035-t20-builtin-hints` [#285](https://github.com/retsu-AI/qq/pull/285) | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
 
 ## Entries
 
@@ -677,3 +677,15 @@ Gate: `classify_command` 1 KiB median of 3: 167.050 µs ≤ 200 µs.
 Host: no concurrent session-owned build/test/review during measurement; shared-host IO pressure recorded in `pressure-overflow-{before,after}.txt`. Other workloads are outside this session's control.
 Evidence: `target/qq-perf/t20-2026-10-13/{workspace-test-overflow-qualified,clippy-overflow-qualified,build-overflow-qualified}.log`, `paired-overflow-{raw.log,summary.json}` (untracked).
 Open: final hosted CI, native stack merge, and immediate shipped-status reconciliation; D9/D10 observation and ENG-1032/ENG-1033 remain separate.
+
+### 2026-10-13 — T18–T20 stack shipped
+
+- Native stack merge landed #280, T18 #283 (`e22537040bfb1605ee360881220cf5d8e8408ce3`), T19 #281 (`e22537040bfb1605ee360881220cf5d8e8408ce3`), and T20 #285 (`669da1f06f9cb4f1a0f031c47d2dd34035785647`). T20 is on main at `e2253704`; final reviewed source head `c31d1a5c` is an ancestor of main.
+- Hosted CI 38426652160 passes Linux fmt/Clippy/workspace/embedding/minimal-core checks, WebAssembly, and Windows teardown. Release-size job skipped by its configured trigger. Local final qualification receipt above: 2243 passed, 0 failed, 14 ignored; independent review Approve.
+- ADR-0058 Accepted; plan status/task index and Linear reconciled after merge. T20 hint/correction contracts and expansion-overflow refusal repair landed together.
+- D9 qualification (2026-10-15), D10 week-after-landing observation, ENG-1032 cancellation, ENG-1033 residual classifier gaps/unread-edit scan optimization, and decisions-needed row 12 remain open. Remaining delivery order: T13 → T14 → T11 → T10.
+
+### 2026-10-13 — Immediate shipped-status docs qualification
+
+- Docs-only follow-up on main `e2253704`; plan/task index/ledger and ADR-0058 file/index/root reconciled. Independent `t20_review` Approve; relative Markdown links and `git diff --check` pass.
+- Workspace gates rerun before push: fmt, all-target/all-feature Clippy with warnings denied, build, and `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=4`: 2243 passed, 0 failed, 14 ignored (nested embedding child counted once). Logs `target/qq-perf/t20-2026-10-13/docs-*.log` (untracked). Source unchanged; final performance receipt remains applicable.
