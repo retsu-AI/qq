@@ -26,3 +26,8 @@
 - Added literal `0.69999999` / `0.70000001` confidence boundaries, high-confidence/low-winning-probability coverage, late-third-criterion malformed rollback, and a full loopback feedback equality assertion. The loopback fixture now consumes the complete request body before replying.
 - Explicit toolchain log: `reviews/alignment-20261011/qq-recovery-20261012/jev-diagnostics-author-final2.log`; cargo/rustc/rustdoc all report 1.97.1. `cargo fmt --all -- --check` and `cargo test --bin qq typesafe_checkpoint --locked` pass, 3 tests.
 - Design note updated in `docs/design/jev.md`; source remains limited to the existing feedback/event route. No provider, credential, protocol, logger, or raw-text changes.
+
+## 2026-10-13 — parent gate receipt
+
+- Parent reports full gates passed on clean `484ba1b`: format, workspace tests, all-feature/all-target Clippy with `-D warnings`, and workspace build. Receipts/logs are retained under `reviews/alignment-20261011/qq-recovery-20261012/jev-diagnostics-parent-*`.
+- Final review requested only the two precision edits above; this follow-up is documentation-only and awaits final independent review.

@@ -93,11 +93,11 @@ and classified outcome; unknown or partially validated response fields are
 discarded with the generic unavailable result. The public verdict still uses
 the minimum confidence across criteria, so the aggregate value is not the
 confidence of the criterion that determined a contradiction or evidence gap.
-These rows contain no task text, candidate text, provider payload, tool
+These rows contain no task text, candidate text, raw or unvalidated provider payload, tool
 arguments, endpoint, or credential. Feedback is supplied to bounded correction
 turns as well as persisted review events, so it is diagnostic evidence and can
-influence later model wording without changing the parser, policy, or repair
-limits.
+influence later model wording without changing classification, policy, or
+repair limits.
 
 Where each is specified in full:
 
