@@ -593,6 +593,61 @@ async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_tota
 }
 
 #[tokio::test]
+async fn summary_retry_requests_preserve_the_original_inputs() {
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 100;
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture.submit().await;
+    let report = fixture.finish(run_id).await;
+    assert!(matches!(report.outcome, RunOutcome::Paused { .. }));
+    assert_eq!(report.compactions, 0);
+    assert_eq!(report.step_runs_started, 6);
+    assert_eq!(report.step_runs_finished, 6);
+    let observed = fixture.observed.lock().unwrap();
+    assert_eq!(observed.summary_inputs.len(), 6);
+    assert!(
+        observed
+            .summary_inputs
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "transcript, model, system, tools, generation and output cap must survive retry unchanged"
+    );
+    assert_eq!(report.executed_calls, report.durable_calls);
+    assert_eq!(report.duplicate_sequences, 0);
+}
+
+#[tokio::test]
+async fn original_deadline_stops_a_summarizer_backoff_without_retrying() {
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_faults = 100;
+    script.retry_delay = Duration::from_secs(600);
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture
+        .submit_with_limits(qq_protocol::RunLimits {
+            max_duration_ms: Some(5_000),
+            ..qq_protocol::RunLimits::default()
+        })
+        .await;
+    let report = tokio::time::timeout(Duration::from_secs(12), fixture.finish(run_id))
+        .await
+        .unwrap();
+    assert!(
+        matches!(report.outcome, RunOutcome::BudgetExhausted { exhaustion } if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+    );
+    assert_eq!(report.summarizer_faults, 1);
+    assert_eq!(report.turn_retries, 1);
+    assert_eq!(report.step_runs_started, 1);
+    assert_eq!(report.step_runs_finished, 1);
+    assert_eq!(fixture.observed.lock().unwrap().summary_requests, 1);
+    assert_eq!(report.compactions, 0);
+    assert!(report.executed_calls > 0);
+    assert_eq!(report.executed_calls, report.durable_calls);
+    assert_eq!(report.duplicate_sequences, 0);
+}
+
+#[tokio::test]
 async fn cancelling_during_a_summarizer_backoff_cancels_the_run_and_starts_no_new_step() {
     // The failed attempt's compaction run has settled before the backoff,
     // so a cancel during the sleep leaves nothing running and no retry.

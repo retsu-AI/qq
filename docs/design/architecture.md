@@ -897,10 +897,11 @@ One durable run follows a guarded loop:
    `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
    earlier turn durable. Token or cost caps stop with `budget_exhausted`
    when a failed attempt's spend is unknown; retry does not renew the
-   allowance or deadline. A rejected or stalled
-   summarizer settles its run failed/cancelled, writes no marker, and the
-   prompt run fails closed with the reason — the overflowing request is
-   never sent. Cancelling the prompt run cascades to its in-run compaction.
+   allowance or deadline. A rejected summary settles its internal run failed,
+   writes no marker, and fails the prompt with the reason; the overflowing
+   work request is never sent. A pending summary stops with the caller's
+   cancellation or original deadline, yielding Cancelled or BudgetExhausted
+   respectively. Cancelling the prompt cascades to its in-run compaction.
    Direct `qq ask` runs have no compactor and fail as before. The prompt
    run reports `RunActivity::Compacting` before it asks and
    `WaitingForProvider` at its next turn; every compaction run, between-run

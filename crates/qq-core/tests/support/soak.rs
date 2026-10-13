@@ -29,6 +29,10 @@ use serde::Serialize;
 const TOOL: &str = "ext__soak__step";
 
 #[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "integration-only fault modes share this fixture with the fault-free benchmark"
+)]
 pub enum SummaryPrefix {
     Calls,
     Truncated,
@@ -109,6 +113,7 @@ pub struct Observations {
     pub summary_faults: usize,
     pub summary_prefix_served: bool,
     pub summary_requests: usize,
+    pub summary_inputs: Vec<String>,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -134,6 +139,11 @@ impl Provider for ScriptedProvider {
         });
         if summarizing {
             observed.summary_requests += 1;
+            if self.script.summary_faults > 0
+                && observed.summary_inputs.len() <= usize::from(qq_protocol::MAX_TURN_RETRIES)
+            {
+                observed.summary_inputs.push(format!("{request:?}"));
+            }
             if let Some(prefix) = self.script.summary_prefix
                 && !observed.summary_prefix_served
             {

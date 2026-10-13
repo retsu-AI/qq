@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped through main `ce768bbc` (2026-10-13). AC3 is in review (#279); AC17 argument tolerance is the next absorbed reliability slice. AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**, evidence pending. AC0.2, AC4–AC6, AC12.2/.3, AC13–AC20 and Goal 7 qualification remain open; AC1/AC2 performance qualification remains open. ADRs 0048–0050 and 0054 Proposed |
+| Now | AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped through main `ce768bbc` (2026-10-13). AC3 is in local qualification for a replacement of draft #279; AC17 argument tolerance is in review (#294). AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**, evidence pending. AC0.2, AC4–AC6, AC12.2/.3, AC13–AC20 and Goal 7 qualification remain open; AC1/AC2 performance qualification remains open. ADRs 0048–0050 and 0054 Proposed |
 | Research | [`../research/core-autonomy.md`](../research/core-autonomy.md) (findings 1–10); session-store evidence for the progress track in ADR-0054 § Context |
 | Ledger | [`progress/autonomous-core.md`](./progress/autonomous-core.md) |
 | Linear | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) (plan). One issue per slice is filed when the plan is accepted |
