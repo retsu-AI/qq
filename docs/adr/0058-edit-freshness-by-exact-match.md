@@ -25,7 +25,8 @@ not the only evidence of that.
 ## Decision
 
 An edit to a file with no recorded read of its current content and no
-`if_hash` applies when its `old` occurs **exactly once, byte for byte**
+`if_hash` applies when its `old` occurs **exactly once, byte for byte,
+counting overlapping occurrences**
 (`Strategy::Exact`). It must be unique both in the content read at plan time
 and in the text as earlier edits in the batch left it. The header says
 `note=unread` (no recorded read) or `note=changed_since_read` (a recorded
@@ -43,7 +44,7 @@ Still refused:
   `if_hash` in a batch is checked.
 
 A batch fails whole. One qualifying file does not carry another.
-Refusals do not name the file's current hash. Passed back as `if_hash`, it
+Refusals do not name the file's current hash, and that includes an `if_hash` mismatch on `edit_file` or `write_file`. Passed back as `if_hash`, it
 would apply the refused fuzzy edit or overwrite on the next call without the
 model seeing any content. The message names the cheapest fix instead: extend
 `old` until it is exact and unique, or read the lines around the edit. The

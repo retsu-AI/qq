@@ -799,14 +799,17 @@ earlier results. Currency is a recorded read of this exact content, or
 `@`-mentioned file needs); every `if_hash` in the batch is checked, and a
 mismatch is `stale_file`. A file with neither (never read, or read at other
 content) takes only edits whose `old` occurs exactly once, byte for byte, in
-the plan-time content and in the text as earlier edits left it
+the plan-time content and in the text as earlier edits left it, counting
+overlapping occurrences (`aa` occurs twice in `aaa`)
 ([ADR-0058](../adr/0058-edit-freshness-by-exact-match.md)): the model
 reproduced the bytes it replaces, so it has that region. An insert by
 anchor alone, an `old` that needs the fuzzy cascade, an absent `old`, and a
 repeated `old` (even under `replace_all`) prove nothing, and fail
 `not_read` for an unread file or `stale_file` for a changed one, never
 `ambiguous` or `not_found`. The header then says `note=unread` or
-`note=changed_since_read`. A refusal names the fix (extend `old` until it is
+`note=changed_since_read`. The note reflects every edit the exception
+admitted, even when a later edit's `if_hash` proves the file. A refusal,
+including an `if_hash` mismatch on either tool, names the fix (extend `old` until it is
 exact and unique, or read the lines around the edit) but never the file's
 current hash: passed back as `if_hash`, it would apply the refused edit
 without the model seeing any content. A replacement whose match lands inside text an earlier edit wrote

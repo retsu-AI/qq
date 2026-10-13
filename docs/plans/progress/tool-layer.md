@@ -507,3 +507,14 @@ Six Codex findings on `9e3da002`, all reproduced against the branch before any f
 - Tests: about 35 new `rule_examples_hold` rows, 2 new `D10_HELD` rows, 6 reason asserts. `qq-core` 916 passed. One full-workspace run failed `schedules_ready_sessions_fairly` (a 2 s timeout under load, unrelated); it passed 3/3 alone and in a full `qq-core` run.
 - `classify_command` (one run on a loaded host, ns): simple 3261, pipeline 11222, forbidden_wrapped 8622, 1 KiB 161366 (budget 200 µs).
 - Advisory replay over the same 226 `auto` commands: allow 83 → 111, held 143 → 115 (28 recovered, 30 before these repairs; the 2 lost were plain `git fetch`).
+
+### 2026-10-12 — T19 review repairs (#281) and ADR renumber
+
+- ADR renumbered 0057 → 0058: #277 (workflow packs) proposed 0057 on 2026-10-09, before the T19 reservation. File, index row, root.md, design links, and code comments all moved. Merged T18's review repairs (#283) in.
+- Three Codex findings on `3b068a5d`, all valid:
+  - An `if_hash` mismatch named the current hash (`is h:<current> now`). That let the next call pass it and apply a fuzzy edit with no content seen, which the slice forbids. The same leak was in `write_file`, which Codex did not flag. Both now say `is not <given> now` and nothing else. Test (e) had pinned the leak as expected behavior; it now asserts the hash is absent on both tools.
+  - Uniqueness used `match_indices`, which skips overlapping occurrences, so `aa` in `aaa` counted once. It now searches again from the next character boundary. Regression covers ASCII and multi-byte overlaps.
+  - A later edit's matching `if_hash` set the file to `Proven` and dropped `note=unread` for the earlier exception-admitted edit. A separate `admitted` field now records the weakest freshness any applied edit relied on.
+- The three new regressions failed against the pre-repair implementation and pass now. `qq-core` 929 passed; workspace fmt, clippy, test, and build are green.
+- The CI failure on `3b068a5d` was `wall_clock_budget_settles_a_hanging_provider_without_a_final_response`, the same flaky timing test noted in the T15 entries. It is not in this slice's paths.
+- `edit_batch` A/B on a loaded host (2 runs each, µs): exact dry 8525/8711 → 8973/8891, single 1462/1474 → 1525/1521. The bench reads the file first, so it never takes the uniqueness scan; the difference is noise.
