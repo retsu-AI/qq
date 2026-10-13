@@ -3037,17 +3037,63 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
         )
         .unwrap();
     assert_eq!(secret.expose_secret_bytes(), b"secret");
+    let cached = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/diagnostic".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(cached.expose_secret_bytes(), b"secret");
     assert_eq!(keyring.read_count("provider/diagnostic"), 1);
     let events = collector.0.lock().unwrap();
     assert!(matches!(
         events.as_slice(),
         [
+            CredentialDiagnosticEvent::ResolutionAdmitted { .. },
             CredentialDiagnosticEvent::OwnerAdmitted { .. },
             CredentialDiagnosticEvent::BackendReadStarted { .. },
             CredentialDiagnosticEvent::BackendReadReturned { .. },
             CredentialDiagnosticEvent::ResolutionFinished { .. },
+            CredentialDiagnosticEvent::ResolutionAdmitted { .. },
+            CredentialDiagnosticEvent::CacheHit { .. },
+            CredentialDiagnosticEvent::ResolutionFinished { .. },
         ]
     ));
+    assert!(matches!(
+        events[6],
+        CredentialDiagnosticEvent::CacheHit {
+            outcome: CredentialDiagnosticOutcome::Success,
+            ..
+        }
+    ));
+    assert!(matches!(
+        events[7],
+        CredentialDiagnosticEvent::ResolutionFinished {
+            coordinator_id: Some(_),
+            flight_id: None,
+            read_id: None,
+            outcome: CredentialDiagnosticOutcome::Success,
+            ..
+        }
+    ));
+    let started = events.iter().find_map(|event| match event {
+        CredentialDiagnosticEvent::BackendReadStarted {
+            attempt_id,
+            read_id,
+            ..
+        } => Some((*attempt_id, *read_id)),
+        _ => None,
+    });
+    let returned = events.iter().find_map(|event| match event {
+        CredentialDiagnosticEvent::BackendReadReturned {
+            attempt_id,
+            read_id,
+            outcome: CredentialDiagnosticOutcome::Success,
+            ..
+        } => Some((*attempt_id, *read_id)),
+        _ => None,
+    });
+    assert_eq!(started, returned);
     assert!(events.iter().all(|event| match event {
         CredentialDiagnosticEvent::BackendReadStarted {
             store_id,
@@ -3062,8 +3108,16 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
             flight_id,
             read_id,
             ..
-        } => *store_id != 0 && coordinator_id.is_some() && *flight_id == Some(*read_id),
-        CredentialDiagnosticEvent::CacheHit { .. } => false,
+        } => *store_id != 0 && coordinator_id.is_some() && *flight_id != Some(*read_id),
+        CredentialDiagnosticEvent::CacheHit {
+            store_id,
+            coordinator_id,
+            outcome,
+            ..
+        } =>
+            *store_id != 0
+                && *coordinator_id != 0
+                && matches!(outcome, CredentialDiagnosticOutcome::Success),
         CredentialDiagnosticEvent::OwnerAdmitted {
             store_id,
             coordinator_id,
@@ -3073,8 +3127,18 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
             store_id,
             coordinator_id,
             ..
-        }
-        | CredentialDiagnosticEvent::ResolutionFinished {
+        } => *store_id != 0 && *coordinator_id != 0,
+        CredentialDiagnosticEvent::ResolutionFinished {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && coordinator_id.is_some(),
+        CredentialDiagnosticEvent::ResolutionAdmitted {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && coordinator_id.is_some(),
+        CredentialDiagnosticEvent::OwnerUnwind {
             store_id,
             coordinator_id,
             ..

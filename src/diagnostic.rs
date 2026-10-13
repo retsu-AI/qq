@@ -68,6 +68,16 @@ struct Summary {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "kind")]
 pub(crate) enum Event {
+    ResolutionAdmitted {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        attempt_id: u64,
+        route: Route,
+        endpoint: Endpoint,
+    },
     OwnerAdmitted {
         session_id: u64,
         pid: u32,
@@ -99,6 +109,7 @@ pub(crate) enum Event {
         attempt_id: u64,
         route: Route,
         endpoint: Endpoint,
+        outcome: auth::CredentialDiagnosticOutcome,
     },
     BackendReadStarted {
         session_id: u64,
@@ -108,6 +119,7 @@ pub(crate) enum Event {
         coordinator_id: Option<u64>,
         flight_id: Option<u64>,
         read_id: u64,
+        attempt_id: u64,
         route: Route,
         endpoint: Endpoint,
     },
@@ -119,10 +131,25 @@ pub(crate) enum Event {
         coordinator_id: Option<u64>,
         flight_id: Option<u64>,
         read_id: u64,
+        attempt_id: u64,
         route: Route,
         endpoint: Endpoint,
+        outcome: auth::CredentialDiagnosticOutcome,
     },
     ResolutionFinished {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        attempt_id: u64,
+        flight_id: Option<u64>,
+        read_id: Option<u64>,
+        route: Route,
+        endpoint: Endpoint,
+        outcome: auth::CredentialDiagnosticOutcome,
+    },
+    OwnerUnwind {
         session_id: u64,
         pid: u32,
         monotonic_ns: u64,
@@ -132,7 +159,7 @@ pub(crate) enum Event {
         flight_id: u64,
         route: Route,
         endpoint: Endpoint,
-        outcome: auth::CredentialDiagnosticOutcome,
+        outcome: auth::CredentialDiagnosticOwnerUnwind,
     },
 }
 
@@ -140,6 +167,22 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
     fn emit(&self, event: auth::CredentialDiagnosticEvent) {
         let (session_id, pid, monotonic_ns) = self.metadata();
         let event = match event {
+            auth::CredentialDiagnosticEvent::ResolutionAdmitted {
+                store_id,
+                coordinator_id,
+                attempt_id,
+                route,
+                endpoint,
+            } => Event::ResolutionAdmitted {
+                session_id,
+                pid,
+                monotonic_ns,
+                store_id,
+                coordinator_id,
+                attempt_id,
+                route: route.into(),
+                endpoint: endpoint.into(),
+            },
             auth::CredentialDiagnosticEvent::OwnerAdmitted {
                 store_id,
                 coordinator_id,
@@ -182,6 +225,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 attempt_id,
                 route,
                 endpoint,
+                outcome,
             } => Event::CacheHit {
                 session_id,
                 pid,
@@ -191,12 +235,14 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 attempt_id,
                 route: route.into(),
                 endpoint: endpoint.into(),
+                outcome,
             },
             auth::CredentialDiagnosticEvent::BackendReadStarted {
                 store_id,
                 coordinator_id,
                 flight_id,
                 read_id,
+                attempt_id,
                 route,
                 endpoint,
             } => Event::BackendReadStarted {
@@ -207,6 +253,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
+                attempt_id,
                 route: route.into(),
                 endpoint: endpoint.into(),
             },
@@ -215,8 +262,10 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
+                attempt_id,
                 route,
                 endpoint,
+                outcome,
             } => Event::BackendReadReturned {
                 session_id,
                 pid,
@@ -225,10 +274,34 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 coordinator_id,
                 flight_id,
                 read_id,
+                attempt_id,
                 route: route.into(),
                 endpoint: endpoint.into(),
+                outcome,
             },
             auth::CredentialDiagnosticEvent::ResolutionFinished {
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                read_id,
+                route,
+                endpoint,
+                outcome,
+            } => Event::ResolutionFinished {
+                session_id,
+                pid,
+                monotonic_ns,
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                read_id,
+                route: route.into(),
+                endpoint: endpoint.into(),
+                outcome,
+            },
+            auth::CredentialDiagnosticEvent::OwnerUnwind {
                 store_id,
                 coordinator_id,
                 attempt_id,
@@ -236,7 +309,7 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 route,
                 endpoint,
                 outcome,
-            } => Event::ResolutionFinished {
+            } => Event::OwnerUnwind {
                 session_id,
                 pid,
                 monotonic_ns,
