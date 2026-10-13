@@ -729,7 +729,11 @@ async fn interactive(
                     match factory.resolve_trust(&request, choice, &reviewed) {
                         Ok(granted) => Ok(qq_tui::TrustResolved {
                             trusted: granted.trusted,
-                            model: granted.state.tui_model,
+                            // Preserve the configured route only as the
+                            // server Models request selection. The attached
+                            // app installs no usable model until the server
+                            // returns its authoritative selection.
+                            model: granted.state.configured_model,
                             models: granted.state.models.into_iter().map(Into::into).collect(),
                             unauthenticated_providers: granted
                                 .state
