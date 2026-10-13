@@ -10308,6 +10308,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_tool_budget_caps_each_batch_and_rejects_excess_before_execution() {
+        struct AllowAllGate;
+
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+
+        struct BatchReadsThenAnswer {
+            batch_size: usize,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for BatchReadsThenAnswer {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                if turn > 0 {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let mut events = Vec::new();
+                for index in 0..self.batch_size {
+                    let id = format!("call-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        for (max_tool_calls, batch_size, expected_successes, expected_rejections) in
+            [(1_u32, 2, 1, 1), (2_u32, 2, 2, 0), (6_u32, 7, 6, 1)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                BatchReadsThenAnswer {
+                    batch_size,
+                    requests: Arc::clone(&requests),
+                },
+                "gpt-test",
+                256,
+            )
+            .unwrap();
+            let events = runtime
+                .run_loop_with_spawner(
+                    vec![Message::user("read it")],
+                    directory.path().to_owned(),
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::default(),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None).with_limits(
+                        RunLimits {
+                            max_tool_calls: Some(max_tool_calls),
+                            ..RunLimits::default()
+                        },
+                        None,
+                    ),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let results: Vec<(&str, bool)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        result, is_error, ..
+                    } => Some((result.as_str(), *is_error)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                results.iter().filter(|(_, is_error)| !is_error).count(),
+                expected_successes,
+                "{events:?}"
+            );
+            assert_eq!(
+                results.iter().filter(|(_, is_error)| *is_error).count(),
+                expected_rejections,
+                "{events:?}"
+            );
+            for (result, is_error) in results {
+                if is_error {
+                    assert!(result.contains("not executed"), "{result}");
+                } else {
+                    assert!(result.contains("hello"), "{result}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_tool_budget_spends_remaining_calls_then_allows_one_final_response() {
+        struct AllowAllGate;
+
+        impl ToolGate for AllowAllGate {
+            fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+                Box::pin(std::future::ready(GateDecision::Execute))
+            }
+        }
+
+        struct ReadBatchesThenAnswer {
+            batches: Vec<usize>,
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+
+        impl Provider for ReadBatchesThenAnswer {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut requests = self.requests.lock().unwrap();
+                let turn = requests.len();
+                requests.push(request);
+                drop(requests);
+                let Some(&batch_size) = self.batches.get(turn) else {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                };
+                let mut events = Vec::new();
+                for index in 0..batch_size {
+                    let id = format!("call-{turn}-{index}");
+                    events.push(Ok(ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "read_file".to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: id.clone(),
+                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }));
+                    events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            ReadBatchesThenAnswer {
+                batches: vec![4, 2],
+                requests: Arc::clone(&requests),
+            },
+            "gpt-test",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("read it")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).with_limits(
+                    RunLimits {
+                        max_tool_calls: Some(6),
+                        ..RunLimits::default()
+                    },
+                    None,
+                ),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        let finished = events
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ToolCallFinished { .. }))
+            .count();
+        assert_eq!(finished, 6, "{events:?}");
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::BudgetExhausted { exhaustion })
+                if exhaustion.limit == BudgetLimitKind::ToolCalls
+                    && exhaustion.final_response
+        ));
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
     async fn a_mixed_turn_overlaps_its_leading_reads_then_runs_the_rest_in_order() {
         struct AllowAllGate;
 
