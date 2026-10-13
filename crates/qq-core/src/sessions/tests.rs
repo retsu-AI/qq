@@ -6499,6 +6499,53 @@ fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
 }
 
 #[test]
+fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("owner-index.sqlite");
+    let (connection, _) = super::bench_support::seed_compacted_session(&path, 3, 2, 2, 100);
+    let original: Vec<(String, Option<String>, Option<u64>)> = connection
+        .prepare("SELECT id, usage_json, estimated_cost_usd_nanos FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    connection.execute_batch("DROP INDEX IF EXISTS runs_owned_compaction; UPDATE metadata SET value = '44' WHERE key = 'schema_version';").unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, _) = open_database(&path).unwrap();
+        let plan: Vec<String> = connection
+            .prepare("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE auto_compaction_for_run_id = ?1 AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL")
+            .unwrap()
+            .query_map(["owner"], |row| row.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("runs_owned_compaction")),
+            "{plan:?}"
+        );
+        let rows: Vec<(String, Option<String>, Option<u64>)> = connection
+            .prepare("SELECT id, usage_json, estimated_cost_usd_nanos FROM runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows, original);
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "45");
+    }
+}
+
+#[test]
 fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("migration.sqlite");

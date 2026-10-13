@@ -4964,6 +4964,14 @@ async fn owned_compaction_receipt_preserves_bounds_unknown_and_exact_ownership()
             let known = super::super::deliveries::owned_run_spend(connection, owner)?;
             assert_eq!(known.usage, Some(usage(2 + count, 3 + count)));
             assert_eq!(known.cost_usd_nanos, Some(10 + count * 4));
+            connection.execute("UPDATE runs SET estimated_cost_usd_nanos = NULL WHERE id = ?1", [last.to_string()])?;
+            let unknown_cost = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(unknown_cost.usage, known.usage);
+            assert_eq!(unknown_cost.cost_usd_nanos, None);
+            connection.execute("UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = 4 WHERE id = ?1", [last.to_string()])?;
+            let unknown_usage = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(unknown_usage.usage, None);
+            assert_eq!(unknown_usage.cost_usd_nanos, known.cost_usd_nanos);
             connection.execute("UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1", [last.to_string()])?;
             assert_eq!(super::super::deliveries::owned_run_spend(connection, owner)?, SpawnAgentSpend::UNKNOWN);
             connection.execute("UPDATE runs SET status = 'running', outcome_json = NULL WHERE id = ?1", [last.to_string()])?;
