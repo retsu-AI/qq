@@ -72,11 +72,12 @@ impl SimpleCommand {
 /// A redirect target that writes nothing: the null device, a standard
 /// stream, or a descriptor duplication (`2>&1`, recorded as `&1`).
 pub(crate) fn stream_target(target: &str) -> bool {
-    target == "/dev/null"
-        || target.starts_with("/dev/std")
-        || target
-            .strip_prefix('&')
-            .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+    matches!(
+        target,
+        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+    ) || target
+        .strip_prefix('&')
+        .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
 }
 
 pub(crate) fn basename(word: &str) -> &str {
@@ -640,15 +641,6 @@ impl Collector<'_> {
                 // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd: skip the
                 // options and the one positional before the command. `-p`
                 // retargets a running process; there is no inner command.
-                let retargets = args.iter().any(|a| {
-                    a.as_deref().is_some_and(|w| {
-                        w == "--pid"
-                            || (w.starts_with('-') && !w.starts_with("--") && w.contains('p'))
-                    })
-                });
-                if retargets {
-                    return;
-                }
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
                     if word.starts_with('-') {
@@ -675,6 +667,18 @@ impl Collector<'_> {
                         skip += 1;
                         break;
                     }
+                }
+                // `-p`/`--pid` among the wrapper's own options (never the
+                // launched command's) retargets a running process: nothing
+                // is launched.
+                let retargets = args.iter().take(skip).any(|a| {
+                    a.as_deref().is_some_and(|w| {
+                        w == "--pid"
+                            || (w.starts_with('-') && !w.starts_with("--") && w.contains('p'))
+                    })
+                });
+                if retargets {
+                    return;
                 }
                 if let Some(inner) = inner_from(skip) {
                     self.peel(inner, depth + 1);
