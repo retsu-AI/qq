@@ -673,9 +673,6 @@ fn branch_lists(args: &[&str]) -> bool {
             "--sort" | "--format" => expect_value = true,
             arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {}
             arg if [
-                "--abbrev=",
-                "--color=",
-                "--column=",
                 "--merged=",
                 "--no-merged=",
                 "--contains=",
@@ -683,7 +680,13 @@ fn branch_lists(args: &[&str]) -> bool {
                 "--points-at=",
             ]
             .iter()
-            .any(|prefix| arg.starts_with(prefix)) => {}
+            .any(|prefix| arg.starts_with(prefix)) =>
+            {
+                list_mode = true;
+            }
+            arg if ["--abbrev=", "--color=", "--column="]
+                .iter()
+                .any(|prefix| arg.starts_with(prefix)) => {}
             arg if arg.starts_with('-') => return false,
             _ => patterns = true,
         }
@@ -1452,6 +1455,8 @@ mod tests {
             "cd src && cargo test >/dev/stderr 2>&1",
             "cargo build; cargo test &>/dev/null",
             "git branch --list --format x 'f*'",
+            "git branch --contains=HEAD created",
+            "git branch --merged=main 'f*'",
             // T18 review round 6: listing-filter operands; standard fds.
             "git branch --contains HEAD",
             "git branch --merged main -a",
@@ -1860,6 +1865,14 @@ mod tests {
             "env -S 'su\"\"do ls'",
             "env -S 'su\\do ls'",
             "nice nice nice nice nice nice nice nice sudo ls",
+            // T18 review round 9: candidates are whole, so a deep `--force`
+            // is judged.
+            "env -S 'git push -v -v -v -v -v -v -v -v -v -v -v -v -v -v -v --force origin main'",
+            // `env -S` builds an unknown command and every suffix is judged,
+            // so a trailing `sudo` argument over-reports as Forbidden. Like
+            // `taskset 0x1 echo sudo`, that is the intended trade: a false
+            // refusal is safe, a missed one is not.
+            "env -S 'echo ok' sudo ls",
             // T18 review round 6: depth exhaustion, env -S escapes, and a
             // dynamic chrt option still find the buried command.
             "nice nice nice nice nice nice nice nice nice sudo ls",
