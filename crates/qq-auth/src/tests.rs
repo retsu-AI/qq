@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2967,4 +2967,128 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
         .unwrap();
     assert_eq!(secret.expose_secret_bytes(), b"secret");
     assert!(keyring.read_count("provider/work") >= 1);
+}
+
+#[derive(Default)]
+struct PanicOnceKeyring {
+    panic_next: AtomicBool,
+    entered: Mutex<Option<Arc<Barrier>>>,
+    values: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl KeyringBackend for PanicOnceKeyring {
+    fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+        if self.panic_next.swap(false, Ordering::SeqCst) {
+            if let Some(barrier) = self.entered.lock().unwrap().take() {
+                barrier.wait();
+            }
+            panic!("test owner panic");
+        }
+        self.values
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or(KeyringError::Missing)
+    }
+
+    fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), secret.to_vec());
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<(), KeyringError> {
+        self.values.lock().unwrap().remove(name);
+        Ok(())
+    }
+}
+
+#[test]
+fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(PanicOnceKeyring::default());
+    let entered = Arc::new(Barrier::new(2));
+    *keyring.entered.lock().unwrap() = Some(Arc::clone(&entered));
+    keyring.panic_next.store(true, Ordering::SeqCst);
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let store = CredentialStore::with_backends(paths, keyring.clone(), protected);
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let owner = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    entered.wait();
+    let follower = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    assert!(owner.join().is_err());
+    assert!(matches!(
+        follower.join().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "owner_panic"
+        })
+    ));
+
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+}
+
+#[test]
+fn stored_keyring_resolution_keeps_distinct_keys_independent() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/one", "one", false).unwrap();
+    store.set("provider/two", "two", false).unwrap();
+    let start = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for name in ["provider/one", "provider/two"] {
+        let store = store.clone();
+        let start = Arc::clone(&start);
+        workers.push(thread::spawn(move || {
+            start.wait();
+            store
+                .resolve(&SecretRef::Stored(name.to_owned()))
+                .unwrap()
+                .expose_secret_str()
+                .unwrap()
+                .to_owned()
+        }));
+    }
+    start.wait();
+    let mut values = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, ["one", "two"]);
+    assert_eq!(keyring.read_count("provider/one"), 1);
+    assert_eq!(keyring.read_count("provider/two"), 1);
 }
