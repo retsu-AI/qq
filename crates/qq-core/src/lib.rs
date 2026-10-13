@@ -2076,12 +2076,14 @@ impl plan::CompiledAgentPlan {
                 // provider request. A spent work budget grants one final
                 // response that asks for no tool calls; a second spent check, an elapsed wall
                 // clock, or unmeasurable cost settles the run here.
-                let budget_final_turn = match budget.before_turn(
+                let (budget_final_turn, tool_call_allowance) = match budget.before_turn(
                     tokio::time::Instant::now(),
                     if allow_tools { MAX_TOOL_CALLS_PER_TURN } else { 0 },
                 ) {
-                    BudgetDecision::Continue => false,
-                    BudgetDecision::FinalResponse(_) => true,
+                    BudgetDecision::Continue { tool_call_allowance } => {
+                        (false, tool_call_allowance)
+                    }
+                    BudgetDecision::FinalResponse(_) => (true, 0),
                     BudgetDecision::Exhausted(exhaustion) => {
                         yield RuntimeEvent::BudgetExhausted { exhaustion };
                         return;
@@ -2630,7 +2632,7 @@ impl plan::CompiledAgentPlan {
                             // failing the whole run. Such calls never execute,
                             // so they do not count against the slice or the
                             // run's tool-call budget.
-                            let over_cap = pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
+                            let over_cap = pending_calls.len() >= tool_call_allowance;
                             let rejection = if summarizer.is_some() {
                                 Some(SUMMARIZER_TOOL_REJECTION.to_owned())
                             } else if final_answer_turn {
@@ -2642,8 +2644,8 @@ impl plan::CompiledAgentPlan {
                             } else if over_cap {
                                 Some(format!(
                                     "not executed: this turn requested more than \
-                                     {MAX_TOOL_CALLS_PER_TURN} tool calls and only the first \
-                                     {MAX_TOOL_CALLS_PER_TURN} ran; call this again next turn"
+                                     {tool_call_allowance} tool calls and only the first \
+                                     {tool_call_allowance} ran; call this again next turn"
                                 ))
                             } else {
                                 None

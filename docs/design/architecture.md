@@ -1011,6 +1011,9 @@ name]`); every other codec sends them as tool blocks, which those APIs accept
 (checked live on Bedrock Mantle's Anthropic Messages path).
 These are observed-spend limits: a provider turn or reserved final response can
 still overshoot; there is no prepaid reservation or estimated audit minimum.
+For a bounded tool-call run, each ordinary turn receives the minimum of the
+requested per-turn calls and the run's unspent allowance; dispatch applies that
+same allowance, and only executable, nonrejected calls charge the run.
 
 Children share the parent's absolute deadline. Preflight and queueing consume
 that clock; expiry cancels the owned work and waits for cleanup, which can finish
