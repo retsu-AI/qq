@@ -20,3 +20,9 @@
 - Candidate: commit `d156465`; `src/runtime.rs` emits exactly three allowlisted criterion records with validated choice, shortest round-trip numeric confidence/winner values, and classified outcome. Aggregate minimum confidence, outcome precedence, spend and malformed generic feedback are unchanged.
 - Focused command: `TMPDIR=/private/tmp rustup run 1.97.1 cargo test --bin qq typesafe_checkpoint --locked`; 3 passed (parser contract, loopback reviewer path, oversized-response rejection). Existing compiler warnings remain in `src/runtime/approval.rs` and `src/catalog.rs`.
 - Parent owns full gates and independent non-author review. Feedback is also supplied to corrective turns, so a changed model continuation remains an open live behavior question.
+
+## 2026-10-13 — JD1 coverage follow-up
+
+- Added literal `0.69999999` / `0.70000001` confidence boundaries, high-confidence/low-winning-probability coverage, late-third-criterion malformed rollback, and a full loopback feedback equality assertion. The loopback fixture now consumes the complete request body before replying.
+- Explicit toolchain log: `reviews/alignment-20261011/qq-recovery-20261012/jev-diagnostics-author-final2.log`; cargo/rustc/rustdoc all report 1.97.1. `cargo fmt --all -- --check` and `cargo test --bin qq typesafe_checkpoint --locked` pass, 3 tests.
+- Design note updated in `docs/design/jev.md`; source remains limited to the existing feedback/event route. No provider, credential, protocol, logger, or raw-text changes.

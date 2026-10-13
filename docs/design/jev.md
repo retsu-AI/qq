@@ -86,6 +86,19 @@ contradiction remain `RED` errors. Final-mode evidence gaps do not spend a
 correction turn; enforce mode and consequential contradictory or partial
 outcomes retain bounded correction behavior.
 
+Checkpoint feedback also retains one bounded diagnostic row for each of the
+three fixed criteria (`task_coverage`, `direct_evidence`, and `consistency`).
+Each row contains only the validated choice, confidence, winning probability,
+and classified outcome; unknown or partially validated response fields are
+discarded with the generic unavailable result. The public verdict still uses
+the minimum confidence across criteria, so the aggregate value is not the
+confidence of the criterion that determined a contradiction or evidence gap.
+These rows contain no task text, candidate text, provider payload, tool
+arguments, endpoint, or credential. Feedback is supplied to bounded correction
+turns as well as persisted review events, so it is diagnostic evidence and can
+influence later model wording without changing the parser, policy, or repair
+limits.
+
 Where each is specified in full:
 
 - Review: [ADR-0028](../adr/0028-mandatory-typed-jev-checkpoints.md).
