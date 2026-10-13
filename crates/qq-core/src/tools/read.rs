@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
 
 use super::{
-    dispatch::{ToolCancellation, ToolOutput},
+    dispatch::{ReadSideOutput, ToolCancellation},
     lang::Language,
     output::{
         Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len, push_line,
@@ -101,7 +101,7 @@ pub(super) fn read_file(
     file_state: &FileState,
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     #[cfg(test)]
     {
         let hook = {
@@ -123,21 +123,21 @@ pub(super) fn read_file(
         !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some());
     let ranges = match parse_ranges(&arguments) {
         Ok(ranges) => ranges,
-        Err(error) => return ToolOutput::error(error),
+        Err(error) => return ReadSideOutput::error(error),
     };
     if let Some(since) = &arguments.if_changed_since
         && !(since.len() == SHORT_HASH_LEN + 2
             && since.starts_with("h:")
             && since[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
-        return ToolOutput::error("invalid_if_changed_since: expected h:<12 hex digits>");
+        return ReadSideOutput::error("invalid_if_changed_since: expected h:<12 hex digits>");
     }
     let loaded = match load(workspace, &arguments.path) {
         Ok(loaded) => loaded,
-        Err(error) => return ToolOutput::error(error),
+        Err(error) => return ReadSideOutput::error(error),
     };
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ReadSideOutput::error("tool execution was cancelled");
     }
     let update = loaded.hash.as_ref().map(|hash| FileStateUpdate {
         path: loaded.path.clone(),
@@ -171,7 +171,7 @@ pub(super) fn read_file(
             if offset_ignored {
                 header = header.field("note", "offset_ignored");
             }
-            ToolOutput::success(header.into_line())
+            ReadSideOutput::success(header.into_line())
         }
         _ if image => {
             let mut header = Header::new("read", Some(&loaded.path))
@@ -190,9 +190,9 @@ pub(super) fn read_file(
             if offset_ignored {
                 header = header.field("note", "offset_ignored");
             }
-            ToolOutput::success(header.into_line())
+            ReadSideOutput::success(header.into_line())
         }
-        _ if binary => ToolOutput::error(format!(
+        _ if binary => ReadSideOutput::error(format!(
             "not_text: {} is binary ({} bytes); use mode=info",
             loaded.path, loaded.size
         )),
@@ -208,7 +208,7 @@ pub(super) fn read_file(
                 if offset_ignored {
                     header = header.field("note", "offset_ignored");
                 }
-                ToolOutput::success(header.into_line())
+                ReadSideOutput::success(header.into_line())
             } else {
                 lines(
                     &loaded,
@@ -360,7 +360,7 @@ fn lines(
     ranges: &[Range],
     offset_ignored: bool,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
         Ok(text) => text,
         // The scan cap (or the file itself) ended inside a multibyte
@@ -370,13 +370,13 @@ fn lines(
                 .expect("the UTF-8 validator reported a valid prefix")
         }
         Err(_) => {
-            return ToolOutput::error(format!("not_text: {} is not valid UTF-8", loaded.path));
+            return ReadSideOutput::error(format!("not_text: {} is not valid UTF-8", loaded.path));
         }
     };
     if let Some(first) = ranges.first()
         && first.start > total_lines
     {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "range_out_of_bounds: {} has {total_lines} lines (last_line={total_lines})",
             loaded.path
         ));
@@ -407,7 +407,7 @@ fn lines(
     let mut number_buffer = String::with_capacity(width + 1);
     'ranges: for (index, range) in ranges.iter().enumerate() {
         if cancelled.is_cancelled() {
-            return ToolOutput::error("tool execution was cancelled");
+            return ReadSideOutput::error("tool execution was cancelled");
         }
         let mut first_shown = None;
         let mut last_shown = 0_usize;
@@ -505,15 +505,20 @@ fn lines(
             MAX_READ_SCAN_BYTES / (1024 * 1024)
         );
     }
-    ToolOutput::bounded(out, &READ_BOUNDS, false)
+    ReadSideOutput::with_bounds(out, &READ_BOUNDS, false)
 }
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the
 /// defining line's indentation, ≤ [`MAX_OUTLINE_ITEMS`] rows.
-fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: bool) -> ToolOutput {
+fn outline(
+    loaded: &Loaded,
+    short: &str,
+    total_lines: usize,
+    offset_ignored: bool,
+) -> ReadSideOutput {
     let language = Language::from_path(&loaded.path);
     let Some(items) = language.outline(&loaded.bytes) else {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "outline_unsupported: no outline table for {}; read it by lines",
             loaded.path
         ));
@@ -568,7 +573,7 @@ fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: boo
     }
     let mut out = header.into_line();
     out.push_str(&body);
-    ToolOutput::bounded(out, &READ_BOUNDS, false)
+    ReadSideOutput::with_bounds(out, &READ_BOUNDS, false)
 }
 
 #[cfg(unix)]
