@@ -68,6 +68,7 @@ class RecorderTests(unittest.TestCase):
         (directory / "protected").write_text("retained")
         result = self.run_recorder()
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exists", result.stderr)
         self.assertEqual((directory / "protected").read_text(), "retained")
         self.assertFalse((self.root / "order").exists())
 

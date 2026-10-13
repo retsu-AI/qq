@@ -1357,3 +1357,5 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Root reserves shared CI/runbook paths. CLI/parser safety and error behavior are test-first; job uses separate target directories to prevent the observed Cargo artifact reuse. Full AC0.2 and entire autonomous-core goal remain open. GitHub connector lacks dispatch; use an authenticated CLI fallback for the explicit runner invocation after reviewable code/checks.
 
 - AC0.2.1 test-first public CLI regressions are red (5 failures): complete120-sample alternating/control recording, aliased inputs, malformed row evidence, no-overwrite output and immutable SHA validation. Recorder absent on input baseline; `.github/scripts/test-record-turn-overhead.py` uses local stand-in binaries without Rust builds or providers. Red log `target/qq-perf/ac3-stack-2026-10-13/red-ci-recorder.log`.
+
+- Correction: initial CLI run was 4 failures/1 pass; the no-overwrite case accepted any process failure. Tightened it to require an existing-output diagnostic; all5 now fail on the absent recorder (`red-ci-recorder-strict.log`). This avoids mistaking a missing executable for correct artifact refusal.
