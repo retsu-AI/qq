@@ -3633,6 +3633,13 @@ pub(crate) fn advisory_reviewer(
     diagnostic: Option<Arc<dyn qq_auth::CredentialDiagnosticSink>>,
 ) -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {
     let store = CredentialStore::system()?;
+    advisory_reviewer_from_store(store, diagnostic)
+}
+
+fn advisory_reviewer_from_store(
+    store: CredentialStore,
+    diagnostic: Option<Arc<dyn qq_auth::CredentialDiagnosticSink>>,
+) -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {
     let store = match diagnostic {
         Some(sink) => store
             .with_diagnostic_sink_as(sink, qq_auth::CredentialDiagnosticRoute::TypesafeReviewer),
@@ -4099,6 +4106,7 @@ mod tests {
     };
     use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream};
     use qq_server::{ServerOptions, ServerPaths, StartOutcome};
+    use tempfile::tempdir;
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -4131,6 +4139,156 @@ mod tests {
                 .map(|_| ())
                 .ok_or(KeyringError::Missing)
         }
+    }
+
+    struct CountingKeyring {
+        values: Mutex<BTreeMap<String, Vec<u8>>>,
+        reads: AtomicU64,
+    }
+
+    impl Default for CountingKeyring {
+        fn default() -> Self {
+            Self {
+                values: Mutex::new(BTreeMap::new()),
+                reads: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl CountingKeyring {
+        fn read_count(&self) -> u64 {
+            self.reads.load(Ordering::Acquire)
+        }
+    }
+
+    impl KeyringBackend for CountingKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            self.values
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or(KeyringError::Missing)
+        }
+
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(name.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or(KeyringError::Missing)
+        }
+    }
+
+    struct DiagnosticEvents {
+        events: Mutex<Vec<qq_auth::CredentialDiagnosticEvent>>,
+        next_id: AtomicU64,
+    }
+
+    impl Default for DiagnosticEvents {
+        fn default() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                next_id: AtomicU64::new(1),
+            }
+        }
+    }
+
+    impl qq_auth::CredentialDiagnosticSink for DiagnosticEvents {
+        fn emit(&self, event: qq_auth::CredentialDiagnosticEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn allocate_id(&self) -> Option<u64> {
+            let mut current = self.next_id.load(Ordering::Acquire);
+            loop {
+                if current == u64::MAX {
+                    return None;
+                }
+                match self.next_id.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(current),
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_reviewer_helper_attaches_existing_store_without_extra_reads() {
+        fn fixture() -> (CredentialStore, Arc<CountingKeyring>, tempfile::TempDir) {
+            let root = tempdir().unwrap();
+            let keyring = Arc::new(CountingKeyring::default());
+            let store = CredentialStore::with_backend(
+                CredentialPaths::new(root.path().join("credentials")),
+                keyring.clone(),
+            );
+            store
+                .set_with_metadata(
+                    "typesafe-jev",
+                    b"fixture-secret",
+                    false,
+                    Some("typesafe"),
+                    Some("https://api.typesafe.ai"),
+                )
+                .unwrap();
+            (store, keyring, root)
+        }
+
+        let (baseline_store, baseline_keyring, _baseline_root) = fixture();
+        let baseline = advisory_reviewer_from_store(baseline_store, None).unwrap();
+        assert_eq!(
+            baseline.identity(),
+            "typesafe/jev-1.13.0/criteria-2026-09-18.1/final"
+        );
+        assert_eq!(baseline_keyring.read_count(), 1);
+
+        let (enabled_store, enabled_keyring, _enabled_root) = fixture();
+        let events = Arc::new(DiagnosticEvents::default());
+        let enabled = advisory_reviewer_from_store(
+            enabled_store,
+            Some(events.clone() as Arc<dyn qq_auth::CredentialDiagnosticSink>),
+        )
+        .unwrap();
+        assert_eq!(enabled.identity(), baseline.identity());
+        assert_eq!(enabled_keyring.read_count(), 1);
+        let events = events.events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            qq_auth::CredentialDiagnosticEvent::BackendReadStarted {
+                route: qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
+                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            qq_auth::CredentialDiagnosticEvent::BackendReadReturned {
+                route: qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
+                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
+                ..
+            }
+        )));
+        drop(events);
+
+        let (deactivated_store, deactivated_keyring, _deactivated_root) = fixture();
+        let deactivated = advisory_reviewer_from_store(deactivated_store, None).unwrap();
+        assert_eq!(deactivated.identity(), baseline.identity());
+        assert_eq!(deactivated_keyring.read_count(), 1);
     }
 
     pub(super) struct PanicKeyring;
