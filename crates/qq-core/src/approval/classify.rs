@@ -35,6 +35,24 @@ pub(crate) const MAX_CLASSIFIED_BYTES: usize = 16 * 1024;
 const MAX_WRAPPER_DEPTH: usize = 8;
 /// `sh -c STRING` inside `sh -c STRING`… recursion bound.
 const MAX_NESTED_SHELLS: usize = 4;
+/// Where the start of a launched command is unknowable, this many suffix
+/// starts are judged, each at most this many words long. Past it the command
+/// is already unknown (never allowed), and a `Forbidden` program further in
+/// is a cost the user approves with the command in front of them.
+const MAX_SUFFIX_STARTS: usize = 64;
+const MAX_SUFFIX_WORDS: usize = 16;
+
+/// Bounded suffixes of `words`: at most `MAX_SUFFIX_STARTS` starts from
+/// `first`, each truncated to `MAX_SUFFIX_WORDS` words, so classification
+/// stays linear in the command however it is split.
+fn bounded_suffixes(
+    words: &[Option<String>],
+    first: usize,
+) -> impl Iterator<Item = Vec<Option<String>>> + '_ {
+    (first..words.len())
+        .take(MAX_SUFFIX_STARTS)
+        .map(|start| words[start..words.len().min(start + MAX_SUFFIX_WORDS)].to_vec())
+}
 
 /// One simple command as the classifier sees it: literal argv (`None` for a
 /// word with an expansion, quote with substitution, or glob), the redirect
@@ -606,9 +624,9 @@ impl Collector<'_> {
             let tails: Vec<Vec<Option<String>>> = if clean {
                 vec![words.to_vec()]
             } else {
-                (1..command.argv.len())
-                    .map(|start| command.argv[start..].to_vec())
-                    .collect()
+                // From index 0: the command at the boundary may itself be
+                // the danger (`nice` ×8 `sudo ls` reaches `sudo` here).
+                bounded_suffixes(&command.argv, 0).collect()
             };
             self.commands.push(SimpleCommand {
                 argv: vec![None],
@@ -730,10 +748,10 @@ impl Collector<'_> {
                             .split_whitespace()
                             .map(|w| Some(w.to_owned()))
                             .collect();
-                        for start in 0..words.len() {
+                        for argv in bounded_suffixes(&words, 0) {
                             self.peel(
                                 SimpleCommand {
-                                    argv: words[start..].to_vec(),
+                                    argv,
                                     redirects: command.redirects.clone(),
                                     raw_redirects: command.raw_redirects.clone(),
                                     assignments: Vec::new(),
@@ -783,10 +801,17 @@ impl Collector<'_> {
                 // "$(printf -o)" 0 sudo ls`), so where the command starts is
                 // not knowable. Each candidate is nested, so this only ever
                 // adds strictness.
-                for start in 0..args.len() {
-                    if let Some(inner) = inner_from(start) {
-                        self.peel(inner, depth + 1);
-                    }
+                for argv in bounded_suffixes(args, 0) {
+                    self.peel(
+                        SimpleCommand {
+                            argv,
+                            redirects: command.redirects.clone(),
+                            raw_redirects: command.raw_redirects.clone(),
+                            assignments: Vec::new(),
+                            nested: true,
+                        },
+                        depth + 1,
+                    );
                 }
             }
             "nice" | "nohup" | "time" | "stdbuf" | "ionice" | "setsid" | "unbuffer" | "command"

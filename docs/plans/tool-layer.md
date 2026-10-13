@@ -465,7 +465,8 @@ remaining friction has moved:
   command `Prompt`. Any assignment before a command (`RUSTDOC=`, `CC=`,
   `GIT_EXTERNAL_DIFF=`, …) keeps it from `Allow`, except a short
   allowlist of output and test knobs (`RUST_BACKTRACE`, `RUST_LOG`,
-  `NO_COLOR`, `QQ_*`, …). Many variables name a program to run, so a
+  `NO_COLOR`, and enumerated `QQ_` bench/soak knobs; not `QQ_*`, since
+  `QQ_UPDATE_FIXTURES` rewrites fixtures). Many variables name a program to run, so a
   denylist cannot be complete. `export`/`declare -x` is a construct and
   never allows, so `export GIT_EXTERNAL_DIFF=x; git diff` prompts. `git branch` is a read only when every option is a
   listing option, because `--list --no-list name` creates `name`.

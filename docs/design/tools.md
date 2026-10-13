@@ -1003,7 +1003,10 @@ unquoted, `\_`-split words is judged too. Past 8 wrappers, any further
 launchers are skipped to the program they launch, which is judged nested
 (`Prompt`), so `nice` ×9 `sudo ls` is `Forbidden` while `nice` ×9 `echo
 sudo` is not. A tail that is not a clean launcher chain is judged at every
-suffix. `env NAME=VALUE cmd` carries its assignments to `cmd`. Because
+suffix, including the command at the boundary itself. Every suffix
+enumeration is bounded to 64 starts of 16 words, so classification stays
+linear however a command is split. `env NAME=VALUE cmd` carries its
+assignments to `cmd`. Because
 GNU `timeout` creates its own process group, shell cancellation can leave
 it running. That predates T18 and is ENG-1032.
 
@@ -1011,7 +1014,9 @@ Any assignment before a command keeps it from `Allow` unless it is in a
 short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,
 `RUST_TEST_THREADS`, `RUST_MIN_STACK`, `NO_COLOR`, `CLICOLOR*`, `TERM`,
 `COLUMNS`, `LINES`, `LANG`, `LC_ALL`, `TZ`, `CI`, `NEXTEST_PROFILE`,
-`INSTA_UPDATE`, and `QQ_*`. Many variables name a program the tool will
+`INSTA_UPDATE`, `QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and
+`QQ_SOAK_EXPECT_COMPLETED`. `QQ_*` as a whole is not inert:
+`QQ_UPDATE_FIXTURES` rewrites checked-in fixtures. Many variables name a program the tool will
 run (`RUSTDOC`, `CC`, `GIT_EXTERNAL_DIFF`), so this is an allowlist. An
 `export` or `declare -x` is a construct and was never `Allow`. `ionice`, `chrt`, and `taskset` are not launchers
 because they can retarget a running process; with `-p` they launch

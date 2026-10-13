@@ -651,6 +651,11 @@ fn branch_lists(args: &[&str]) -> bool {
     let mut expect_value = false;
     let mut patterns = false;
     for arg in args {
+        // A value option consumes the next word whatever it looks like:
+        // `--format --list name` formats with `--list` and creates `name`.
+        if std::mem::take(&mut expect_value) {
+            continue;
+        }
         match *arg {
             // `-l` meant `--create-reflog` before git 2.23; only the long
             // form is a listing on every git a workspace may run.
@@ -658,8 +663,6 @@ fn branch_lists(args: &[&str]) -> bool {
             "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
             | "-i" | "--ignore-case" | "--color" | "--no-color" | "--column" | "--no-column"
             | "--no-abbrev" | "--show-current" => {}
-            // Listing filters that take a value: the next word is the
-            // value, not a branch name.
             // Filters select listing mode and take a value.
             "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at" => {
                 list_mode = true;
@@ -668,7 +671,6 @@ fn branch_lists(args: &[&str]) -> bool {
             // Formatting takes a value but does not select listing mode:
             // `git branch --format x name` creates `name`.
             "--sort" | "--format" => expect_value = true,
-            _ if std::mem::take(&mut expect_value) => {}
             arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {}
             arg if [
                 "--abbrev=",
@@ -1223,7 +1225,14 @@ fn harmless_env(name: &str) -> bool {
             | "CI"
             | "NEXTEST_PROFILE"
             | "INSTA_UPDATE"
-    ) || name.starts_with("QQ_")
+            // This repository's test and bench knobs that only choose what
+            // runs or how long. `QQ_UPDATE_FIXTURES`/`QQ_UPDATE_GOLDENS`
+            // rewrite checked-in files and `QQ_CONFIG*` changes what runs,
+            // so `QQ_*` as a whole is not inert.
+            | "QQ_BENCH_ITERATIONS"
+            | "QQ_SOAK_TURNS"
+            | "QQ_SOAK_EXPECT_COMPLETED"
+    )
 }
 
 fn is_dangerous_env(name: &str) -> bool {
@@ -1452,6 +1461,7 @@ mod tests {
             "cargo test 2>/dev/fd/2",
             "RUST_BACKTRACE=1 RUST_LOG=debug cargo test",
             "QQ_BENCH_ITERATIONS=2 cargo test",
+            "QQ_SOAK_EXPECT_COMPLETED=1 cargo test",
             "NO_COLOR=1 git log",
             // T18 review round 3: harmless globals and real stream devices.
             "git --no-pager log --oneline -3",
@@ -1608,6 +1618,13 @@ mod tests {
             // nests its command, so it never allows.
             "nice nice nice nice nice nice nice nice nice echo sudo",
             "env NO_COLOR=1 cargo test",
+            // T18 review round 8 (final): only enumerated QQ_ knobs; a value
+            // option eats the next word; the boundary wrapper is judged.
+            "QQ_UPDATE_FIXTURES=1 cargo test -p qq-protocol --test wire_fixtures",
+            "QQ_UPDATE_GOLDENS=1 cargo test",
+            "QQ_CONFIG_CONTENT=x cargo run",
+            "git branch --format --list created",
+            "git branch --sort --list created",
             // T18 review round 7: env NAME=VALUE carries the assignment; a
             // format option does not make a branch name a pattern.
             "env GIT_EXTERNAL_DIFF='touch PWN' git diff",
@@ -1842,6 +1859,7 @@ mod tests {
             // T18 review round 7: env -S quote joining.
             "env -S 'su\"\"do ls'",
             "env -S 'su\\do ls'",
+            "nice nice nice nice nice nice nice nice sudo ls",
             // T18 review round 6: depth exhaustion, env -S escapes, and a
             // dynamic chrt option still find the buried command.
             "nice nice nice nice nice nice nice nice nice sudo ls",
@@ -1953,7 +1971,7 @@ mod tests {
                 Allow,
             ),
             (
-                "cd sub && QQ_FLAG=1 timeout 300 cargo test -q -p a --test soak -- --include-ignored --test-threads=1 name 2>&1 | grep -E \"panicked|result\"",
+                "cd sub && QQ_SOAK_EXPECT_COMPLETED=1 timeout 300 cargo test -q -p a --test soak -- --include-ignored --test-threads=1 name 2>&1 | grep -E \"panicked|result\"",
                 Prompt,
                 Allow,
             ),
@@ -2088,6 +2106,25 @@ mod tests {
             ),
         ]
     };
+
+    /// Review (#283): suffix enumeration is bounded, so an `env -S` string of
+    /// thousands of words classifies in linear time instead of cloning every
+    /// suffix (quadratic), and still fails closed.
+    #[test]
+    fn huge_split_strings_classify_quickly_and_fail_closed() {
+        let words = vec!["x"; 7_000].join(" ");
+        for command in [
+            format!("env -S '{words}'"),
+            format!("taskset {words}"),
+            format!("{} {words}", vec!["nice"; 9].join(" ")),
+        ] {
+            assert!(command.len() < super::super::classify::MAX_CLASSIFIED_BYTES);
+            let started = std::time::Instant::now();
+            let got = classify_command(&command, Some(Path::new(WS)));
+            assert_eq!(got.decision, Decision::Prompt, "{:?}", got.reasons);
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        }
+    }
 
     #[test]
     fn d10_held_shapes_keep_their_expected_verdicts() {
