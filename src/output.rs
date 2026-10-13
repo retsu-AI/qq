@@ -87,7 +87,7 @@ pub async fn render(
     Err(OutputError::IncompleteRun)
 }
 
-fn checkpoint_label(outcome: qq_protocol::CheckpointOutcome) -> &'static str {
+pub(crate) fn checkpoint_label(outcome: qq_protocol::CheckpointOutcome) -> &'static str {
     match outcome {
         qq_protocol::CheckpointOutcome::Supported => "GREEN",
         qq_protocol::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
@@ -250,5 +250,45 @@ mod tests {
         let notices = String::from_utf8(notices).unwrap();
         assert!(notices.contains("[jev] GREEN ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
+    }
+
+    #[tokio::test]
+    async fn writes_evidence_gap_notices_without_polluting_answer_stdout() {
+        let events = stream::iter([
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:gap".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                confidence_basis_points: None,
+                feedback: "no direct test evidence".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:unavailable".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                confidence_basis_points: None,
+                feedback: "reviewer unavailable".to_owned(),
+            },
+            RunEvent::OutputTextDelta {
+                text: "literal answer".to_owned(),
+            },
+            RunEvent::Completed,
+        ]);
+        let mut output = Vec::new();
+        let mut notices = Vec::new();
+
+        render(events, &mut output, &mut notices, OutputMode::Raw)
+            .await
+            .unwrap();
+
+        assert_eq!(output, b"literal answer\n");
+        let notices = String::from_utf8(notices).unwrap();
+        assert!(notices.contains("[jev] NEEDS EVIDENCE FinalCandidate final:gap"));
+        assert!(notices.contains("[jev] UNAVAILABLE FinalCandidate final:unavailable"));
+        assert!(!notices.contains("literal answer"));
     }
 }
