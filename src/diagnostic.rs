@@ -626,32 +626,32 @@ impl DiagnosticSession {
         if already_closed && self.close_outcome.load(Ordering::Acquire) == 0 {
             return CloseOutcome::Incomplete;
         }
-        if !self.writer_done.load(Ordering::Acquire) {
-            if let Ok(done) = self.done.try_lock() {
-                let completed = if already_closed {
-                    done.try_recv().is_ok()
-                } else {
-                    done.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                        .is_ok()
-                };
-                if completed {
-                    self.writer_done.store(true, Ordering::Release);
-                }
+        if !self.writer_done.load(Ordering::Acquire)
+            && let Ok(done) = self.done.try_lock()
+        {
+            let completed = if already_closed {
+                done.try_recv().is_ok()
+            } else {
+                done.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .is_ok()
+            };
+            if completed {
+                self.writer_done.store(true, Ordering::Release);
             }
         }
         let mut joined = false;
-        if self.writer_done.load(Ordering::Acquire) {
-            if let Ok(mut join) = self.join.try_lock() {
-                if let Some(handle) = join.as_ref() {
-                    while !handle.is_finished() && Instant::now() < deadline {
-                        thread::yield_now();
-                    }
-                    if handle.is_finished() {
-                        joined = join.take().unwrap().join().is_ok();
-                    }
-                } else {
-                    joined = true;
+        if self.writer_done.load(Ordering::Acquire)
+            && let Ok(mut join) = self.join.try_lock()
+        {
+            if let Some(handle) = join.as_ref() {
+                while !handle.is_finished() && Instant::now() < deadline {
+                    thread::yield_now();
                 }
+                if handle.is_finished() {
+                    joined = join.take().unwrap().join().is_ok();
+                }
+            } else {
+                joined = true;
             }
         }
         if already_closed {
@@ -1035,7 +1035,7 @@ mod tests {
         assert!(summary["emitted"].as_u64().unwrap() <= 255);
         assert!(lines.lines().all(|line| line.len() < MAX_LINE_BYTES));
         assert!(lines.lines().count() <= 256);
-        assert!(lines.as_bytes().len() <= 131_072);
+        assert!(lines.len() <= 131_072);
         assert!(lines.lines().any(|line| line.contains("Summary")));
     }
 

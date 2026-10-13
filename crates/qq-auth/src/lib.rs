@@ -1185,66 +1185,66 @@ impl CredentialStore {
         .await
         .map_err(|_| qq_provider::RequestCredentialError::CapacityUnavailable)?
         .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed)?;
-        if let Some(context) = self.diagnostic.as_ref() {
-            if attempt_id != 0 {
-                context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
-                    store_id: context.store_id,
-                    coordinator_id: None,
-                    attempt_id,
-                    route,
-                    endpoint,
-                });
-            }
+        if let Some(context) = self.diagnostic.as_ref()
+            && attempt_id != 0
+        {
+            context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
+                store_id: context.store_id,
+                coordinator_id: None,
+                attempt_id,
+                route,
+                endpoint,
+            });
         }
         let store = self.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let diagnostic = store.diagnostic.clone();
-            if let Some(context) = diagnostic.as_ref() {
-                if read_id != 0 {
-                    context.emit(CredentialDiagnosticEvent::BackendReadStarted {
-                        store_id: context.store_id,
-                        coordinator_id: None,
-                        flight_id: None,
-                        read_id,
-                        attempt_id,
-                        route,
-                        endpoint,
-                    });
-                }
+            if let Some(context) = diagnostic.as_ref()
+                && read_id != 0
+            {
+                context.emit(CredentialDiagnosticEvent::BackendReadStarted {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    attempt_id,
+                    route,
+                    endpoint,
+                });
             }
             let result = operation(store);
-            if let Some(context) = diagnostic.as_ref() {
-                if read_id != 0 {
-                    context.emit(CredentialDiagnosticEvent::BackendReadReturned {
-                        store_id: context.store_id,
-                        coordinator_id: None,
-                        flight_id: None,
-                        read_id,
-                        attempt_id,
-                        route,
-                        endpoint,
-                        outcome: if result.is_ok() {
-                            CredentialDiagnosticOutcome::Success
-                        } else {
-                            CredentialDiagnosticOutcome::Failure
-                        },
-                    });
-                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
-                        store_id: context.store_id,
-                        coordinator_id: None,
-                        attempt_id,
-                        flight_id: None,
-                        read_id: Some(read_id),
-                        route,
-                        endpoint,
-                        outcome: if result.is_ok() {
-                            CredentialDiagnosticOutcome::Success
-                        } else {
-                            CredentialDiagnosticOutcome::Failure
-                        },
-                    });
-                }
+            if let Some(context) = diagnostic.as_ref()
+                && read_id != 0
+            {
+                context.emit(CredentialDiagnosticEvent::BackendReadReturned {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    attempt_id,
+                    route,
+                    endpoint,
+                    outcome: if result.is_ok() {
+                        CredentialDiagnosticOutcome::Success
+                    } else {
+                        CredentialDiagnosticOutcome::Failure
+                    },
+                });
+                context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    attempt_id,
+                    flight_id: None,
+                    read_id: Some(read_id),
+                    route,
+                    endpoint,
+                    outcome: if result.is_ok() {
+                        CredentialDiagnosticOutcome::Success
+                    } else {
+                        CredentialDiagnosticOutcome::Failure
+                    },
+                });
             }
             result
         });
@@ -1419,34 +1419,34 @@ impl CredentialStore {
                 let secret = entry.secret.clone();
                 state.cache.entries.push_back(entry);
                 drop(state);
-                if let Some(context) = self.diagnostic.as_ref() {
-                    if attempt_id != 0 {
-                        context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
-                            store_id: context.store_id,
-                            coordinator_id: Some(context.coordinator_id),
-                            attempt_id,
-                            route: context.route,
-                            endpoint: diagnostic_endpoint(expected_endpoint),
-                        });
-                        context.emit(CredentialDiagnosticEvent::CacheHit {
-                            store_id: context.store_id,
-                            coordinator_id: context.coordinator_id,
-                            attempt_id,
-                            route: context.route,
-                            endpoint: diagnostic_endpoint(expected_endpoint),
-                            outcome: CredentialDiagnosticOutcome::CacheHit,
-                        });
-                        context.emit(CredentialDiagnosticEvent::ResolutionFinished {
-                            store_id: context.store_id,
-                            coordinator_id: Some(context.coordinator_id),
-                            attempt_id,
-                            flight_id: None,
-                            read_id: None,
-                            route: context.route,
-                            endpoint: diagnostic_endpoint(expected_endpoint),
-                            outcome: CredentialDiagnosticOutcome::CacheHit,
-                        });
-                    }
+                if let Some(context) = self.diagnostic.as_ref()
+                    && attempt_id != 0
+                {
+                    context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                    });
+                    context.emit(CredentialDiagnosticEvent::CacheHit {
+                        store_id: context.store_id,
+                        coordinator_id: context.coordinator_id,
+                        attempt_id,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::CacheHit,
+                    });
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: None,
+                        read_id: None,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::CacheHit,
+                    });
                 }
                 return Ok(secret);
             }
@@ -1485,7 +1485,7 @@ impl CredentialStore {
                 context.emit(CredentialDiagnosticEvent::FlightJoined {
                     store_id: context.store_id,
                     coordinator_id: context.coordinator_id,
-                    attempt_id: attempt_id,
+                    attempt_id,
                     flight_id: flight.flight_id,
                     route: context.route,
                     endpoint: diagnostic_endpoint(expected_endpoint),
@@ -1564,7 +1564,7 @@ impl CredentialStore {
             context.emit(CredentialDiagnosticEvent::OwnerAdmitted {
                 store_id: context.store_id,
                 coordinator_id: context.coordinator_id,
-                attempt_id: attempt_id,
+                attempt_id,
                 flight_id: flight.flight_id,
                 route: context.route,
                 endpoint: diagnostic_endpoint(expected_endpoint),

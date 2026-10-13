@@ -3046,7 +3046,7 @@ impl CredentialDiagnosticSink for DiagnosticCollector {
         let current = self
             .1
             .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                (value != u64::MAX).then_some(value + 1)
+                value.checked_add(1)
             })
             .ok()?;
         Some(current)
@@ -3963,30 +3963,28 @@ fn diagnostic_backend_failures_keep_results_and_typed_outcomes() {
                 .count(),
             1
         );
-        assert!(events.iter().any(|event| match (mode, event) {
+        assert!(events.iter().any(|event| matches!(
+            (mode, event),
             (
                 None,
                 CredentialDiagnosticEvent::ResolutionFinished {
                     outcome: CredentialDiagnosticOutcome::Missing,
                     ..
-                },
-            ) => true,
-            (
+                }
+            ) | (
                 Some(FakeMode::Unavailable),
                 CredentialDiagnosticEvent::ResolutionFinished {
                     outcome: CredentialDiagnosticOutcome::Unavailable,
                     ..
-                },
-            ) => true,
-            (
+                }
+            ) | (
                 Some(FakeMode::Failure),
                 CredentialDiagnosticEvent::ResolutionFinished {
                     outcome: CredentialDiagnosticOutcome::Failure,
                     ..
-                },
-            ) => true,
-            _ => false,
-        }));
+                }
+            )
+        )));
     }
 }
 
