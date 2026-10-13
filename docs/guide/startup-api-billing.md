@@ -42,7 +42,9 @@ Revoked keys and suspended accounts fail before extraction.
 
 Browser identity is now better-auth behind the typed Retsu routes. The
 [Identity service](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Identity.ts)
-uses D1 auth tables, hashed magic links, Turnstile checks, and a host-only
+uses D1 auth tables and hashed magic links. The account routes enforce
+configured Turnstile and edge throttling through `services/Edge.ts`; Identity
+provides the better-auth boundary and host-only
 Secure/HttpOnly/SameSite=Lax `__Host-retsu.session_token` cookie. The session
 TTL is 30 days and refreshes daily while in use; magic links are one-use and
 15 minutes. These are current source facts, not live authentication evidence.
@@ -51,7 +53,7 @@ TTL is 30 days and refreshes daily while in use; magic links are one-use and
 maps better-auth users and sessions to billing accounts and supports current
 principal checks, per-device session listing and revocation, email change,
 account deletion confirmation, and bounded impersonation. Signup behavior is
-selected by `signup_mode`: waitlist, invite-only, or open. The current
+selected by `signup_mode`: `waitlist`, `invite_only`, or `open`. The current
 [account router](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/http/account.ts)
 also exposes:
 
@@ -97,8 +99,8 @@ creates hosted Stripe Checkout sessions. Card data does not pass through the
 Worker. The webhook verifies signature and timestamp, applies checkout credit
 once, and handles asynchronous payment, cumulative refunds, and charge
 disputes. A refund debits the proportional credit; an opened dispute removes
-credit and suspends the account, while a won dispute restores credit pending
-review. Unpaid, cancelled, stale, unknown, duplicate, signature-failed,
+credit and suspends the account, while a won dispute restores credit but leaves the account
+suspended pending review. Unpaid, cancelled, stale, unknown, duplicate, signature-failed,
 backend-failed, reserve-failed, release, and settlement outcomes remain
 distinct.
 

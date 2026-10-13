@@ -26,7 +26,7 @@
       { "page": "startup-feature-map", "label": "Feature map", "description": "Map journeys to components, source entrypoints, guides, and evidence limits." },
       { "page": "startup-qq-development", "label": "Develop QQ", "description": "Use the isolated branch, real workflow, review, adoption, and rollback loop." },
       { "page": "startup-assistant", "label": "Assistant gateway and nodes", "description": "Understand the Rust assistant boundary and its Mac and iOS node plans." },
-      { "page": "startup-native-modes", "label": "Direct and assistant modes", "description": "See how native clients use the same QQ runtime in direct and assistant modes." },
+      { "page": "startup-native-modes", "label": "Direct and assistant modes", "description": "See how native clients are intended to use the same QQ runtime in direct and assistant modes." },
       { "page": "startup-api-billing", "label": "API and billing", "description": "Separate QQ usage metadata from the Retsu API and its unverified billing path." },
       { "page": "startup-data-models", "label": "Data and models", "description": "Track data, model, memory, schema, and experiment ownership across systems." },
       { "page": "startup-infrastructure", "label": "Infrastructure", "description": "Read the current staging, production, deployment, and recovery boundaries." },

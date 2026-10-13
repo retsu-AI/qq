@@ -23,6 +23,9 @@ The status is for the reviewed snapshot in the [overview](startup-overview.md).
 ## Startup features
 
 Retsu rows use origin/main pin `8d58080829231bb74e180c6de4e8f687c4606200`, refreshed on 2026-10-13. Private repository access is required. The older `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` snapshot is historical.
+The adjacent `grip-train/src/rl.rs`, `loss.rs`, and `calibrate.rs` files are
+Phase 4/5 stubs at this pin; their presence does not establish RL training or
+calibration.
 
 | Feature or process | Reviewed source | Guide | Status |
 | --- | --- | --- | --- |
@@ -34,7 +37,7 @@ Retsu rows use origin/main pin `8d58080829231bb74e180c6de4e8f687c4606200`, refre
 | Retsu extraction and usage | [`services/Extract.ts`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Extract.ts), [`services/Ledger.ts`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Ledger.ts) | [API and billing](startup-api-billing.md) | Implemented source |
 | Stripe checkout, refunds, and disputes | [`services/Billing.ts`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Billing.ts), [`http/account.ts`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/http/account.ts) | [API and billing](startup-api-billing.md) | Implemented source |
 | Grip model and inference | [`crates/grip-model/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-model), [`crates/grip-core/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-core) | [Data and models](startup-data-models.md) | Implemented source |
-| Grip training, data, and evaluation | [`crates/grip-train/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-train), [`crates/grip-data/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-data), [`crates/grip-eval/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-eval) | [Data and models](startup-data-models.md) | Implemented source |
+| Grip SFT training, data, and evaluation | [`crates/grip-train/src/sft.rs`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-train/src/sft.rs), [`crates/grip-data/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-data), [`crates/grip-eval/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-eval) | [Data and models](startup-data-models.md) | Implemented source |
 | Grip serving and CLI | [`crates/grip-server/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-server), [`crates/grip-cli/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/crates/grip-cli) | [Infrastructure](startup-infrastructure.md) | Implemented source |
 | TypeScript SDK | [`sdk/typescript/src/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/sdk/typescript/src) | [Product docs](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/packages/docs/src/content/docs/sdks) | Implemented source |
 | Python SDK | [`sdk/python/src/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/sdk/python/src) | [Product docs](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/docs/src/content/docs/sdks/python.mdx) | Implemented source |

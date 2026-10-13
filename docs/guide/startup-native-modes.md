@@ -6,7 +6,7 @@ the reviewed candidates.
 
 ## Current client source
 
-The Mac candidate at observed head `a4a1d247a26c7019e4d4cec1ea84f3cd4ed309cd`
+The Mac candidate at pinned revision `a4a1d247a26c7019e4d4cec1ea84f3cd4ed309cd`
 and the iOS candidate at `a3ef908573b73fbc3fe35dd00336fa4ef2eab21a` share a
 QQ HTTP and SSE contract. Their `SPEC.md` files describe discovery, protocol
 validation, workspace and session selection, bounded snapshots, explicit

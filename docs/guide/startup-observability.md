@@ -37,9 +37,9 @@ records typed extraction outcomes.
 
 Current monitoring source is separate from proposed Sentry work:
 [services/Metrics.ts](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Metrics.ts)
-writes bounded request and event points to Analytics Engine, using low-cardinality
-route, method, outcome, status, latency, token, cost, cold-start, and
-invariant fields. [services/Monitor.ts](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Monitor.ts)
+writes bounded request and event points to Analytics Engine, using bounded
+route, method, outcome, status, latency, token, cost, cold-start, invariant,
+hashed account-id (`blob4`), and key-mode (`blob7`) fields. [services/Monitor.ts](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/api/src/services/Monitor.ts)
 runs five-minute checks and daily digest crons for backend failures, 5xx rate,
 ledger drift, webhook/mail failures, cold starts, and quota signals, then
 sends configured chat/email alerts. These are source capabilities, not proof

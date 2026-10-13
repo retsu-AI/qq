@@ -48,7 +48,7 @@ Choose a task card, then read the source and evidence boundary on its page.
   </a>
 </nav>
 
-<p class="startup-task-links">More: <a href="../startup-feature-map/">full feature map</a> · <a href="../startup-mcp-acp/">protocol boundaries</a> · <a href="../startup-maintenance/">documentation maintenance</a></p>
+<p class="startup-task-links">More: <a href="../startup-feature-map/">full feature map</a> · <a href="../startup-mcp-acp/">protocol boundaries</a> · <a href="../startup-recovery/">recovery</a> · <a href="../startup-maintenance/">documentation maintenance</a></p>
 
 ## Master architecture
 

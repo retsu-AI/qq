@@ -31,9 +31,10 @@ and the local server boundary in
 7. Adopt the candidate explicitly, or retain the prior revision and record why.
 
 For a QQ source change, the normal Rust checks remain formatting, workspace
-tests, Clippy, and the workspace build. Separately, the website runbook
-uses `nub run build` for the docs-truth and static-site path; its checks parse
-command examples and compatibility labels across the guides. This
+tests, Clippy, and the workspace build. Separately, `nub run build` runs guide
+sync, Astro checks, static generation, Pagefind, and link checks. The
+docs-truth checks that parse guide commands, versions, and compatibility labels
+run under `cargo test --workspace` (`src/docs_truth.rs`). This
 documentation-only delivery is scoped to guide sync and site checks, so no
 Cargo suite was run. A green check still does not establish provider,
 deployment, payment, or customer acceptance.
