@@ -11,6 +11,7 @@ ledger is deleted with it; the receipts stay in Git history.
 | --- | --- | --- |
 | [`autonomous-core.md`](./autonomous-core.md) | agent on the autonomous-core plan | AP0–AP5 progress track; AC0–AC16: soak harness, reset scopes, continuation, loop guard, `qq-harness`, tool features, store write amplification (AC7–AC9 moved to goals) |
 | [`goals.md`](./goals.md) | agent on the goals plan | G0–G5: goal state and protocol, goal in runs, driver, completion check, surfaces, evidence |
+| [`action-bias.md`](./action-bias.md) | agent on the action-bias plan | AB1–AB6: read classification, prompt v20, read window, run authority (ADR-0059), root stall report, qualification |
 | [`compaction.md`](./compaction.md) | agent on the compaction plan | CX0–CX5: narrative plus rendered record, cache-aligned summarizer, prune watermark, compacting activity, live qualification |
 | [`run-reliability.md`](./run-reliability.md) | agent on the run-reliability plan | RR1–RR12: turn recovery, checkpoint tolerance, admission validation, tool leniency (RR12's loop result moved to autonomous-core AC4) |
 | [`tool-layer.md`](./tool-layer.md) | agent on the tool-layer plan | T1–T17 built-in tool slices and the A0–A5 ablation |

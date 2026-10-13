@@ -62,6 +62,10 @@ date and the plan that acts on it.
 - [`goal-pursuit.md`](research/goal-pursuit.md) (2026-09-28) — how the
   reference harnesses pursue one objective over time, and the positions
   QQ's `/goal` takes. Acted on by [`plans/goals.md`](plans/goals.md).
+- [`action-bias.md`](research/action-bias.md) (2026-10-13) — why runs read
+  instead of finishing: shell reads counted as work, re-reads, delegation
+  wall time, and what the reference harnesses do instead. Acted on by
+  [`plans/action-bias.md`](plans/action-bias.md).
 
 ## Decisions — `adr/`
 

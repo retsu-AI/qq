@@ -1,0 +1,323 @@
+# Action Bias: runs that produce results
+
+## Status
+
+| | |
+| --- | --- |
+| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after AB1–AB4 have been on `main` for seven days |
+| Research | [`../research/action-bias.md`](../research/action-bias.md): live store, 30 days to 2026-10-13, findings AB-F1–AB-F7; reference prompts and tools from Codex, OpenCode, Pi, fx |
+| Ledger | [`progress/action-bias.md`](./progress/action-bias.md) |
+| Linear | [ENG-1037](https://linear.app/retsu-ai/issue/ENG-1037) (program), milestone `Action Bias`; AB1–AB6 are ENG-1038–ENG-1043 |
+| ADR | ADR-0059 reserved for AB4 (the prompt and tool set state a run's real authority; supersedes ADR-0054 § 5's read-only-root clause) |
+| Crosses | `autonomous-core.md` (progress rule, AC4 loop guard), `tool-layer.md` (built-in contracts, shell nudge), `token-efficiency.md` TE3 and `supervised-delegation.md` D6b (delegation economics). Each slice names what it borrows; § Coordination lists the requests |
+
+## Goal
+
+When a run is asked for a change, it makes the change, verifies it and
+reports, without reading the same material repeatedly first. Specifically:
+
+- **Root runs reach their first edit sooner.** Built-in reads before the
+  first edit: median 9 → ≤ 6, p90 57 → ≤ 30.
+- **Fewer re-reads.** Same-path re-reads fall from 44 % of root `read_file`
+  calls (1,631 of 3,669) to ≤ 25 %.
+- **Reads go through the built-ins.** Root shell calls whose program (after
+  an optional leading `cd DIR`) is a read fall from 38 % of root `shell`
+  calls (725 of 1,886) to ≤ 15 %.
+- **No per-directory instruction walk.** Instruction-file probes fall from
+  271 in 30 days to at most one `search` per run that edits below the root.
+- **The safety net fires.** A root run whose last 64 calls changed nothing
+  receives a stall report. Today `cd … && grep` and `sed -n` count as work,
+  so this never happened in the window: 0 root stall reports in 30 days
+  (children: 21).
+- **No regressions.** Edit failure rate, mean wall time of non-spawning
+  roots, and completed-run share do not get worse.
+
+The baselines are from the research snapshot. They are observational: the
+task mix is not controlled. A paired evaluation is the stronger gate and is
+described in AB6.
+
+## Non-goals
+
+- **Ending root runs.** A stuck root is paused by AC4 (ADR-0049 § 8), not
+  by this plan. AB5 only changes what the root's stall report asks for.
+- **Changing `qq run`'s default approval** (`read-only`). AB4 makes the
+  prompt tell the truth about it; changing the default is a product
+  decision.
+- **Removing or hiding built-ins.** Codex removed its read and grep tools.
+  QQ's ablation (T13) has not measured that, and nothing here pre-empts it.
+- **Per-model prompt variants.** One prompt; it is measured as one prompt.
+- **A delegation limiter or classifier.** Delegation is the largest
+  wall-time cost (AB-F4). Its defaults are owned by D6b and TE3; this plan
+  hands them the evidence (§ Coordination).
+- **Read-range memory or deduplication in the runtime.** If AB2 and AB3 do
+  not bring re-reads down, that is a TE5 question, not a new mechanism
+  here.
+
+## Principles
+
+1. **Classify reads honestly.** The progress rule decides when a run owes a
+   report. It must agree with what the call actually did: a `grep`
+   preceded by `cd` is a read.
+2. **The prompt states one obligation: finish.** Inspection rules stay only
+   where they protect correctness: read before editing by anchor, preserve
+   unrelated work, and verify. Rules that only add reads go.
+3. **Make the built-in strictly better than the shell form,** and say so
+   where the model chooses: the prompt, and the tool's own description.
+4. **Describe exactly the authority the run has.** Never offer a tool that
+   is certain to be refused, and never say "implement" to a run that cannot.
+5. **Measure before and after with the same queries.** The research appendix
+   is the runbook.
+
+## Task index
+
+| ID | Goal | Finding | Size | Inputs | Owned paths | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (`read_only_shell_command` only), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
+| AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found by one search instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test |
+| AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit always carries `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
+| AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` gains one `granted_externals: bool`; `specs_with_pins` honours the filter), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`; a config-granted mutating MCP tool still declares and runs on a direct run; a pinned mutating MCP tool is not declared in a read-only run; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
+| AB5 | A root's stall report asks for the next action, not a status summary: a new `TurnNotice::RootStallReport` with its own wording; children keep `StallReport` | AB-F1 | S | AB1 | `crates/qq-core/src/lib.rs` (notice constant), `runtime/events.rs` (`TurnNotice`, `from_stored`), `runtime/run_loop.rs` (choose by `StallPolicy`), `sessions/store/schema` (`STORE_SCHEMA_VERSION` 44 → 45, version-only migration; root request), `docs/design/protocol.md` store schema history, guide `troubleshooting.md` and `providers.md` schema mentions (checked by `docs_truth`) | A root fixture gets `root_stall_report` on request 65 and its continuation; a replayed pre-AB5 root run still renders `stall_report` byte-identically; a child fixture is unchanged; a schema-44 binary refuses a schema-45 store at open instead of failing per session with `CODEC` |
+| AB6 | Qualification: re-run the research queries after seven days of AB1–AB4 on `main`; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB1–AB4 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
+
+Order: AB1 and AB2 in parallel, then AB3, AB4, AB5, and AB6 after seven days.
+AB2 and AB4 both edit `prompt.rs`, so AB4 rebases on AB2. AB1 and AB5 both
+touch the progress path and land in that order.
+
+## Design notes
+
+### AB1 — what counts as a read
+
+Today `read_only_shell_command` (`approval.rs:493`) is consulted only by
+`runtime::is_progress` and the audit trigger (`lib.rs:536`), never by
+approval. So widening it changes when reports and audits fire. It does not
+change what may run. The slice states this in the function's doc comment
+and keeps it true: it does not reuse the approval classifier's `Allow`,
+which admits `cargo test`.
+
+The rule:
+
+1. Strip one leading `cd DIR` followed by `&&` or `;`. `DIR` is one word
+   without shell metacharacters; quoted or escaped operands are not
+   stripped. This is the same lexical test T20 uses for its nudge, without
+   T20's containment requirement, because nothing here grants authority.
+2. A redirection (`>`) still makes the command not a read.
+3. A newline, `$(`, a backtick or `<(` makes the command not a read. The
+   splitter today ignores `\n`, so `grep x f` + newline + `cargo fmt` is
+   misread as a read. That is fixed here.
+4. Every remaining `|`, `;`, `&&` segment must start with a read prefix.
+   The current list is kept with these narrowings, which close shapes that
+   pass today and write:
+   - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-fprint*`;
+   - `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`;
+   - `git diff` without `--output`.
+5. Additions:
+   - `sed` when `-n` is present, no flag contains `i` or is
+     `--in-place`, and the script has no `w`, `W` or `e` command;
+   - `nl`, `cut`;
+   - `sort` without `-o`, and `uniq` with at most one operand;
+   - `git -C DIR` followed by a read under the same rules, and
+     `git worktree list`.
+
+| command | read? |
+| --- | --- |
+| `cd crates/x && grep -n foo y.rs` | yes |
+| `cd crates/x; sed -n 1,80p y.rs` | yes |
+| `sed -n 1,80p f.rs \| nl` | yes |
+| `git -C .worktrees/a diff --stat` | yes |
+| `cd x && cargo test -p y` | no (work) |
+| `sed -i s/a/b/ f.rs` | no |
+| `cd x && grep foo f > out` | no |
+| `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
+| `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |
+| `sort -o f.rs f.rs`, `uniq in out` | no |
+| `find . -name '*.orig' -delete`, `git branch -D topic`, `git diff --output=x` | no (read today; fixed) |
+| `grep x f` newline `cargo fmt`, `cat $(cargo fmt)` | no (read today; fixed) |
+
+A false "read" matters in one place besides the stall count. It clears the
+audit trigger's `non_read_shell` (`runtime/audit.rs:69-70`), so a short run
+whose only change is a misread write is not audited. The rows marked
+"fixed" close cases that are wrong today.
+
+Consequence: roots that explore through the shell now receive stall
+reports. That is ADR-0054's intended behaviour. It amends no decision, only
+how "read-only" is judged, and ADR-0054 § 1's text is clarified in the same
+PR (the ADR is Proposed). AC4 later counts novelty over the same
+classification and needs no change.
+
+### AB2 — prompt v20
+
+Changes to `Working conventions` (`prompt.rs:260-279`). The final wording
+is reviewed in the PR; these bullets are the contract.
+
+- **Replace** "Determine observable completion criteria…", "Implement
+  requested changes rather than stopping at analysis…" and "Inspect
+  existing state before changing it…" with:
+  - "Do the work. Decide what done looks like, read what the change needs,
+    make it, verify it, and report. A plan, a proposal, or an offer to
+    continue is not a result: end your turn when the task is done or a
+    concrete blocker remains, and name the blocker."
+  - "Explore only as far as your next action needs. Once you can name the
+    file and the change, make the change. Search an exact name once; if it
+    finds only a definition, act on what you know or say what is missing."
+  - "Do not re-read text that is still in your context; re-read only lines
+    you have not seen, lines that may have changed, or a read that shows
+    as a [pruned: …] stub. Read the region you need in one call, with
+    ranges for several windows, rather than paging in slices."
+  - "Preserve unrelated work in the files you change."
+
+  The first bullet is dropped for read children, keyed exactly as the
+  implement line is today (ADR-0054 § 5). AB4 replaces it for read-only
+  roots.
+- **Replace** the shell-preference bullet with: "Read with the built-ins:
+  read_file instead of cat, head, tail, or sed -n; search instead of grep or
+  rg; tree instead of ls or find. They accept a path inside ignored
+  directories, such as a worktree under target/ or .worktrees/: pass path
+  rather than cd."
+- **Replace** the AGENTS.md walk with: "Instructions from nested AGENTS.md
+  files (CLAUDE.md where there is none) apply below their directory, more
+  specific first. Before editing below the root, find them once per run
+  with search mode=names regex=true query="(AGENTS|CLAUDE)\.md$", and
+  read only those on the path to your target."
+- **Shorten** "mode=outline to see a file's shape before reading it" to "mode=outline
+  for the shape of a long file". The rest of the T19 bullet is unchanged.
+- **Header:** list `search_history` and `read_tool_result` as read-only only
+  when they are in `specs`.
+- **Fallout in the same PR:**
+  - The `lib.rs` prompt assertion on "observable completion criteria"
+    (`lib.rs:2669`) moves to the new wording.
+  - `docs/design/tools.md:55-61` lists the conventions and is amended.
+- **Tool descriptions:**
+  - `read_file`, `search` and `tree` each gain one "Use instead of …" clause.
+  - `shell` gains "Not for reading files or searching; use read_file,
+    search, tree."
+  - Descriptions are part of the tool-schema hash, and the PR records that
+    hash change.
+
+The nested-instruction search must find a file name inside an ignored
+directory when given `path`. The research probe confirmed this for content
+search: `search` with an explicit path into `.worktrees/x` returns matches.
+The walk never applies ignore rules to its own root
+(`tools/walk.rs:128-156`), and names mode uses the same walk
+(`tools/search.rs:888`). The slice adds regression tests for both modes.
+
+### AB3 — read window
+
+`READ_BOUNDS` (32 KiB) already bounds a read. The 200-line default only
+makes small files cost two calls. With no `limit`, the window becomes
+`MAX_READ_LINES` (2,000), and the byte budget stops it, with the existing
+`continue from offset=` marker. A read that stops on its line limit
+before the end of the file now gets the same marker, with the remaining
+line count. Explicit `ranges` are unchanged.
+
+The risk is the per-turn budget. 96 KiB admits three full 32 KiB reads.
+A fourth read in the same batch is cut to at least 4 KiB, and its marker
+points at `read_tool_result` (or says "not stored" on a direct run)
+rather than at an offset (`tools/output.rs:812-846`). That is more calls,
+not fewer. So the slice measures a batched fixture before and after. If
+cuts rise without fewer calls, it chooses a smaller default (for example
+16 KiB of lines) and records why. Replay is unaffected, because the turn
+projection is deterministic (F23).
+
+### AB4 — authority the run actually has
+
+- `CompiledAgentPlan::run`'s doc comment already says "read-only tools
+  scoped to the plan's workspace, … Configuration allowlists are the only
+  grants." The code passes `RunCapabilities::user` (`read_only: false`) and
+  an `Ask` gate that denies everything un-granted.
+  - AB4 makes the declared tools match the comment. It declares a tool
+    only if it is read-only or interactive, or a configuration grant
+    covers it.
+  - Direct-run grants are host grants only (`lib.rs:1407-1412`,
+    `shell_prefixes` empty), so built-in edit and shell tools are never
+    declared there.
+  - Today `StaticFilter.read_only` drops every External tool not hinted
+    read-only (`catalog.rs:585-589`), which would also drop a granted MCP
+    tool.
+  - The filter gains one `granted_externals: bool`, and `base_specs`
+    looks up the plan's configuration grants itself. Those grants are
+    constant for a plan (`Runtime::config_grants`, `lib.rs:1407`).
+  - `StaticFilter` and `PromptPrefixKey` stay `Copy` and the prefix
+    cache stays bounded. Its bound comment (`plan.rs:516-519`: "2⁵ … (198)")
+    is updated to the new count.
+  - `specs_with_pins` (`catalog.rs:611`) bypasses the filter, so a pinned
+    mutating tool is declared even in a read-only run. It is made to
+    honour the filter.
+  - The gate is unchanged, so a granted tool still runs.
+- For a read-only root (`qq run --approval read-only`, a read-only profile),
+  the implement line is replaced with:
+  > "This run cannot change files or run commands. When the request is a
+  > change, give it as exact edits (path, old, new) or commands, and stop."
+  - This reverses ADR-0054 § 5's "a read-only root keeps the line",
+    which the evidence shows sends the model looking for a way to act
+    that does not exist.
+  - ADR-0059 records the decision and supersedes that clause.
+- The authority line is keyed on the prefix key's existing `read_only`
+  flag only. No `ask`/`auto`/`full` clause is added:
+  - `SetApprovalMode` can change the mode mid-session
+    (`sessions/commands.rs:1279`), so a mode baked into the prompt would
+    go stale;
+  - every mode switch would also cold-start the provider prompt cache;
+  - the summarizer's prefix key mirrors the run's
+    (`sessions/execution.rs:78-100`) and stays in step automatically.
+- **Compatibility:**
+  - No `PROTOCOL_VERSION`, schema or `DESCRIPTOR_VERSION` change:
+    `PromptPrefixKey` is in memory only (`plan.rs:538`).
+  - Embedders calling `plan.run` see fewer declared tools, all of which
+    could only be denied. Callers are `src/main.rs:173`, `src/runtime.rs`
+    tests and `qq-core` tests; `examples/embed.rs` uses `SessionRuntime`
+    and is unaffected.
+  - The user guide says `qq ask` has "no tools"
+    (`docs/guide/headless.md:13`, `docs/guide/cli.md:28`). That is wrong
+    today and is corrected to "read-only tools" in this PR.
+
+### AB5 — the root's stall report asks for action
+
+The wording of a stored notice is part of every run that carried it
+(`lib.rs`, notice comment). So AB5 adds a variant instead of editing
+`STALL_REPORT_NOTICE`:
+
+- Wording:
+  > "[QQ runtime notice; not a user instruction] The last 64 tool calls
+  > changed nothing. Do not call tools in this reply. In three lines: what
+  > you now know, the change you will make next (path and what changes) or
+  > the blocker that prevents one. Then make that change next turn."
+  Under a read-only root (AB4), "the change you will make" reads as "the
+  change you would make, or the finding". The PR states the read-only
+  wording if it differs.
+- Stored value: `root_stall_report`. `from_stored` maps it, and older
+  rows keep `stall_report`.
+- **An unknown notice is a hard error,** not a harmless `None`.
+  `from_stored` → `None` fails transcript assembly with `CODEC`
+  (`sessions/transcript.rs:458-460`, also `sessions/deliveries.rs:196-204`).
+  The store's only downgrade guard is the schema version. So AB5 bumps
+  `STORE_SCHEMA_VERSION` 44 → 45 with a version-only migration, and an
+  older binary refuses the store at open instead of failing on every
+  session that holds the new value.
+- The bump makes downgrade impossible for every store, not only stores
+  that hold the new notice. Every schema bump has that cost, and it is
+  accepted here. The bump goes through a root request.
+
+## Coordination
+
+| With | Request | Why |
+| --- | --- | --- |
+| `autonomous-core.md` ledger | AB1 and AB5 touch the AP3b progress path (`progress.rs`, notice set). Run AB1 after AP5's window closes (2026-10-13 17:42 UTC) so AP5's evidence is not mixed | Owner of ADR-0054 |
+| `autonomous-core.md` AC4 | Count novelty over AB1's read classification; no change requested | One definition of a read |
+| `tool-layer.md` | AB2 and AB3 edit built-in descriptions and `read_file` defaults; T13's arms should include prompt 20 | Owner of built-in contracts |
+| `token-efficiency.md` TE3, `supervised-delegation.md` D6b | Research § Delegation dominates wall time: 145 vs 24 min and 73 % of reads in children. Use as TE3 input; this plan does not change delegation defaults | Owners of delegation economics |
+| `progress/root.md` | ADR-0059 reservation; `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md` rows; at AB5, store schema 44 → 45 (version-only) | Shared files |
+
+## Risks
+
+- **More stall reports on roots that read legitimately.** An analysis-only
+  request is mostly reading; it will now get a report at 64 calls. That is
+  the existing contract for children and costs one turn. AB5's wording
+  allows "the blocker that prevents one". An analysis task can answer with
+  its finding.
+- **Larger default reads cost tokens.** AB3 measures it. If assembled input
+  rises without fewer calls, revert the default and keep only the marker.
+- **Prompt changes are model-sensitive.** One prompt is measured as a unit.
+  AB6 compares windows; a paired run is the real test and needs ENG-809.
+- **Nested-instruction compliance.** Replacing the walk with one search
+  could miss a scope the walk found. The AB2 golden test pins the
+  semantics; AB6 counts instruction-file reads on the path to edited files.
