@@ -298,6 +298,8 @@ pub(crate) struct DiagnosticSession {
     failed: Arc<AtomicBool>,
     closed: AtomicBool,
     close_outcome: AtomicU64,
+    #[cfg(test)]
+    close_entered: AtomicBool,
     join: Mutex<Option<JoinHandle<()>>>,
     done: Mutex<mpsc::Receiver<()>>,
     started: Instant,
@@ -373,6 +375,8 @@ impl DiagnosticSession {
             failed,
             closed: AtomicBool::new(false),
             close_outcome: AtomicU64::new(0),
+            #[cfg(test)]
+            close_entered: AtomicBool::new(false),
             join: Mutex::new(Some(join)),
             done: Mutex::new(done_rx),
             started,
@@ -467,6 +471,8 @@ impl DiagnosticSession {
     }
 
     pub(crate) fn close(&self) -> CloseOutcome {
+        #[cfg(test)]
+        self.close_entered.store(true, Ordering::Release);
         if self.closed.swap(true, Ordering::AcqRel) {
             if self.close_outcome.load(Ordering::Acquire) == 0 {
                 return CloseOutcome::Incomplete;
@@ -475,7 +481,9 @@ impl DiagnosticSession {
                 if done.try_recv().is_ok() {
                     if let Ok(mut join) = self.join.try_lock() {
                         if let Some(join) = join.take() {
-                            let _ = join.join();
+                            if join.join().is_err() {
+                                self.close_outcome.store(2, Ordering::Release);
+                            }
                         }
                     }
                 }
@@ -496,10 +504,17 @@ impl DiagnosticSession {
             .ok()
             .and_then(|done| done.recv_timeout(CLOSE_TIMEOUT).ok());
         if done.is_some() {
-            if let Ok(mut join) = self.join.try_lock() {
+            let joined = if let Ok(mut join) = self.join.try_lock() {
                 if let Some(join) = join.take() {
-                    let _ = join.join();
+                    join.join().is_ok()
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            if !joined {
+                self.failed.store(true, Ordering::Release);
             }
             if self.failed.load(Ordering::Acquire) {
                 self.close_outcome.store(2, Ordering::Release);
@@ -788,16 +803,25 @@ mod tests {
             assert!(Instant::now() < deadline, "writer did not enter");
             thread::yield_now();
         }
+        let first = Arc::clone(&session);
         let close_started = Instant::now();
-        assert_eq!(session.close(), CloseOutcome::Incomplete);
-        assert!(close_started.elapsed() < Duration::from_millis(500));
-        assert_eq!(session.close(), CloseOutcome::Incomplete);
+        let first_close = thread::spawn(move || first.close());
+        while !session.close_entered.load(Ordering::Acquire) {
+            assert!(close_started.elapsed() < Duration::from_secs(1));
+            thread::yield_now();
+        }
         let second = thread::spawn({
             let session = Arc::clone(&session);
             move || session.close()
         });
         assert_eq!(second.join().unwrap(), CloseOutcome::Incomplete);
+        assert!(close_started.elapsed() < Duration::from_millis(100));
         assert!(!release.load(Ordering::Acquire));
+        assert!(first_close.is_finished() == false);
+        let timeout_started = Instant::now();
+        assert_eq!(first_close.join().unwrap(), CloseOutcome::Incomplete);
+        assert!(timeout_started.elapsed() >= Duration::from_millis(200));
+        assert!(timeout_started.elapsed() < Duration::from_millis(400));
         release.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(1);
         while session
