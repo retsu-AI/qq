@@ -92,8 +92,9 @@ pub enum TrustChoice {
     Session,
 }
 
-/// What a resolved trust choice unlocked: the catalog and credential state
-/// the client skipped at startup because the configuration would not load.
+/// What a resolved trust choice unlocked: catalog request metadata and
+/// credential state the client skipped at startup because configuration would
+/// not load. The usable model still comes from the server's Models update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustResolved {
     /// Paths now trusted, for the confirmation notice.
@@ -529,8 +530,8 @@ impl App {
     }
 
     /// The trust prompt's answer, resolved by the composition root. Applies
-    /// what the now-loadable configuration provides (the client default
-    /// model, the catalog, the credential remedies) and drops the prompt, so
+    /// the now-loadable catalog and credential remedies while retaining the
+    /// configured route only as request metadata, then drops the prompt, so
     /// the OB1/OB2 guidance takes over exactly as if the TUI had started
     /// with a trusted project.
     pub fn apply_trust_resolved(

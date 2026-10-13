@@ -139,8 +139,8 @@ pub struct TuiModelState {
     /// `configured_model` when the catalog lists it, so bare `qq` can create
     /// the first session with it.
     pub model: Option<ModelSelection>,
-    /// The TUI's client default: `model`, or the configured route when only
-    /// its credential is missing (so the remedy can be named), or none.
+    /// The TUI's local usable/default selection. Empty until the server's
+    /// authoritative Models response selects a route.
     pub tui_model: ModelSelection,
     pub models: Vec<ModelDescriptor>,
     pub unauthenticated_providers: Vec<ProviderRemedy>,
@@ -597,12 +597,13 @@ impl RuntimeFactory {
         }
         let allowed = snapshot.policy().allowed_providers();
         let denied = snapshot.policy().denied_providers();
-        let registered: BTreeSet<String> = self
-            .inner
-            .credentials
-            .list()
-            .map(|records| records.into_iter().map(|record| record.name).collect())
-            .unwrap_or_default();
+        let registered: BTreeSet<String> = match self.inner.credentials.list() {
+            Ok(records) => records.into_iter().map(|record| record.name).collect(),
+            // An unreadable index is unknown, never proof that every stored
+            // credential is missing. Omit definite-missing remedies until the
+            // server can classify the provider authoritatively.
+            Err(_) => return Vec::new(),
+        };
         let mut remedies = Vec::new();
         for (provider_id, provider) in snapshot.providers() {
             if allowed.is_some_and(|allowed| !allowed.iter().any(|id| id == provider_id))
