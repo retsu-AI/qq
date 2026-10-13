@@ -41,3 +41,8 @@
 
 - Candidate `97c68c703736eb3a0ad90f328f392d6a9fad2c54` removes the eager reviewer-store construction and keeps the pre-existing shared checkpoint store unchanged. Codex/XAI start/return events now occur inside the existing blocking credential operation, so permit wait is not mislabeled as backend I/O; OAuth events carry no fabricated flight/coordinator IDs.
 - Focused auth and CLI selectors both passed after the correction. Remaining acceptance work is the public composition/resource-failure matrix and independent exact-head review; no live credential/provider execution was performed.
+
+## 2026-10-13 — public activation fixture checkpoint
+
+- Candidate `7d12bee0c098aae8e1e6467d6bff0d819055e13c` adds a subprocess test-harness child that parses the actual public CLI option, opens the same diagnostic session path, closes it, and verifies the parent process reads the summary without path leakage.
+- The exact pinned selector executed 7 tests and passed; raw output is retained as `DI1-cli-composition-7d12bee.log`. This proves CLI parsing/activation and file safety, while credential-store composition and full failure matrix remain pending.
