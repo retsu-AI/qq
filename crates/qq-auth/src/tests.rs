@@ -2888,3 +2888,41 @@ fn file_lock_serializes_concurrent_updates() {
         );
     }
 }
+
+#[test]
+fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let start = Arc::new(Barrier::new(9));
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let start = Arc::clone(&start);
+        workers.push(thread::spawn(move || {
+            start.wait();
+            store
+                .resolve_with_endpoint(
+                    &SecretRef::Stored("provider/work".to_owned()),
+                    Some("https://provider.example"),
+                )
+                .unwrap()
+                .expose_secret_bytes()
+                .to_vec()
+        }));
+    }
+    start.wait();
+    for worker in workers {
+        assert_eq!(worker.join().unwrap(), b"secret");
+    }
+
+    assert_eq!(keyring.read_count("provider/work"), 1);
+}
