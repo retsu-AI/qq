@@ -971,9 +971,9 @@ unquoted, `\_`-split words is judged too. Past 8 wrappers, any further
 launchers are skipped to the program they launch, which is judged nested
 (`Prompt`), so `nice` ×9 `sudo ls` is `Forbidden` while `nice` ×9 `echo
 sudo` is not. A tail that is not a clean launcher chain is judged at every
-suffix, including the command at the boundary itself. Every suffix
-enumeration is bounded to 64 starts of 16 words, so classification stays
-linear however a command is split. `env NAME=VALUE cmd` carries its
+suffix, including the command at the boundary itself. Every suffix enumeration judges at most 16 starts, each whole (so a
+`--force` deep in the argv is seen), and classification stays linear in
+the command. `env NAME=VALUE cmd` carries its
 assignments to `cmd`. Because
 GNU `timeout` creates its own process group, shell cancellation can leave
 it running. That predates T18 and is ENG-1032.

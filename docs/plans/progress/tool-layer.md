@@ -561,3 +561,10 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `nice` ×8 `sudo ls` reached `sudo` at the depth boundary, and the fallback skipped index 0. The boundary command is now included.
 - Suffix enumeration was quadratic (an 8 000-word `env -S` cloned about 32 M strings). All three sites now use `bounded_suffixes`, capped at 64 starts × 16 words. A 7 000-word regression classifies in 0.04 s and fails closed.
 - `approval` 93 tests pass. Merging after this round (lead decision); further findings become follow-up issues.
+
+### 2026-10-13 — T18 merge-round residuals (#283)
+
+- The 16-word suffix window hid a deep `--force` (`env -S 'git push -v ×15 --force …'`). Candidates are whole again, and only the number of starts is bounded (16), which keeps the work linear.
+- `git branch --contains=HEAD created` is a listing. The attached filter forms now select list mode, like the separated forms.
+- `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
+- `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.

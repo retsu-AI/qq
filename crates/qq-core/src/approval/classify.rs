@@ -35,23 +35,21 @@ pub(crate) const MAX_CLASSIFIED_BYTES: usize = 16 * 1024;
 const MAX_WRAPPER_DEPTH: usize = 8;
 /// `sh -c STRING` inside `sh -c STRING`… recursion bound.
 const MAX_NESTED_SHELLS: usize = 4;
-/// Where the start of a launched command is unknowable, this many suffix
-/// starts are judged, each at most this many words long. Past it the command
-/// is already unknown (never allowed), and a `Forbidden` program further in
-/// is a cost the user approves with the command in front of them.
-const MAX_SUFFIX_STARTS: usize = 64;
-const MAX_SUFFIX_WORDS: usize = 16;
+/// Where the start of a launched command is unknowable, at most this many
+/// suffix starts are judged, each whole (no word dropped, so a `--force`
+/// deep in the argv still counts). The bound keeps the work linear in the
+/// command; past it the command is already unknown, never allowed, and the
+/// user sees the whole string before approving it.
+const MAX_SUFFIX_STARTS: usize = 16;
 
-/// Bounded suffixes of `words`: at most `MAX_SUFFIX_STARTS` starts from
-/// `first`, each truncated to `MAX_SUFFIX_WORDS` words, so classification
-/// stays linear in the command however it is split.
+/// The first `MAX_SUFFIX_STARTS` suffixes of `words` from `first`.
 fn bounded_suffixes(
     words: &[Option<String>],
     first: usize,
 ) -> impl Iterator<Item = Vec<Option<String>>> + '_ {
     (first..words.len())
         .take(MAX_SUFFIX_STARTS)
-        .map(|start| words[start..words.len().min(start + MAX_SUFFIX_WORDS)].to_vec())
+        .map(|start| words[start..].to_vec())
 }
 
 /// One simple command as the classifier sees it: literal argv (`None` for a
@@ -744,10 +742,15 @@ impl Collector<'_> {
                                 c => unquoted.push(c),
                             }
                         }
-                        let words: Vec<Option<String>> = unquoted
+                        // The split words are prepended to the arguments that
+                        // follow the option (`env -S 'echo ok' sudo ls` runs
+                        // `echo ok sudo ls`), so trailing words are judged as
+                        // arguments, not as a separate command.
+                        let mut words: Vec<Option<String>> = unquoted
                             .split_whitespace()
                             .map(|w| Some(w.to_owned()))
                             .collect();
+                        words.extend(args.get(skip + 1..).unwrap_or(&[]).iter().cloned());
                         for argv in bounded_suffixes(&words, 0) {
                             self.peel(
                                 SimpleCommand {
@@ -760,7 +763,8 @@ impl Collector<'_> {
                                 depth + 1,
                             );
                         }
-                        skip += 1;
+                        // The rest of argv belongs to the split command.
+                        return;
                     } else if word == "-i" || word == "--ignore-environment" {
                         skip += 1;
                     } else if word == "-u" || word == "--unset" {
