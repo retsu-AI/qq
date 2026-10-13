@@ -536,3 +536,13 @@ Six Codex findings on `9e3da002`, all reproduced against the branch before any f
 - Rule set: T18 as merged for review. Launchers are peeled by bare name only, through eight wrappers. Stream-only list redirects stay flat. `git worktree list` and `git branch --list` are reads. `git fetch` keeps `GitRemote` in every form, and every `-C` command prompts. Globs are unchanged.
 - Advisory replay over the same 226 `auto` shell commands: allow 83 → 111, held 143 → 115 (28 recovered, 51 % still held), nothing into or out of `Forbidden`. This is the number the plan uses. The 26/25 figures in the 2026-10-11 entries came from a simulation that still allowed `git fetch`, and are superseded.
 - Plan amendments from the second #280 review: T13 takes T18–T20 as inputs; T18/T19 integrate as a stack with one writer per ledger entry; T20 is narrowed (nudge past a leading `cd` only, 9-range reads stay a correction, the `read_tool_result` dispatch path is owned, focused regressions are listed).
+
+### 2026-10-13 — T18 review repairs, round 3 (#283)
+
+This round closes each class of gap, not only the reported instance:
+
+- Environment: `GIT_CONFIG_PARAMETERS` could set `core.fsmonitor` to an outside executable that `git status` runs. Every `GIT_*` assignment on `git` now prompts. Program-substitution variables on any program (`*_WRAPPER`, `*PAGER`, `*EDITOR`, `CARGO_*`, `RUSTC*`, `RUSTFLAGS`, `SHELL`, `VISUAL`, `BROWSER`) prompt as well; `RUSTC_WRAPPER=/tmp/x cargo build` had been allowed on `main`.
+- Git global options: `git -C sub -c k=v push --force` was Prompt (and ran under `full`) because only consecutive `-C` pairs were skipped. All global options are now skipped before the subcommand. Any of them except `--no-pager`, `-P`, and `--no-optional-locks` prompts.
+- `chrt -o 0 sudo -p x ls` was not peeled, because a `-p` in the launched command was read as chrt's own. `-p` is now looked for only among the wrapper's options.
+- `/dev/stdout-copy` counted as a stream. Only exact `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` do.
+- About 40 new rows. `approval` 92 tests pass. `classify_command` 1 KiB 167 µs. Replay unchanged (111 allow / 115 prompt).

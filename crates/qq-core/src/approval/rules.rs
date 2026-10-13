@@ -200,65 +200,104 @@ pub(crate) fn judge(
         .first()
         .and_then(Option::as_deref)
         .is_some_and(|word| word.contains('/'));
-    // `GIT_DIR`, `GIT_WORK_TREE`, and their kin choose which repository git
-    // acts on, so a read or fetch shape no longer says where it lands.
-    let selects_repository = program == "git"
-        && command.assignments.iter().any(|assignment| {
-            matches!(
-                assignment.split('=').next().unwrap_or(""),
-                "GIT_DIR"
-                    | "GIT_WORK_TREE"
-                    | "GIT_COMMON_DIR"
-                    | "GIT_INDEX_FILE"
-                    | "GIT_OBJECT_DIRECTORY"
-                    | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-                    | "GIT_NAMESPACE"
-                    | "GIT_CEILING_DIRECTORIES"
-                    | "GIT_CONFIG"
-                    | "GIT_CONFIG_GLOBAL"
-                    | "GIT_CONFIG_SYSTEM"
-                    | "GIT_CONFIG_COUNT"
-            ) || assignment.starts_with("GIT_CONFIG_KEY_")
-                || assignment.starts_with("GIT_CONFIG_VALUE_")
-        });
+    // An assignment can change what a listed program runs or where it acts:
+    // every `GIT_*` variable on git (repository, config, exec path, pager,
+    // ssh), and the common program-substitution variables on anything
+    // (`RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC`, `PAGER`, `EDITOR`, …). Those
+    // shapes are judged as written but never allowed. `is_dangerous_env`
+    // above already refuses the loader and `PATH` class outright.
+    let substitutes_program = command.assignments.iter().any(|assignment| {
+        let name = assignment.split('=').next().unwrap_or("");
+        (program == "git" && name.starts_with("GIT_"))
+            || name.ends_with("_WRAPPER")
+            || name.ends_with("PAGER")
+            || name.ends_with("EDITOR")
+            || name.starts_with("CARGO_")
+            || name.starts_with("RUSTC")
+            || matches!(
+                name,
+                "RUSTDOCFLAGS" | "RUSTFLAGS" | "SHELL" | "VISUAL" | "BROWSER"
+            )
+    });
     let mut args: Vec<&str> = command
         .args()
         .iter()
         .map(|arg| arg.as_deref().unwrap_or("\u{0}"))
         .collect();
-    // `git -C <dir>…` runs git in `<dir>`. The subcommand is read after every
-    // `-C` hop; the joined hops either escape or are unproven.
+    // Git's global options sit before the subcommand (`git [-C dir] [-c k=v]
+    // [--git-dir=…] … <command>`). All of them are skipped so the
+    // subcommand rules (`push --force` is Forbidden) see the subcommand.
+    // Every one but `--no-pager`/`-P`/`--no-optional-locks` changes which
+    // repository git acts on or what it runs, so a command carrying one is
+    // never allowed. A `-C` hop that escapes lexically says so.
     let mut git_dir_escapes = false;
-    // A lexically contained hop is still unproven: a workspace symlink can
-    // point anywhere, and the gates classify without a root to resolve it
-    // against. The subcommand is read (so `git -C sub push --force` stays
-    // Forbidden), but the command never reaches the allow table.
-    let mut git_dir_unproven = false;
+    let mut git_globals_unproven = false;
     if program == "git" {
         let mut dir = String::new();
-        let mut hops = 0;
-        while args.get(hops) == Some(&"-C") {
-            match args.get(hops + 1).copied() {
-                Some(hop) if hop != "\u{0}" => {
-                    dir = if dir.is_empty() || Path::new(hop).is_absolute() {
-                        hop.to_owned()
-                    } else {
-                        format!("{dir}/{hop}")
-                    };
-                    hops += 2;
+        let mut skip = 0;
+        loop {
+            match args.get(skip).copied() {
+                Some("-C") => match args.get(skip + 1).copied() {
+                    Some(hop) if hop != "\u{0}" => {
+                        dir = if dir.is_empty() || Path::new(hop).is_absolute() {
+                            hop.to_owned()
+                        } else {
+                            format!("{dir}/{hop}")
+                        };
+                        git_globals_unproven = true;
+                        skip += 2;
+                    }
+                    // A dynamic or missing directory: leave the words in
+                    // place so the command reads as dynamic or unlisted.
+                    _ => break,
+                },
+                Some(
+                    "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
+                    | "--super-prefix" | "--config-env",
+                ) => {
+                    if args.get(skip + 1).is_none_or(|v| *v == "\u{0}") {
+                        break;
+                    }
+                    git_globals_unproven = true;
+                    skip += 2;
                 }
-                // A dynamic or missing directory: leave the words in place
-                // so the command reads as dynamic or unlisted.
+                Some(word)
+                    if [
+                        "--git-dir=",
+                        "--work-tree=",
+                        "--namespace=",
+                        "--exec-path=",
+                        "--super-prefix=",
+                        "--config-env=",
+                        "--attr-source=",
+                    ]
+                    .iter()
+                    .any(|prefix| word.starts_with(prefix))
+                        || matches!(
+                            word,
+                            "--bare"
+                                | "--literal-pathspecs"
+                                | "--glob-pathspecs"
+                                | "--noglob-pathspecs"
+                                | "--icase-pathspecs"
+                                | "--no-replace-objects"
+                                | "--paginate"
+                                | "-p"
+                        ) =>
+                {
+                    git_globals_unproven = true;
+                    skip += 1;
+                }
+                Some("--no-pager" | "-P" | "--no-optional-locks") => skip += 1,
                 _ => break,
             }
         }
-        if hops > 0 {
+        if !dir.is_empty() {
             // Containment without `path_escapes`' writable-temporary
             // exception: `/tmp/other` is another repository, not scratch.
             git_dir_escapes = Path::new(&dir).starts_with("/tmp") || path_escapes(&dir, workspace);
-            git_dir_unproven = !git_dir_escapes;
-            args.drain(..hops);
         }
+        args.drain(..skip);
     }
     let dynamic = args.contains(&"\u{0}");
     let literal_args: Vec<&str> = args.iter().copied().filter(|arg| *arg != "\u{0}").collect();
@@ -270,8 +309,8 @@ pub(crate) fn judge(
     if git_dir_escapes {
         return (Decision::Prompt, Some(RuleId::PathOutsideWorkspace));
     }
-    if selects_repository {
-        return (Decision::Prompt, Some(RuleId::PathOutsideWorkspace));
+    if substitutes_program {
+        return (Decision::Prompt, Some(RuleId::Unlisted));
     }
     // Redirects into the workspace ask; outside it (except /tmp) ask too, but
     // a redirect to a shell profile or a device was caught above.
@@ -283,7 +322,11 @@ pub(crate) fn judge(
         match target {
             None => return (Decision::Prompt, Some(RuleId::RedirectIntoWorkspace)),
             Some(target) => {
-                if stream_target(target) || target.starts_with("/dev/fd/") {
+                if stream_target(target)
+                    || target
+                        .strip_prefix("/dev/fd/")
+                        .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+                {
                     continue;
                 }
                 if path_escapes(target, workspace) {
@@ -302,7 +345,7 @@ pub(crate) fn judge(
     if dynamic {
         return (Decision::Prompt, Some(RuleId::DynamicWord));
     }
-    if git_dir_unproven {
+    if git_globals_unproven {
         return (Decision::Prompt, Some(RuleId::Unlisted));
     }
     if !path_qualified && allow(program, &literal_args, workspace) {
@@ -1351,6 +1394,12 @@ mod tests {
             "cd src && cargo test 2>/dev/null",
             "cd src && cargo test >/dev/stderr 2>&1",
             "cargo build; cargo test &>/dev/null",
+            // T18 review round 3: harmless globals and real stream devices.
+            "git --no-pager log --oneline -3",
+            "git -P diff --stat",
+            "git --no-optional-locks status",
+            "RUST_BACKTRACE=1 cargo test",
+            "cargo test >/dev/stderr",
             // T18: listing reads.
             "git worktree list",
             "git worktree list --porcelain",
@@ -1466,6 +1515,32 @@ mod tests {
             "nohup -p cargo test",
             "stdbuf -x L cargo test",
             "nohup",
+            // T18 review round 3: program-substitution environment.
+            "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor'='/tmp/evil'\" git status --short",
+            "GIT_PAGER=x git log",
+            "GIT_EXEC_PATH=/tmp git status",
+            "GIT_SSH=/tmp/x git status",
+            "RUSTC_WRAPPER=/tmp/x cargo build",
+            "CARGO_BUILD_RUSTC=/tmp/x cargo build",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=/tmp/x cargo test",
+            "RUSTFLAGS=-Clinker=/tmp/x cargo build",
+            "PAGER=/tmp/x git log",
+            "EDITOR=/tmp/x git log",
+            // T18 review round 3: every git global option is skipped, and
+            // one that changes the repository or what runs never allows.
+            "git -c core.pager=cat log",
+            "git --git-dir=/tmp/o/.git status",
+            "git --git-dir /tmp/o/.git status",
+            "git --work-tree=/tmp status",
+            "git --exec-path=/tmp status",
+            "git --config-env=core.pager=X log",
+            "git --bare log",
+            // T18 review round 3: only the real standard-stream devices.
+            "printf x > /dev/stdout-copy",
+            "cd . && printf x > /dev/stdout-copy",
+            "printf x > /dev/stdoutx",
+            "printf x > /dev/fd/../x",
+            "printf x > /dev/fd/",
             // T18 review: nine wrappers are too deep to see through.
             "nice nice nice nice nice nice nice nice nice cargo test",
             "timeout 1e3x cargo test",
@@ -1667,6 +1742,14 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review round 3: git globals before a forbidden subcommand,
+            // and a launched command's own `-p` is not the wrapper's.
+            "git -C sub -c core.pager=cat push --force origin main",
+            "git -c x=y push --force",
+            "git --no-pager -C sub push --force",
+            "git --git-dir=.git push --force",
+            "chrt -o 0 sudo -p Password ls",
+            "taskset 0x1 sudo -p x ls",
             // T18 review: taskset and chrt run their inner command, so a
             // Forbidden inner command is found through them.
             "taskset -c 0 sudo ls",
@@ -1946,7 +2029,11 @@ mod tests {
         );
         assert_eq!(
             reasons("GIT_DIR=/tmp/o/.git git status"),
-            vec![RuleId::PathOutsideWorkspace]
+            vec![RuleId::Unlisted]
+        );
+        assert_eq!(
+            reasons("git -C sub -c core.pager=cat push --force origin main"),
+            vec![RuleId::GitForcePush]
         );
         assert_eq!(
             reasons("git branch --list --no-list x"),

@@ -389,7 +389,15 @@ remaining friction has moved:
    approval, invisible to the diff UI, and unchecked by the cascade. The
    freshness rule protects against overwriting text the model never saw.
    An exact `old` that matches exactly once already proves the model has
-   that region. The `if_hash` path is weaker than either: `read_file
+   that region. This is a lead decision (2026-10-11, ADR-0058). Matching
+   bytes are weaker evidence than a recorded read: an `old` of `false` can
+   be guessed. They were accepted as enough for `auto`, for two reasons.
+   `edit_file` is a workspace-bounded mutation that `auto` already
+   executes without approval once a read is recorded, and that read
+   proves nothing about intent either. The alternative the data shows is
+   an unreviewed `sed -i` through the shell. `note=unread` keeps every
+   such edit visible, and under `ask` and `supervised` every edit is
+   still held. The `if_hash` path is weaker than either: `read_file
    mode=info` returns `h:` without any content. Across the store, 44
    `edit_file`/`write_file` calls also sent the placeholder
    `h:000000000000`. T19 does not widen the `if_hash` path, and a separate
@@ -500,9 +508,12 @@ of the current content. Gate: `edit_batch` unchanged.
   and then judges the first program, as today. `cd x && sed -n 1,20p a.rs`
   hints `read_file ranges`. A replaceable program later in a list or
   pipeline (`cargo test && grep x log`) gets no hint and no `strict`
-  refusal: the compound needs the shell. It stays a string-level prefix
-  skip with no classifier reparse, so `approval/classify.rs` is
-  untouched. The hint stays a result suffix, and only `strict` refuses.
+  refusal: the compound needs the shell. The skip uses no classifier
+  reparse, so `approval/classify.rs` is untouched. It accepts only a
+  leading `cd` whose operand is one unquoted word with no shell
+  metacharacters. A quoted or escaped operand (`cd 'x;grep y z' && …`) is
+  not skipped, so that command gets no hint and no refusal, and is a
+  listed regression. The hint stays a result suffix, and only `strict` refuses.
 - `search.max_per_file` above 50 clamps with `note=max_per_file_clamped=50`
   (same shape as T15's `context`). `read_file` with more than 8 ranges
   keeps the current `invalid_ranges` correction: a silent partial read
@@ -521,7 +532,8 @@ of the current content. Gate: `edit_batch` unchanged.
 - `read_file.include_ignored` and similar unknown fields belong to RR10
   (ENG-872). T20 does not take them.
 - Regressions: `cd x && sed -n 1,5p a` hints and `strict` refuses;
-  `cargo test && grep x log` neither hints nor refuses; `max_per_file=80`
+  `cargo test && grep x log` and `cd 'x;grep y z' && cargo test` neither
+  hint nor refuse; `max_per_file=80`
   returns the clamped result with its note, combined with `context`'s by
   a comma; a 9-range read still fails `invalid_ranges`; a zero handle
   returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`

@@ -994,8 +994,10 @@ because they can retarget a running process; with `-p` they launch
 nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
 reparsed. Past 8 wrappers, a ninth is not looked through.
 
-A redirect writes nothing when its target is `/dev/null`, `/dev/std*`, or
-a descriptor duplication (`2>&1`, `>&2`). `> 1` writes a file named `1`. A
+A redirect writes nothing when its target is exactly `/dev/null`,
+`/dev/stdin`, `/dev/stdout`, or `/dev/stderr`, or a descriptor
+duplication (`2>&1`, `>&2`). A prefix such as `/dev/stdout-copy` is a
+file. `> 1` writes a file named `1`. A
 list or pipeline whose redirects all write nothing (`cd src && cargo test
 2>&1 | grep FAILED`) is judged like the same list without them. Any other
 redirected construct counts as nested.
@@ -1024,9 +1026,17 @@ which the classifier cannot read and which may update local branches.
 A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
 `Allow`, and a path-qualified launcher is not peeled: the allow tables
 name programs reached through `PATH`, and a path names whatever file sits
-there. A `git` command with a repository-selection variable (`GIT_DIR`,
-`GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, and their kin) is
-`Prompt` with `path_outside_workspace`. `git -C` into `/tmp` is an escape:
+there. An assignment that substitutes a program or a repository is
+never `Allow`. That covers every `GIT_*` variable on `git` (including
+`GIT_CONFIG_PARAMETERS`, which can set `core.fsmonitor` to an outside
+executable that `git status` runs), plus `*_WRAPPER`, `*PAGER`,
+`*EDITOR`, `CARGO_*`, `RUSTC*`, and `RUSTFLAGS` on any program.
+
+Git's global options before the subcommand (`-C`, `-c`, `--git-dir`,
+`--work-tree`, `--exec-path`, `--config-env`, `--bare`, …) are all
+skipped, so the subcommand rules apply: `git -C sub -c k=v push --force`
+is `Forbidden`. Any of them except `--no-pager`, `-P`, and
+`--no-optional-locks` makes the command `Prompt`. `git -C` into `/tmp` is an escape:
 the writable-temporary exception covers scratch files, not other
 repositories. `git branch` is a read only when every option is a listing
 option. Git's last option wins (`--list --no-list name` creates `name`),
