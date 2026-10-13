@@ -491,3 +491,8 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-13 — T20 ownership clarification (ENG-1035)
+
+- The task index limited `runtime/run_loop.rs` to `read_tool_result` dispatch, but T20 also explicitly requires strict refusals to distinguish hint-only prefixed/outside-path commands. Its existing refusal lives in the same file. Extend ownership to that refusal expression; no classifier or broader dispatch changes.
+- Acceptance harness ownership includes `lib.rs` (one test-module declaration), `src/tests/t20.rs`, and `tools.rs` bounds tests. Independent second-agent review approved these policy changes; no shared manifest, dependency, CI, or system boundary change.

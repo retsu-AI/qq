@@ -613,3 +613,9 @@ The last two rounds kept finding new names for the same three classes, so each i
 - Isolated worktree `.worktrees/t20`, base T19 `db44ecf2`; current tightened D10 spec governs.
 - Preserve oversized search/ranges corrections, skip only lexical relative unquoted `cd DIR &&`, correct zero handles before store lookup.
 - Pre-change `tool_dispatch` captured in `target/qq-perf/t20-2026-10-13/baseline.log`; focused regressions and workspace qualification next.
+
+### 2026-10-13 — T20 implementation and independent review
+
+- Test-first commit `cc481b02`: placeholder dispatch and leading-cd strict/hint tests failed on T19; oversized bounds guard passed. Four focused regressions now pass, including lexical prefix and attached option paths.
+- Hint and strict refusal eligibility are separate; no classifier reparse. Zero handles return `handle_placeholder` before a spill lookup, graded Correction. Prompt/marker already use symbolic handles and need no version change.
+- Independent second-agent review requested changes for attached `grep -f/tmp/patterns`; fixed conservatively for dash-prefixed slash operands and covered absolute/parent forms. Re-review verdict Approve implementation; qualification remains pending.

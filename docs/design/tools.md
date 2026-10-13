@@ -320,7 +320,10 @@ where a `SpillReader` is installed; it is `ReadOnly`, concurrent, and
 prunable. A handle resolves first against `tool_spills`; when no spill
 row matches the call prefix and digest, the call's own `tool_calls.result`
 answers if its digest agrees — the recall path for a result only the
-per-turn budget cut. Failures: `handle_invalid`, `spill_missing` (no row,
+per-turn budget cut. A handle with both eight-digit components zero returns
+`handle_placeholder` before any store lookup: copy the handle from the result's
+`…[qq: … t:…]…` marker. This is an argument correction, and examples use the
+symbolic `t:<tool>:<call8>:<digest8>` form. Failures: `handle_invalid`, `spill_missing` (no row,
 or the digest disagrees), `spill_evicted`, `handle_foreign_session`,
 `invalid_regex`, `invalid_offset`, `invalid_limit`, `range_out_of_bounds`.
 
@@ -930,8 +933,18 @@ Deferred).
   `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,
   `ls|tree` → `tree`, `curl|wget` → `fetch`), `hint` (the default) runs it
   and appends one `hint: use … instead of …` line; `strict` refuses before
-  execution with `use_builtin` — the arm the ablation harness uses to
-  measure what shell habit costs; `off` says nothing.
+  execution with `use_builtin` for a plain unprefixed command with relative
+  operands containing no parent-directory component — the arm the ablation
+  harness uses to measure what shell habit costs; `off` says nothing.
+  One leading `cd DIR &&` is skipped for hints only, when `DIR` is an unquoted,
+  unescaped relative word with no parent-directory component or shell syntax.
+  This prefix never enables strict refusal: lexical checks cannot prove it is
+  not a symlink out of the workspace. `cd DIR;` is not skipped. A replaceable
+  program later in a list or pipeline gets no hint or refusal. Absolute or
+  parent-directory operands, shell expansions, quoting, and compound commands
+  may hint at the first program but are not refused. Strict can still refuse
+  an unprefixed relative operand through a symlink; this accepted ablation
+  limitation can require the model to recover using the shell form.
 
 **`exec`** runs one program with an argument list (`program`, `args` ≤ 64 ×
 4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`, `env`) with no

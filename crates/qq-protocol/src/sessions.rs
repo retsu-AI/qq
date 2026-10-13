@@ -1767,6 +1767,7 @@ impl ToolErrorKind {
             "bad_glob",
             "cursor_invalid",
             "handle_invalid",
+            "handle_placeholder:",
             "not executed:",
             "not_read:",
             "tool arguments exceed",
@@ -2607,6 +2608,24 @@ mod tests {
     /// D9: corrections are the argument-contract codes the model fixes
     /// itself, outcomes are well-formed "no" answers, and anything else
     /// (including an unlisted code) stays a failure.
+    #[test]
+    fn placeholder_spill_handles_are_argument_corrections() {
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "handle_placeholder: copy the handle from the result marker"
+            ),
+            ToolErrorKind::Correction,
+        );
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "spill_missing: no stored output for t:shell:12345678:abcdef12"
+            ),
+            ToolErrorKind::Outcome,
+        );
+    }
+
     #[test]
     fn tool_error_kinds_follow_the_leading_error_code() {
         for result in [

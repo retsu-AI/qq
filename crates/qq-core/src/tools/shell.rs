@@ -221,11 +221,10 @@ pub(super) async fn run_shell(
         builtin_alternative(&launch.nudge_text()),
     ) {
         (BuiltinPreference::Off, _) | (_, None) => None,
-        (BuiltinPreference::Hint | BuiltinPreference::Strict, Some((program, builtin))) => {
-            Some(format!(
-                "hint: use {builtin} instead of {program}; it is bounded, ignore-aware, and needs no approval"
-            ))
-        }
+        (BuiltinPreference::Hint | BuiltinPreference::Strict, Some(alternative)) => Some(format!(
+            "hint: use {} instead of {}; it is bounded, ignore-aware, and needs no approval",
+            alternative.builtin, alternative.program
+        )),
     };
     let timeout_seconds = launch
         .timeout_seconds()
