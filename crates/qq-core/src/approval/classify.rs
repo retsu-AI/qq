@@ -988,6 +988,15 @@ mod tests {
     }
 
     #[test]
+    fn env_split_expansion_does_not_rescan_inserted_values() {
+        let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(8));
+        let found = commands(&command);
+        assert!(found.iter().flatten().flatten().all(|word| word.len() < 32));
+        assert!(commands("CMD=echo CMD=sudo env -S '${CMD} ls'")
+            .iter().any(|argv| argv.first().and_then(|word| word.as_deref()) == Some("sudo")));
+    }
+
+    #[test]
     fn simple_commands_are_collected_from_every_construct() {
         assert_eq!(
             commands("cargo test -p qq-core && git status"),
