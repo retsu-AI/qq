@@ -118,6 +118,12 @@
       "title": "Current infrastructure and runtime handoff",
       "ref": "Specification-owner handoff 2026-10-13: infra PR1 5905dee / PR2 372eeb8 / PR3 e58b4ce / PR4 942c source only; PR4 under repair. Infrastructure staging/production branches exist. Cloud PR44 915b044 review/E2E pending; no hosted runtime proof.",
       "url": "https://github.com/retsu-AI/retsu-infrastructure"
+    },
+    {
+      "id": "qqruntime",
+      "title": "QQ source and dated runtime observations",
+      "ref": "QQ code at9bae6937b50a013f652db8963ac3590103eb4b84 (AGENTS.md and src/main.rs direct CLI/TUI composition); D113-SOURCE-TO-E2E-MAP.md installed DI1 d377cf2 trial recorded zero model starts; CONTINUITY retains Keychain/provider acceptance limits. Code and installed trial are separate subjects.",
+      "url": "https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84"
     }
   ],
   "services": [
@@ -157,8 +163,8 @@
       "purpose": "Start and inspect local agent work.",
       "status": "source",
       "stateOwner": "QQ owns session truth; TUI holds presentation",
-      "source": "qq",
-      "detail": "One qq binary composes direct CLI, TUI and server. Current installed candidate has unresolved Keychain/provider acceptance.",
+      "source": "qqruntime",
+      "detail": "One qq binary shares its core across direct CLI, TUI and server. qq ask/run compose the runtime directly; interactive TUI uses qq-client HTTP/SSE through the discovered local server. Installed provider acceptance remains open.",
       "executionOwner": "Native and documentation owners",
       "environment": "Device/browser",
       "evidenceAt": "2026-10-13 source read; runtime claims are dated observations in the cited source"
@@ -213,7 +219,7 @@
       "purpose": "The sole agent and provider execution engine.",
       "status": "observed",
       "stateOwner": "QQ sessions, runs, queues and command journal",
-      "source": "qq",
+      "source": "qqruntime",
       "detail": "Installed runtime observed; a dated real prompt trial produced zero model starts. Source improvements do not prove useful provider acceptance.",
       "executionOwner": "QQ or Rust assistant owner",
       "environment": "Private local host",
@@ -868,7 +874,7 @@
     {
       "fromId": "cli",
       "toId": "sdk",
-      "label": "send exact direct-QQ commands",
+      "label": "TUI mode: HTTP/SSE client to the discovered local QQ server",
       "status": "source",
       "source": "qq"
     },
@@ -1235,6 +1241,13 @@
       "label": "measure actual first and repeat use",
       "status": "planned",
       "source": "continuity"
+    },
+    {
+      "fromId": "cli",
+      "toId": "qq",
+      "label": "Direct CLI ask/run: compose the shared QQ runtime without HTTP",
+      "status": "source",
+      "source": "qq"
     }
   ],
   "journeys": [
