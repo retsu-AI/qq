@@ -50,6 +50,10 @@ pub struct Script {
     pub hold_result: bool,
     /// Visible text streamed with each work turn's calls, in bytes.
     pub text_bytes: usize,
+    pub work_usage: Option<qq_provider::ProviderUsage>,
+    /// Deterministic request-sized usage so measured context still grows.
+    pub measure_work_usage: bool,
+    pub summary_usage: Option<qq_provider::ProviderUsage>,
 }
 
 impl Script {
@@ -76,6 +80,9 @@ impl Script {
             journal: None,
             hold_result: false,
             text_bytes: 0,
+            work_usage: None,
+            measure_work_usage: false,
+            summary_usage: None,
         }
     }
 }
@@ -119,8 +126,9 @@ impl Provider for ScriptedProvider {
                 })]));
             }
             drop(observed);
-            return text(
+            return text_with_usage(
                 "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Open problems: none\n5. Next step: finish the scripted task",
+                self.script.summary_usage,
             );
         }
         // The checkpoint's report notice is the request's last message
@@ -146,6 +154,17 @@ impl Provider for ScriptedProvider {
             }
             return text("Checkpoint: continue with the next uniquely numbered step.");
         }
+        let work_usage = if self.script.measure_work_usage {
+            Some(qq_provider::ProviderUsage {
+                input_tokens: u64::try_from(format!("{request:?}").len().div_ceil(4)).unwrap(),
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: None,
+            })
+        } else {
+            self.script.work_usage
+        };
         let turn = observed.work_turns;
         if self.script.stall_after.is_some_and(|after| turn >= after) {
             return Box::pin(stream::pending());
@@ -165,7 +184,7 @@ impl Provider for ScriptedProvider {
         }
         if turn == self.script.turns {
             drop(observed);
-            return text("Scripted task complete.");
+            return text_with_usage("Scripted task complete.", work_usage);
         }
         let now = Instant::now();
         if let Some(previous) = observed.last_work_entry.replace(now) {
@@ -200,17 +219,21 @@ impl Provider for ScriptedProvider {
             }));
             events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
         }
-        events.push(Ok(ProviderEvent::Completed { usage: None }));
+        events.push(Ok(ProviderEvent::Completed { usage: work_usage }));
         Box::pin(stream::iter(events))
     }
 }
 
 fn text(value: &str) -> ProviderStream {
+    text_with_usage(value, None)
+}
+
+fn text_with_usage(value: &str, usage: Option<qq_provider::ProviderUsage>) -> ProviderStream {
     Box::pin(stream::iter([
         Ok(ProviderEvent::OutputTextDelta {
             text: value.to_owned(),
         }),
-        Ok(ProviderEvent::Completed { usage: None }),
+        Ok(ProviderEvent::Completed { usage }),
     ]))
 }
 
@@ -452,6 +475,14 @@ impl Fixture {
     }
 
     pub async fn submit(&self) -> RunId {
+        self.submit_with_limits(RunLimits {
+            max_duration_ms: Some(300_000),
+            ..RunLimits::default()
+        })
+        .await
+    }
+
+    pub async fn submit_with_limits(&self, limits: RunLimits) -> RunId {
         let receipt = self
             .runtime
             .command(
@@ -459,10 +490,7 @@ impl Fixture {
                 SessionCommand::SubmitPrompt {
                     session_id: self.session_id,
                     input: vec![InputPart::text("finish the scripted task".to_owned())],
-                    limits: RunLimits {
-                        max_duration_ms: Some(300_000),
-                        ..RunLimits::default()
-                    },
+                    limits,
                     correlation: Correlation::default(),
                     output: None,
                 },

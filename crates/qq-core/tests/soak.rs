@@ -167,6 +167,46 @@ async fn forty_mib_of_streamed_text_across_windows_completes() {
 }
 
 #[tokio::test]
+async fn in_run_summary_spend_exhausts_the_callers_token_allowance() {
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.measure_work_usage = true;
+    script.summary_usage = Some(qq_provider::ProviderUsage {
+        input_tokens: 600_000,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_tokens: None,
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture
+        .submit_with_limits(qq_protocol::RunLimits {
+            max_total_tokens: Some(500_000),
+            max_duration_ms: Some(60_000),
+            ..qq_protocol::RunLimits::default()
+        })
+        .await;
+    let report = fixture.finish(run_id).await;
+    assert!(
+        report.compactions > 0,
+        "fixture must perform in-run compaction"
+    );
+    assert!(
+        matches!(&report.outcome, RunOutcome::BudgetExhausted { exhaustion }
+        if exhaustion.limit == qq_protocol::BudgetLimitKind::TotalTokens),
+        "{:?}",
+        report.outcome
+    );
+    assert!(
+        report.work_turns < 24,
+        "summary spend must stop subsequent work"
+    );
+    assert_eq!(report.durable_calls, report.executed_calls);
+    assert_eq!(report.duplicate_sequences, 0);
+    fixture.runtime.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_the_run() {
     // ADR-0048 § 2: the summarizer is under turn recovery. Three 529s, then
     // a summary: the step is retried, commits, and the run completes.
