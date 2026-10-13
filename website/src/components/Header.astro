@@ -12,8 +12,8 @@ const isStartup = Astro.url.pathname.includes('/startup-');
   <div class="brand-group"><SiteTitle /><span class="brand-divider" aria-hidden="true">/</span><span class="brand-caption">the agent runtime</span></div>
   <div class="header-search"><Search /></div>
   <nav class="header-links" aria-label="Primary">
-    <a href={href('docs/')} aria-current={isDocs ? 'true' : undefined}>Docs</a>
-    <a class="startup-link" href={href('docs/startup-overview/')} aria-current={isStartup ? 'page' : undefined}>Startup systems</a>
+    <a href={href('docs/')} aria-current={isDocs && !isStartup ? 'true' : undefined}>Docs</a>
+    <a class="startup-link" href={href('docs/startup-overview/')} aria-current={isStartup ? 'true' : undefined}>Startup systems</a>
     <a class="github-link" href={site.github}><Icon name="github" size="17" /><span>GitHub</span></a>
     <div class="theme-control"><ThemeSelect /></div>
   </nav>
