@@ -554,3 +554,13 @@ This round closes each class of gap, not only the reported instance:
 - `printf x > '&1'` passed as a descriptor duplication. The internal duplication marker now starts with NUL, which no shell word can contain.
 - `timeout --foreground` leaves the command's children untimed, so it is no longer a transparent option.
 - `approval` 92 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 5 (#283)
+
+Each fix covers the whole class: the classifier's argument scanning must never hide the command a wrapper launches.
+
+- Git globals: `--attr-source HEAD` (two-word) and any unknown dash word before the subcommand (`--no-advice`, future flags) are skipped, so `push --force` is judged. Unknown globals also make the command non-allowable.
+- `taskset`/`chrt`: every dash word is the wrapper's, and both the next word and the one after it are judged as the command. This covers `taskset -c -a 0 sudo ls` and a dynamic `chrt -o "$?" sudo ls`. Both candidates are nested, so this only adds strictness.
+- `env -S STRING` / `--split-string` was allowed on `main` (`env -S'rm -rf target'`). It is now reparsed like `sh -c`.
+- Descriptor duplication counts as harmless only for 0–2 (`2>&1`, `/dev/fd/1`). `>&3` writes to an inherited file or socket.
+- 15 rows. `approval` 92 tests pass.
