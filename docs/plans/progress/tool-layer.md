@@ -611,3 +611,11 @@ The last two rounds kept finding new names for the same three classes, so each i
 ### 2026-10-13 — T19 adjacency (#281)
 
 - The deletion-boundary guard used strict comparisons, so an edit adjacent to an earlier replacement (`abcd`: `ab`→`AB` then `cd`→`CD`) was refused. Written spans now use ordinary half-open overlap, and an empty deletion point counts only when it lies strictly inside the later match. `A--AB--B` is still refused. Adjacent and post-deletion edits apply (new rows).
+
+### 2026-10-13 — T18 last residuals (#283)
+
+- `env -S 'su\cdo'`: `\c` now ends the split string.
+- taskset scanning starts at the last leading option word, so 16 repeated `-a` cannot use up the bounded starts.
+- `INSTA_UPDATE` was removed from the harmless set: `always` rewrites snapshots.
+- `git --html-path`/`--man-path`/`--info-path`/`--version`/`--help` print and exit, so the words after them are not judged as a subcommand. `git --html-path push --force` is now Prompt, not a false Forbidden.
+- `approval` 93 tests pass.
