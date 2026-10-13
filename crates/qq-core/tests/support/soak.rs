@@ -41,6 +41,8 @@ pub struct Script {
     pub summary_faults: usize,
     /// HTTP status of each scripted summarizer fault.
     pub summary_fault_status: u16,
+    /// One measured call-bearing summarizer turn before a later fault.
+    pub summary_tool_prefix: bool,
     /// Backoff between turn and summarizer retries.
     pub retry_delay: Duration,
     pub empty_checkpoint: bool,
@@ -73,6 +75,7 @@ impl Script {
             fault_attempts: 0,
             summary_faults: 0,
             summary_fault_status: 529,
+            summary_tool_prefix: false,
             retry_delay: Duration::from_millis(1),
             empty_checkpoint: false,
             repeat_arguments: false,
@@ -94,6 +97,7 @@ pub struct Observations {
     pub truncations: HashSet<usize>,
     pub faults: usize,
     pub summary_faults: usize,
+    pub summary_tool_prefix_served: bool,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -108,9 +112,9 @@ impl Provider for ScriptedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let mut observed = self.observed.lock().expect("fixture observations");
         observed.provider_requests += 1;
-        // Summarizers are recognized by their instruction, the last message:
-        // they declare the session's tools to share its cache (ADR-0056 § 5).
-        let summarizing = request.messages().last().is_some_and(|message| {
+        // The instruction remains in summarizer continuations and rejected
+        // call replies. Ordinary prompt history never includes it.
+        let summarizing = request.messages().iter().any(|message| {
             message.content().iter().any(|block| {
                 matches!(block, qq_provider::ContentBlock::Text { text }
                     if text.starts_with("Summarize this conversation")
@@ -118,6 +122,25 @@ impl Provider for ScriptedProvider {
             })
         });
         if summarizing {
+            if self.script.summary_tool_prefix && !observed.summary_tool_prefix_served {
+                observed.summary_tool_prefix_served = true;
+                return Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "summary-read".to_owned(),
+                        name: TOOL.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "summary-read".to_owned(),
+                        json: "{\"sequence\":0}".to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted {
+                        id: "summary-read".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed {
+                        usage: self.script.summary_usage,
+                    }),
+                ]));
+            }
             if observed.summary_faults < self.script.summary_faults {
                 observed.summary_faults += 1;
                 return Box::pin(stream::iter([Err(ProviderError::Api {

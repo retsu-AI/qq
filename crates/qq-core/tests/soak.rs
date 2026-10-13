@@ -206,6 +206,51 @@ async fn in_run_summary_spend_exhausts_the_callers_token_allowance() {
 }
 
 #[tokio::test]
+async fn a_measured_summarizer_prefix_survives_retry_exhaustion_in_the_store() {
+    let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+    script.summary_tool_prefix = true;
+    script.summary_faults = 6;
+    script.summary_usage = Some(qq_provider::ProviderUsage {
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_tokens: None,
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut fixture = support::Fixture::open(directory.path(), script).await;
+    let run_id = fixture.submit().await;
+    let report = fixture.finish(run_id).await;
+    assert!(
+        matches!(report.outcome, RunOutcome::Paused { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert!(fixture.observed.lock().unwrap().summary_tool_prefix_served);
+    assert_eq!(report.summarizer_faults, 6);
+    assert_eq!(report.step_runs_started, report.step_runs_finished);
+    assert_eq!(report.durable_calls, report.executed_calls);
+    assert_eq!(report.duplicate_sequences, 0);
+    let database = fixture.database.clone();
+    let reported = tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let mut statement = connection.prepare(
+            "SELECT t.usage_json FROM model_turns t JOIN runs r ON r.id = t.run_id WHERE r.kind = 'compaction' AND t.usage_json IS NOT NULL"
+        ).unwrap();
+        statement.query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .map(|row| serde_json::from_str::<qq_protocol::TokenUsage>(&row.unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    }).await.unwrap();
+    assert_eq!(
+        reported.len(),
+        1,
+        "known prefix must survive close/reopen despite an unknown attempt total"
+    );
+    assert_eq!(reported[0].input_tokens, 7);
+    assert_eq!(reported[0].output_tokens, 3);
+}
+
+#[tokio::test]
 async fn a_summarizer_outage_that_clears_within_the_retry_allowance_continues_the_run() {
     // ADR-0048 § 2: the summarizer is under turn recovery. Three 529s, then
     // a summary: the step is retried, commits, and the run completes.
