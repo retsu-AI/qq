@@ -3222,7 +3222,7 @@ async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
         ApprovalMode::ReadOnly,
         vec![vec![(
             "read_file",
-            r#"{"path":"note.txt","ranges":"[\"1\"]"}"#.to_owned(),
+            r#"{"path":"note.txt","ranges":"[\"1\"]","include_ignored":true}"#.to_owned(),
         )]],
     )
     .await;
@@ -3246,7 +3246,7 @@ async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
     assert_eq!(results.len(), 1);
     assert!(!results[0].is_error);
     let result = results[0].result.as_deref().unwrap();
-    assert!(result.contains("note=ranges_array_coerced"));
+    assert!(result.contains("note=ranges_array_coerced,include_ignored_ignored"));
     let snapshot = harness
         .runtime
         .snapshot(SnapshotRequest {

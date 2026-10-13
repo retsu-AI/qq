@@ -287,6 +287,37 @@ pub(crate) struct ToolOutput {
     pub(crate) spill: Option<SpillRecord>,
 }
 
+/// Complete read-side domain output. Dispatch adds any argument-repair
+/// note before masking and bounding once; a clipped preview is never treated
+/// as complete input for another bound.
+pub(super) struct ReadSideOutput {
+    text: String,
+    bounds: Bounds,
+    pub(super) is_error: bool,
+    pub(super) ui_payload: Option<ToolCallDisplay>,
+    pub(super) file_states: Vec<FileStateUpdate>,
+}
+
+impl ReadSideOutput {
+    pub(super) fn success(text: String) -> Self {
+        Self::with_bounds(text, &Bounds::DEFAULT, false)
+    }
+
+    pub(super) fn error(message: impl Into<String>) -> Self {
+        Self::with_bounds(message.into(), &Bounds::DEFAULT, true)
+    }
+
+    pub(super) fn with_bounds(text: String, bounds: &Bounds, is_error: bool) -> Self {
+        Self {
+            text,
+            bounds: *bounds,
+            is_error,
+            ui_payload: None,
+            file_states: Vec::new(),
+        }
+    }
+}
+
 /// A complete tool output awaiting storage: the text, its SHA-256 (the
 /// handle's digest), and the line the bounded text omits from so the marker
 /// can point at it.
@@ -405,33 +436,17 @@ pub(super) fn execute_blocking(
         Some(BuiltInTool::ReadFile) => deserialize_read_only(name, arguments).map_or_else(
             ToolOutput::error,
             |(args, notes)| {
-                with_argument_notes(
-                    read_file(workspace, file_state, args, cancelled),
-                    &notes,
-                    &super::read::READ_BOUNDS,
-                )
+                with_argument_notes(read_file(workspace, file_state, args, cancelled), &notes)
             },
         ),
-        Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments).map_or_else(
-            ToolOutput::error,
-            |(args, notes)| {
-                with_argument_notes(
-                    tree(workspace, args, cancelled),
-                    &notes,
-                    &super::tree::TREE_BOUNDS,
-                )
-            },
-        ),
-        Some(BuiltInTool::Search) => deserialize_read_only(name, arguments).map_or_else(
-            ToolOutput::error,
-            |(args, notes)| {
-                with_argument_notes(
-                    search(workspace, args, cancelled),
-                    &notes,
-                    &super::search::SEARCH_BOUNDS,
-                )
-            },
-        ),
+        Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments)
+            .map_or_else(ToolOutput::error, |(args, notes)| {
+                with_argument_notes(tree(workspace, args, cancelled), &notes)
+            }),
+        Some(BuiltInTool::Search) => deserialize_read_only(name, arguments)
+            .map_or_else(ToolOutput::error, |(args, notes)| {
+                with_argument_notes(search(workspace, args, cancelled), &notes)
+            }),
         // The applied change travels as a UI payload (the unified diff of what
         // actually changed on disk); the model gets the header summary.
         Some(BuiltInTool::EditFile) => deserialize(arguments)
@@ -589,6 +604,16 @@ fn deserialize_read_only<T: serde::de::DeserializeOwned>(
         object.remove("offset");
         notes.push("offset_ignored");
     }
+    // An ignore-walk flag has no effect on reading a named file. The
+    // observed boolean shape is redundant; other types remain invalid.
+    if name == "read_file"
+        && object
+            .get("include_ignored")
+            .is_some_and(serde_json::Value::is_boolean)
+    {
+        object.remove("include_ignored");
+        notes.push("include_ignored_ignored");
+    }
     if notes.is_empty() {
         return Err(original_error);
     }
@@ -598,34 +623,31 @@ fn deserialize_read_only<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn with_argument_notes(mut output: ToolOutput, notes: &[&str], bounds: &Bounds) -> ToolOutput {
-    if notes.is_empty() || output.is_error {
-        return output;
+fn with_argument_notes(mut output: ReadSideOutput, notes: &[&str]) -> ToolOutput {
+    if !notes.is_empty() {
+        let end = output.text.find('\n').unwrap_or(output.text.len());
+        let search = output.text.starts_with("search ");
+        let position = if search {
+            output.text[..end].rfind(" mode=").unwrap_or(end)
+        } else {
+            end
+        };
+        let note = format!(" note={}", notes.join(","));
+        let header_cap = if search {
+            super::output::MAX_STUB_HEADER_BYTES.min(output.bounds.max_line_bytes)
+        } else {
+            output.bounds.max_line_bytes
+        };
+        if end + note.len() > header_cap {
+            output
+                .text
+                .insert_str(end, &format!("\nnote={}", notes.join(",")));
+        } else {
+            output.text.insert_str(position, &note);
+        }
     }
-    let mut text = match output.spill.take() {
-        Some(spill) => spill.text,
-        None => std::mem::take(&mut output.model_text),
-    };
-    let end = text.find('\n').unwrap_or(text.len());
-    // Search cursors can exceed the per-line display cap. Put repair notes
-    // before its fixed mode field, ahead of the cursor that may be clipped.
-    let position = if text.starts_with("search ") {
-        text[..end].rfind(" mode=").unwrap_or(end)
-    } else {
-        end
-    };
-    let note = format!(" note={}", notes.join(","));
-    if position + note.len() > bounds.max_line_bytes {
-        // Preserve the path token used by clients while keeping the repair
-        // visible when the path already fills the header's display budget.
-        text.insert_str(end, &format!("\nnote={}", notes.join(",")));
-    } else {
-        text.insert_str(position, &note);
-    }
-    // Rebound the complete result, so notes and their digest/continuation are
-    // durable too. Valid calls never enter this allocation/formatting path.
-    let mut noted = ToolOutput::bounded(text, bounds, false);
-    noted.ui_payload = output.ui_payload;
-    noted.file_states = output.file_states;
-    noted
+    let mut result = ToolOutput::bounded(output.text, &output.bounds, output.is_error);
+    result.ui_payload = output.ui_payload;
+    result.file_states = output.file_states;
+    result
 }

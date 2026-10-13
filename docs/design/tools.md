@@ -450,23 +450,26 @@ and keeps the schema for each tool in one place:
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded at dispatch (§ Output Bounding).
-A repaired read-side result is rebound from its complete text after its notes
-are added.
+Read/tree/search carry their complete domain text and selected bounds to
+dispatch. Repair notes are added before the single masking/bounding pass.
 
 Read-only argument decoding first uses the strict typed shape. Only a failed
 shape takes the repair path: `search.include`/`exclude` and `read_file.ranges`
 may be JSON arrays encoded as strings, provided every element is a string.
 For these three tools, an extra `cwd:"."` is the existing workspace root;
 for `search`, an extra `offset:0` requests no skipped matches. They are
-ignored with deterministic `note=` tokens. A non-neutral value, duplicate
+ignored with deterministic `note=` tokens. A boolean `read_file.include_ignored`
+is also irrelevant to reading a named file and is dropped with a note. Other
+types remain invalid. A non-neutral value, duplicate
 field, other unknown field or malformed authority field still refuses.
 Mutation, shell, exec, approval and path validation do not take this repair
 path. Existing array/count/output caps and the `search.context` clamp hold.
 
 Repair notes are added to the result header alongside tool-specific notes,
-ahead of long search cursors. When a long path fills the header display cap,
-they use a separate line immediately after the header. The repaired output
-is then bounded for persistence. Existing full
+ahead of search cursors. If the resulting header would exceed the line cap
+or search’s 512-byte pruning-header cap, notes use a separate line immediately
+after the unchanged header. Execution errors retain their error flag and
+repair notes. The complete noted output is bounded once for persistence. Full
 spill text, its digest/omission metadata and file-state updates stay consistent
 with that header; valid calls do not parse or format a repair record.
 

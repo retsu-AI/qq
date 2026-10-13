@@ -1274,3 +1274,9 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Performance and independent review receipts above. Protocol/descriptor/schema unchanged; tools design amended. AC17 ready to submit on reviewed consolidation parent #291. Full-plan gates remain open.
 
 - AC17 submitted as ready [PR #294](https://github.com/retsu-AI/qq/pull/294), base consolidation branch #291. ENG-872 In Review. Awaiting Codex opening-description thumbs-up; not merged.
+
+### 2026-10-13 — AC17 Codex review repairs in qualification
+
+- Codex raised four P2s on #294: observed read `include_ignored`, lost notes on execution errors, rebounding a line-clipped preview, and search notes exceeding the pruning header cap. Regression-first `c21d495` reproduced all four (6 existing passed / 4 new failed).
+- Private `ReadSideOutput` carries complete text and original per-path bounds to dispatch, which adds notes then masks/bounds once. Boolean read `include_ignored` drops with a note; other types remain rejected. Error status stays authoritative. Notes go below an unchanged search header when adding them would exceed `MAX_STUB_HEADER_BYTES` (512). File-state/UI payloads remain moved unchanged.
+- Ten focused repair regressions and the combined durable-session regression pass. Independent review: Approve; no remaining concrete findings. Fresh controlled dispatch measurement and workspace gates run before pushing the repair. Original raw evidence remains preserved.

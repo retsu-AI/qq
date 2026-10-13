@@ -414,15 +414,24 @@ mod tests {
         let header = result.model_text.lines().next().unwrap();
         assert!(header.contains("next="), "{header}");
         assert!(
-            header.contains("note=include_array_coerced,cwd_ignored,offset_ignored"),
-            "{header}"
+            result
+                .model_text
+                .lines()
+                .any(|line| line == "note=include_array_coerced,cwd_ignored,offset_ignored"),
+            "{}",
+            result.model_text
         );
         let spill = result
             .spill
             .as_ref()
             .expect("long search header exceeds the reserved header budget");
         let complete_header = spill.text.lines().next().unwrap();
-        assert!(complete_header.contains("note=include_array_coerced,cwd_ignored,offset_ignored"));
+        assert!(
+            spill
+                .text
+                .lines()
+                .any(|line| line == "note=include_array_coerced,cwd_ignored,offset_ignored")
+        );
         let encoded = complete_header
             .split_once(" next=")
             .unwrap()
@@ -432,9 +441,10 @@ mod tests {
             .unwrap();
         let original = baseline.spill.as_ref().expect("baseline also spills");
         assert_eq!(
-            spill
-                .text
-                .replace(" note=include_array_coerced,cwd_ignored,offset_ignored", ""),
+            spill.text.replace(
+                "note=include_array_coerced,cwd_ignored,offset_ignored\n",
+                ""
+            ),
             original.text,
             "repair must preserve complete spilled content"
         );
