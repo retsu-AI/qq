@@ -14,7 +14,7 @@
 //! run's provider cache; a call is rejected, never run (ADR-0056 § 5).
 
 use super::{
-    execution::{RunAccounting, cancellation_requested},
+    execution::{ModelTurnCommit, RunAccountingAccumulator, cancellation_requested},
     runtime::SessionRuntimeInner,
     *,
 };
@@ -68,6 +68,29 @@ async fn compact_in_run(
     if *inner.failed.borrow() {
         return Err(Error::Unavailable("session runtime failed".to_owned()));
     }
+    let now = tokio::time::Instant::now();
+    let allowance = match request.budget.limits_at(now) {
+        Ok(allowance) => allowance,
+        Err(kind) => {
+            return Err(Error::BudgetExhausted {
+                kind,
+                usage: Some(TokenUsage::default()),
+                estimated_cost_usd_nanos: Some(0),
+            });
+        }
+    };
+    let mut budget =
+        crate::runtime::BudgetMeter::new(allowance, resolved_model.pricing.clone(), now);
+    let basis = context_occupancy_basis(
+        qq_protocol::ContentHash::from_bytes([0; 32]),
+        crate::runtime::PreparedStaticPrefix::new(
+            qq_protocol::ContentHash::from_bytes([0; 32]),
+            None,
+        ),
+        0,
+    );
+    let mut observed_accounting =
+        RunAccountingAccumulator::new(resolved_model.pricing.clone(), basis);
     let turn_cutoff = request.turn_cutoff;
     let retained_bytes = request.retained_bytes;
     let started = inner
@@ -142,21 +165,120 @@ async fn compact_in_run(
             resolved_model.context_window,
         ),
     );
-    let reply = tokio::select! {
-        biased;
-        changed = cancelled.changed() => {
-            guard.disarm();
-            if changed.is_ok() && *cancelled.borrow() {
-                settle_cancelled(inner, &compaction).await;
-                return Err(Error::Unavailable("cancelled".to_owned()));
+    tokio::pin!(summarize);
+    let reply = loop {
+        let step = tokio::select! {
+            biased;
+            changed = cancelled.changed() => {
+                guard.disarm();
+                if changed.is_ok() && *cancelled.borrow() {
+                    settle_cancelled(inner, &compaction).await;
+                    return Err(Error::Unavailable("cancelled".to_owned()));
+                }
+                settle_failed(inner, &compaction, "cancellation channel closed".to_owned()).await;
+                return Err(Error::Unavailable("cancellation channel closed".to_owned()));
             }
-            settle_failed(inner, &compaction, "cancellation channel closed".to_owned()).await;
-            return Err(Error::Unavailable("cancellation channel closed".to_owned()));
+            step = summarize.next() => step,
+        };
+        match step {
+            Some(Ok(crate::runtime::SummarizeStep::RequestStarting)) => {
+                let now = tokio::time::Instant::now();
+                if let Err(kind) = request
+                    .budget
+                    .limits_at(now)
+                    .and_then(|_| budget.remaining(now))
+                {
+                    let accounting = observed_accounting.snapshot();
+                    let exhaustion = budget.exhaustion(kind, false, tokio::time::Instant::now());
+                    guard.disarm();
+                    match inner
+                        .store
+                        .finish_in_run_compaction_failed(
+                            &compaction,
+                            RunOutcome::BudgetExhausted {
+                                exhaustion: Box::new(exhaustion),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(events) => {
+                            for event in events {
+                                inner.notify(event.cursor);
+                            }
+                        }
+                        Err(error) => {
+                            inner.failed.send_replace(true);
+                            return Err(Error::Persistence(error.to_string()));
+                        }
+                    }
+                    return Err(Error::BudgetExhausted {
+                        kind,
+                        usage: accounting.usage,
+                        estimated_cost_usd_nanos: accounting.estimated_cost_usd_nanos,
+                    });
+                }
+                if let Err(error) = inner.store.start_in_run_summary_request(&compaction).await {
+                    inner.failed.send_replace(true);
+                    return Err(Error::Persistence(error.to_string()));
+                }
+            }
+            Some(Ok(crate::runtime::SummarizeStep::TurnCompleted {
+                ordinal,
+                message,
+                usage,
+                truncated,
+            })) => {
+                observed_accounting.record_turn(usage);
+                let accounting = observed_accounting.snapshot();
+                let cost = usage.and_then(|usage| {
+                    resolved_model
+                        .pricing
+                        .as_ref()
+                        .and_then(|price| run_cost(usage, price))
+                });
+                budget.charge_child(usage, cost);
+                let persisted = inner
+                    .store
+                    .persist_in_run_summary_turn(
+                        &compaction,
+                        ModelTurnCommit {
+                            turn_ordinal: ordinal,
+                            message,
+                            calls: Vec::new(),
+                            turn_message: None,
+                            context_tokens: accounting.context_tokens,
+                            occupancy_basis: None,
+                            usage,
+                            estimated_cost_usd_nanos: cost,
+                            accounting: Some(accounting),
+                            truncated,
+                            notice: None,
+                        },
+                    )
+                    .await;
+                match persisted {
+                    Ok(events) => {
+                        for event in events {
+                            inner.notify(event.cursor);
+                        }
+                    }
+                    Err(error) => {
+                        inner.failed.send_replace(true);
+                        return Err(Error::Persistence(error.to_string()));
+                    }
+                }
+            }
+            Some(Ok(crate::runtime::SummarizeStep::Summary(summary))) => break Ok(summary),
+            Some(Err(error)) => break Err(error),
+            None => {
+                break Err(crate::runtime::SummarizeError::Rejected(
+                    "summarizer ended without a summary".to_owned(),
+                ));
+            }
         }
-        reply = summarize => reply,
     };
     guard.disarm();
-    let (summary, usage) = match reply {
+    let summary = match reply {
         Ok(reply) => reply,
         // The compaction run is settled before the loop's backoff, so a retry
         // never stacks a second running row; if that write fails the runtime
@@ -171,47 +293,27 @@ async fn compact_in_run(
                 },
             )
             .await;
-            return Err(Error::SummarizerUnavailable { kind, message });
+            return Err(Error::SummarizerUnavailable {
+                kind,
+                message,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+            });
         }
         Err(crate::runtime::SummarizeError::Rejected(message)) => {
             settle_failed(inner, &compaction, message.clone()).await;
             return Err(Error::SummarizerFailed(message));
         }
     };
-    // One turn's spend and occupancy. The request basis is the summarizer's
-    // own, never reused for a retry, so a zero shape is exact.
-    let accounting = usage.map(|usage| RunAccounting {
-        usage: Some(usage),
-        context_tokens: Some(
-            usage
-                .input_tokens
-                .saturating_add(usage.cache_read_input_tokens)
-                .saturating_add(usage.cache_write_input_tokens),
-        ),
-        estimated_cost_usd_nanos: resolved_model
-            .pricing
-            .as_ref()
-            .and_then(|pricing| run_cost(usage, pricing)),
-        saw_turn: true,
-        request_basis: context_occupancy_basis(
-            qq_protocol::ContentHash::from_bytes([0; 32]),
-            crate::runtime::PreparedStaticPrefix::new(
-                qq_protocol::ContentHash::from_bytes([0; 32]),
-                None,
-            ),
-            0,
-        ),
-        final_output: None,
-    });
-    let estimated_cost_usd_nanos = accounting
-        .as_ref()
-        .and_then(|value| value.estimated_cost_usd_nanos);
+    let accounting = observed_accounting.snapshot();
+    let usage = accounting.usage;
+    let estimated_cost_usd_nanos = accounting.estimated_cost_usd_nanos;
     let committed = inner
         .store
         .finish_in_run_compaction(
             &compaction,
             summary,
-            accounting,
+            Some(accounting),
             record_budget(resolved_model.context_window),
             retained_bytes,
         )

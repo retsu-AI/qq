@@ -1141,6 +1141,15 @@ impl RunState {
                                 // request. A rejected summary fails closed.
                                 let mut summarizer_retries: u16 = 0;
                                 let compacted = loop {
+                                    let allowance = match run.budget.child_budget(tokio::time::Instant::now()) {
+                                        Ok(allowance) => allowance,
+                                        Err(kind) => {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                    };
                                     let attempt = compactor
                                         .compact(runtime::InRunCompactionRequest {
                                             transcript: transcript.to_vec(),
@@ -1148,10 +1157,27 @@ impl RunState {
                                             system: Arc::clone(system),
                                             tools: Arc::clone(&run.tool_specs),
                                             retained_bytes,
+                                            budget: allowance,
                                         })
                                         .await;
                                     let (kind, message) = match attempt {
-                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message }) => (kind, message),
+                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message, usage, estimated_cost_usd_nanos }) => {
+                                            run.budget.charge_child(usage, estimated_cost_usd_nanos);
+                                            if let Err(limit) = run.budget.remaining(tokio::time::Instant::now()) {
+                                                yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                    exhaustion: run.budget.exhaustion(limit, false, tokio::time::Instant::now()),
+                                                });
+                                                yield TurnStep::Stop; return;
+                                            }
+                                            (kind, message)
+                                        }
+                                        Err(runtime::InRunCompactionError::BudgetExhausted { kind, usage, estimated_cost_usd_nanos }) => {
+                                            run.budget.charge_child(usage, estimated_cost_usd_nanos);
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
                                         settled => break settled,
                                     };
                                     if summarizer_retries >= MAX_TURN_RETRIES {
@@ -1224,6 +1250,7 @@ impl RunState {
                                             // Unreachable after the retry loop above, which
                                             // pauses instead; kept for exhaustiveness.
                                             | runtime::InRunCompactionError::SummarizerUnavailable { .. }
+                                            | runtime::InRunCompactionError::BudgetExhausted { .. }
                                             | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
                                                 kind: RunFailureKind::Policy,
                                                 message: format!(

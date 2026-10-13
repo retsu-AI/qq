@@ -38,6 +38,7 @@ pub(crate) struct InRunCompactionRequest {
     /// summary it commits and re-bases the run's context reservation to the
     /// total in the marker's transaction (ADR-0048 § 1).
     pub(crate) retained_bytes: u64,
+    pub(crate) budget: super::ChildBudget,
 }
 
 /// A committed in-run summary the loop splices in.
@@ -66,6 +67,14 @@ pub(crate) enum InRunCompactionError {
     SummarizerUnavailable {
         kind: RunFailureKind,
         message: String,
+        usage: Option<qq_protocol::TokenUsage>,
+        estimated_cost_usd_nanos: Option<u64>,
+    },
+    #[error("summarizer budget exhausted: {kind:?}")]
+    BudgetExhausted {
+        kind: qq_protocol::BudgetLimitKind,
+        usage: Option<qq_protocol::TokenUsage>,
+        estimated_cost_usd_nanos: Option<u64>,
     },
     /// The summarizer ran and settled failed (rejected, malformed, did not
     /// shrink). Its outcome is durable on its own run.
@@ -83,6 +92,20 @@ pub(crate) enum InRunCompactionError {
 
 pub(crate) trait InRunCompactor: Send + Sync {
     fn compact(&self, request: InRunCompactionRequest) -> InRunCompactionFuture;
+}
+
+/// Pull-driven summarizer boundaries. A request cannot be dispatched until
+/// its starting step has been admitted, and each completed turn can be
+/// persisted before the generator is polled for more provider work.
+pub(crate) enum SummarizeStep {
+    RequestStarting,
+    TurnCompleted {
+        ordinal: u32,
+        message: Message,
+        usage: Option<qq_protocol::TokenUsage>,
+        truncated: bool,
+    },
+    Summary(String),
 }
 
 /// Why one summarizer request produced no summary.
