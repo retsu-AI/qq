@@ -4,7 +4,8 @@
 
 - Owner: `/root/jev_contract_trace`; independent verifier: `jev_final_verifier`.
 - Base: `eddff56e054e4ad6f16a4156660f3918782ac49d`.
-- Candidate: `284f412` (implementation `5b25a3f` plus recovery tests/docs).
+- Candidate: `5e02aed` (capacity/poison/client-flow repairs); follow-up source
+  corrections are pending this ledger update.
 - Baseline: `baseline-cold-same-key.cast` and matching logs recorded 8 Keyring reads
   for one cold same-key request where the regression expected 1.
 - Focused checks on the candidate: three `qq-auth` coalescing/failure-retry/distinct-key
@@ -19,6 +20,7 @@ retry reloads the index/epoch after releasing the state lock. Attached clients k
 model options empty until the server-authoritative `Models` response; credential
 index presence remains presentation-only.
 
-Remaining verification belongs to the parent lane: full workspace gates and
-independent exact-head review. Saturation and attached live-TUI behavior are not
-claimed by the focused checks above.
+The follow-up adds predicate capacity waiting, target epoch/secret rotation while
+saturated, active coordinator poison cleanup, trust-to-Models separation, and
+AWS presence checks that inspect environment names only. Live attached-TUI behavior
+remains root-owned acceptance.

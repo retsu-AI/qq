@@ -388,14 +388,18 @@ impl Drop for StoredResolutionOwnerGuard {
         if self.completed {
             return;
         }
-        if let Ok(mut state) = self.coordinator.0.lock() {
-            state.flights.remove(&self.key);
-            if let Ok(mut result) = self.flight.result.lock() {
-                *result = Some(Err(StoredResolutionFailure::Coordinator("owner_panic")));
-                self.flight.ready.notify_all();
-            }
-            self.coordinator.1.notify_all();
-        }
+        let mut state = match self.coordinator.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.flights.remove(&self.key);
+        let mut result = match self.flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *result = Some(Err(StoredResolutionFailure::Coordinator("owner_panic")));
+        self.flight.ready.notify_all();
+        self.coordinator.1.notify_all();
     }
 }
 

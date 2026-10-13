@@ -2333,8 +2333,18 @@ fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<
             | ProviderAccess::AmazonBedrockMantle { auth, .. },
         ) => match auth {
             BedrockAuth::ApiKey(reference) => reference_present(reference),
-            BedrockAuth::Aws(AwsAuth::Profile(profile)) => aws_profile_configured(profile),
-            BedrockAuth::Aws(AwsAuth::DefaultChain) => aws_default_chain_source().is_some(),
+            // The client presence path may inspect environment names, but it
+            // must not read AWS config/credentials files before first paint.
+            // Server-side authorization retains the full AWS chain.
+            BedrockAuth::Aws(AwsAuth::Profile(_)) => false,
+            BedrockAuth::Aws(AwsAuth::DefaultChain) => {
+                environment_variable_set("AWS_ACCESS_KEY_ID")
+                    && environment_variable_set("AWS_SECRET_ACCESS_KEY")
+                    || (environment_variable_set("AWS_WEB_IDENTITY_TOKEN_FILE")
+                        && environment_variable_set("AWS_ROLE_ARN"))
+                    || environment_variable_set("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+                    || environment_variable_set("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+            }
         },
         None => false,
     }

@@ -34,6 +34,13 @@ struct FakeKeyring {
     values: Mutex<BTreeMap<String, Vec<u8>>>,
     reads: Mutex<BTreeMap<String, usize>>,
     break_index_after_set: Mutex<Option<PathBuf>>,
+    read_gate: Mutex<Option<Arc<ReadGate>>>,
+}
+
+#[derive(Default)]
+struct ReadGate {
+    entered: AtomicBool,
+    release: AtomicBool,
 }
 
 impl FakeKeyring {
@@ -61,6 +68,10 @@ impl FakeKeyring {
         *self.max_secret_len.lock().unwrap() = Some(limit);
     }
 
+    fn gate_next_read(&self, gate: Arc<ReadGate>) {
+        *self.read_gate.lock().unwrap() = Some(gate);
+    }
+
     fn check_mode(&self) -> Result<(), KeyringError> {
         match *self.mode.lock().unwrap() {
             FakeMode::Available => Ok(()),
@@ -72,13 +83,19 @@ impl FakeKeyring {
 
 impl KeyringBackend for FakeKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
-        self.check_mode()?;
+        if let Some(gate) = self.read_gate.lock().unwrap().take() {
+            gate.entered.store(true, Ordering::SeqCst);
+            while !gate.release.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+        }
         *self
             .reads
             .lock()
             .unwrap()
             .entry(name.to_owned())
             .or_default() += 1;
+        self.check_mode()?;
         self.value(name).ok_or(KeyringError::Missing)
     }
 
@@ -2940,6 +2957,8 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
         )
         .unwrap();
     keyring.set_mode(FakeMode::Failure);
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
 
     let mut workers = Vec::new();
     for _ in 0..4 {
@@ -2951,6 +2970,10 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
             )
         }));
     }
+    while !gate.entered.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+    gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert!(matches!(
             worker.join().unwrap(),
@@ -2966,12 +2989,13 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
         )
         .unwrap();
     assert_eq!(secret.expose_secret_bytes(), b"secret");
-    assert!(keyring.read_count("provider/work") >= 1);
+    assert_eq!(keyring.read_count("provider/work"), 2);
 }
 
 #[derive(Default)]
 struct PanicOnceKeyring {
     panic_next: AtomicBool,
+    release: AtomicBool,
     entered: Mutex<Option<Arc<Barrier>>>,
     values: Mutex<BTreeMap<String, Vec<u8>>>,
 }
@@ -2981,6 +3005,9 @@ impl KeyringBackend for PanicOnceKeyring {
         if self.panic_next.swap(false, Ordering::SeqCst) {
             if let Some(barrier) = self.entered.lock().unwrap().take() {
                 barrier.wait();
+            }
+            while !self.release.load(Ordering::SeqCst) {
+                thread::yield_now();
             }
             panic!("test owner panic");
         }
@@ -3045,6 +3072,7 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
             )
         })
     };
+    keyring.release.store(true, Ordering::SeqCst);
     assert!(owner.join().is_err());
     assert!(matches!(
         follower.join().unwrap(),
@@ -3149,14 +3177,14 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let worker_store = store.clone();
     let worker = thread::spawn(move || {
-        let result = worker_store.resolve(&SecretRef::Stored(target.name.clone()));
+        let result = worker_store.resolve_with_epoch(&SecretRef::Stored(target.name.clone()), None);
         done_tx.send(result).unwrap();
     });
     assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
 
     // Rotate the index while the request is waiting. Releasing one flight must
     // cause the public call to reload the current epoch before reading.
-    store.set("provider/epoch", "rotated", false).unwrap();
+    store.set("provider/target", "rotated", false).unwrap();
     let (key, flight) = held.pop().unwrap();
     {
         let mut state = coordinator.0.lock().unwrap();
@@ -3170,6 +3198,7 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
         .expect("capacity wait must recover after a flight is released")
         .unwrap();
     worker.join().unwrap();
-    assert_eq!(result.expose_secret_bytes(), b"target");
+    assert_eq!(result.0.expose_secret_bytes(), b"rotated");
+    assert!(result.1 > epoch);
     assert_eq!(keyring.read_count("provider/target"), 1);
 }

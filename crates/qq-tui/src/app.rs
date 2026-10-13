@@ -543,7 +543,11 @@ impl App {
         self.unauthenticated_providers = resolved.unauthenticated_providers;
         // Through the catalog path so the sort, per-session context windows,
         // and an open picker are refreshed like a server catalog update.
-        self.apply_model_options(resolved.models, Some(resolved.model));
+        // Keep the configured route as request metadata only. The app's
+        // usable/default model remains empty until the server's Models update
+        // returns its authoritative selected value.
+        let requested_selection = resolved.model;
+        self.apply_model_options(resolved.models, None);
         self.set_info(match choice {
             TrustChoice::Persist => format!(
                 "trusted {} file{}",
@@ -557,7 +561,7 @@ impl App {
         // refresh the catalog the same way bootstrap does so provider
         // discovery replaces the root's static list.
         let mut effects = Effects::send_now(ClientRequest::Capabilities);
-        effects.push(Effect::Send(ClientRequest::Models(self.model.clone())));
+        effects.push(Effect::Send(ClientRequest::Models(requested_selection)));
         effects
     }
 
