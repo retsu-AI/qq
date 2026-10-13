@@ -961,16 +961,19 @@ sudo ls` is `Forbidden`.
 The other wrappers are recorded as commands of their own, and the command
 they wrap is recorded as nested. It is judged, so a `Forbidden` inner
 command is found, but it is never allowed. These are `env`, `xargs`,
-`sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset` (after its mask or
-priority positional). `ionice`, `chrt`, and `taskset` are not launchers
+`sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset`. For `chrt` and
+`taskset`, both the word after the options and the one after it are
+judged as the command, so a dynamic or misread positional cannot hide it.
+`env -S STRING` (`--split-string`) is reparsed like `sh -c STRING`. `ionice`, `chrt`, and `taskset` are not launchers
 because they can retarget a running process; with `-p` they launch
 nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
 reparsed. Past 8 wrappers, a ninth is not looked through.
 
 A redirect writes nothing when its target is exactly `/dev/null`,
-`/dev/stdin`, `/dev/stdout`, or `/dev/stderr`, or a descriptor
-duplication (`2>&1`, `>&2`). A prefix such as `/dev/stdout-copy` is a
-file. `> 1` writes a file named `1`. A
+`/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `/dev/fd/0`–`2`, or when it
+duplicates a standard descriptor (`2>&1`, `>&2`). A prefix such as
+`/dev/stdout-copy` is a file. `>&3` copies an inherited descriptor, which
+may be a file or a socket, so it is a write. `> 1` writes a file named `1`. A
 list or pipeline whose redirects all write nothing (`cd src && cargo test
 2>&1 | grep FAILED`) is judged like the same list without them. Any other
 redirected construct counts as nested.
@@ -1005,8 +1008,9 @@ executable that `git status` runs), plus `*_WRAPPER`, `*PAGER`,
 `*EDITOR`, `CARGO_*`, `RUSTC*`, and `RUSTFLAGS` on any program.
 
 Git's global options before the subcommand (`-C`, `-c`, `--git-dir`,
-`--work-tree`, `--exec-path`, `--config-env`, `--bare`, …) are all
-skipped, so the subcommand rules apply: `git -C sub -c k=v push --force`
+`--work-tree`, `--exec-path`, `--config-env`, `--attr-source`, `--bare`,
+and any other dash word, known or not) are all skipped, so the subcommand
+rules apply: `git -C sub -c k=v push --force`
 is `Forbidden`. Any of them except `--no-pager`, `-P`, and
 `--no-optional-locks` makes the command `Prompt`. `git -C` into `/tmp` is an escape:
 the writable-temporary exception covers scratch files, not other

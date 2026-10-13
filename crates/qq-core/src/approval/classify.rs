@@ -70,14 +70,16 @@ impl SimpleCommand {
 }
 
 /// A redirect target that writes nothing: the null device, a standard
-/// stream, or a descriptor duplication (`2>&1`, recorded as `\0&1`).
+/// stream, or a duplication of a standard descriptor (`2>&1`, recorded as
+/// `\0&1`). `>&3` copies an inherited descriptor, which may be a file or a
+/// socket, so it is a write.
 pub(crate) fn stream_target(target: &str) -> bool {
     matches!(
         target,
         "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
     ) || target
         .strip_prefix("\u{0}&")
-        .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+        .is_some_and(|fd| matches!(fd, "0" | "1" | "2"))
 }
 
 pub(crate) fn basename(word: &str) -> &str {
@@ -641,10 +643,32 @@ impl Collector<'_> {
         };
         match program.as_str() {
             "env" => {
-                // env [-i] [-u NAME]… [K=V]… cmd
+                // env [-i] [-u NAME]… [-S STRING] [K=V]… cmd
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
-                    if word == "-i" || word == "--ignore-environment" {
+                    // `-S`/`--split-string` makes a string the command: it is
+                    // judged like `sh -c STRING`, nested.
+                    let split = if word == "-S" || word == "--split-string" {
+                        skip += 1;
+                        Some(args.get(skip).cloned().flatten())
+                    } else {
+                        word.strip_prefix("--split-string=")
+                            .or_else(|| word.strip_prefix("-S"))
+                            .map(|rest| Some(rest.to_owned()))
+                    };
+                    if let Some(string) = split {
+                        self.peel(
+                            SimpleCommand {
+                                argv: vec![Some("sh".to_owned()), Some("-c".to_owned()), string],
+                                redirects: command.redirects.clone(),
+                                raw_redirects: command.raw_redirects.clone(),
+                                assignments: Vec::new(),
+                                nested: true,
+                            },
+                            depth + 1,
+                        );
+                        skip += 1;
+                    } else if word == "-i" || word == "--ignore-environment" {
                         skip += 1;
                     } else if word == "-u" || word == "--unset" {
                         skip += 2;
@@ -659,34 +683,29 @@ impl Collector<'_> {
                 }
             }
             "taskset" | "chrt" => {
-                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd: skip the
-                // options and the one positional before the command. `-p`
-                // retargets a running process; there is no inner command.
+                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd. Every
+                // dash word is the wrapper's (chrt's -T/-P/-D take a value);
+                // the next word is the mask, list, or priority, possibly
+                // dynamic. The command is judged from both that word and the
+                // one after, so a misread positional cannot hide it. Both
+                // candidates are nested, so this only ever adds strictness.
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
-                    if word.starts_with('-') {
-                        skip += 1;
-                        if program == "taskset" && matches!(word.as_str(), "-c" | "--cpu-list") {
-                            // `-c LIST` replaces the mask positional.
-                            skip += 1;
-                            break;
-                        }
-                        if program == "chrt"
-                            && matches!(
-                                word.as_str(),
-                                "-T" | "-P"
-                                    | "-D"
-                                    | "--sched-runtime"
-                                    | "--sched-period"
-                                    | "--sched-deadline"
-                            )
-                        {
-                            skip += 1;
-                        }
-                    } else {
-                        // The mask or the priority.
-                        skip += 1;
+                    if !word.starts_with('-') {
                         break;
+                    }
+                    skip += 1;
+                    if program == "chrt"
+                        && matches!(
+                            word.as_str(),
+                            "-T" | "-P"
+                                | "-D"
+                                | "--sched-runtime"
+                                | "--sched-period"
+                                | "--sched-deadline"
+                        )
+                    {
+                        skip += 1;
                     }
                 }
                 // `-p`/`--pid` among the wrapper's own options (never the
@@ -701,8 +720,10 @@ impl Collector<'_> {
                 if retargets {
                     return;
                 }
-                if let Some(inner) = inner_from(skip) {
-                    self.peel(inner, depth + 1);
+                for start in [skip, skip + 1] {
+                    if let Some(inner) = inner_from(start) {
+                        self.peel(inner, depth + 1);
+                    }
                 }
             }
             "nice" | "nohup" | "time" | "stdbuf" | "ionice" | "setsid" | "unbuffer" | "command"

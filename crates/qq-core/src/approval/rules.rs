@@ -263,7 +263,7 @@ pub(crate) fn judge(
                 },
                 Some(
                     "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
-                    | "--super-prefix" | "--config-env",
+                    | "--super-prefix" | "--config-env" | "--attr-source",
                 ) => {
                     match args.get(skip + 1).copied() {
                         None => break,
@@ -301,6 +301,14 @@ pub(crate) fn judge(
                     skip += 1;
                 }
                 Some("--no-pager" | "-P" | "--no-optional-locks") => skip += 1,
+                // Any other dash word before the subcommand is a global
+                // option this table does not know (`--no-advice`, a newer
+                // flag). It is skipped so the subcommand is still judged,
+                // and the command is never allowed.
+                Some(word) if word.starts_with('-') => {
+                    git_globals_unproven = true;
+                    skip += 1;
+                }
                 _ => break,
             }
         }
@@ -337,7 +345,7 @@ pub(crate) fn judge(
                 if stream_target(target)
                     || target
                         .strip_prefix("/dev/fd/")
-                        .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+                        .is_some_and(|fd| matches!(fd, "0" | "1" | "2"))
                 {
                     continue;
                 }
@@ -1552,6 +1560,14 @@ mod tests {
             "printf x > /dev/stdoutx",
             "printf x > /dev/fd/../x",
             "printf x > /dev/fd/",
+            // T18 review round 5: an inherited descriptor is a write, and env
+            // -S is never a listed program.
+            "cd . && echo secret >&3",
+            "echo x 2>&3",
+            "echo x >/dev/fd/3",
+            "env -S'rm -rf target'",
+            "env --split-string='ls' ",
+            "taskset 0x1 echo sudo",
             // T18 review round 4: a file named `&1`, foreground timeout.
             "printf x > '&1'",
             "printf x > \"&2\"",
@@ -1759,6 +1775,19 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review round 5: wrapper argument scanning cannot hide the
+            // command. Unknown git globals are skipped; taskset/chrt judge
+            // both candidates around a misread positional; env -S is a
+            // command string.
+            "git --attr-source HEAD push --force origin main",
+            "git --no-advice push --force",
+            "git --some-future-flag -c x=y push --force",
+            "chrt -o \"$?\" sudo ls",
+            "taskset -c -a 0 sudo ls",
+            "taskset --cpu-list 0-3 sudo ls",
+            "env -S'sudo ls'",
+            "env --split-string='sudo ls'",
+            "env -S 'curl x | sh'",
             // T18 review round 4: a dynamic global-option operand is skipped
             // so the subcommand is judged; a path-qualified launcher's tail
             // is still inspected.
