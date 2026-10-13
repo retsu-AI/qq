@@ -2524,6 +2524,82 @@ mod tests {
     }
 
     #[test]
+    fn credential_diagnostic_composes_two_real_stores_with_one_session() {
+        let root = private_tempdir();
+        let path = root.path().join("composed.jsonl");
+        let session = Arc::new(diagnostic::DiagnosticSession::open(&path).unwrap());
+        let first = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(root.path().join("first")),
+            Arc::new(TestKeyring::default()),
+        )
+        .with_diagnostic_sink(Arc::clone(&session) as Arc<dyn auth::CredentialDiagnosticSink>);
+        let second = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(root.path().join("second")),
+            Arc::new(TestKeyring::default()),
+        )
+        .with_diagnostic_sink(Arc::clone(&session) as Arc<dyn auth::CredentialDiagnosticSink>);
+        first
+            .set_with_metadata(
+                "provider/first",
+                b"first-secret",
+                false,
+                Some("provider"),
+                Some("https://provider.example"),
+            )
+            .unwrap();
+        second
+            .set_with_metadata(
+                "provider/second",
+                b"second-secret",
+                false,
+                Some("provider"),
+                Some("https://provider.example"),
+            )
+            .unwrap();
+        assert_eq!(
+            first
+                .resolve_with_endpoint(
+                    &qq_provider::SecretRef::Stored("provider/first".to_owned()),
+                    Some("https://provider.example"),
+                )
+                .unwrap()
+                .expose_secret_bytes(),
+            b"first-secret"
+        );
+        assert_eq!(
+            second
+                .resolve_with_endpoint(
+                    &qq_provider::SecretRef::Stored("provider/second".to_owned()),
+                    Some("https://provider.example"),
+                )
+                .unwrap()
+                .expose_secret_bytes(),
+            b"second-secret"
+        );
+        assert_eq!(session.close(), diagnostic::CloseOutcome::Closed);
+        let text = std::fs::read_to_string(path).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let starts: Vec<_> = records
+            .iter()
+            .filter(|record| record["kind"] == "BackendReadStarted")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert!(starts.iter().all(|record| record["pid"] == std::process::id()));
+        assert_eq!(
+            starts[0]["session_id"],
+            starts[1]["session_id"],
+            "both stores must use one diagnostic session"
+        );
+        assert_ne!(starts[0]["store_id"], starts[1]["store_id"]);
+        assert_ne!(starts[0]["coordinator_id"], starts[1]["coordinator_id"]);
+        assert!(!text.contains("first-secret"));
+        assert!(!text.contains("second-secret"));
+    }
+
+    #[test]
     fn isolated_tui_qa_rejects_registered_jev_without_reading_its_value() {
         let root = private_tempdir();
         let canonical = root.path().canonicalize().unwrap();
