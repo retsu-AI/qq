@@ -478,7 +478,7 @@ the same fuzzy edit or overwrite on the next call without the model
 seeing any content. The message instead names the cheapest fix: extend
 `old` until it is exact and unique, or `read_file` the ranges around the
 edit. The applied edit records the new hash in `FileState` as before. This changes `tools.md` § Optimistic Concurrency
-step 2 and needs ADR-0057 (reserved). The concurrency argument still
+step 2 and needs ADR-0058 (reserved). The concurrency argument still
 holds. The match runs against the bytes read at plan time, and the
 apply-time exclusive section re-hashes against that same `before_hash`.
 A writer that lands in between therefore fails the edit with
@@ -553,7 +553,7 @@ table is `tools.md` § Approval Policy.
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, allowlisted plain `git fetch` (D10); globs unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
-| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0057 | `edit_batch` unchanged |
+| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
 | T20 | Nudge over the classifier's command list; `max_per_file`/ranges clamps; placeholder spill handle (D10) | S | T18 | `runtime/shell_policy.rs`, `tools/{shell,search,read}.rs`, `runtime/spill.rs`, `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
