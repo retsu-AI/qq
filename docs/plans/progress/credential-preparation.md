@@ -4,8 +4,8 @@
 
 - Owner: `/root/jev_contract_trace`; independent verifier: `jev_final_verifier`.
 - Base: `eddff56e054e4ad6f16a4156660f3918782ac49d`.
-- Candidate: `5e02aed` (capacity/poison/client-flow repairs); follow-up source
-  corrections are pending this ledger update.
+- Candidate: `ab00b89` (capacity/poison/client-flow repairs plus trust catalog
+  selection separation).
 - Baseline: `baseline-cold-same-key.cast` and matching logs recorded 8 Keyring reads
   for one cold same-key request where the regression expected 1.
 - Focused checks on the candidate: three `qq-auth` coalescing/failure-retry/distinct-key
