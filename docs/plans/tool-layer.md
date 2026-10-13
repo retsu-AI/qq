@@ -397,7 +397,10 @@ remaining friction has moved:
    proves nothing about intent either. The alternative the data shows is
    an unreviewed `sed -i` through the shell. `note=unread` keeps every
    such edit visible, and under `ask` and `supervised` every edit is
-   still held. The `if_hash` path is weaker than either: `read_file
+   still held. The model-facing contract changes with the behavior: the
+   `edit_file` description and the system prompt's read-before-edit
+   bullet say that a unique exact `old` applies to an unread file, and a
+   prompt-text test pins the wording. The `if_hash` path is weaker than either: `read_file
    mode=info` returns `h:` without any content. Across the store, 44
    `edit_file`/`write_file` calls also sent the placeholder
    `h:000000000000`. T19 does not widen the `if_hash` path, and a separate
@@ -419,7 +422,11 @@ remaining friction has moved:
 
 **T18 — classifier false prompts.** In `approval/{classify,rules}.rs`:
 
-- Transparent launchers are judged by the command they launch. The set
+- Transparent launchers are judged by the command they launch. Past
+  8 wrappers, or wherever the start of the launched command is not
+  knowable (dynamic `chrt`/`taskset` options, `env -S` strings), the
+  command is unknown and every suffix of its words is judged, nested.
+  A buried `sudo` is still `Forbidden`. The set
   is closed: `timeout`, `time`, `nice`, `nohup`, `stdbuf`. Each admits
   only its own launch options: `timeout` takes `-s/--signal SIG`,
   `-k/--kill-after D`, and `--preserve-status`, then a duration
@@ -449,10 +456,12 @@ remaining friction has moved:
   `bin/cargo`, `./timeout`) is never `Allow`, and a path-qualified
   launcher is never peeled. `git -C` into `/tmp` counts as an escape.
   `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`, and their kin make a `git`
-  command `Prompt`. Every `GIT_*` assignment on `git` prompts, because
-  several run programs (`GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`,
-  `GIT_CONFIG_PARAMETERS` with `core.fsmonitor`) and an allowlist of
-  harmless ones is not worth its risk. `git branch` is a read only when every option is a
+  command `Prompt`. Any assignment before a command (`RUSTDOC=`, `CC=`,
+  `GIT_EXTERNAL_DIFF=`, …) keeps it from `Allow`, except a short
+  allowlist of output and test knobs (`RUST_BACKTRACE`, `RUST_LOG`,
+  `NO_COLOR`, `QQ_*`, …). Many variables name a program to run, so a
+  denylist cannot be complete. `export`/`declare -x` is a construct and
+  never allows, so `export GIT_EXTERNAL_DIFF=x; git diff` prompts. `git branch` is a read only when every option is a
   listing option, because `--list --no-list name` creates `name`.
 - Globs are unchanged and keep `dynamic_word` (see observation 1).
 - Every case above is a `match`/`not_match` row in `rule_examples_hold`,
@@ -593,7 +602,7 @@ table is `tools.md` § Approval Policy.
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
-| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
+| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools/specs.rs` (`edit_file` description), `runtime/prompt.rs` (read-before-edit bullet, prompt version), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
 | T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (`read_tool_result` dispatch only), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
