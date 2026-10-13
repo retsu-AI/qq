@@ -4928,6 +4928,60 @@ async fn sequential_children_receive_the_remaining_budget_after_prior_spend() {
 }
 
 #[tokio::test]
+async fn owned_compaction_receipt_preserves_bounds_unknown_and_exact_ownership() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, session, parent) = create_claimed_parent(&store, directory.path()).await;
+    let owner = parent.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            let outcome = serde_json::to_string(&RunOutcome::Completed).unwrap();
+            connection.execute(
+                "UPDATE runs SET status = 'completed', outcome_json = ?2,
+                 usage_json = ?3, estimated_cost_usd_nanos = 10 WHERE id = ?1",
+                params![owner.to_string(), outcome, serde_json::to_string(&usage(2, 3)).unwrap()],
+            )?;
+            let count = u64::from(MAX_DESCENDANTS_PER_ROOT) + 2;
+            let mut last = owner;
+            for _ in 0..count {
+                last = insert_accounting_run(connection, session, "completed", Some(usage(1, 1)), Some(4));
+                connection.execute(
+                    "UPDATE runs SET kind = 'compaction', auto_compaction_for_run_id = ?2,
+                     outcome_json = ?3 WHERE id = ?1",
+                    params![last.to_string(), owner.to_string(), outcome],
+                )?;
+            }
+            // Manual and another prompt's summaries never enter this receipt.
+            for unrelated_owner in [None, Some(RunId::generate().unwrap().to_string())] {
+                let unrelated = insert_accounting_run(connection, session, "running", None, None);
+                connection.execute(
+                    "UPDATE runs SET kind = 'compaction', auto_compaction_for_run_id = ?2 WHERE id = ?1",
+                    params![unrelated.to_string(), unrelated_owner],
+                )?;
+            }
+            let known = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(known.usage, Some(usage(2 + count, 3 + count)));
+            assert_eq!(known.cost_usd_nanos, Some(10 + count * 4));
+            connection.execute("UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1", [last.to_string()])?;
+            assert_eq!(super::super::deliveries::owned_run_spend(connection, owner)?, SpawnAgentSpend::UNKNOWN);
+            connection.execute("UPDATE runs SET status = 'running', outcome_json = NULL WHERE id = ?1", [last.to_string()])?;
+            assert!(matches!(super::super::deliveries::owned_run_spend(connection, owner), Err(SessionRuntimeError::AccountingUnavailable)));
+            connection.execute(
+                "UPDATE runs SET status = 'completed', outcome_json = ?2,
+                 usage_json = ?3, estimated_cost_usd_nanos = 4 WHERE id = ?1",
+                params![last.to_string(), outcome, serde_json::to_string(&usage(1, 1)).unwrap()],
+            )?;
+            assert_eq!(super::super::deliveries::owned_run_spend(connection, owner)?, known);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn child_compaction_spend_reduces_the_next_child_allowance() {
     let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
         inner: Arc::new(MultiSpawnProvider {
