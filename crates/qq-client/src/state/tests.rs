@@ -781,6 +781,63 @@ fn the_output_truncation_notice_names_the_cap_when_capabilities_are_known() {
     ));
 }
 
+#[test]
+fn checkpoint_evidence_gaps_are_warnings_with_typed_labels() {
+    let session_id = SessionId::from_bytes([7; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+
+    for (sequence, outcome, expected_level, expected_label) in [
+        (
+            2,
+            qq_protocol::CheckpointOutcome::InsufficientEvidence,
+            NoticeLevel::Warning,
+            "NEEDS EVIDENCE",
+        ),
+        (
+            3,
+            qq_protocol::CheckpointOutcome::Unavailable,
+            NoticeLevel::Warning,
+            "UNAVAILABLE",
+        ),
+        (
+            4,
+            qq_protocol::CheckpointOutcome::PartiallySupported,
+            NoticeLevel::Error,
+            "RED",
+        ),
+        (
+            5,
+            qq_protocol::CheckpointOutcome::Contradicted,
+            NoticeLevel::Error,
+            "RED",
+        ),
+    ] {
+        let effects = store.reduce_event(
+            &envelope(
+                sequence,
+                session_id,
+                SessionEvent::CheckpointReviewed {
+                    run_id: RunId::from_bytes([8; 16]),
+                    correlation: format!("final:{sequence}"),
+                    phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                    tool_call_id: None,
+                    outcome,
+                    confidence_basis_points: Some(9000),
+                    feedback: "fixture feedback".to_owned(),
+                    spend: None,
+                },
+            ),
+            context(&[]),
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [StateEffect::Notice { level, text, .. }]
+                if *level == expected_level && text.contains(expected_label)
+        ));
+    }
+}
+
 /// Streaming deltas are body-only mutations: the derived tree index (sidebar
 /// order) must survive them, or every frame during a run rebuilds it.
 #[test]
