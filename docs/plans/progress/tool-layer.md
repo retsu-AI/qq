@@ -25,7 +25,7 @@ newest last.
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | Planned | | Replay harness method in the 2026-10-11 entry |
-| T19 | Edit freshness by exact unique match (D10) | Planned | | ADR-0057 reserved |
+| T19 | Edit freshness by exact unique match (D10) | Planned | | ADR-0058 reserved |
 | T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
 
 ## Entries
