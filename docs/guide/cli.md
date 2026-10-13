@@ -11,7 +11,45 @@ Accepted by every command:
 | `--model PROVIDER/MODEL` | override the configured route for this invocation |
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
+| `--credential-diagnostics PATH` | opt in to bounded credential-read attribution in a new private JSONL file |
 | `-V`, `--version` | `qq 0.1.5 (abc1234 2026-09-29)` |
+
+### Credential-read attribution
+
+Diagnostics are off by default. To observe existing runtime and advisory
+credential reads, add `--credential-diagnostics` to the command being investigated:
+
+```sh
+qq --credential-diagnostics /private/tmp/qq-credential-new.jsonl serve
+```
+
+Choose a fresh output path each time. On Unix, QQ exclusively creates the final
+file with mode `0600` and validates its descriptor and path before runtime
+construction. Existing files, symlinks, directories, devices, invalid identities,
+and permission failures reject activation without replacing the target. Other
+platforms refuse activation until private output is supported. Restart the same
+command without the flag to deactivate it; it is not a persisted setting.
+
+The trace contains process-local opaque IDs, the real PID, monotonic timing,
+allowlisted route/endpoint classes, and typed outcomes. The runtime store and
+existing separate advisory store share one diagnostic session. Credential
+names, URLs, secret values, and raw errors are excluded. Routes without exact
+supported hooks remain silent. Enabling diagnostics preserves existing
+credential reads, authentication results, prompts, and cancellation behavior.
+
+Each line is at most 512 bytes; the whole output is bounded to 256 records and
+128 KiB, including a reserved summary of ordinary emitted bytes and dropped
+records. Queue pressure and output budgets can drop events. Shutdown waits at
+most 250 ms for the writer; output failures or a timeout print
+`[diagnostic] output incomplete; the command result is unchanged`, while
+preserving the original command result. Treat that trace as incomplete even
+if a summary was already written.
+
+`BackendReadReturned` records a genuine synchronous operation return. An
+aborted wait can leave that operation running, and a missing return event can
+also reflect dropped or incomplete output. Use the trace to attribute the
+observed operation; authentication, provider execution, and visible session
+acceptance each require their own actual checks.
 
 ## `qq` — interactive
 
