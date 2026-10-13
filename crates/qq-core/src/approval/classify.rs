@@ -593,10 +593,7 @@ impl Collector<'_> {
             // tail that is not a clean launcher chain is judged at every
             // suffix instead, so nothing buried is missed.
             let mut words: &[Option<String>] = &command.argv;
-            loop {
-                let Some(name) = words.first().and_then(Option::as_deref) else {
-                    break;
-                };
+            while let Some(name) = words.first().and_then(Option::as_deref) {
                 match launcher_words(basename(name), &words[1..]) {
                     Some(own) if !name.contains('/') => words = &words[own + 1..],
                     _ => break,
