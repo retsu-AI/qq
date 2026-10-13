@@ -53,7 +53,8 @@ pub async fn render(
                 };
                 writeln!(
                     notices,
-                    "[jev] {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
+                    "[jev] {} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}",
+                    checkpoint_label(outcome)
                 )?;
                 notices.flush()?;
             }
@@ -84,6 +85,16 @@ pub async fn render(
     }
 
     Err(OutputError::IncompleteRun)
+}
+
+fn checkpoint_label(outcome: qq_protocol::CheckpointOutcome) -> &'static str {
+    match outcome {
+        qq_protocol::CheckpointOutcome::Supported => "GREEN",
+        qq_protocol::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
+        qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+        qq_protocol::CheckpointOutcome::PartiallySupported
+        | qq_protocol::CheckpointOutcome::Contradicted => "RED",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +248,7 @@ mod tests {
 
         assert_eq!(output, b"answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] Supported ToolResult tool:call-1"));
+        assert!(notices.contains("[jev] GREEN ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
     }
 }

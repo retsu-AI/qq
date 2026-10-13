@@ -932,10 +932,14 @@ async fn stream_run(
                         ..
                     } if ours => {
                         if text {
-                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
-                                "GREEN"
-                            } else {
-                                "RED"
+                            let color = match outcome {
+                                qq_protocol::CheckpointOutcome::Supported => "GREEN",
+                                qq_protocol::CheckpointOutcome::InsufficientEvidence => {
+                                    "NEEDS EVIDENCE"
+                                }
+                                qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+                                qq_protocol::CheckpointOutcome::PartiallySupported
+                                | qq_protocol::CheckpointOutcome::Contradicted => "RED",
                             };
                             let confidence = confidence_basis_points
                                 .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
