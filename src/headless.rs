@@ -47,6 +47,16 @@ pub const MAX_PENDING_STEER_LINES: usize = 8;
 /// Byte budget for one concise tool-activity line in text format.
 const MAX_ACTIVITY_BYTES: usize = 160;
 
+fn checkpoint_label(outcome: qq_protocol::CheckpointOutcome) -> &'static str {
+    match outcome {
+        qq_protocol::CheckpointOutcome::Supported => "GREEN",
+        qq_protocol::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
+        qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+        qq_protocol::CheckpointOutcome::PartiallySupported
+        | qq_protocol::CheckpointOutcome::Contradicted => "RED",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
     pub prompt: String,
@@ -932,15 +942,7 @@ async fn stream_run(
                         ..
                     } if ours => {
                         if text {
-                            let color = match outcome {
-                                qq_protocol::CheckpointOutcome::Supported => "GREEN",
-                                qq_protocol::CheckpointOutcome::InsufficientEvidence => {
-                                    "NEEDS EVIDENCE"
-                                }
-                                qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
-                                qq_protocol::CheckpointOutcome::PartiallySupported
-                                | qq_protocol::CheckpointOutcome::Contradicted => "RED",
-                            };
+                            let color = checkpoint_label(*outcome);
                             let confidence = confidence_basis_points
                                 .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
                                 .unwrap_or_default();
@@ -3406,6 +3408,30 @@ mod tests {
         assert_eq!(source.len(), 40);
         assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(source.starts_with(display));
+    }
+
+    #[test]
+    fn checkpoint_labels_preserve_typed_headless_outcomes() {
+        assert_eq!(
+            checkpoint_label(qq_protocol::CheckpointOutcome::Supported),
+            "GREEN"
+        );
+        assert_eq!(
+            checkpoint_label(qq_protocol::CheckpointOutcome::InsufficientEvidence),
+            "NEEDS EVIDENCE"
+        );
+        assert_eq!(
+            checkpoint_label(qq_protocol::CheckpointOutcome::Unavailable),
+            "UNAVAILABLE"
+        );
+        assert_eq!(
+            checkpoint_label(qq_protocol::CheckpointOutcome::PartiallySupported),
+            "RED"
+        );
+        assert_eq!(
+            checkpoint_label(qq_protocol::CheckpointOutcome::Contradicted),
+            "RED"
+        );
     }
 
     #[tokio::test]
