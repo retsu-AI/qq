@@ -19,6 +19,24 @@
     ]
   },
   {
+    "label": "Startup systems",
+    "items": [
+      { "page": "startup-overview", "label": "Startup systems overview", "description": "Choose a current terminal, native, assistant, API, or operations path." },
+      { "page": "startup-getting-started", "label": "Get started with the stack", "description": "Set up QQ first, then choose the smallest useful startup workflow." },
+      { "page": "startup-feature-map", "label": "Feature map", "description": "Map journeys to components, source entrypoints, guides, and evidence limits." },
+      { "page": "startup-qq-development", "label": "Develop QQ", "description": "Use the isolated branch, real workflow, review, adoption, and rollback loop." },
+      { "page": "startup-assistant", "label": "Assistant gateway and nodes", "description": "Understand the Rust assistant boundary and its Mac and iOS node plans." },
+      { "page": "startup-native-modes", "label": "Direct and assistant modes", "description": "See how native clients use the same QQ runtime in direct and assistant modes." },
+      { "page": "startup-api-billing", "label": "API and billing", "description": "Separate QQ usage metadata from the Retsu API and its unverified billing path." },
+      { "page": "startup-data-models", "label": "Data and models", "description": "Track data, model, memory, schema, and experiment ownership across systems." },
+      { "page": "startup-infrastructure", "label": "Infrastructure", "description": "Read the current staging, production, deployment, and recovery boundaries." },
+      { "page": "startup-observability", "label": "Observability", "description": "Record useful runtime signals without exposing credentials or private prompts." },
+      { "page": "startup-mcp-acp", "label": "MCP and ACP", "description": "Use implemented MCP boundaries and identify ACP work that remains planned." },
+      { "page": "startup-recovery", "label": "Recovery", "description": "Recover sessions, stores, credentials, and uncertain operations with bounded actions." },
+      { "page": "startup-maintenance", "label": "Maintain the documentation", "description": "Update source-backed pages, navigation, evidence labels, and static output safely." }
+    ]
+  },
+  {
     "label": "Reference",
     "items": [
       { "page": "configuration", "label": "Configuration", "description": "Every setting in config.ron: files and precedence, models, providers, policy, MCP, profiles." },
