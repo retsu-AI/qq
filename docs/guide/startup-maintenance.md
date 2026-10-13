@@ -14,9 +14,7 @@ copies guide pages into the site and rejects a missing or extra entry.
 Use the status terms implemented source, candidate source, planned, and
 runtime or deployment unverified. Include the source revision or source path
 when a claim depends on a private candidate, and say repository access
-required. Never include secrets, raw chats, account identifiers, local
-absolute
-paths, or private diagnostic dumps.
+required. Never include secrets, raw chats, account identifiers, local absolute paths, or private diagnostic dumps.
 
 ## Check the site
 

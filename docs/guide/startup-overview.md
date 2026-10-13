@@ -5,19 +5,50 @@ Choose a task card, then read the source and evidence boundary on its page.
 
 ## Task cards
 
-| I need to… | Start here | What the page gives you |
-| --- | --- | --- |
-| Install and run QQ | [Get started with the stack](startup-getting-started.md) | The smallest terminal path and its current source boundary |
-| Change QQ safely | [Develop QQ](startup-qq-development.md) | Source entrypoints, checks, review, adoption, and rollback |
-| Find a feature | [Feature map](startup-feature-map.md) | Component ownership, exact source links, and status |
-| Understand the assistant | [Assistant gateway and nodes](startup-assistant.md) | Rust gateway, node, memory, and QQ authority boundaries |
-| Compare native modes | [Direct and assistant modes](startup-native-modes.md) | Current client source, embedded Tailscale, and open acceptance |
-| Operate API or billing | [API and billing](startup-api-billing.md) | Cloudflare Worker, D1, AccountLedger, Modal, and Stripe flow |
-| Operate data and models | [Data and models](startup-data-models.md) | Grip and platform2 source workflows, with hosted limits |
-| Operate staging or production | [Infrastructure](startup-infrastructure.md) | Current Cloudflare and Modal source versus the selected AWS target |
-| Diagnose a failure | [Observability](startup-observability.md) and [Recovery](startup-recovery.md) | Bounded signals and explicit recovery decisions |
-| Connect tools or protocols | [MCP and ACP](startup-mcp-acp.md) | QQ MCP client, helper server, and ACP status |
-| Edit these pages | [Maintain the documentation](startup-maintenance.md) | Source links, status labels, and site checks |
+<nav class="startup-task-grid" aria-label="Startup systems tasks">
+  <a class="startup-task-card" href="../startup-getting-started/">
+    <span class="startup-task-kicker">Terminal</span>
+    <strong>Install and run QQ</strong>
+    <span>Start with the smallest local journey, then choose TUI, headless, server, or MCP.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-qq-development/">
+    <span class="startup-task-kicker">Contribute</span>
+    <strong>Change QQ safely</strong>
+    <span>Trace the source entrypoint, exercise the real path, review, adopt, or roll back.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-assistant/">
+    <span class="startup-task-kicker">Assistant</span>
+    <strong>Understand gateway and nodes</strong>
+    <span>Separate the Rust candidate, local journal, planned surfaces, and QQ authority.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-native-modes/">
+    <span class="startup-task-kicker">Native</span>
+    <strong>Compare direct and assistant modes</strong>
+    <span>Follow the shared client contract, embedded Tailscale source, and pairing gaps.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-api-billing/">
+    <span class="startup-task-kicker">API and billing</span>
+    <strong>Trace account-backed extraction</strong>
+    <span>Map Worker, D1, AccountLedger, backend reserve/settle, sessions, and Stripe boundaries.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-data-models/">
+    <span class="startup-task-kicker">Data and models</span>
+    <strong>Follow dataset and model evidence</strong>
+    <span>Use the platform2 local workflows and keep reused references separate from hosted claims.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-infrastructure/">
+    <span class="startup-task-kicker">Infrastructure</span>
+    <strong>Separate current from selected</strong>
+    <span>Compare Cloudflare and Modal source with the planned ECS, Temporal, and Postgres target.</span>
+  </a>
+  <a class="startup-task-card" href="../startup-observability/">
+    <span class="startup-task-kicker">Recovery</span>
+    <strong>Diagnose and recover</strong>
+    <span>Record request identity, health, event state, uncertain effects, and bounded repair evidence.</span>
+  </a>
+</nav>
+
+<p class="startup-task-links">More: <a href="../startup-feature-map/">full feature map</a> · <a href="../startup-mcp-acp/">protocol boundaries</a> · <a href="../startup-maintenance/">documentation maintenance</a></p>
 
 ## Source snapshots
 
