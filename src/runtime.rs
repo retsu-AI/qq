@@ -3636,7 +3636,7 @@ pub(crate) fn advisory_reviewer(
     advisory_reviewer_from_store(store, diagnostic)
 }
 
-fn advisory_reviewer_from_store(
+pub(crate) fn advisory_reviewer_from_store(
     store: CredentialStore,
     diagnostic: Option<Arc<dyn qq_auth::CredentialDiagnosticSink>>,
 ) -> Result<Arc<dyn CheckpointReviewer>, RuntimeBuildError> {

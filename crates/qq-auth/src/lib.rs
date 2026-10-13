@@ -35,14 +35,14 @@ pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
 
 /// The small, typed boundary used by opt-in credential attribution.  The
-/// auth crate never formats or writes diagnostics and never receives secret
-/// values; the application owns the sink and its privacy policy.
+/// auth crate never formats or writes diagnostics. This boundary carries no
+/// secret values; the application owns the sink and its privacy policy.
 pub trait CredentialDiagnosticSink: Send + Sync {
     fn emit(&self, event: CredentialDiagnosticEvent);
     fn allocate_id(&self) -> Option<u64>;
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CredentialDiagnosticRoute {
     StoredKeyring,
     CodexOAuth,
@@ -52,7 +52,7 @@ pub enum CredentialDiagnosticRoute {
     OtherKnown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CredentialDiagnosticEndpoint {
     Typesafe,
     ChatGpt,
@@ -135,16 +135,19 @@ pub enum CredentialDiagnosticEvent {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CredentialDiagnosticOutcome {
     Success,
+    CacheHit,
+    OwnerPanic,
+    LockPoisoned,
     Missing,
     Unavailable,
     Failure,
     CoordinatorFailure,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CredentialDiagnosticOwnerUnwind {
     OwnerPanic,
     LockPoisoned,
@@ -213,24 +216,47 @@ fn is_resolution_capacity_wait(error: &AuthError) -> bool {
 }
 
 fn diagnostic_endpoint(endpoint: Option<&str>) -> CredentialDiagnosticEndpoint {
-    match endpoint {
-        Some(value) if value.eq_ignore_ascii_case("typesafe") || value.contains("typesafe.ai") => {
-            CredentialDiagnosticEndpoint::Typesafe
+    let Some(value) = endpoint else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    for (label, class) in [
+        ("typesafe", CredentialDiagnosticEndpoint::Typesafe),
+        ("chatgpt", CredentialDiagnosticEndpoint::ChatGpt),
+        ("xai", CredentialDiagnosticEndpoint::Xai),
+    ] {
+        if value.eq_ignore_ascii_case(label) {
+            return class;
         }
-        Some(value)
-            if value.eq_ignore_ascii_case("chatgpt")
-                || value.contains("openai.com")
-                || value.contains("chatgpt.com") =>
+    }
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    let Some(host) = url.host_str() else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    for (domain, class) in [
+        ("typesafe.ai", CredentialDiagnosticEndpoint::Typesafe),
+        ("openai.com", CredentialDiagnosticEndpoint::ChatGpt),
+        ("chatgpt.com", CredentialDiagnosticEndpoint::ChatGpt),
+        ("x.ai", CredentialDiagnosticEndpoint::Xai),
+    ] {
+        if host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
         {
-            CredentialDiagnosticEndpoint::ChatGpt
+            return class;
         }
-        Some(value) if value.eq_ignore_ascii_case("xai") || value.contains("x.ai") => {
-            CredentialDiagnosticEndpoint::Xai
-        }
-        Some(value) if value.contains("127.0.0.1") || value.contains("localhost") => {
-            CredentialDiagnosticEndpoint::CustomLoopback
-        }
-        _ => CredentialDiagnosticEndpoint::Other,
+    }
+    if host == "localhost"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        CredentialDiagnosticEndpoint::CustomLoopback
+    } else {
+        CredentialDiagnosticEndpoint::Other
     }
 }
 
@@ -242,6 +268,12 @@ fn diagnostic_outcome(
         Err(StoredResolutionFailure::Missing) => CredentialDiagnosticOutcome::Missing,
         Err(StoredResolutionFailure::Unavailable) => CredentialDiagnosticOutcome::Unavailable,
         Err(StoredResolutionFailure::Failure) => CredentialDiagnosticOutcome::Failure,
+        Err(StoredResolutionFailure::Coordinator("owner_panic")) => {
+            CredentialDiagnosticOutcome::OwnerPanic
+        }
+        Err(StoredResolutionFailure::Coordinator("lock_poisoned")) => {
+            CredentialDiagnosticOutcome::LockPoisoned
+        }
         Err(StoredResolutionFailure::Coordinator(_)) => {
             CredentialDiagnosticOutcome::CoordinatorFailure
         }
@@ -571,6 +603,7 @@ struct StoredResolutionOwnerGuard {
     diagnostic: Option<Arc<CredentialDiagnosticContext>>,
     attempt_id: u64,
     endpoint: CredentialDiagnosticEndpoint,
+    read_id: u64,
 }
 
 impl Drop for StoredResolutionOwnerGuard {
@@ -608,6 +641,16 @@ impl Drop for StoredResolutionOwnerGuard {
                 } else {
                     CredentialDiagnosticOwnerUnwind::OwnerPanic
                 },
+            });
+            context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                attempt_id: self.attempt_id,
+                flight_id: Some(self.flight.flight_id),
+                read_id: Some(self.read_id),
+                route: context.route,
+                endpoint: self.endpoint,
+                outcome: diagnostic_outcome(&Err(self.failure.clone())),
             });
         }
     }
@@ -1341,13 +1384,28 @@ impl CredentialStore {
         };
         let (coordinator, wake) = &*self.stored_resolution;
         let attempt_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
-        let read_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
         let (flight, owner) = {
-            let mut state = coordinator
-                .lock()
-                .map_err(|_| AuthError::CredentialCoordinator {
-                    operation: "lock_poisoned",
-                })?;
+            let mut state = match coordinator.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    drop(poisoned);
+                    if let Some(context) = self.diagnostic.as_ref() {
+                        context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                            store_id: context.store_id,
+                            coordinator_id: Some(context.coordinator_id),
+                            attempt_id,
+                            flight_id: None,
+                            read_id: None,
+                            route: context.route,
+                            endpoint: diagnostic_endpoint(expected_endpoint),
+                            outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                        });
+                    }
+                    return Err(AuthError::CredentialCoordinator {
+                        operation: "lock_poisoned",
+                    });
+                }
+            };
             let now = std::time::Instant::now();
             state.cache.entries.retain(|entry| entry.expires_at > now);
             if let Some(position) = state.cache.entries.iter().position(|entry| {
@@ -1376,7 +1434,7 @@ impl CredentialStore {
                             attempt_id,
                             route: context.route,
                             endpoint: diagnostic_endpoint(expected_endpoint),
-                            outcome: CredentialDiagnosticOutcome::Success,
+                            outcome: CredentialDiagnosticOutcome::CacheHit,
                         });
                         context.emit(CredentialDiagnosticEvent::ResolutionFinished {
                             store_id: context.store_id,
@@ -1386,7 +1444,7 @@ impl CredentialStore {
                             read_id: None,
                             route: context.route,
                             endpoint: diagnostic_endpoint(expected_endpoint),
-                            outcome: CredentialDiagnosticOutcome::Success,
+                            outcome: CredentialDiagnosticOutcome::CacheHit,
                         });
                     }
                 }
@@ -1433,23 +1491,40 @@ impl CredentialStore {
                     endpoint: diagnostic_endpoint(expected_endpoint),
                 });
             }
-            let mut result =
-                flight
-                    .result
-                    .lock()
-                    .map_err(|_| AuthError::CredentialCoordinator {
-                        operation: "lock_poisoned",
-                    })?;
+            let publish_poison = || {
+                if let Some(context) = self.diagnostic.as_ref() {
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: Some(flight.flight_id),
+                        read_id: None,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                    });
+                }
+                AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                }
+            };
+            let mut result = match flight.result.lock() {
+                Ok(result) => result,
+                Err(poisoned) => {
+                    drop(poisoned);
+                    return Err(publish_poison());
+                }
+            };
             #[cfg(test)]
             flight.followers.fetch_add(1, Ordering::SeqCst);
             while result.is_none() {
-                result =
-                    flight
-                        .ready
-                        .wait(result)
-                        .map_err(|_| AuthError::CredentialCoordinator {
-                            operation: "lock_poisoned",
-                        })?;
+                result = match flight.ready.wait(result) {
+                    Ok(result) => result,
+                    Err(poisoned) => {
+                        drop(poisoned);
+                        return Err(publish_poison());
+                    }
+                };
             }
             let follower_result = result.as_ref().expect("flight result exists").clone();
             drop(result);
@@ -1468,6 +1543,7 @@ impl CredentialStore {
             return follower_result.map_err(|failure| failure.into_auth_error(name));
         }
 
+        let read_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
         let mut owner_guard = StoredResolutionOwnerGuard {
             coordinator: Arc::clone(&self.stored_resolution),
             key: key.clone(),
@@ -1476,7 +1552,13 @@ impl CredentialStore {
             completed: false,
             diagnostic: self.diagnostic.clone(),
             attempt_id,
-            endpoint: diagnostic_endpoint(expected_endpoint),
+            endpoint: self
+                .diagnostic
+                .as_ref()
+                .map_or(CredentialDiagnosticEndpoint::Other, |_| {
+                    diagnostic_endpoint(expected_endpoint)
+                }),
+            read_id,
         };
         if let Some(context) = self.diagnostic.as_ref() {
             context.emit(CredentialDiagnosticEvent::OwnerAdmitted {
@@ -1533,6 +1615,20 @@ impl CredentialStore {
                 flight.ready.notify_all();
                 wake.notify_all();
                 owner_guard.completed = true;
+                drop(result);
+                drop(state);
+                if let Some(context) = self.diagnostic.as_ref() {
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: Some(flight.flight_id),
+                        read_id: Some(read_id),
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                    });
+                }
                 return Err(failure.into_auth_error(name));
             }
         };

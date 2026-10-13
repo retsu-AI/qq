@@ -2,7 +2,7 @@
 
 | slice | goal | status | branch/PR | notes |
 |---|---|---|---|---|
-| DI1 | Secret-free, default-off attribution for existing credential-read routes | In review | `fix/qq-credential-preparation-20261013` / no PR | Revised design awaiting independent exact-identity verdict |
+| DI1 | Secret-free, default-off attribution for existing credential-read routes | In review | `fix/qq-credential-preparation-20261013` / no PR | Implementation complete; recorded workspace gates and same nonauthor final-head verdict pending |
 
 ## 2026-10-13 — revised design checkpoint
 
@@ -51,3 +51,10 @@
 
 - Candidate `4ea6cc8b0bade02cc719b50939f54cf7f0ef5bd7` adds a real production-path composition regression using two `CredentialStore::with_backend` stores and one `DiagnosticSession`. Both fake keyring reads are nonzero and successful; output asserts one PID/session, distinct store/coordinator IDs, and no secret leakage.
 - The focused selector executed 1 test and passed; raw output is retained as `DI1-composition-7d12bee-rerun.log`. An initial endpoint-required fixture failure was repaired by using the existing endpoint-bound resolution API.
+
+## 2026-10-13 — primary integration completion pending qualification
+
+- Existing author released clean a8cf299 source/Cargo lane to primary integration owner; same branch and pair/models retained, no new team. Both source authors require the same independent nonauthor final verdict.
+- Corrected the prior sequential concurrent-close proof, final cache schema amendment gaps, owner/follower poison and unwind completion, enum-only actual-host endpoint classification, private descriptor/path validation, writer destruction before completion, and early CLI error finalization. No auth coordination/results, stores, reads, prompts, or session/protocol paths changed.
+- Actual isolated focused checks now include held owner/follower/cache, panic/retry and poison, missing/unavailable/failure, OAuth permit waiting and actual late return after waiter abort, default/enabled/deactivated process resources with two unchanged fake reads, real advisory attachment, privacy, exact byte/record/line/trailing-drop bounds, queue pressure, saturation, writer faults, and bounded shutdown/mutex contention.
+- Retained parent working-tree compiler failure and repaired raw receipts outside Git. Focused working-tree passes are not final-head qualification; parent recorded required workspace gates, final same-reviewer exact-head acceptance, release retention and root handoff remain outstanding. Original installed c70, backups/history, and live0/0/0 are unchanged. Native Warp Computer access remains denied.

@@ -42,12 +42,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let cli = cli::Cli::parse();
     validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
-    let diagnostic = cli
-        .credential_diagnostics
-        .as_deref()
-        .map(diagnostic::DiagnosticSession::open)
-        .transpose()?;
-    let diagnostic = diagnostic.map(Arc::new);
+    let diagnostic = activate_credential_diagnostics(cli.credential_diagnostics.as_deref())?;
     let diagnostic_sink: Option<Arc<dyn auth::CredentialDiagnosticSink>> = diagnostic
         .as_ref()
         .map(|session| Arc::clone(session) as Arc<dyn auth::CredentialDiagnosticSink>);
@@ -58,60 +53,75 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         diagnostic: diagnostic_sink,
     };
 
-    match cli.command {
-        Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-        Some(cli::Command::Run(args)) => {
-            let code = headless_run(args, &overrides).await;
-            if let Some(session) = diagnostic {
-                if diagnostic::CloseOutcome::Incomplete == session.close() {
-                    eprintln!("[diagnostic] output incomplete; the command result is unchanged");
-                }
+    let result: Result<ExitCode, Box<dyn Error>> = async {
+        match cli.command {
+            Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
+            Some(cli::Command::Run(args)) => {
+                let code = headless_run(args, &overrides).await;
+                return Ok(code);
             }
-            return Ok(code);
+            Some(cli::Command::Serve {
+                bind,
+                allow_origins,
+            }) => serve(bind, &allow_origins, overrides.diagnostic.clone()).await?,
+            Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
+            Some(cli::Command::Auth { command }) => {
+                run_blocking_command(move || auth_command(command)).await?
+            }
+            Some(cli::Command::Jev {
+                command: cli::JevCommand::Observe(args),
+            }) => advisory::run(args, overrides.diagnostic.clone()).await?,
+            Some(cli::Command::Jev {
+                command: cli::JevCommand::Setup { allow_file },
+            }) => run_blocking_command(move || jev_setup(allow_file)).await?,
+            Some(cli::Command::Mcp {
+                command: cli::McpCommand::Inspect { name },
+            }) => {
+                let request = overrides.load_request()?;
+                let settings = tokio::task::spawn_blocking(move || {
+                    mcp::inspection_settings(&name, &request).map_err(|error| error.to_string())
+                })
+                .await?
+                .map_err(io::Error::other)?;
+                let report = mcp::inspect_server(settings).await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            Some(cli::Command::Org { command }) => organization_command(command)?,
+            Some(cli::Command::Trust) => trust_command(&overrides)?,
+            Some(cli::Command::Doctor(args)) => {
+                return doctor_command(args, &overrides).await;
+            }
+            Some(cli::Command::Init(args)) => {
+                run_blocking_command(move || init_command(args)).await?
+            }
+            Some(cli::Command::Version) => print!("{}", version_report()),
+            None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
         }
-        Some(cli::Command::Serve {
-            bind,
-            allow_origins,
-        }) => serve(bind, &allow_origins, overrides.diagnostic.clone()).await?,
-        Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
-        Some(cli::Command::Auth { command }) => {
-            run_blocking_command(move || auth_command(command)).await?
-        }
-        Some(cli::Command::Jev {
-            command: cli::JevCommand::Observe(args),
-        }) => advisory::run(args, overrides.diagnostic.clone()).await?,
-        Some(cli::Command::Jev {
-            command: cli::JevCommand::Setup { allow_file },
-        }) => run_blocking_command(move || jev_setup(allow_file)).await?,
-        Some(cli::Command::Mcp {
-            command: cli::McpCommand::Inspect { name },
-        }) => {
-            let request = overrides.load_request()?;
-            let settings = tokio::task::spawn_blocking(move || {
-                mcp::inspection_settings(&name, &request).map_err(|error| error.to_string())
-            })
-            .await?
-            .map_err(io::Error::other)?;
-            let report = mcp::inspect_server(settings).await?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Some(cli::Command::Org { command }) => organization_command(command)?,
-        Some(cli::Command::Trust) => trust_command(&overrides)?,
-        Some(cli::Command::Doctor(args)) => {
-            return doctor_command(args, &overrides).await;
-        }
-        Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
-        Some(cli::Command::Version) => print!("{}", version_report()),
-        None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
-    }
 
-    if let Some(session) = diagnostic {
-        if diagnostic::CloseOutcome::Incomplete == session.close() {
-            eprintln!("[diagnostic] output incomplete; the command result is unchanged");
-        }
+        Ok(ExitCode::SUCCESS)
     }
+    .await;
+    finish_credential_diagnostics(diagnostic.as_deref(), result, |notice| {
+        eprintln!("{notice}")
+    })
+}
 
-    Ok(ExitCode::SUCCESS)
+fn activate_credential_diagnostics(
+    path: Option<&Path>,
+) -> io::Result<Option<Arc<diagnostic::DiagnosticSession>>> {
+    path.map(diagnostic::DiagnosticSession::open)
+        .transpose()
+        .map(|session| session.map(Arc::new))
+}
+fn finish_credential_diagnostics<T>(
+    session: Option<&diagnostic::DiagnosticSession>,
+    result: T,
+    mut report: impl FnMut(&'static str),
+) -> T {
+    if session.is_some_and(|session| session.close() == diagnostic::CloseOutcome::Incomplete) {
+        report("[diagnostic] output incomplete; the command result is unchanged");
+    }
+    result
 }
 
 fn validate_tui_qa_invocation(root: &Option<PathBuf>, has_command: bool) -> Result<(), io::Error> {
@@ -2517,17 +2527,198 @@ mod tests {
         let Some(path) = std::env::var_os("QQ_DIAGNOSTIC_CHILD_PATH") else {
             return;
         };
-        let cli = cli::Cli::try_parse_from([
-            "qq",
-            "--credential-diagnostics",
-            path.to_str().unwrap(),
-            "version",
-        ])
-        .unwrap();
+        let mode = std::env::var("QQ_DIAGNOSTIC_CHILD_MODE").unwrap_or_else(|_| "enabled".into());
+        let path = PathBuf::from(path);
+        let before = diagnostic::resource_counts();
+        let mut args = vec!["qq".to_owned()];
+        if mode == "enabled" {
+            args.extend([
+                "--credential-diagnostics".into(),
+                path.to_string_lossy().into_owned(),
+            ]);
+        }
+        args.push("version".into());
+        let cli = cli::Cli::try_parse_from(args).unwrap();
         let session =
-            diagnostic::DiagnosticSession::open(cli.credential_diagnostics.as_deref().unwrap())
+            activate_credential_diagnostics(cli.credential_diagnostics.as_deref()).unwrap();
+        let sink = session
+            .as_ref()
+            .map(|s| Arc::clone(s) as Arc<dyn auth::CredentialDiagnosticSink>);
+        let root = private_tempdir();
+        let first_backend = Arc::new(CountingDiagnosticKeyring::default());
+        let second_backend = Arc::new(CountingDiagnosticKeyring::default());
+        let mut first = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(root.path().join("normal")),
+            first_backend.clone(),
+        );
+        if let Some(sink) = sink.clone() {
+            first = first.with_diagnostic_sink(sink);
+        }
+        first
+            .set_with_metadata(
+                "provider/private-name-marker",
+                b"private-secret-marker",
+                false,
+                Some("provider"),
+                Some("https://private-url-marker.example"),
+            )
+            .unwrap();
+        assert_eq!(
+            first
+                .resolve_with_endpoint(
+                    &qq_provider::SecretRef::Stored("provider/private-name-marker".into()),
+                    Some("https://private-url-marker.example")
+                )
+                .unwrap()
+                .expose_secret_bytes(),
+            b"private-secret-marker"
+        );
+        let second = auth::CredentialStore::with_backend(
+            auth::CredentialPaths::new(root.path().join("advisory")),
+            second_backend.clone(),
+        );
+        second
+            .set_with_metadata(
+                "typesafe-jev",
+                b"private-reviewer-secret-marker",
+                false,
+                Some("typesafe-jev"),
+                Some("https://api.typesafe.ai"),
+            )
+            .unwrap();
+        let _reviewer = runtime::advisory_reviewer_from_store(second, sink).unwrap();
+        assert_eq!(
+            first_backend
+                .reads
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            second_backend
+                .reads
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        let result: Result<u8, &'static str> = Ok(7);
+        assert_eq!(
+            finish_credential_diagnostics(session.as_deref(), result, |_| panic!(
+                "unexpected incomplete output"
+            )),
+            Ok(7)
+        );
+        let after = diagnostic::resource_counts();
+        if mode == "enabled" {
+            assert_eq!(after.0, before.0 + 1);
+            assert_eq!(after.1, before.1 + 1);
+            assert_eq!(after.2, before.2 + 1);
+        } else {
+            assert_eq!(before, after);
+            assert!(!path.exists());
+        }
+        println!(
+            "ACTUAL DIAGNOSTIC FIXTURE mode={mode} reads=2 session_launches={} writer_launches={}",
+            after.1 - before.1,
+            after.2 - before.2
+        );
+    }
+
+    #[derive(Default)]
+    struct CountingDiagnosticKeyring {
+        inner: TestKeyring,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl auth::KeyringBackend for CountingDiagnosticKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, auth::KeyringError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner.get(name)
+        }
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), auth::KeyringError> {
+            self.inner.set(name, secret)
+        }
+        fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
+            self.inner.remove(name)
+        }
+    }
+
+    #[test]
+    fn credential_diagnostic_default_enabled_deactivated_process_resources_and_privacy() {
+        for mode in ["disabled", "enabled", "deactivated"] {
+            let root = private_tempdir();
+            let path = root.path().join("events.jsonl");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::credential_diagnostic_cli_child",
+                    "--nocapture",
+                ])
+                .env("QQ_DIAGNOSTIC_CHILD_PATH", &path)
+                .env("QQ_DIAGNOSTIC_CHILD_MODE", mode)
+                .env_remove("QQ_JEV_API_KEY")
+                .env_remove("TYPESAFE_API_KEY")
+                .env_remove("QQ_JEV_ACTIVATION")
+                .output()
                 .unwrap();
-        assert_eq!(session.close(), diagnostic::CloseOutcome::Closed);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("reads=2"));
+            if mode == "enabled" {
+                let raw = std::fs::read_to_string(&path).unwrap();
+                for marker in [
+                    "private-name-marker",
+                    "private-secret-marker",
+                    "private-reviewer-secret-marker",
+                    "private-url-marker",
+                    "events.jsonl",
+                ] {
+                    assert!(!raw.contains(marker));
+                }
+                let rows: Vec<serde_json::Value> = raw
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect();
+                let starts: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r["kind"] == "BackendReadStarted")
+                    .collect();
+                assert_eq!(starts.len(), 2);
+                assert_eq!(starts[0]["pid"], starts[1]["pid"]);
+                assert_eq!(starts[0]["session_id"], starts[1]["session_id"]);
+                assert_ne!(starts[0]["store_id"], starts[1]["store_id"]);
+                assert_ne!(starts[0]["coordinator_id"], starts[1]["coordinator_id"]);
+                assert_eq!(starts[1]["route"], "TypesafeReviewer");
+                assert_eq!(starts[1]["endpoint"], "Typesafe");
+            } else {
+                assert!(!path.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn credential_diagnostic_finalization_preserves_success_and_failure_results() {
+        struct BrokenWriter;
+        impl std::io::Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("private-error-marker"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("private-error-marker"))
+            }
+        }
+        for result in [Ok(7u8), Err("original-command-error")] {
+            let session = diagnostic::DiagnosticSession::open_with_writer(BrokenWriter);
+            let mut notices = Vec::new();
+            let observed =
+                finish_credential_diagnostics(Some(&session), result, |n| notices.push(n));
+            assert_eq!(observed, result);
+            assert_eq!(
+                notices,
+                vec!["[diagnostic] output incomplete; the command result is unchanged"]
+            );
+            assert!(!notices[0].contains("private-error-marker"));
+        }
     }
 
     #[test]
