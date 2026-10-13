@@ -1199,9 +1199,28 @@ impl CredentialStore {
         &self,
         profile: &str,
     ) -> Result<(CodexCredential, CredentialEpoch), AuthError> {
+        self.resolve_codex_with_epoch_mode(profile, false)
+    }
+
+    fn resolve_codex_with_epoch_fresh(
+        &self,
+        profile: &str,
+    ) -> Result<(CodexCredential, CredentialEpoch), AuthError> {
+        self.resolve_codex_with_epoch_mode(profile, true)
+    }
+
+    fn resolve_codex_with_epoch_mode(
+        &self,
+        profile: &str,
+        force_reload: bool,
+    ) -> Result<(CodexCredential, CredentialEpoch), AuthError> {
         let name = credential_name(profile)?;
         let now = unix_time()?;
-        let (credential, epoch) = self.load_codex_with_epoch(&name)?;
+        let (credential, epoch) = if force_reload {
+            self.load_codex_with_epoch_uncached(&name)?
+        } else {
+            self.load_codex_with_epoch(&name)?
+        };
         if !credential.needs_refresh(now) {
             return Ok((credential.runtime_credential(), epoch));
         }
@@ -1209,7 +1228,7 @@ impl CredentialStore {
         let _refresh = self
             .lock_codex_operation(&name)?
             .expect("OpenAI Codex credential names always require the Codex lock");
-        let (mut credential, epoch) = self.load_codex_with_epoch(&name)?;
+        let (mut credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
             return Ok((credential.runtime_credential(), epoch));
@@ -1248,7 +1267,7 @@ impl CredentialStore {
         // Bind the cache candidate to the exact durable value and epoch read
         // under one state lock. A separate process may rotate or remove it
         // immediately after our refresh write.
-        let (credential, epoch) = self.load_codex_with_epoch(&name)?;
+        let (credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if credential.needs_refresh(now) {
             return Err(CodexAuthError::TokenResponseInvalid {
@@ -1264,6 +1283,19 @@ impl CredentialStore {
         name: &str,
     ) -> Result<(StoredCodexCredential, CredentialEpoch), AuthError> {
         let (secret, epoch) = self.resolve_with_epoch(
+            &SecretRef::Stored(name.to_owned()),
+            Some(CREDENTIAL_ENDPOINT),
+        )?;
+        let credential =
+            StoredCodexCredential::parse(secret.expose_secret_bytes()).map_err(AuthError::from)?;
+        Ok((credential, epoch))
+    }
+
+    fn load_codex_with_epoch_uncached(
+        &self,
+        name: &str,
+    ) -> Result<(StoredCodexCredential, CredentialEpoch), AuthError> {
+        let (secret, epoch) = self.resolve_with_epoch_uncached(
             &SecretRef::Stored(name.to_owned()),
             Some(CREDENTIAL_ENDPOINT),
         )?;
@@ -1318,12 +1350,17 @@ impl RequestCredentialProvider for CodexRequestCredentials {
                 .load_request_credential(move |store| {
                     let now = unix_time()?;
                     let epoch = store.epoch()?;
-                    if cached_state.is_some_and(|(cached_epoch, refresh_after)| {
+                    let cache_valid = cached_state.is_some_and(|(cached_epoch, refresh_after)| {
                         cached_epoch == epoch && now < refresh_after
-                    }) {
+                    });
+                    if cache_valid {
                         return Ok(None);
                     }
-                    store.resolve_codex_with_epoch(&profile).map(Some)
+                    if cached_state.is_some() {
+                        store.resolve_codex_with_epoch_fresh(&profile).map(Some)
+                    } else {
+                        store.resolve_codex_with_epoch(&profile).map(Some)
+                    }
                 })
                 .await?
                 .map_err(|error| map_request_credential_error(error, &self.remedies))?;

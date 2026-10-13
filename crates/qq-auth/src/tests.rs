@@ -796,6 +796,29 @@ fn keyring_success_records_and_resolves_the_backend() {
 }
 
 #[test]
+fn stored_resolution_reuses_success_and_invalidates_on_epoch_change() {
+    let (store, keyring, _directory) = test_store();
+    store.set("openai", "first", false).unwrap();
+
+    let first = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    let second = store
+        .resolve_with_epoch(&SecretRef::Stored("openai".to_owned()), None)
+        .unwrap();
+    assert_eq!(first.expose_secret_str().unwrap(), "first");
+    assert_eq!(second.0.expose_secret_str().unwrap(), "first");
+    assert_eq!(keyring.read_count("openai"), 1);
+
+    store.set("openai", "rotated", false).unwrap();
+    let rotated = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    assert_eq!(rotated.expose_secret_str().unwrap(), "rotated");
+    assert_eq!(keyring.read_count("openai"), 2);
+}
+
+#[test]
 fn credential_epoch_advances_on_every_durable_mutation_and_survives_reload() {
     let (store, _keyring, directory) = test_store();
     assert_eq!(store.epoch().unwrap(), CredentialEpoch::NONE);
@@ -2792,6 +2815,37 @@ fn insecure_existing_state_permissions_are_rejected() {
     assert!(matches!(
         store.list().unwrap_err(),
         AuthError::InsecurePermissions { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn file_resolution_rechecks_private_permissions_after_a_warm_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (store, keyring, _directory) = test_store();
+    keyring.set_mode(FakeMode::Unavailable);
+    assert_eq!(
+        store.set("openai", "file secret", true).unwrap(),
+        CredentialBackend::File
+    );
+    assert_eq!(
+        store
+            .resolve(&SecretRef::Stored("openai".to_owned()))
+            .unwrap()
+            .expose_secret_str()
+            .unwrap(),
+        "file secret"
+    );
+
+    fs::set_permissions(
+        store.paths().fallback_file(),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.resolve(&SecretRef::Stored("openai".to_owned())),
+        Err(AuthError::InsecurePermissions { .. })
     ));
 }
 
