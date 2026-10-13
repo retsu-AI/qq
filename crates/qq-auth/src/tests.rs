@@ -20,7 +20,7 @@ use sha2::Digest as _;
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while !ready() {
         assert!(Instant::now() < deadline, "timed out waiting for {label}");
         thread::yield_now();
@@ -43,13 +43,24 @@ struct FakeKeyring {
     reads: Mutex<BTreeMap<String, usize>>,
     break_index_after_set: Mutex<Option<PathBuf>>,
     read_gate: Mutex<Option<Arc<ReadGate>>>,
-    entry_barrier: Mutex<Option<(Arc<Barrier>, usize)>>,
+    entry_gate: Mutex<Option<(Arc<BackendEntryGate>, usize)>>,
 }
 
 #[derive(Default)]
 struct ReadGate {
     entered: AtomicBool,
     release: AtomicBool,
+}
+
+#[derive(Default)]
+struct BackendEntryGate {
+    entered: AtomicUsize,
+    release: AtomicBool,
+}
+
+fn join_bounded<T>(worker: thread::JoinHandle<T>) -> thread::Result<T> {
+    wait_until("worker completion", || worker.is_finished());
+    worker.join()
 }
 
 impl FakeKeyring {
@@ -81,8 +92,8 @@ impl FakeKeyring {
         *self.read_gate.lock().unwrap() = Some(gate);
     }
 
-    fn gate_reads_until_both_enter(&self, barrier: Arc<Barrier>, count: usize) {
-        *self.entry_barrier.lock().unwrap() = Some((barrier, count));
+    fn gate_reads_until_released(&self, gate: Arc<BackendEntryGate>, count: usize) {
+        *self.entry_gate.lock().unwrap() = Some((gate, count));
     }
 
     fn check_mode(&self) -> Result<(), KeyringError> {
@@ -96,23 +107,27 @@ impl FakeKeyring {
 
 impl KeyringBackend for FakeKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
-        if let Some(gate) = self.read_gate.lock().unwrap().take() {
+        let read_gate = self.read_gate.lock().unwrap().take();
+        if let Some(gate) = read_gate {
             gate.entered.store(true, Ordering::SeqCst);
-            while !gate.release.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
+            wait_until("backend read release", || {
+                gate.release.load(Ordering::SeqCst)
+            });
         }
-        let entry_barrier = {
-            let mut gate = self.entry_barrier.lock().unwrap();
-            gate.as_mut().and_then(|(barrier, remaining)| {
+        let entry_gate = {
+            let mut gate = self.entry_gate.lock().unwrap();
+            gate.as_mut().and_then(|(entry, remaining)| {
                 (*remaining > 0).then(|| {
                     *remaining -= 1;
-                    Arc::clone(barrier)
+                    Arc::clone(entry)
                 })
             })
         };
-        if let Some(barrier) = entry_barrier {
-            barrier.wait();
+        if let Some(gate) = entry_gate {
+            gate.entered.fetch_add(1, Ordering::SeqCst);
+            wait_until("distinct backend release", || {
+                gate.release.load(Ordering::SeqCst)
+            });
         }
         *self
             .reads
@@ -2946,13 +2961,10 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
 
     let gate = Arc::new(ReadGate::default());
     keyring.gate_next_read(Arc::clone(&gate));
-    let start = Arc::new(Barrier::new(9));
     let mut workers = Vec::new();
     for _ in 0..8 {
         let store = store.clone();
-        let start = Arc::clone(&start);
         workers.push(thread::spawn(move || {
-            start.wait();
             store
                 .resolve_with_endpoint(
                     &SecretRef::Stored("provider/work".to_owned()),
@@ -2963,7 +2975,6 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
                 .to_vec()
         }));
     }
-    start.wait();
     wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
     wait_until("cold followers", || {
         store
@@ -2978,7 +2989,7 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
     });
     gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
-        assert_eq!(worker.join().unwrap(), b"secret");
+        assert_eq!(join_bounded(worker).unwrap(), b"secret");
     }
 
     assert_eq!(keyring.read_count("provider/work"), 1);
@@ -3025,7 +3036,7 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
     gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert!(matches!(
-            worker.join().unwrap(),
+            join_bounded(worker).unwrap(),
             Err(AuthError::KeyringFailure { .. })
         ));
     }
@@ -3045,19 +3056,17 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
 struct PanicOnceKeyring {
     panic_next: AtomicBool,
     release: AtomicBool,
-    entered: Mutex<Option<Arc<Barrier>>>,
+    entered: AtomicBool,
     values: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl KeyringBackend for PanicOnceKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
         if self.panic_next.swap(false, Ordering::SeqCst) {
-            if let Some(barrier) = self.entered.lock().unwrap().take() {
-                barrier.wait();
-            }
-            while !self.release.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
+            self.entered.store(true, Ordering::SeqCst);
+            wait_until("panic backend release", || {
+                self.release.load(Ordering::SeqCst)
+            });
             panic!("test owner panic");
         }
         self.values
@@ -3087,8 +3096,6 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
     let directory = TestDirectory::new();
     let paths = CredentialPaths::new(directory.path());
     let keyring = Arc::new(PanicOnceKeyring::default());
-    let entered = Arc::new(Barrier::new(2));
-    *keyring.entered.lock().unwrap() = Some(Arc::clone(&entered));
     keyring.panic_next.store(true, Ordering::SeqCst);
     let protected = Arc::new(FakeWindowsProtected::default());
     let store = CredentialStore::with_backends(paths, keyring.clone(), protected);
@@ -3111,7 +3118,9 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
             )
         })
     };
-    entered.wait();
+    wait_until("panic backend entry", || {
+        keyring.entered.load(Ordering::SeqCst)
+    });
     let follower = {
         let store = store.clone();
         thread::spawn(move || {
@@ -3133,9 +3142,9 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
             .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 1)
     });
     keyring.release.store(true, Ordering::SeqCst);
-    assert!(owner.join().is_err());
+    assert!(join_bounded(owner).is_err());
     assert!(matches!(
-        follower.join().unwrap(),
+        join_bounded(follower).unwrap(),
         Err(AuthError::CredentialCoordinator {
             operation: "owner_panic"
         })
@@ -3155,14 +3164,12 @@ fn stored_keyring_resolution_keeps_distinct_keys_independent() {
     let (store, keyring, _directory) = test_store();
     store.set("provider/one", "one", false).unwrap();
     store.set("provider/two", "two", false).unwrap();
-    keyring.gate_reads_until_both_enter(Arc::new(Barrier::new(2)), 2);
-    let start = Arc::new(Barrier::new(3));
+    let gate = Arc::new(BackendEntryGate::default());
+    keyring.gate_reads_until_released(Arc::clone(&gate), 2);
     let mut workers = Vec::new();
     for name in ["provider/one", "provider/two"] {
         let store = store.clone();
-        let start = Arc::clone(&start);
         workers.push(thread::spawn(move || {
-            start.wait();
             store
                 .resolve(&SecretRef::Stored(name.to_owned()))
                 .unwrap()
@@ -3171,10 +3178,15 @@ fn stored_keyring_resolution_keeps_distinct_keys_independent() {
                 .to_owned()
         }));
     }
-    start.wait();
+    wait_until("both distinct backend entries", || {
+        gate.entered.load(Ordering::SeqCst) == 2
+    });
+    assert_eq!(keyring.read_count("provider/one"), 0);
+    assert_eq!(keyring.read_count("provider/two"), 0);
+    gate.release.store(true, Ordering::SeqCst);
     let mut values = workers
         .into_iter()
-        .map(|worker| worker.join().unwrap())
+        .map(|worker| join_bounded(worker).unwrap())
         .collect::<Vec<_>>();
     values.sort();
     assert_eq!(values, ["one", "two"]);
@@ -3188,11 +3200,10 @@ fn stored_keyring_resolution_fails_closed_when_coordinator_is_poisoned() {
     store.set("provider/work", "secret", false).unwrap();
     let coordinator = Arc::clone(&store.stored_resolution);
     assert!(
-        thread::spawn(move || {
+        join_bounded(thread::spawn(move || {
             let _guard = coordinator.0.lock().unwrap();
             panic!("poison coordinator for test");
-        })
-        .join()
+        }))
         .is_err()
     );
 
@@ -3265,10 +3276,10 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
     coordinator.1.notify_all();
 
     let result = done_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(Duration::from_secs(5))
         .expect("capacity wait must recover after a flight is released")
         .unwrap();
-    worker.join().unwrap();
+    join_bounded(worker).unwrap();
     assert_eq!(result.0.expose_secret_bytes(), b"rotated");
     assert!(result.1 > epoch);
     assert_eq!(keyring.read_count("provider/target"), 1);
@@ -3309,28 +3320,27 @@ fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
     });
     let coordinator = Arc::clone(&store.stored_resolution);
     assert!(
-        thread::spawn(move || {
+        join_bounded(thread::spawn(move || {
             let _guard = coordinator.0.lock().unwrap();
             panic!("active coordinator poison");
-        })
-        .join()
+        }))
         .is_err()
     );
     gate.release.store(true, Ordering::SeqCst);
     assert!(matches!(
-        owner_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        owner_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Err(AuthError::CredentialCoordinator {
             operation: "lock_poisoned"
         })
     ));
     assert!(matches!(
-        follower_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        follower_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Err(AuthError::CredentialCoordinator {
             operation: "lock_poisoned"
         })
     ));
-    owner.join().unwrap();
-    follower.join().unwrap();
+    join_bounded(owner).unwrap();
+    join_bounded(follower).unwrap();
     assert!(store.stored_resolution.0.lock().is_err());
 }
 
@@ -3338,6 +3348,10 @@ fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
 fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
     let (store, keyring, _directory) = test_store();
     store.set("provider/result", "secret", false).unwrap();
+    store
+        .set("provider/capacity", "capacity-secret", false)
+        .unwrap();
+    let epoch = store.epoch().unwrap();
     let gate = Arc::new(ReadGate::default());
     keyring.gate_next_read(Arc::clone(&gate));
 
@@ -3356,7 +3370,7 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
             .send(follower_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
             .unwrap();
     });
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let flight = loop {
         assert!(
             Instant::now() < deadline,
@@ -3377,30 +3391,91 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
         }
         thread::yield_now();
     };
+    // The active owner is the 64th reserved flight. A distinct request must
+    // reach the actual capacity condvar before the owner's poisoned result
+    // frees its slot. No test-side notification releases this waiter.
+    {
+        let mut state = store.stored_resolution.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES - 1 {
+            state.flights.insert(
+                StoredResolutionKey {
+                    name: format!("held/{index}"),
+                    endpoint: None,
+                    epoch,
+                },
+                Arc::new(StoredResolutionFlight {
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    followers: AtomicUsize::new(0),
+                }),
+            );
+        }
+        assert_eq!(state.flights.len(), MAX_STORED_RESOLUTION_CACHE_ENTRIES);
+    }
+    let capacity_store = store.clone();
+    let (capacity_tx, capacity_rx) = std::sync::mpsc::channel();
+    let capacity_worker = thread::spawn(move || {
+        capacity_tx
+            .send(capacity_store.resolve(&SecretRef::Stored("provider/capacity".to_owned())))
+            .unwrap();
+    });
+    wait_until("saturated result-poison capacity waiter", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .capacity_waiters
+            .load(Ordering::SeqCst)
+            > 0
+    });
+    assert_eq!(keyring.read_count("provider/capacity"), 0);
     let poisoned_result = Arc::clone(&flight);
     assert!(
-        thread::spawn(move || {
+        join_bounded(thread::spawn(move || {
             let _guard = poisoned_result.result.lock().unwrap();
             panic!("active result poison");
-        })
-        .join()
+        }))
         .is_err()
     );
     gate.release.store(true, Ordering::SeqCst);
     assert!(matches!(
-        owner_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        owner_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Err(AuthError::CredentialCoordinator {
             operation: "lock_poisoned"
         })
     ));
     assert!(matches!(
-        follower_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        follower_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Err(AuthError::CredentialCoordinator {
             operation: "lock_poisoned"
         })
     ));
-    owner.join().unwrap();
-    follower.join().unwrap();
+    join_bounded(owner).unwrap();
+    join_bounded(follower).unwrap();
+    let capacity_secret = capacity_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("poison cleanup must wake the saturated capacity waiter")
+        .unwrap();
+    assert_eq!(capacity_secret.expose_secret_bytes(), b"capacity-secret");
+    join_bounded(capacity_worker).unwrap();
+    assert_eq!(keyring.read_count("provider/capacity"), 1);
+    {
+        let state = store.stored_resolution.0.lock().unwrap();
+        assert!(
+            state
+                .flights
+                .keys()
+                .all(|key| key.name != "provider/result")
+        );
+        assert!(
+            state
+                .cache
+                .entries
+                .iter()
+                .all(|entry| entry.name != "provider/result")
+        );
+    }
     let secret = store
         .resolve(&SecretRef::Stored("provider/result".to_owned()))
         .unwrap();

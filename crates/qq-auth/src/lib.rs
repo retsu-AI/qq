@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +21,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use thiserror::Error;
 
 use qq_protocol::CredentialEpoch;
@@ -369,12 +371,14 @@ struct StoredResolutionKey {
 struct StoredResolutionCoordinator {
     cache: StoredResolutionCache,
     flights: HashMap<StoredResolutionKey, Arc<StoredResolutionFlight>>,
+    #[cfg(test)]
     capacity_waiters: AtomicUsize,
 }
 
 struct StoredResolutionFlight {
     result: Mutex<Option<Result<Secret, StoredResolutionFailure>>>,
     ready: std::sync::Condvar,
+    #[cfg(test)]
     followers: AtomicUsize,
 }
 
@@ -1054,7 +1058,6 @@ impl CredentialStore {
                 break (Arc::clone(flight), false);
             }
             if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
-                state.capacity_waiters.fetch_add(1, Ordering::SeqCst);
                 return Err(AuthError::CredentialCoordinator {
                     operation: "capacity_wait",
                 });
@@ -1062,6 +1065,7 @@ impl CredentialStore {
             let flight = Arc::new(StoredResolutionFlight {
                 result: Mutex::new(None),
                 ready: std::sync::Condvar::new(),
+                #[cfg(test)]
                 followers: AtomicUsize::new(0),
             });
             state.flights.insert(key.clone(), Arc::clone(&flight));
@@ -1069,7 +1073,6 @@ impl CredentialStore {
         };
 
         if !owner {
-            flight.followers.fetch_add(1, Ordering::SeqCst);
             let mut result =
                 flight
                     .result
@@ -1077,6 +1080,8 @@ impl CredentialStore {
                     .map_err(|_| AuthError::CredentialCoordinator {
                         operation: "lock_poisoned",
                     })?;
+            #[cfg(test)]
+            flight.followers.fetch_add(1, Ordering::SeqCst);
             while result.is_none() {
                 result =
                     flight
@@ -1153,13 +1158,16 @@ impl CredentialStore {
                 operation: "lock_poisoned",
             })?;
         while state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            #[cfg(test)]
+            state.capacity_waiters.fetch_add(1, Ordering::SeqCst);
             state = wake
                 .wait(state)
                 .map_err(|_| AuthError::CredentialCoordinator {
                     operation: "lock_poisoned",
                 })?;
+            #[cfg(test)]
+            state.capacity_waiters.fetch_sub(1, Ordering::SeqCst);
         }
-        state.capacity_waiters.fetch_sub(1, Ordering::SeqCst);
         Ok(())
     }
 
