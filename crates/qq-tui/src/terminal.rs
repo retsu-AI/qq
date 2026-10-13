@@ -56,6 +56,8 @@ where
     let terminal = TerminalGuard::enter()?;
     let events = EventStream::new();
     let output = tokio::io::stdout();
+    // Inside a herdr pane, report this client's state to it (ENG-1034).
+    let herdr = crate::herdr::HerdrPane::from_env().map(crate::herdr::Reporter::spawn);
     let app = run_loop(
         client,
         app,
@@ -66,9 +68,16 @@ where
         Hooks {
             editor: external_editor,
             trust,
+            herdr: herdr.as_ref().map(crate::herdr::Reporter::sink),
         },
     )
-    .await?;
+    .await;
+    // Release whether the loop ended cleanly or not: the pane no longer
+    // runs an agent either way.
+    if let Some(herdr) = herdr {
+        herdr.release().await;
+    }
+    let app = app?;
     drop(terminal);
     Ok(app.focused())
 }
@@ -139,10 +148,12 @@ pub(crate) type EditorFuture =
 
 /// The blocking work the loop delegates outside the app: an external editor
 /// for the draft and, when this client owns the server, the trust prompt's
-/// answer. Both suspend the loop while they run.
+/// answer. Both suspend the loop while they run. `herdr` receives the
+/// client's state after every update when running inside a herdr pane.
 pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
     pub(crate) trust: Option<TrustResolver>,
+    pub(crate) herdr: Option<crate::herdr::ReportSink>,
 }
 
 /// The event loop with every terminal dependency injected so it runs without a
@@ -171,6 +182,7 @@ where
     let Hooks {
         mut editor,
         mut trust,
+        herdr,
     } = hooks;
     tokio::pin!(shutdown);
     let mut renderer = FrameRenderer::default();
@@ -184,6 +196,8 @@ where
     // The most recent client-reported failure, surfaced if the client then
     // stops without recovering.
     let mut last_client_failure: Option<String> = None;
+    // Set when input or a client update arrived since the last herdr report.
+    let mut state_may_change = false;
 
     loop {
         if redraw == Some(Redraw::Immediate) {
@@ -207,6 +221,7 @@ where
                         if let Event::Resize(columns, rows) = event {
                             terminal_size = (columns, rows);
                         }
+                        state_may_change = true;
                         app.handle_terminal_event(event)
                     }
                     Some(Err(error)) => return Err(TuiError::Terminal(error)),
@@ -220,6 +235,7 @@ where
                 if let ClientUpdate::SnapshotFailed(failure) = &update {
                     last_client_failure = Some(failure.message().to_owned());
                 }
+                state_may_change = true;
                 app.apply_client_update(update)
             }
             highlighted = renderer.highlighter.next() => {
@@ -327,6 +343,16 @@ where
         }
         if quit {
             break;
+        }
+        // After input or a client update, so a focus change or a new session
+        // also moves herdr's resume target; frame and animation ticks change
+        // nothing herdr shows. Deduplicated in the sink.
+        if state_may_change && let Some(herdr) = &herdr {
+            state_may_change = false;
+            herdr.update(crate::herdr::Report {
+                activity: app.sessions.activity(),
+                session: app.focused(),
+            });
         }
     }
     Ok(app)

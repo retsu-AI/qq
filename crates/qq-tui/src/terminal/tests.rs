@@ -153,6 +153,7 @@ impl Harness {
                     })
                 },
                 trust,
+                herdr: None,
             },
         ))
     }
@@ -551,6 +552,7 @@ async fn the_first_frame_paints_before_the_client_port_connects() {
         Hooks {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             trust: None,
+            herdr: None,
         },
     ));
     tokio::task::yield_now().await;
@@ -619,6 +621,7 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
         Hooks {
             editor: |_| -> EditorFuture { Box::pin(async { Err(EditorError::NotConfigured) }) },
             trust: None,
+            herdr: None,
         },
     ));
     let result = task.await.expect("loop task");
