@@ -3027,8 +3027,10 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
     assert_eq!(keyring.read_count("provider/diagnostic"), 1);
     let events = collector.0.lock().unwrap();
     assert!(matches!(events.as_slice(), [
+        CredentialDiagnosticEvent::OwnerAdmitted { .. },
         CredentialDiagnosticEvent::BackendReadStarted { .. },
         CredentialDiagnosticEvent::BackendReadReturned { .. },
+        CredentialDiagnosticEvent::ResolutionFinished { .. },
     ]));
     assert!(events.iter().all(|event| match event {
         CredentialDiagnosticEvent::BackendReadStarted {
@@ -3046,6 +3048,21 @@ fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
             ..
         } => *store_id != 0 && *coordinator_id != 0 && *flight_id == *read_id,
         CredentialDiagnosticEvent::CacheHit { .. } => false,
+        CredentialDiagnosticEvent::OwnerAdmitted {
+            store_id,
+            coordinator_id,
+            ..
+        }
+        | CredentialDiagnosticEvent::FlightJoined {
+            store_id,
+            coordinator_id,
+            ..
+        }
+        | CredentialDiagnosticEvent::ResolutionFinished {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && *coordinator_id != 0,
     }));
 }
 

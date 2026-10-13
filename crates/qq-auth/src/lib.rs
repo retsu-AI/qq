@@ -51,12 +51,29 @@ pub enum CredentialDiagnosticEndpoint {
     Typesafe,
     ChatGpt,
     Xai,
+    CustomLoopback,
     Other,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "kind")]
 pub enum CredentialDiagnosticEvent {
+    OwnerAdmitted {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
+    FlightJoined {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
     CacheHit {
         store_id: u64,
         coordinator_id: u64,
@@ -80,6 +97,24 @@ pub enum CredentialDiagnosticEvent {
         route: CredentialDiagnosticRoute,
         endpoint: CredentialDiagnosticEndpoint,
     },
+    ResolutionFinished {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+        outcome: CredentialDiagnosticOutcome,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub enum CredentialDiagnosticOutcome {
+    Success,
+    Missing,
+    Unavailable,
+    Failure,
+    CoordinatorFailure,
 }
 
 struct CredentialDiagnosticContext {
@@ -135,14 +170,42 @@ fn is_resolution_capacity_wait(error: &AuthError) -> bool {
 
 fn diagnostic_endpoint(endpoint: Option<&str>) -> CredentialDiagnosticEndpoint {
     match endpoint {
-        Some(value) if value.eq_ignore_ascii_case("typesafe") => {
+        Some(value)
+            if value.eq_ignore_ascii_case("typesafe")
+                || value.contains("typesafe.ai") =>
+        {
             CredentialDiagnosticEndpoint::Typesafe
         }
-        Some(value) if value.eq_ignore_ascii_case("chatgpt") => {
+        Some(value)
+            if value.eq_ignore_ascii_case("chatgpt")
+                || value.contains("openai.com")
+                || value.contains("chatgpt.com") =>
+        {
             CredentialDiagnosticEndpoint::ChatGpt
         }
-        Some(value) if value.eq_ignore_ascii_case("xai") => CredentialDiagnosticEndpoint::Xai,
+        Some(value)
+            if value.eq_ignore_ascii_case("xai") || value.contains("x.ai") =>
+        {
+            CredentialDiagnosticEndpoint::Xai
+        }
+        Some(value) if value.contains("127.0.0.1") || value.contains("localhost") => {
+            CredentialDiagnosticEndpoint::CustomLoopback
+        }
         _ => CredentialDiagnosticEndpoint::Other,
+    }
+}
+
+fn diagnostic_outcome(
+    outcome: &Result<Secret, StoredResolutionFailure>,
+) -> CredentialDiagnosticOutcome {
+    match outcome {
+        Ok(_) => CredentialDiagnosticOutcome::Success,
+        Err(StoredResolutionFailure::Missing) => CredentialDiagnosticOutcome::Missing,
+        Err(StoredResolutionFailure::Unavailable) => CredentialDiagnosticOutcome::Unavailable,
+        Err(StoredResolutionFailure::Failure) => CredentialDiagnosticOutcome::Failure,
+        Err(StoredResolutionFailure::Coordinator(_)) => {
+            CredentialDiagnosticOutcome::CoordinatorFailure
+        }
     }
 }
 
@@ -1185,6 +1248,16 @@ impl CredentialStore {
         };
 
         if !owner {
+            if let Some(context) = self.diagnostic.as_ref() {
+                context.sink.emit(CredentialDiagnosticEvent::FlightJoined {
+                    store_id: context.store_id,
+                    coordinator_id: context.coordinator_id,
+                    attempt_id: attempt_id.unwrap_or(0),
+                    flight_id: flight.flight_id,
+                    route: CredentialDiagnosticRoute::StoredKeyring,
+                    endpoint: diagnostic_endpoint(expected_endpoint),
+                });
+            }
             let mut result =
                 flight
                     .result
@@ -1217,6 +1290,16 @@ impl CredentialStore {
             failure: StoredResolutionFailure::Coordinator("owner_panic"),
             completed: false,
         };
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.sink.emit(CredentialDiagnosticEvent::OwnerAdmitted {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                attempt_id: attempt_id.unwrap_or(0),
+                flight_id: flight.flight_id,
+                route: CredentialDiagnosticRoute::StoredKeyring,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+            });
+        }
         if let Some(context) = self.diagnostic.as_ref() {
             context.sink.emit(CredentialDiagnosticEvent::BackendReadStarted {
                 store_id: context.store_id,
@@ -1278,7 +1361,19 @@ impl CredentialStore {
         *result = Some(outcome.clone());
         flight.ready.notify_all();
         wake.notify_all();
+        drop(state);
         owner_guard.completed = true;
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.sink.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                attempt_id: attempt_id.unwrap_or(0),
+                flight_id: flight.flight_id,
+                route: CredentialDiagnosticRoute::StoredKeyring,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+                outcome: diagnostic_outcome(&outcome),
+            });
+        }
         outcome.map_err(|failure| failure.into_auth_error(name))
     }
 

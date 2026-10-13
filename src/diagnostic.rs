@@ -6,12 +6,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_ORDINARY_RECORDS: u64 = 255;
 const MAX_ORDINARY_BYTES: u64 = 130_560;
 const MAX_LINE_BYTES: usize = 512;
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) enum Route {
@@ -35,7 +36,32 @@ pub(crate) enum Endpoint {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "kind")]
 pub(crate) enum Event {
+    OwnerAdmitted {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: Route,
+        endpoint: Endpoint,
+    },
+    FlightJoined {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: Route,
+        endpoint: Endpoint,
+    },
     CacheHit {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
         store_id: u64,
         coordinator_id: u64,
         attempt_id: u64,
@@ -43,6 +69,9 @@ pub(crate) enum Event {
         endpoint: Endpoint,
     },
     BackendReadStarted {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
         store_id: u64,
         coordinator_id: u64,
         flight_id: u64,
@@ -51,6 +80,9 @@ pub(crate) enum Event {
         endpoint: Endpoint,
     },
     BackendReadReturned {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
         store_id: u64,
         coordinator_id: u64,
         flight_id: u64,
@@ -58,11 +90,60 @@ pub(crate) enum Event {
         route: Route,
         endpoint: Endpoint,
     },
+    ResolutionFinished {
+        session_id: u64,
+        pid: u32,
+        monotonic_ns: u64,
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: Route,
+        endpoint: Endpoint,
+        outcome: auth::CredentialDiagnosticOutcome,
+    },
 }
 
 impl auth::CredentialDiagnosticSink for DiagnosticSession {
     fn emit(&self, event: auth::CredentialDiagnosticEvent) {
+        let (session_id, pid, monotonic_ns) = self.metadata();
         let event = match event {
+            auth::CredentialDiagnosticEvent::OwnerAdmitted {
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                endpoint,
+            } => Event::OwnerAdmitted {
+                session_id,
+                pid,
+                monotonic_ns,
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: Route::StoredKeyring,
+                endpoint: endpoint.into(),
+            },
+            auth::CredentialDiagnosticEvent::FlightJoined {
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                endpoint,
+            } => Event::FlightJoined {
+                session_id,
+                pid,
+                monotonic_ns,
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: Route::StoredKeyring,
+                endpoint: endpoint.into(),
+            },
             auth::CredentialDiagnosticEvent::CacheHit {
                 store_id,
                 coordinator_id,
@@ -70,6 +151,9 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 route: auth::CredentialDiagnosticRoute::StoredKeyring,
                 endpoint,
             } => Event::CacheHit {
+                session_id,
+                pid,
+                monotonic_ns,
                 store_id,
                 coordinator_id,
                 attempt_id,
@@ -84,6 +168,9 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 route: auth::CredentialDiagnosticRoute::StoredKeyring,
                 endpoint,
             } => Event::BackendReadStarted {
+                session_id,
+                pid,
+                monotonic_ns,
                 store_id,
                 coordinator_id,
                 flight_id,
@@ -99,12 +186,35 @@ impl auth::CredentialDiagnosticSink for DiagnosticSession {
                 route: auth::CredentialDiagnosticRoute::StoredKeyring,
                 endpoint,
             } => Event::BackendReadReturned {
+                session_id,
+                pid,
+                monotonic_ns,
                 store_id,
                 coordinator_id,
                 flight_id,
                 read_id,
                 route: Route::StoredKeyring,
                 endpoint: endpoint.into(),
+            },
+            auth::CredentialDiagnosticEvent::ResolutionFinished {
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: auth::CredentialDiagnosticRoute::StoredKeyring,
+                endpoint,
+                outcome,
+            } => Event::ResolutionFinished {
+                session_id,
+                pid,
+                monotonic_ns,
+                store_id,
+                coordinator_id,
+                attempt_id,
+                flight_id,
+                route: Route::StoredKeyring,
+                endpoint: endpoint.into(),
+                outcome,
             },
         };
         self.emit(event);
@@ -117,6 +227,7 @@ impl From<auth::CredentialDiagnosticEndpoint> for Endpoint {
             auth::CredentialDiagnosticEndpoint::Typesafe => Self::Typesafe,
             auth::CredentialDiagnosticEndpoint::ChatGpt => Self::ChatGPT,
             auth::CredentialDiagnosticEndpoint::Xai => Self::Xai,
+            auth::CredentialDiagnosticEndpoint::CustomLoopback => Self::CustomLoopback,
             auth::CredentialDiagnosticEndpoint::Other => Self::Other,
         }
     }
@@ -128,25 +239,26 @@ pub(crate) struct DiagnosticSession {
     session_id: u64,
     pid: u32,
     tx: Mutex<Option<mpsc::SyncSender<WriterMessage>>>,
-    emitted: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
-    bytes: Arc<AtomicU64>,
+    reserved_records: AtomicU64,
+    reserved_bytes: AtomicU64,
     failed: Arc<AtomicBool>,
     closed: AtomicBool,
     join: Mutex<Option<JoinHandle<()>>>,
     done: Mutex<mpsc::Receiver<()>>,
+    started: Instant,
 }
 
 impl DiagnosticSession {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
-        let file = options.open(path)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let file = options.open(path)?;
         let (tx, rx) = mpsc::sync_channel(255);
         let (done_tx, done_rx) = mpsc::channel();
         let emitted = Arc::new(AtomicU64::new(0));
@@ -171,16 +283,17 @@ impl DiagnosticSession {
                 )
             })?;
         Ok(Self {
-            session_id: 1,
+            session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             pid: std::process::id(),
             tx: Mutex::new(Some(tx)),
-            emitted,
             dropped,
-            bytes,
+            reserved_records: AtomicU64::new(0),
+            reserved_bytes: AtomicU64::new(0),
             failed,
             closed: AtomicBool::new(false),
             join: Mutex::new(Some(join)),
             done: Mutex::new(done_rx),
+            started: Instant::now(),
         })
     }
 
@@ -193,10 +306,8 @@ impl DiagnosticSession {
             }
         };
         line.push(b'\n');
-        if line.len() > MAX_LINE_BYTES
-            || self.emitted.load(Ordering::Relaxed) >= MAX_ORDINARY_RECORDS
-            || self.bytes.load(Ordering::Relaxed) + line.len() as u64 > MAX_ORDINARY_BYTES
-        {
+        let line_bytes = line.len() as u64;
+        if line.len() > MAX_LINE_BYTES || !self.reserve(line_bytes) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -208,6 +319,48 @@ impl DiagnosticSession {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    fn reserve(&self, line_bytes: u64) -> bool {
+        let mut records = self.reserved_records.load(Ordering::Acquire);
+        loop {
+            if records >= MAX_ORDINARY_RECORDS {
+                return false;
+            }
+            match self.reserved_records.compare_exchange_weak(
+                records,
+                records + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => records = actual,
+            }
+        }
+        let mut bytes = self.reserved_bytes.load(Ordering::Acquire);
+        loop {
+            if bytes.saturating_add(line_bytes) > MAX_ORDINARY_BYTES {
+                self.reserved_records.fetch_sub(1, Ordering::AcqRel);
+                return false;
+            }
+            match self.reserved_bytes.compare_exchange_weak(
+                bytes,
+                bytes + line_bytes,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => bytes = actual,
+            }
+        }
+    }
+
+    fn metadata(&self) -> (u64, u32, u64) {
+        (
+            self.session_id,
+            self.pid,
+            self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        )
     }
 
     pub(crate) fn close(&self) {
@@ -288,6 +441,9 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         let session = DiagnosticSession::open(&path).unwrap();
         session.emit(Event::CacheHit {
+            session_id: 1,
+            pid: std::process::id(),
+            monotonic_ns: 0,
             store_id: 1,
             coordinator_id: 1,
             attempt_id: 1,
@@ -305,5 +461,48 @@ mod tests {
     fn default_path_is_silent() {
         let dir = tempdir().unwrap();
         assert!(!dir.path().join("events.jsonl").exists());
+    }
+
+    #[test]
+    fn concurrent_emit_reserves_the_inclusive_ordinary_budget() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let session = Arc::new(DiagnosticSession::open(&path).unwrap());
+        let mut workers = Vec::new();
+        for _ in 0..300 {
+            let session = Arc::clone(&session);
+            workers.push(thread::spawn(move || {
+                session.emit(Event::CacheHit {
+                    session_id: 1,
+                    pid: 1,
+                    monotonic_ns: 0,
+                    store_id: 1,
+                    coordinator_id: 1,
+                    attempt_id: 1,
+                    route: Route::StoredKeyring,
+                    endpoint: Endpoint::Other,
+                });
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        session.close();
+        let lines = fs::read_to_string(&path).unwrap();
+        assert_eq!(lines.lines().filter(|line| line.contains("CacheHit")).count(), 255);
+        assert!(lines.lines().any(|line| line.contains("Summary")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_rejects_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"preserve").unwrap();
+        let path = dir.path().join("events.jsonl");
+        symlink(&target, &path).unwrap();
+        assert!(DiagnosticSession::open(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"preserve");
     }
 }
