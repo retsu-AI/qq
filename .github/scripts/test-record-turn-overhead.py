@@ -72,6 +72,20 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual((directory / "protected").read_text(), "retained")
         self.assertFalse((self.root / "order").exists())
 
+    def test_failed_launch_preserves_attempt_and_error(self):
+        self.candidate.write_text("#!/nonexistent/qq-benchmark-interpreter\n")
+        result = self.run_recorder()
+        self.assertNotEqual(result.returncode, 0)
+        raw = json.loads((self.root / "result" / "raw.json").read_text())
+        self.assertFalse(raw["complete"])
+        self.assertEqual(len(raw["runs"]), 2)
+        failed = raw["runs"][-1]
+        self.assertEqual(failed["arm"], "candidate")
+        self.assertIsNone(failed["exit_code"])
+        self.assertIn("No such file", failed["error"])
+        self.assertTrue((self.root / "result" / failed["log"]).exists())
+        self.assertFalse((self.root / "result" / "summary.json").exists())
+
     def test_nonimmutable_sha_is_rejected_before_running(self):
         result = self.run_recorder("--baseline-sha", "main")
         self.assertNotEqual(result.returncode, 0)
