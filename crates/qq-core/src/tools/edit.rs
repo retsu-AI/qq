@@ -175,7 +175,7 @@ struct Planned {
     freshness: Freshness,
 }
 
-/// What proves the model saw the bytes a file's edits replace (ADR-0057).
+/// What proves the model saw the bytes a file's edits replace (ADR-0058).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Freshness {
     /// A recorded read of this exact content, or a matching `if_hash`.
@@ -298,7 +298,7 @@ pub(super) fn edit_file(
             }
             file.freshness = Freshness::Proven;
         }
-        // ADR-0057: an `old` that occurs exactly once, byte for byte, shows
+        // ADR-0058: an `old` that occurs exactly once, byte for byte, shows
         // the model has the region it replaces. An anchor, a fuzzy match,
         // or a repeated `old` shows nothing, so those still need a read.
         // It must be unique in the plan-time bytes (what the model can have

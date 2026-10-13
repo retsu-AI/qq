@@ -192,6 +192,35 @@ pub(crate) fn judge(
     let Some(program) = command.program() else {
         return (Decision::Prompt, Some(RuleId::DynamicWord));
     };
+    // The allow tables name system programs reached through `PATH`. A
+    // path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is
+    // whatever sits at that path, so its tier never comes from the table.
+    let path_qualified = command
+        .argv
+        .first()
+        .and_then(Option::as_deref)
+        .is_some_and(|word| word.contains('/'));
+    // `GIT_DIR`, `GIT_WORK_TREE`, and their kin choose which repository git
+    // acts on, so a read or fetch shape no longer says where it lands.
+    let selects_repository = program == "git"
+        && command.assignments.iter().any(|assignment| {
+            matches!(
+                assignment.split('=').next().unwrap_or(""),
+                "GIT_DIR"
+                    | "GIT_WORK_TREE"
+                    | "GIT_COMMON_DIR"
+                    | "GIT_INDEX_FILE"
+                    | "GIT_OBJECT_DIRECTORY"
+                    | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                    | "GIT_NAMESPACE"
+                    | "GIT_CEILING_DIRECTORIES"
+                    | "GIT_CONFIG"
+                    | "GIT_CONFIG_GLOBAL"
+                    | "GIT_CONFIG_SYSTEM"
+                    | "GIT_CONFIG_COUNT"
+            ) || assignment.starts_with("GIT_CONFIG_KEY_")
+                || assignment.starts_with("GIT_CONFIG_VALUE_")
+        });
     let mut args: Vec<&str> = command
         .args()
         .iter()
@@ -220,7 +249,9 @@ pub(crate) fn judge(
             }
         }
         if hops > 0 {
-            git_dir_escapes = path_escapes(&dir, workspace);
+            // Containment without `path_escapes`' writable-temporary
+            // exception: `/tmp/other` is another repository, not scratch.
+            git_dir_escapes = Path::new(&dir).starts_with("/tmp") || path_escapes(&dir, workspace);
             args.drain(..hops);
         }
     }
@@ -232,6 +263,9 @@ pub(crate) fn judge(
         return (Decision::Forbidden, Some(rule));
     }
     if git_dir_escapes {
+        return (Decision::Prompt, Some(RuleId::PathOutsideWorkspace));
+    }
+    if selects_repository {
         return (Decision::Prompt, Some(RuleId::PathOutsideWorkspace));
     }
     // Redirects into the workspace ask; outside it (except /tmp) ask too, but
@@ -263,7 +297,7 @@ pub(crate) fn judge(
     if dynamic {
         return (Decision::Prompt, Some(RuleId::DynamicWord));
     }
-    if allow(program, &literal_args, workspace) {
+    if !path_qualified && allow(program, &literal_args, workspace) {
         return (Decision::Allow, None);
     }
     (Decision::Prompt, Some(RuleId::Unlisted))
@@ -426,24 +460,6 @@ fn prompt(
     match program {
         "rm" | "rmdir" | "unlink" | "shred" | "truncate" => Some(RuleId::RemoveFile),
         "git" => match args.first().copied() {
-            // Plain fetch updates only `FETCH_HEAD` and remote-tracking refs
-            // (lead decision 2026-10-11). It is admitted by allowlist: a few
-            // output and scope options, and remote or branch names. That
-            // excludes force, prune, tags, refspecs, depth, transfer programs,
-            // URLs, and paths.
-            Some("fetch")
-                if args[1..].iter().all(|a| {
-                    matches!(
-                        *a,
-                        "-q" | "--quiet" | "-v" | "--verbose" | "--all" | "--no-tags"
-                    ) || (!a.is_empty()
-                        && !a.starts_with(['-', '+', '.', '/', '~'])
-                        && !a.contains([':', '\\'])
-                        && !a.contains(".."))
-                }) =>
-            {
-                None
-            }
             Some("push" | "fetch" | "pull" | "clone" | "remote" | "submodule" | "lfs") => {
                 if args.first() == Some(&"remote")
                     && matches!(args.get(1).copied(), None | Some("-v" | "show" | "get-url"))
@@ -475,34 +491,9 @@ fn prompt(
                     Some(RuleId::GitMutation)
                 }
             }
-            Some("branch")
-                if args.iter().any(|a| {
-                    matches!(
-                        *a,
-                        "-d" | "-D"
-                            | "-m"
-                            | "-M"
-                            | "--delete"
-                            | "--move"
-                            | "-c"
-                            | "-C"
-                            | "--copy"
-                            | "-u"
-                            | "--set-upstream-to"
-                    )
-                }) =>
-            {
-                Some(RuleId::GitMutation)
-            }
-            Some("branch")
-                if args.len() > 1
-                    && !args[1..].iter().all(|a| a.starts_with('-'))
-                    && !args.contains(&"--list") =>
-            {
-                // `git branch name` creates; `git branch --list pattern`
-                // filters the listing.
-                Some(RuleId::GitMutation)
-            }
+            // Anything but a listing creates, moves, deletes, retracks, or
+            // edits a branch.
+            Some("branch") if !branch_lists(&args[1..]) => Some(RuleId::GitMutation),
             _ => None,
         },
         "chmod" | "chown" | "chgrp" => Some(RuleId::ChangeMode),
@@ -583,6 +574,43 @@ fn prompt(
             ))
         .then_some(RuleId::NestedConstruct)
     })
+}
+
+/// `git branch` arguments that only list: every option is a listing option,
+/// and pattern words appear only in list mode. An allowlist, because git's
+/// last-option-wins parsing (`--list --no-list name` creates `name`) and its
+/// abbreviated long options make any denylist incomplete.
+fn branch_lists(args: &[&str]) -> bool {
+    let mut list_mode = false;
+    let mut patterns = false;
+    for arg in args {
+        match *arg {
+            // `-l` meant `--create-reflog` before git 2.23; only the long
+            // form is a listing on every git a workspace may run.
+            "--list" => list_mode = true,
+            "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
+            | "-i" | "--ignore-case" | "--color" | "--no-color" | "--column" | "--no-column"
+            | "--no-abbrev" | "--show-current" | "--merged" | "--no-merged" | "--contains"
+            | "--no-contains" | "--points-at" => {}
+            arg if [
+                "--sort=",
+                "--format=",
+                "--abbrev=",
+                "--color=",
+                "--column=",
+                "--merged=",
+                "--no-merged=",
+                "--contains=",
+                "--no-contains=",
+                "--points-at=",
+            ]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix)) => {}
+            arg if arg.starts_with('-') => return false,
+            _ => patterns = true,
+        }
+    }
+    list_mode || !patterns
 }
 
 /// The read-only and build shapes `auto` mode runs without asking. Requires
@@ -667,15 +695,9 @@ fn allow(program: &str, args: &[&str], workspace: Option<&Path>) -> bool {
                         | "show-ref"
                         | "show-branch"
                 )
-            ) || (first == Some("branch")
-                && (args[1..].iter().all(|a| a.starts_with('-')) || args.contains(&"--list"))
-                && !args
-                    .iter()
-                    .any(|a| matches!(*a, "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "-u")))
+            ) || (first == Some("branch") && branch_lists(&args[1..]))
                 || (first == Some("stash") && matches!(args.get(1).copied(), Some("list" | "show")))
                 || (first == Some("worktree") && args.get(1) == Some(&"list"))
-                // Only the plain form reaches here; `prompt` judged the rest.
-                || first == Some("fetch")
                 || (first == Some("remote")
                     && matches!(args.get(1).copied(), None | Some("-v" | "show" | "get-url")))
                 || (first == Some("config")
@@ -1319,6 +1341,8 @@ mod tests {
             "git -C sub status",
             "git -C crates/qq-core log --oneline -3",
             "git -C a -C b diff --stat",
+            // Absolute and inside the workspace. Production gates classify
+            // with no workspace root, so there this prompts (fails closed).
             "git -C /work/repo/sub status",
             // T18: listing reads.
             "git worktree list",
@@ -1326,14 +1350,8 @@ mod tests {
             "git branch --list",
             "git branch --list 'feat/*'",
             "git branch -a --list 'fix/*'",
-            // T18: plain fetch (lead decision 2026-10-11).
-            "git fetch",
-            "git fetch origin",
-            "git fetch -q origin",
-            "git fetch origin main",
-            "git fetch --quiet --no-tags origin main feat/x",
-            "git fetch --all -v",
-            "git -C sub fetch -q origin",
+            "git branch --list --sort=-committerdate 'fix/*'",
+            "git branch -vv --no-color",
         ];
         for command in allow {
             let got = classify_command(command, Some(Path::new(WS)));
@@ -1477,6 +1495,45 @@ mod tests {
             "git branch -l name",
             "git branch --list -d x",
             "git branch --list -m a b",
+            // T18 review: plain fetch stays held. With no refspec on the
+            // command line git uses `remote.<name>.fetch`, which the
+            // classifier cannot see and which may name local branches.
+            "git fetch",
+            "git fetch origin",
+            "git fetch -q origin",
+            "git fetch origin main",
+            "git fetch --all -v",
+            "git -C sub fetch -q origin",
+            // T18 review: a path-qualified program is whatever sits there.
+            "./timeout 5 cargo test",
+            "/tmp/nohup cargo test",
+            "bin/time cargo build",
+            "./cargo build",
+            "./ls",
+            "target/debug/git status",
+            "nice ./ls",
+            // T18 review: -C into /tmp is another repository.
+            "git -C /tmp/other status",
+            "git -C /tmp/other log --oneline",
+            "git -C sub -C /tmp/x status",
+            // T18 review: repository-selection environment.
+            "GIT_DIR=/tmp/other/.git git status",
+            "GIT_WORK_TREE=/tmp/other git status",
+            "GIT_DIR=.git GIT_WORK_TREE=. git log",
+            "GIT_INDEX_FILE=x git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x git log",
+            "timeout 5 env GIT_DIR=/tmp/o/.git git status",
+            // T18 review: branch mode is the last option, so only a pure
+            // listing is a read.
+            "git branch --list --no-list created",
+            "git branch --list -f created HEAD",
+            "git branch --list --no-l x",
+            "git branch --list --set-upstream-to=main",
+            "git branch --list -t x",
+            "git branch --list --edit-description",
+            "git branch --list --create-reflog x",
+            "git branch -l name",
+            "git branch name",
             // T18 adversarial: every fetch outside the allowlist.
             "git fetch --prune",
             "git fetch -p origin",
@@ -1633,7 +1690,7 @@ mod tests {
             (
                 "git fetch origin feat/a feat/b main 2>&1 | tail -3; git worktree list; git log --oneline origin/main..origin/feat/a",
                 Prompt,
-                Allow,
+                Prompt,
             ),
             (
                 "git branch --list 'feat/*' -vv; git rev-parse origin/feat/a",
@@ -1673,12 +1730,22 @@ mod tests {
             (
                 "cd sub && git fetch -q origin && git log --oneline origin/main -3",
                 Prompt,
-                Allow,
+                Prompt,
             ),
             (
                 "git -C sub log --oneline -3; git -C sub status --short",
                 Prompt,
                 Allow,
+            ),
+            (
+                "./timeout 400 cargo test -q -p a 2>&1 | tail",
+                Prompt,
+                Prompt,
+            ),
+            (
+                "GIT_DIR=/tmp/o/.git git log --oneline -3; git -C /tmp/o status --short",
+                Prompt,
+                Prompt,
             ),
             // The same shapes with the part T18 must not admit.
             (
@@ -1844,6 +1911,23 @@ mod tests {
             vec![RuleId::PathOutsideWorkspace]
         );
         assert_eq!(reasons("git fetch --prune"), vec![RuleId::GitRemote]);
+        assert_eq!(reasons("git fetch origin"), vec![RuleId::GitRemote]);
+        assert_eq!(
+            reasons("./timeout 5 ls"),
+            vec![RuleId::Unlisted, RuleId::NestedConstruct]
+        );
+        assert_eq!(
+            reasons("git -C /tmp/other status"),
+            vec![RuleId::PathOutsideWorkspace]
+        );
+        assert_eq!(
+            reasons("GIT_DIR=/tmp/o/.git git status"),
+            vec![RuleId::PathOutsideWorkspace]
+        );
+        assert_eq!(
+            reasons("git branch --list --no-list x"),
+            vec![RuleId::GitMutation]
+        );
         assert_eq!(reasons("echo hi > 1"), vec![RuleId::RedirectIntoWorkspace]);
         assert_eq!(reasons("grep -n x docs/*.md"), vec![RuleId::DynamicWord]);
     }

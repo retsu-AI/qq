@@ -9636,7 +9636,7 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 19 (T19, ADR-0057) rewords only the read-before-edit
+        // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
         // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
         // bullet, and prompt 16 rewords only the first and last delegation
         // bullets; undo them, then the brief bullet.
@@ -9658,7 +9658,7 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // Every built-in declaration is unchanged except `edit_file`'s
-        // description, which T19 (ADR-0057) rewords.
+        // description, which T19 (ADR-0058) rewords.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash

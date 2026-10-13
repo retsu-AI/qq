@@ -25,7 +25,7 @@ newest last.
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
-| T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0057 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
+| T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
 | T20 | Nudge over the command list; clamps; placeholder handle (D10) | Planned | | After T18 |
 
 ## Entries
@@ -493,3 +493,17 @@ Deviations: every `if_hash` in a batch is checked, not only the first per file. 
 Docs: ADR-0057 (Proposed), `docs/adr/README.md`, root.md reservation, `tools.md` § Edit Semantics and § Optimistic Concurrency.
 Open: independent review requested. Rebased onto T18 (#283) and retargeted.
 Evidence: target/qq-perf/t19-2026-10-11/ (untracked).
+
+### 2026-10-12 — T18 review repairs (#283)
+
+Six Codex findings on `9e3da002`, all reproduced against the branch before any fix:
+
+- `./timeout 5 cargo test` and `/tmp/nohup …` were peeled as launchers. Peeling is now limited to bare names. More broadly, a path-qualified program (`./ls`, `bin/cargo`, `target/debug/git`) is never `Allow`. That gap was already on `main` (`./cargo build` was allowed), because `program()` reduces to the basename.
+- `git -C /tmp/other …` inherited `path_escapes`' `/tmp` scratch exception. `-C` into `/tmp` now counts as an escape.
+- `GIT_DIR=/tmp/o/.git git status|fetch` was allowed. Git repository-selection and config variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, …) now make a `git` command `Prompt` with `path_outside_workspace`.
+- `git branch --list --no-list x` and `--list -f x HEAD` created branches, as verified in a scratch repository. `branch_lists` is now an allowlist of listing options, and `-l` is excluded (before git 2.23 it meant `--create-reflog`).
+- Plain `git fetch` falls back to `remote.<name>.fetch`, which may name local branches. Lead decision 2026-10-12: fetch stays `GitRemote` in every form. The allowlist and the matching `D10_HELD` rows are reverted to `Prompt`.
+- Production gates pass `workspace: None`, so `git -C /work/repo/sub` prompts in sessions. That fails closed and is documented. Threading the root through 48 `evaluate` sites is left for a follow-up.
+- Tests: about 35 new `rule_examples_hold` rows, 2 new `D10_HELD` rows, 6 reason asserts. `qq-core` 916 passed. One full-workspace run failed `schedules_ready_sessions_fairly` (a 2 s timeout under load, unrelated); it passed 3/3 alone and in a full `qq-core` run.
+- `classify_command` (one run on a loaded host, ns): simple 3261, pipeline 11222, forbidden_wrapped 8622, 1 KiB 161366 (budget 200 µs).
+- Advisory replay over the same 226 `auto` commands: allow 83 → 111, held 143 → 115 (28 recovered, 30 before these repairs; the 2 lost were plain `git fetch`).

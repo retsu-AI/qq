@@ -80,7 +80,8 @@ may append a **request** row; only root changes a request's status.
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 | 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
-| 0057 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 | Proposed: `docs/adr/0057-edit-freshness-by-exact-match.md` |
+| 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
+| 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Proposed 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -152,7 +153,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0058. Reserve here before opening a PR that adds an ADR.
+Next free number: 0059. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

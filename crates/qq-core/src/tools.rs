@@ -1659,7 +1659,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
-        // ADR-0057: a unique exact `old` is proof enough; an anchor is not.
+        // ADR-0058: a unique exact `old` is proof enough; an anchor is not.
         let edit = run_tool(
             &workspace,
             &state,

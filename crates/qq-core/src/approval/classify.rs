@@ -533,8 +533,16 @@ impl Collector<'_> {
             return;
         }
         let program = command.program().map(str::to_owned);
+        // Only the bare name reaches the system launcher through `PATH`;
+        // `./timeout` or `/tmp/nohup` is whatever program sits there.
+        let bare = command
+            .argv
+            .first()
+            .and_then(Option::as_deref)
+            .is_some_and(|word| !word.contains('/'));
         if let Some(own) = program
             .as_deref()
+            .filter(|_| bare)
             .and_then(|program| launcher_words(program, command.args()))
         {
             // The launcher changes how long, how nicely, or how buffered the

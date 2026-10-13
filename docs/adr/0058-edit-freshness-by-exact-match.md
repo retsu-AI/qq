@@ -1,4 +1,4 @@
-# ADR-0057 — Edit freshness: a unique exact match proves the region was seen
+# ADR-0058 — Edit freshness: a unique exact match proves the region was seen
 
 **Status:** Proposed
 **Date:** 2026-10-11
