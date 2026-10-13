@@ -1,6 +1,6 @@
 use qq_auth as auth;
 use serde::Serialize;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -318,7 +318,7 @@ impl DiagnosticSession {
         let join = thread::Builder::new()
             .name("qq-diagnostic-writer".to_owned())
             .spawn(move || {
-                write_records(
+                let _ = write_records(
                     file,
                     rx,
                     done_tx,
@@ -330,7 +330,7 @@ impl DiagnosticSession {
                     session_id,
                     pid,
                     started,
-                )
+                );
             })?;
         Ok(Self {
             session_id,
@@ -474,8 +474,8 @@ impl Drop for DiagnosticSession {
     }
 }
 
-fn write_records(
-    mut file: File,
+fn write_records<W: Write + Send + 'static>(
+    mut file: W,
     rx: mpsc::Receiver<WriterMessage>,
     done: mpsc::Sender<()>,
     emitted: Arc<AtomicU64>,
@@ -486,7 +486,7 @@ fn write_records(
     session_id: u64,
     pid: u32,
     started: Instant,
-) {
+) -> W {
     for WriterMessage(line) in rx {
         if file.write_all(&line).is_err() {
             failed.store(true, Ordering::Relaxed);
@@ -519,13 +519,79 @@ fn write_records(
         failed.store(true, Ordering::Release);
     }
     let _ = done.send(());
+    file
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::mpsc;
     use tempfile::tempdir;
+
+    struct FailingWriter {
+        writes: usize,
+        fail_after: Option<usize>,
+        fail_flush: bool,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_after.is_some_and(|limit| self.writes >= limit) {
+                return Err(io::Error::other("fixture write failure"));
+            }
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::other("fixture flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn run_writer(writer: FailingWriter, records: usize) -> (FailingWriter, bool) {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..records {
+            tx.send(WriterMessage(b"{\"kind\":\"CacheHit\"}\n".to_vec()))
+                .unwrap();
+        }
+        drop(tx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let emitted = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let bytes = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let budget = Arc::new(AtomicBool::new(false));
+        let emitted_ref = Arc::clone(&emitted);
+        let dropped_ref = Arc::clone(&dropped);
+        let bytes_ref = Arc::clone(&bytes);
+        let failed_ref = Arc::clone(&failed);
+        let budget_ref = Arc::clone(&budget);
+        let handle = thread::spawn(move || {
+            write_records(
+                writer,
+                rx,
+                done_tx,
+                emitted_ref,
+                dropped_ref,
+                bytes_ref,
+                failed_ref,
+                budget_ref,
+                1,
+                1,
+                Instant::now(),
+            )
+        });
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let writer = handle.join().unwrap();
+        (writer, failed.load(Ordering::Acquire))
+    }
 
     #[test]
     fn diagnostic_activation_is_exclusive_and_typed() {
@@ -569,6 +635,42 @@ mod tests {
     }
 
     #[test]
+    fn writer_failures_mark_incomplete_without_claiming_success() {
+        let (_, first_write_failed) = run_writer(
+            FailingWriter {
+                writes: 0,
+                fail_after: Some(0),
+                fail_flush: false,
+                bytes: Vec::new(),
+            },
+            1,
+        );
+        assert!(first_write_failed);
+
+        let (_, summary_write_failed) = run_writer(
+            FailingWriter {
+                writes: 0,
+                fail_after: Some(1),
+                fail_flush: false,
+                bytes: Vec::new(),
+            },
+            1,
+        );
+        assert!(summary_write_failed);
+
+        let (_, flush_failed) = run_writer(
+            FailingWriter {
+                writes: 0,
+                fail_after: None,
+                fail_flush: true,
+                bytes: Vec::new(),
+            },
+            1,
+        );
+        assert!(flush_failed);
+    }
+
+    #[test]
     fn concurrent_emit_reserves_the_inclusive_ordinary_budget() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
@@ -601,6 +703,9 @@ mod tests {
                 .count(),
             255
         );
+        assert!(lines.lines().all(|line| line.len() < MAX_LINE_BYTES));
+        assert!(lines.lines().count() <= 256);
+        assert!(lines.as_bytes().len() <= 131_072);
         assert!(lines.lines().any(|line| line.contains("Summary")));
     }
 
