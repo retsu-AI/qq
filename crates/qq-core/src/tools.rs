@@ -299,7 +299,7 @@ mod tests {
             ("read_file", r#"{"path":"../input.txt","ranges":"[\"1\"]"}"#),
             (
                 "read_file",
-                r#"{"path":"input.txt","include_ignored":true}"#,
+                r#"{"path":"input.txt","include_ignored":"yes"}"#,
             ),
             (
                 "exec",
@@ -533,6 +533,115 @@ mod tests {
                 result.model_text
             );
         }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_drop_observed_irrelevant_read_ignore_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let expected = run_tool(&workspace, &state, "read_file", r#"{"path":"input.txt"}"#);
+        for value in [true, false] {
+            let result = run_tool(
+                &workspace,
+                &state,
+                "read_file",
+                &json!({"path":"input.txt", "include_ignored": value}).to_string(),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(
+                result
+                    .model_text
+                    .replace(" note=include_ignored_ignored", ""),
+                expected.model_text
+            );
+            assert_eq!(result.file_states, expected.file_states);
+        }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_note_execution_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"missing.txt","ranges":"[\"1\"]"}"#,
+        );
+        assert!(result.is_error);
+        assert!(result.model_text.contains("path_not_found"));
+        assert!(
+            result.model_text.contains("note=ranges_array_coerced"),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_line_clipping_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "a".repeat(3_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let typed = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":["1"]}"#,
+        );
+        let repaired = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":"[\"1\"]"}"#,
+        );
+        assert!(typed.spill.is_none());
+        assert!(typed.model_text.contains("…+"));
+        assert_eq!(
+            repaired
+                .model_text
+                .replace(" note=ranges_array_coerced", ""),
+            typed.model_text
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_the_prunable_search_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join(vec!["a".repeat(102); 3].join("/"));
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("input.txt"), "needle\n".repeat(50)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let typed = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({"query":"needle","limit":25,"max_per_file":50,"include":["**/*.txt"]})
+                .to_string(),
+        );
+        let header = typed.model_text.lines().next().unwrap();
+        assert!(
+            header.len() <= output::MAX_STUB_HEADER_BYTES,
+            "{}",
+            header.len()
+        );
+        assert!(
+            header.len() + " note=include_array_coerced,cwd_ignored".len()
+                > output::MAX_STUB_HEADER_BYTES,
+            "{}",
+            header.len()
+        );
+        let repaired = run_tool(&workspace, &state, "search", &json!({"query":"needle","limit":25,"max_per_file":50,"include":"[\"**/*.txt\"]","cwd":"."}).to_string());
+        assert_eq!(repaired.model_text.lines().next().unwrap(), header);
+        assert!(
+            repaired
+                .model_text
+                .lines()
+                .any(|line| line == "note=include_array_coerced,cwd_ignored")
+        );
     }
 
     #[test]
