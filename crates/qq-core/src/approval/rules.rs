@@ -2116,7 +2116,7 @@ mod tests {
         for command in [
             format!("env -S '{words}'"),
             format!("taskset {words}"),
-            format!("{} {words}", vec!["nice"; 9].join(" ")),
+            format!("{} {words}", ["nice"; 9].join(" ")),
         ] {
             assert!(command.len() < super::super::classify::MAX_CLASSIFIED_BYTES);
             let started = std::time::Instant::now();
