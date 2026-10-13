@@ -1536,6 +1536,8 @@ mod tests {
             "nohup",
             // T18 review round 3: program-substitution environment.
             "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor'='/tmp/evil'\" git status --short",
+            "GIT_EXTERNAL_DIFF='touch PWN' git diff",
+            "GIT_SEQUENCE_EDITOR=x git status",
             "GIT_PAGER=x git log",
             "GIT_EXEC_PATH=/tmp git status",
             "GIT_SSH=/tmp/x git status",
