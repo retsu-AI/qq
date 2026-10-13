@@ -63,7 +63,9 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Run(args)) => {
             let code = headless_run(args, &overrides).await;
             if let Some(session) = diagnostic {
-                session.close();
+                if diagnostic::CloseOutcome::Incomplete == session.close() {
+                    eprintln!("[diagnostic] output incomplete; the command result is unchanged");
+                }
             }
             return Ok(code);
         }
@@ -104,7 +106,9 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     }
 
     if let Some(session) = diagnostic {
-        session.close();
+        if diagnostic::CloseOutcome::Incomplete == session.close() {
+            eprintln!("[diagnostic] output incomplete; the command result is unchanged");
+        }
     }
 
     Ok(ExitCode::SUCCESS)

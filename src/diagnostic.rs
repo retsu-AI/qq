@@ -275,8 +275,10 @@ pub(crate) struct DiagnosticSession {
     dropped: Arc<AtomicU64>,
     reserved_records: AtomicU64,
     reserved_bytes: AtomicU64,
+    budget_exhausted: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
     closed: AtomicBool,
+    close_outcome: AtomicU64,
     join: Mutex<Option<JoinHandle<()>>>,
     done: Mutex<mpsc::Receiver<()>>,
     started: Instant,
@@ -304,10 +306,15 @@ impl DiagnosticSession {
         let dropped = Arc::new(AtomicU64::new(0));
         let bytes = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicBool::new(false));
+        let budget_exhausted = Arc::new(AtomicBool::new(false));
         let writer_emitted = Arc::clone(&emitted);
         let writer_dropped = Arc::clone(&dropped);
         let writer_bytes = Arc::clone(&bytes);
         let writer_failed = Arc::clone(&failed);
+        let writer_budget_exhausted = Arc::clone(&budget_exhausted);
+        let session_id = allocate_saturating(&NEXT_SESSION_ID).unwrap_or(0);
+        let pid = std::process::id();
+        let started = Instant::now();
         let join = thread::Builder::new()
             .name("qq-diagnostic-writer".to_owned())
             .spawn(move || {
@@ -319,21 +326,27 @@ impl DiagnosticSession {
                     writer_dropped,
                     writer_bytes,
                     writer_failed,
+                    writer_budget_exhausted,
+                    session_id,
+                    pid,
+                    started,
                 )
             })?;
         Ok(Self {
-            session_id: allocate_saturating(&NEXT_SESSION_ID).unwrap_or(0),
+            session_id,
             next_id: AtomicU64::new(1),
             pid: std::process::id(),
             tx: Mutex::new(Some(tx)),
             dropped,
             reserved_records: AtomicU64::new(0),
             reserved_bytes: AtomicU64::new(0),
+            budget_exhausted,
             failed,
             closed: AtomicBool::new(false),
+            close_outcome: AtomicU64::new(0),
             join: Mutex::new(Some(join)),
             done: Mutex::new(done_rx),
-            started: Instant::now(),
+            started,
         })
     }
 
@@ -360,7 +373,12 @@ impl DiagnosticSession {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let Ok(tx) = self.tx.lock() else { return };
+        let tx = loop {
+            match self.tx.try_lock() {
+                Ok(tx) => break tx,
+                Err(_) => thread::yield_now(),
+            }
+        };
         let Some(tx) = tx.as_ref() else { return };
         match tx.try_send(WriterMessage(line)) {
             Ok(()) => {}
@@ -374,6 +392,7 @@ impl DiagnosticSession {
         let mut records = self.reserved_records.load(Ordering::Acquire);
         loop {
             if records >= MAX_ORDINARY_RECORDS {
+                self.budget_exhausted.store(true, Ordering::Release);
                 return false;
             }
             match self.reserved_records.compare_exchange_weak(
@@ -389,6 +408,7 @@ impl DiagnosticSession {
         let mut bytes = self.reserved_bytes.load(Ordering::Acquire);
         loop {
             if bytes.saturating_add(line_bytes) > MAX_ORDINARY_BYTES {
+                self.budget_exhausted.store(true, Ordering::Release);
                 self.reserved_records.fetch_sub(1, Ordering::AcqRel);
                 return false;
             }
@@ -414,7 +434,10 @@ impl DiagnosticSession {
 
     pub(crate) fn close(&self) -> CloseOutcome {
         if self.closed.swap(true, Ordering::AcqRel) {
-            return CloseOutcome::Closed;
+            return match self.close_outcome.load(Ordering::Acquire) {
+                2 => CloseOutcome::Incomplete,
+                _ => CloseOutcome::Closed,
+            };
         }
         if let Ok(mut tx) = self.tx.lock() {
             tx.take();
@@ -430,9 +453,16 @@ impl DiagnosticSession {
                     let _ = join.join();
                 }
             }
-            CloseOutcome::Closed
+            if self.failed.load(Ordering::Acquire) {
+                self.close_outcome.store(2, Ordering::Release);
+                CloseOutcome::Incomplete
+            } else {
+                self.close_outcome.store(1, Ordering::Release);
+                CloseOutcome::Closed
+            }
         } else {
             self.failed.store(true, Ordering::Relaxed);
+            self.close_outcome.store(2, Ordering::Release);
             CloseOutcome::Incomplete
         }
     }
@@ -452,6 +482,10 @@ fn write_records(
     dropped: Arc<AtomicU64>,
     bytes: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
+    budget_exhausted: Arc<AtomicBool>,
+    session_id: u64,
+    pid: u32,
+    started: Instant,
 ) {
     for WriterMessage(line) in rx {
         if file.write_all(&line).is_err() {
@@ -461,21 +495,29 @@ fn write_records(
         emitted.fetch_add(1, Ordering::Relaxed);
         bytes.fetch_add(line.len() as u64, Ordering::Relaxed);
     }
+    let status = if failed.load(Ordering::Acquire) {
+        "Failed"
+    } else if budget_exhausted.load(Ordering::Acquire) {
+        "BudgetExhausted"
+    } else {
+        "Closed"
+    };
     let summary = format!(
-        "{{\"kind\":\"Summary\",\"emitted\":{},\"dropped\":{},\"bytes\":{},\"sink\":\"{}\"}}\n",
+        "{{\"kind\":\"Summary\",\"session_id\":{},\"pid\":{},\"monotonic_ns\":{},\"emitted\":{},\"dropped\":{},\"bytes\":{},\"status\":\"{}\"}}\n",
+        session_id,
+        pid,
+        started.elapsed().as_nanos().min(u64::MAX as u128),
         emitted.load(Ordering::Relaxed),
         dropped.load(Ordering::Relaxed),
         bytes.load(Ordering::Relaxed),
-        if failed.load(Ordering::Relaxed) {
-            "Failed"
-        } else {
-            "Closed"
-        },
+        status,
     );
     if !failed.load(Ordering::Relaxed) && file.write_all(summary.as_bytes()).is_err() {
         failed.store(true, Ordering::Relaxed);
     }
-    let _ = file.flush();
+    if file.flush().is_err() {
+        failed.store(true, Ordering::Release);
+    }
     let _ = done.send(());
 }
 
@@ -500,6 +542,7 @@ mod tests {
             route: Route::StoredKeyring,
             endpoint: Endpoint::Other,
         });
+        assert_eq!(session.close(), CloseOutcome::Closed);
         assert_eq!(session.close(), CloseOutcome::Closed);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("CacheHit"));
