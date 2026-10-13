@@ -32,7 +32,7 @@ pub use checkpoint::{
 pub(crate) use checkpoint::{MAX_CHECKPOINT_REVIEWS_PER_RUN, MAX_CHECKPOINT_TEXT_BYTES};
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
-    InRunCompactor,
+    InRunCompactor, SummarizeError,
 };
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{

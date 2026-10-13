@@ -937,10 +937,11 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<CompactedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, run, window, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, .. } = env;
+                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let model_max_output_tokens = *model_max_output_tokens;
-
+                    let deadline = *deadline;
+                    let turn_recovery = plan.runtime.turn_recovery;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
                         let estimate_input_tokens = |chain: Option<(u64, u64, u64, u64)>, reducible: u64, irreducible: u64| -> u64 {
                             let message_bytes = reducible.saturating_add(irreducible);
@@ -1114,9 +1115,9 @@ impl RunState {
                                             <= u64::from(context_window)
                                     });
                                 let transcript = if summarizer_fits {
-                                    messages[..cut].to_vec()
+                                    &messages[..cut]
                                 } else {
-                                    messages[reducible_messages..cut].to_vec()
+                                    &messages[reducible_messages..cut]
                                 };
                                 // What the next request carries besides the
                                 // summary; the store adds the summary and
@@ -1131,15 +1132,63 @@ impl RunState {
                                 yield TurnStep::Emit(RuntimeEvent::ActivityChanged {
                                     activity: RunActivity::Compacting,
                                 });
-                                match compactor
-                                    .compact(runtime::InRunCompactionRequest {
-                                        transcript,
-                                        turn_cutoff,
-                                        system: Arc::clone(system),
-                                        tools: Arc::clone(&run.tool_specs),
-                                        retained_bytes,
-                                    })
-                                    .await
+                                // The summarizer is a provider turn under the same
+                                // recovery as a model turn (ADR-0048 § 2): a transient
+                                // fault is retried after the policy's backoff, and
+                                // when `MAX_TURN_RETRIES` is spent the run pauses with
+                                // every earlier turn durable. Nothing in the live
+                                // transcript changed, so each attempt sends the same
+                                // request. A rejected summary fails closed.
+                                let mut summarizer_retries: u16 = 0;
+                                let compacted = loop {
+                                    let attempt = compactor
+                                        .compact(runtime::InRunCompactionRequest {
+                                            transcript: transcript.to_vec(),
+                                            turn_cutoff,
+                                            system: Arc::clone(system),
+                                            tools: Arc::clone(&run.tool_specs),
+                                            retained_bytes,
+                                        })
+                                        .await;
+                                    let (kind, message) = match attempt {
+                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message }) => (kind, message),
+                                        settled => break settled,
+                                    };
+                                    if summarizer_retries >= MAX_TURN_RETRIES {
+                                        yield TurnStep::Emit(RuntimeEvent::Paused {
+                                            pause: Box::new(qq_protocol::RunPause {
+                                                kind,
+                                                message: format!("in-run compaction summarizer: {message}"),
+                                                turn_ordinal,
+                                                attempts: summarizer_retries,
+                                            }),
+                                        });
+                                        yield TurnStep::Stop; return;
+                                    }
+                                    summarizer_retries += 1;
+                                    let delay = turn_recovery.delay(summarizer_retries);
+                                    yield TurnStep::Emit(RuntimeEvent::TurnRetrying {
+                                        turn_ordinal,
+                                        attempt: summarizer_retries,
+                                        delay,
+                                        kind,
+                                        message: format!("in-run compaction summarizer: {message}"),
+                                    });
+                                    let sleep = tokio::time::sleep(delay);
+                                    tokio::pin!(sleep);
+                                    tokio::select! {
+                                        biased;
+                                        () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
+                                        () = runtime::RunDeadline::wait(deadline) => {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                        () = &mut sleep => {}
+                                    }
+                                };
+                                match compacted
                                 {
                                     Ok(summary) => {
                                         let summary = Message::user(format!(
@@ -1165,6 +1214,9 @@ impl RunState {
                                                 message: format!("in-run compaction failed: {error}"),
                                             },
                                             runtime::InRunCompactionError::SummarizerFailed(_)
+                                            // Unreachable after the retry loop above, which
+                                            // pauses instead; kept for exhaustiveness.
+                                            | runtime::InRunCompactionError::SummarizerUnavailable { .. }
                                             | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
                                                 kind: RunFailureKind::Policy,
                                                 message: format!(

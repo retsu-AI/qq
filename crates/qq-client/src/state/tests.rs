@@ -626,6 +626,164 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
 }
 
 #[test]
+fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
+    // AC3: a transient summarizer outage settles one failed compaction run
+    // per attempt while the prompt run keeps the session. Those finishes
+    // must not ping, count as unread, raise an error notice or clear the
+    // prompt run's live state; the prompt run's own finish still does.
+    let session_id = SessionId::from_bytes([3; 16]);
+    let prompt = RunId::from_bytes([4; 16]);
+    let compaction = RunId::from_bytes([5; 16]);
+    let mut store = SessionStore::default();
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(prompt);
+    store.upsert_summary(running.clone(), &[], 0);
+    store.warm_empty(session_id);
+    store.get_mut(&session_id).unwrap().live.active_tool = Some("shell".to_owned());
+    store
+        .get_mut(&session_id)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([7; 16]));
+    let effects = store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running),
+                run_id: compaction,
+                outcome: RunOutcome::Failed {
+                    failure: qq_protocol::RunFailure {
+                        kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+                        message: "provider returned HTTP 529".to_owned(),
+                    },
+                },
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(store[&session_id].unread, 0);
+    assert!(!store[&session_id].finished_unread);
+    assert_eq!(
+        store[&session_id].live.active_tool.as_deref(),
+        Some("shell")
+    );
+    assert_eq!(store[&session_id].live.awaiting_approval.len(), 1);
+
+    // The prompt run's own pause still notifies and clears live state.
+    let mut idle = summary(session_id);
+    idle.status = SessionStatus::Idle;
+    let effects = store.reduce_event(
+        &envelope(
+            3,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(idle),
+                run_id: prompt,
+                outcome: RunOutcome::Paused {
+                    pause: Box::new(qq_protocol::RunPause {
+                        kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+                        message: "in-run compaction summarizer: HTTP 529".to_owned(),
+                        turn_ordinal: 9,
+                        attempts: qq_protocol::MAX_TURN_RETRIES,
+                    }),
+                },
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store[&session_id].unread, 1);
+    assert!(store[&session_id].live.active_tool.is_none());
+    assert!(store[&session_id].live.awaiting_approval.is_empty());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Attention(Attention::RunFinished { .. })
+    )));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Notice { level: NoticeLevel::Warning, text, .. } if text.contains("paused after")
+    )));
+}
+
+#[test]
+fn cancelling_a_queued_prompt_leaves_the_active_runs_live_state() {
+    // A queued prompt cancelled while another run holds the session finishes
+    // with that run still active: it is not the end of the visible work, and
+    // the active run's tool and approval state stay.
+    let session_id = SessionId::from_bytes([3; 16]);
+    let active = RunId::from_bytes([4; 16]);
+    let queued = RunId::from_bytes([6; 16]);
+    let mut store = SessionStore::default();
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(active);
+    store.upsert_summary(running.clone(), &[], 0);
+    store.warm_empty(session_id);
+    store
+        .get_mut(&session_id)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([7; 16]));
+    let effects = store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running),
+                run_id: queued,
+                outcome: RunOutcome::Cancelled,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(store[&session_id].live.awaiting_approval.len(), 1);
+}
+
+#[test]
+fn a_completed_prompt_after_a_failed_step_still_notifies() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let prompt = RunId::from_bytes([4; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(session_id), &[], 0);
+    store.warm_empty(session_id);
+    let mut idle = summary(session_id);
+    idle.status = SessionStatus::Idle;
+    let effects = store.reduce_event(
+        &envelope(
+            3,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(idle),
+                run_id: prompt,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store[&session_id].unread, 1);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Attention(Attention::RunFinished { .. })
+    )));
+}
+#[test]
 fn deleting_the_shown_session_refocuses_its_neighbour_and_fetches_a_cold_body() {
     let a = SessionId::from_bytes([0xa; 16]);
     let b = SessionId::from_bytes([0xb; 16]);

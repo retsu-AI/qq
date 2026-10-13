@@ -2073,6 +2073,9 @@ pub enum SessionEvent {
     /// turn; the run sleeps `delay_ms` and re-issues the turn as
     /// `turn_ordinal + 1`. `attempt` is 1-based within this turn's recovery;
     /// a turn that completes resets it. Exhaustion settles the run `paused`.
+    /// The in-run compaction step before turn `turn_ordinal` is retried the
+    /// same way with its own count: then nothing is committed, the same
+    /// summarizer request is re-sent, and `message` names the summarizer.
     RunTurnRetrying {
         run_id: RunId,
         turn_ordinal: u32,

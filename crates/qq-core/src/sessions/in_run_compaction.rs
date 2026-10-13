@@ -158,7 +158,22 @@ async fn compact_in_run(
     guard.disarm();
     let (summary, usage) = match reply {
         Ok(reply) => reply,
-        Err(message) => {
+        // The compaction run is settled before the loop's backoff, so a retry
+        // never stacks a second running row; if that write fails the runtime
+        // is marked failed and the next attempt returns `Unavailable`.
+        Err(crate::runtime::SummarizeError::Transient { kind, message }) => {
+            settle_failed_with(
+                inner,
+                &compaction,
+                RunFailure {
+                    kind,
+                    message: message.clone(),
+                },
+            )
+            .await;
+            return Err(Error::SummarizerUnavailable { kind, message });
+        }
+        Err(crate::runtime::SummarizeError::Rejected(message)) => {
             settle_failed(inner, &compaction, message.clone()).await;
             return Err(Error::SummarizerFailed(message));
         }

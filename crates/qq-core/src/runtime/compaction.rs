@@ -12,6 +12,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use qq_protocol::RunFailureKind;
 use qq_provider::{Message, ToolSpec};
 
 /// What the loop hands the compactor: the run's live request cut after the
@@ -47,11 +48,21 @@ pub(crate) struct InRunCompaction {
 pub(crate) type InRunCompactionFuture =
     Pin<Box<dyn Future<Output = Result<InRunCompaction, InRunCompactionError>> + Send + 'static>>;
 
-/// Why an in-run compaction did not commit. The loop fails the run with the
-/// context diagnosis for a summarizer or availability failure, and as a
-/// server failure when the store could not record the compaction.
+/// Why an in-run compaction did not commit. The loop retries a transient
+/// summarizer fault under the run's turn recovery and pauses the run when
+/// that is spent (ADR-0048 § 2); it fails the run with the context diagnosis
+/// for a rejected summary or an availability failure, and as a server
+/// failure when the store could not record the compaction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum InRunCompactionError {
+    /// The summarizer's provider faulted transiently (overload, rate limit,
+    /// transport loss). The compaction run settled failed; the prompt run's
+    /// turns are untouched, so the step can be retried.
+    #[error("the summarizer's provider is unavailable: {message}")]
+    SummarizerUnavailable {
+        kind: RunFailureKind,
+        message: String,
+    },
     /// The summarizer ran and settled failed (rejected, malformed, did not
     /// shrink). Its outcome is durable on its own run.
     #[error("the summarizer failed: {0}")]
@@ -68,4 +79,19 @@ pub(crate) enum InRunCompactionError {
 
 pub(crate) trait InRunCompactor: Send + Sync {
     fn compact(&self, request: InRunCompactionRequest) -> InRunCompactionFuture;
+}
+
+/// Why one summarizer request produced no summary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SummarizeError {
+    /// A provider fault worth re-issuing the request for, as for a model turn.
+    #[error("{message}")]
+    Transient {
+        kind: RunFailureKind,
+        message: String,
+    },
+    /// The reply itself is unusable, or the provider refused the request in
+    /// a way a retry would repeat.
+    #[error("{0}")]
+    Rejected(String),
 }
