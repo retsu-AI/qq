@@ -1614,14 +1614,14 @@ chunked bodies). Final claims may be corrected using existing evidence within
 the same finite repair allowance; no extra tool call is forced merely to revise
 wording. Existing run cancellation and deadlines drop inference futures.
 
-A verdict is evidence, not the run's outcome. A RED verdict redirects the run
-while a correction attempt remains; once both are spent, later RED verdicts
-stay on record (`checkpoint_reviewed` events and the `[JEV RED …]` marker on
-retained tool results) and the run completes with the candidate. A review the
-harness could not obtain (reviewer timeout, malformed reply, oversized task or
-evidence) is recorded as `unavailable` and the run continues. The reviewer's
-request limit and cost admission remain run failures because they are harness
-bounds.
+A verdict is evidence, not the run's outcome. The reviewer's repair policy
+selects which typed outcomes redirect the run while a correction attempt
+remains; once both are spent, later verdicts stay on record
+(`checkpoint_reviewed` events and the typed marker on retained tool results)
+and the run completes with the candidate. A review the harness could not
+obtain (reviewer timeout, malformed reply, oversized task or evidence) is
+recorded as `unavailable` and the run continues. The reviewer's request limit
+and cost admission remain run failures because they are harness bounds.
 
 `checkpoint_started` commits before dispatch and marks the in-flight charge
 unknown in durable totals. `checkpoint_reviewed.spend` carries typed usage and

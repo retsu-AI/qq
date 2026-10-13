@@ -3687,10 +3687,10 @@ impl plan::CompiledAgentPlan {
                             return;
                         }
                         // `Unavailable` (timeout, malformed reply, outage) is
-                        // already recorded above; the candidate stands. A RED
-                        // verdict redirects the run while a correction attempt
-                        // remains; once both are spent the run completes with
-                        // the verdict on record rather than failing.
+                        // already recorded above; the candidate stands. A
+                        // policy-selected correction outcome redirects the run
+                        // while a correction attempt remains; once both are
+                        // spent the run completes with the verdict on record.
                         if reviewer
                             .repair_policy()
                             .requests_correction(verdict.outcome)
@@ -3700,7 +3700,7 @@ impl plan::CompiledAgentPlan {
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             let notice = format!(
-                                "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
+                                "JEV review requires correction ({}). Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
                                 verdict.outcome.label(), verdict.feedback
                             );
                             Arc::make_mut(&mut messages).push(Message::user(notice));
@@ -4497,8 +4497,8 @@ impl plan::CompiledAgentPlan {
                             return;
                         }
                         // An unavailable reviewer leaves its marker on the
-                        // retained result and the run continues; only a RED
-                        // verdict asks for correction.
+                        // retained result and the run continues; the reviewer's
+                        // repair policy selects which outcomes ask for correction.
                         if reviewer
                             .repair_policy()
                             .requests_correction(verdict.outcome)
@@ -4506,12 +4506,12 @@ impl plan::CompiledAgentPlan {
                             correction.push(format!("{}: {}", call.name, verdict.feedback));
                         }
                     }
-                    // Both correction attempts spent: the RED markers stay on
+                    // Both correction attempts spent: typed markers stay on
                     // the results as evidence and the model proceeds without
                     // another redirect, instead of the run failing.
                     if !correction.is_empty() && context.repair() {
                         checkpoint_correction_notice = Some(format!(
-                            "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
+                            "JEV review requires correction. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                             correction.join("\n- ")
                         ));
                     }
