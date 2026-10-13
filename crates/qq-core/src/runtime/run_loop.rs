@@ -1191,6 +1191,7 @@ impl RunState {
                                 match compacted
                                 {
                                     Ok(summary) => {
+                                        run.budget.charge_child(summary.usage, summary.estimated_cost_usd_nanos);
                                         let summary = Message::user(format!(
                                             "{}\n\n{}",
                                             sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
@@ -1206,6 +1207,12 @@ impl RunState {
                                         window.model_text_bytes = 0;
                                         window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
+                                        if let Err(kind) = run.budget.remaining(tokio::time::Instant::now()) {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
                                     }
                                     Err(error) => {
                                         yield TurnStep::Emit(match error {

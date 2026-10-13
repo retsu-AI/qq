@@ -203,7 +203,6 @@ async fn in_run_summary_spend_exhausts_the_callers_token_allowance() {
     );
     assert_eq!(report.durable_calls, report.executed_calls);
     assert_eq!(report.duplicate_sequences, 0);
-    fixture.runtime.close().await.unwrap();
 }
 
 #[tokio::test]

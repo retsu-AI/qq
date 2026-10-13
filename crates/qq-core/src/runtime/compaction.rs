@@ -43,6 +43,10 @@ pub(crate) struct InRunCompactionRequest {
 /// A committed in-run summary the loop splices in.
 pub(crate) struct InRunCompaction {
     pub(crate) summary: String,
+    /// Observed spend belongs to the internal run in storage, and is also
+    /// charged to the prompt's caller allowance in memory.
+    pub(crate) usage: Option<qq_protocol::TokenUsage>,
+    pub(crate) estimated_cost_usd_nanos: Option<u64>,
 }
 
 pub(crate) type InRunCompactionFuture =

@@ -203,6 +203,9 @@ async fn compact_in_run(
         ),
         final_output: None,
     });
+    let estimated_cost_usd_nanos = accounting
+        .as_ref()
+        .and_then(|value| value.estimated_cost_usd_nanos);
     let committed = inner
         .store
         .finish_in_run_compaction(
@@ -220,7 +223,11 @@ async fn compact_in_run(
             for event in events {
                 inner.notify(event.cursor);
             }
-            Ok(crate::runtime::InRunCompaction { summary })
+            Ok(crate::runtime::InRunCompaction {
+                summary,
+                usage,
+                estimated_cost_usd_nanos,
+            })
         }
         Ok((events, None)) => {
             for event in events {
