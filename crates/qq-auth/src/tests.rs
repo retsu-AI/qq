@@ -2919,6 +2919,8 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
         )
         .unwrap();
 
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
     let start = Arc::new(Barrier::new(9));
     let mut workers = Vec::new();
     for _ in 0..8 {
@@ -2937,6 +2939,22 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
         }));
     }
     start.wait();
+    while !gate.entered.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+    while store
+        .stored_resolution
+        .0
+        .lock()
+        .unwrap()
+        .flights
+        .values()
+        .next()
+        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 7)
+    {
+        thread::yield_now();
+    }
+    gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert_eq!(worker.join().unwrap(), b"secret");
     }
