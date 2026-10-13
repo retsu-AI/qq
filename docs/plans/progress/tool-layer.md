@@ -553,3 +553,11 @@ The last two rounds kept finding new names for the same three classes, so each i
 - Past the depth cap, a clean launcher chain is followed to its program, so `nice` ×9 `echo sudo` is Prompt, not a false Forbidden. A non-chain tail is still judged at every suffix.
 - The `timeout` process-group cancellation leak predates T18 and is filed as [ENG-1032](https://linear.app/retsu-ai/issue/ENG-1032); `timeout` stays transparent (lead decision 2026-10-13).
 - Lead decision: merge after this round. Any further Codex findings become follow-up issues, not more PR rounds.
+
+### 2026-10-13 — T18 review repairs, round 8 (#283), final before merge
+
+- `QQ_*` was too broad: `QQ_UPDATE_FIXTURES` rewrites checked-in fixtures. Only `QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and `QQ_SOAK_EXPECT_COMPLETED` are inert.
+- `git branch --format --list created` creates `created`. A value option now consumes the next word before anything else is matched.
+- `nice` ×8 `sudo ls` reached `sudo` at the depth boundary, and the fallback skipped index 0. The boundary command is now included.
+- Suffix enumeration was quadratic (an 8 000-word `env -S` cloned about 32 M strings). All three sites now use `bounded_suffixes`, capped at 64 starts × 16 words. A 7 000-word regression classifies in 0.04 s and fails closed.
+- `approval` 93 tests pass. Merging after this round (lead decision); further findings become follow-up issues.
