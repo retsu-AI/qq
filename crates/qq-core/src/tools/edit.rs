@@ -326,13 +326,20 @@ pub(super) fn edit_file(
                 // touching any earlier edit's written span. A deletion
                 // writes an empty span, so `A--AB--B` with `--AB--` deleted
                 // forms a new `AB` from bytes either side of it. A match
-                // that reaches the span's edge is not provably original.
+                // that only shares an edge with an earlier edit is fine.
                 let untouched = |text: &str| {
                     text.find(old).is_some_and(|start| {
                         let end = start + old.len();
-                        file.changes
-                            .iter()
-                            .all(|change| end < change.wrote.start || change.wrote.end < start)
+                        file.changes.iter().all(|change| {
+                            if change.wrote.is_empty() {
+                                // A deletion point joins bytes only when it
+                                // lies strictly inside the match.
+                                !(start < change.wrote.start && change.wrote.start < end)
+                            } else {
+                                // Written text: ordinary half-open overlap.
+                                end <= change.wrote.start || change.wrote.end <= start
+                            }
+                        })
                     })
                 };
                 once(&file.text)
@@ -1273,6 +1280,28 @@ mod tests {
             fs::read_to_string(directory.path().join("a.txt")).unwrap(),
             "A--AB--B\n"
         );
+        // Review (#281): an edit adjacent to an earlier replacement, or
+        // ending exactly at an earlier deletion point, still applies.
+        fs::write(directory.path().join("c.txt"), "abcd\n").unwrap();
+        let adjacent = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"c.txt","old":"ab","new":"AB"},{"path":"c.txt","old":"cd","new":"CD"}]}"#,
+        );
+        assert!(!adjacent.is_error, "{}", adjacent.model_text);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("c.txt")).unwrap(),
+            "ABCD\n"
+        );
+        fs::write(directory.path().join("d.txt"), "xxYYzz\n").unwrap();
+        let after_deletion = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"d.txt","old":"YY","new":""},{"path":"d.txt","old":"xx","new":"X"}]}"#,
+        );
+        assert!(!after_deletion.is_error, "{}", after_deletion.model_text);
         // Disjoint edits in one batch still apply.
         fs::write(directory.path().join("b.txt"), "one\ntwo\nthree\n").unwrap();
         let applied = run(

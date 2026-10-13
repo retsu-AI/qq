@@ -607,3 +607,7 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git branch --contains=HEAD created` is a listing. The attached filter forms now select list mode, like the separated forms.
 - `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
 - `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.
+
+### 2026-10-13 — T19 adjacency (#281)
+
+- The deletion-boundary guard used strict comparisons, so an edit adjacent to an earlier replacement (`abcd`: `ab`→`AB` then `cd`→`CD`) was refused. Written spans now use ordinary half-open overlap, and an empty deletion point counts only when it lies strictly inside the later match. `A--AB--B` is still refused. Adjacent and post-deletion edits apply (new rows).
