@@ -5954,6 +5954,7 @@ impl RuntimeLoader for BudgetLoopLoader {
 struct ChildBudgetLoader {
     inner: QueueLoader,
     write_children: bool,
+    child_context_window: Option<u32>,
     audit: crate::runtime::AuditMode,
 }
 
@@ -5962,6 +5963,14 @@ impl RuntimeLoader for ChildBudgetLoader {
         let provider = self.inner.next_provider(&request);
         let write_children = self.write_children;
         let audit = self.audit;
+        let child_context_window = (request.model.model.as_deref() == Some("test/child"))
+            .then_some(self.child_context_window)
+            .flatten();
+        let route = request
+            .model
+            .model
+            .clone()
+            .unwrap_or_else(|| "test/model".to_owned());
         let mut pricing = budget_pricing();
         if request.model.model.as_deref() == Some("test/child") {
             pricing.input_usd_nanos_per_token = 2_000;
@@ -5970,8 +5979,9 @@ impl RuntimeLoader for ChildBudgetLoader {
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
                 .map(|runtime| {
-                    loaded_runtime(
+                    loaded_runtime_for_route(
                         runtime
+                            .with_context_window(child_context_window)
                             .with_delegation(qq_protocol::DelegationRoster {
                                 roster: vec![qq_protocol::DelegationRosterEntry {
                                     route: "test/child".to_owned(),
@@ -5992,6 +6002,7 @@ impl RuntimeLoader for ChildBudgetLoader {
                                 role: qq_protocol::DelegationRole::Balanced,
                             }),
                         &request.workspace,
+                        route,
                         Some(pricing),
                     )
                 })
@@ -6026,8 +6037,22 @@ async fn child_budget_harness(
     write_children: bool,
     audit: crate::runtime::AuditMode,
 ) -> SpawnHarness {
+    child_budget_harness_with_window(parent, child, write_children, audit, None).await
+}
+
+async fn child_budget_harness_with_window(
+    parent: Arc<dyn Provider>,
+    child: Arc<dyn Provider>,
+    write_children: bool,
+    audit: crate::runtime::AuditMode,
+    child_context_window: Option<u32>,
+) -> SpawnHarness {
     let directory = tempfile::tempdir().unwrap();
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut verdict = ReviewVerdict::free(ReviewDecision::Approve);
+    if child_context_window.is_some() {
+        verdict.spend.usage = Some(TokenUsage::default());
+    }
+    let (reviewer, _) = StubReviewer::immediate(verdict);
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
             .with_approval_reviewer(reviewer),
@@ -6037,6 +6062,7 @@ async fn child_budget_harness(
                 queue: StdMutex::new(vec![parent]),
             },
             write_children,
+            child_context_window,
             audit,
         }),
     )

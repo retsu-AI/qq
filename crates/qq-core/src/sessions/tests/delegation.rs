@@ -4928,6 +4928,123 @@ async fn sequential_children_receive_the_remaining_budget_after_prior_spend() {
 }
 
 #[tokio::test]
+async fn child_compaction_spend_reduces_the_next_child_allowance() {
+    let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+        inner: Arc::new(MultiSpawnProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            spawns: 2,
+            arguments: |_| {
+                r#"{"task":"research","model":"test/child","authority":"write"}"#.to_owned()
+            },
+            turn: StdMutex::new(0),
+        }),
+        usage: Some(usage(10, 5)),
+    });
+    let child: Arc<dyn Provider> = Arc::new(AutoCompactProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        served: StdMutex::new(0),
+        script: AutoCompactScript::Measured {
+            script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                turns: 24,
+                text: "child done".to_owned(),
+                summary: valid_summary("child work"),
+            }),
+            bytes_per_token: 4,
+        },
+    });
+    let mut harness = child_budget_harness_with_window(
+        parent,
+        child,
+        true,
+        crate::runtime::AuditMode::Off,
+        Some(16 * 1_024),
+    )
+    .await;
+    let limits = RunLimits {
+        max_total_tokens: Some(1_000_000),
+        max_cost_usd_nanos: Some(5_000_000_000),
+        ..RunLimits::default()
+    };
+    let root = submit_child_budget_prompt(&harness, limits).await;
+    let events = collect_until_run_finished(&mut harness.events, root).await;
+    let children: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.event {
+            SessionEvent::PromptQueued { session, run, .. }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some((index, session.id, run.id, run.limits.clone().unwrap()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(children.len(), 2, "{events:#?}");
+    let (second_index, _, _, second_limits) = &children[1];
+    let (_, first_session, first_prompt, _) = &children[0];
+    let mut prompt_tokens = 0_u64;
+    let mut summary_tokens = 0_u64;
+    let mut prompt_cost = 0_u64;
+    let mut summary_cost = 0_u64;
+    for event in &events[..*second_index] {
+        if event.session_id != *first_session {
+            continue;
+        }
+        if let SessionEvent::ModelTurnCompleted {
+            run_id,
+            usage: Some(usage),
+            estimated_cost_usd_nanos: Some(cost),
+            ..
+        } = &event.event
+        {
+            let tokens = usage.input_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_write_input_tokens
+                + usage.output_tokens;
+            if run_id == first_prompt {
+                prompt_tokens += tokens;
+                prompt_cost += cost;
+            } else {
+                summary_tokens += tokens;
+                summary_cost += cost;
+            }
+        }
+    }
+    assert!(
+        events.iter().any(|event| event.session_id == *first_session
+            && matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "first child must really compact"
+    );
+    assert!(summary_tokens > 0 && summary_cost > 0);
+    assert_eq!(
+        second_limits.max_total_tokens,
+        Some(1_000_000 - 15 - prompt_tokens - summary_tokens)
+    );
+    assert_eq!(
+        second_limits.max_cost_usd_nanos,
+        Some(5_000_000_000 - 20_000 - prompt_cost - summary_cost)
+    );
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(*first_session),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    let direct = snapshot.focused.unwrap().summary.accounting.unwrap().direct;
+    assert_eq!(
+        direct.estimated_cost_usd_nanos,
+        Some(prompt_cost + summary_cost)
+    );
+    assert_eq!(finished_outcome(&events, root), Some(RunOutcome::Completed));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_balanced_child_of_a_max_effort_parent_is_admitted_at_medium() {
     // RR8.4 regression: children inherited the parent's pin verbatim, so a
     // read-only worker under `max` spent ~14 k reasoning tokens per read.
@@ -5286,6 +5403,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
                     },
                     write_children: false,
                     audit: crate::runtime::AuditMode::Off,
+                    child_context_window: None,
                 },
                 first: AtomicBool::new(false),
                 entered: Arc::clone(&entered),
