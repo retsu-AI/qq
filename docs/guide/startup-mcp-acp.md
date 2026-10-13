@@ -1,34 +1,47 @@
 # MCP and ACP
 
-QQ currently implements Model Context Protocol support. ACP remains a separate
-compatibility question until an accepted source implementation is identified.
+This page separates the protocol surfaces that are present in the reviewed QQ
+source from development helpers and future compatibility work.
 
-## MCP in QQ
+## QQ's MCP client
 
-Declare an MCP server in QQ configuration, inspect its descriptors, and pin
-the reviewed tool-set digest when the server is stable. QQ namespaces tools as
-`mcp__<server>__<tool>`. The MCP guide explains stdio and streamable HTTP,
-credentials, grants, descriptor limits, quarantine, and unavailable servers.
+QQ's shipped runtime is the MCP client. The client implementation is in
+[crates/qq-mcp/src/lib.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-mcp/src/lib.rs)
+and the harness wires configured servers in
+[crates/qq-harness/src/mcp.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-harness/src/mcp.rs).
+The CLI exposes inspection through
+[src/cli.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/cli.rs):
 
-Use [MCP servers](mcp.md) as the detailed reference. It is the source of truth
-for user configuration. `qq mcp inspect NAME` contacts only the named server,
-calls no tool, and prints descriptors and the digest.
+```sh
+qq mcp inspect NAME
+```
 
-MCP calls still pass through QQ's approval policy. A declaration does not
-grant a tool. A pin covers advertised descriptors, not every behavior of the
-server. An unavailable or changed server remains unavailable until its current
-state is reviewed.
+Inspection contacts only the named server, reads descriptors, and does not
+invoke a tool. QQ namespaces discovered tools as
+`mcp__<server>__<tool>`. A declaration is still subject to project trust,
+workspace grants, approval policy, descriptor limits, pinning, and quarantine.
+A pin records the reviewed descriptor set; it does not guarantee the server's
+future behavior. See the detailed [MCP servers](mcp.md) guide for stdio,
+streamable HTTP, credentials, and grant configuration.
+
+The `qq-development` MCP server helper is separate development tooling. It
+may help a developer inspect or exercise a repository, but it is not QQ's
+runtime client, does not grant QQ tools, and is not evidence of a hosted MCP
+service. Candidate or private helper source requires repository access.
 
 ## ACP status
 
-The current QQ checkout has no accepted ACP implementation or public ACP
-operator guide. Do not document an ACP endpoint, adapter, or compatibility
-claim as available. The startup requirement records ACP as planned research or
-future implementation until source, protocol identity, checks, and runtime
-evidence exist.
+The reviewed QQ snapshot is `9bae6937b50a013f652db8963ac3590103eb4b84`
+(origin/main). It contains no accepted ACP endpoint, adapter, or operator
+workflow. Do not infer ACP compatibility from an unrelated editor or agent
+project, including a Devin ACP implementation. ACP remains a candidate
+compatibility surface until a source implementation, protocol identity,
+conformance check, and runtime evidence are accepted.
 
-## Assistant boundary
+## Startup boundary
 
-The assistant may eventually coordinate nodes and tool connections, but it does
-not replace QQ's tool and approval authority. See [Assistant gateway and nodes](startup-assistant.md)
-for the current candidate boundary.
+An assistant can coordinate nodes and tool connections later, but it does not
+replace QQ's MCP client or approval authority. The reviewed assistant and
+native candidates do not turn this boundary into a currently hosted product.
+Continue with [assistant and gateway](startup-assistant.md) and
+[native modes](startup-native-modes.md) for the candidate boundary.

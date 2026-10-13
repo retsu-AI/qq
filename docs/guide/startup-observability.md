@@ -1,32 +1,47 @@
 # Observability
 
-Record enough context to diagnose a failure without collecting credentials,
-private prompts, or raw customer records.
+Observability must help an operator answer which revision handled a request,
+what state it reached, and whether an external side effect is still uncertain.
+Keep credentials, raw prompts, memory content, and customer records outside
+diagnostic events.
 
-## QQ signals
+## QQ source signals
 
-QQ exposes health, capabilities, model catalog, session events, run outcomes,
-tool approval state, and typed headless records. Its server and client code
-bound response bodies, event cursors, deadlines, and stream idle time. Use
-[Troubleshooting](troubleshooting.md) for the operator-facing reports.
+The QQ server defines health, capabilities, model catalog, workspace snapshot,
+SSE workspace events, prompt submission, steering, approvals, cancellation, and
+session profile routes in
+[crates/qq-server/src/lib.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-server/src/lib.rs).
+The CLI and headless records define the command and session boundary in
+[src/cli.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/cli.rs)
+and [src/headless.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/headless.rs).
 
-The useful identity for a report is the exact source or binary revision, the
-workspace or session scope, the command, the expected result, and the observed
-result. Preserve uncertainty when a request may have reached a provider before
-the client lost its reply.
+A useful incident record includes source or binary revision, command or route,
+session/workspace scope, request or run identifier, event cursor, deadline,
+expected result, observed result, and whether the provider outcome is known.
+Health or a closed SSE stream proves transport state only; it does not prove
+that a provider accepted a prompt.
 
-## Privacy boundary
+## Retsu request evidence
 
-Diagnostics must redact provider secrets, bearer values, memory content,
-prompt bodies, raw receipts, and private account data. Log bounded identifiers
-and typed outcomes. Do not treat a hash as proof that an external service
-accepted a request.
+The private Retsu snapshot at
+`b889cd9e531438e4c54b25aa5ff9dc281c5e6888` (repository access required)
+adds request identity at the gateway and records typed extraction outcomes:
+[packages/api/src/index.ts](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/packages/api/src/index.ts),
+[packages/api/src/http/respond.ts](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/packages/api/src/http/respond.ts),
+and [packages/api/src/services/Extract.ts](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/packages/api/src/services/Extract.ts).
+The source names request IDs, spans, status, model, token counts, fields,
+cost, and latency as bounded request/usage evidence. Account and billing
+records remain separately governed; see [API and billing](startup-api-billing.md).
 
-## Startup observability
+## Planned error routing
 
-The startup plan includes privacy-safe error tracking and deduplicated repair
-routing. That composition is planned. It is not an enabled production
-collector in this repository. A future implementation must name its capture
-fields, retention, access boundary, and error-to-owner path before activation.
+Privacy-safe Sentry collection and deduplicated error-to-agent assignment are
+proposed startup work. They are not enabled by the reviewed source and should
+not be presented as a production collector. Before activation, specify the
+event schema, redaction, retention, access boundary, sampling, ownership
+routing, and deletion path. A future error assignment must link to a bounded
+revision and reproducible evidence, not expose a bearer token, prompt body,
+receipt, account identifier, or private dump.
 
-See [Recovery](startup-recovery.md) for the evidence needed after a failure.
+Use [recovery](startup-recovery.md) to record uncertain effects and the
+repair decision.

@@ -1,38 +1,82 @@
 # API and billing
 
-QQ's local runtime and the Retsu extraction API have different ownership and
-billing boundaries.
+QQ's local runtime and Retsu's hosted extraction gateway have separate owners.
+The Retsu source snapshot is private and requires repository access.
 
-## QQ usage
+## Retsu request path
 
-QQ's headless protocol can attach optional usage and billing metadata to a
-record. The current source includes a `billing.cents` field in the headless
-record shape. That field is metadata for a run. It does not create a customer
-account, charge a card, settle credits, or prove a paid journey.
+The Effect Worker in [`packages/api/src/index.ts`](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/packages/api/src/index.ts)
+composes the gateway services and routes. `http/public.ts` exposes
+`POST /v1/extract`, `GET /v1/models`, `GET /v1/balance`, `GET /v1/health`, and
+`POST /v1/waitlist`. The Worker adds a request id and calls the model backend
+through the `Backend` service.
 
-QQ provider credentials remain under QQ's credential boundary. Review
-[Providers and credentials](providers.md) for supported local provider setup.
+`services/Extract.ts` implements the billed path. It rate-limits, validates the
+request, reserves an estimated amount for a live key, calls the backend, then
+settles the exact input-token cost or releases the hold on failure. It records
+usage asynchronously with request id, key id, status, model, tokens, fields,
+cost, and latency.
 
-## Retsu extraction API
+The current Worker configuration points at a Modal Grip endpoint in
+`packages/api/wrangler.jsonc` and `worker-configuration.d.ts`. That is source
+configuration. It does not prove that the endpoint is reachable, healthy, or
+serving the documented model.
 
-The Retsu source design describes a public gateway and a private `grip serve`
-backend. The gateway handles customer API keys, rate limits, credits, and usage
-records. The backend performs stateless extraction and receives a backend
-secret. The documented request is `POST /v1/extract`, with `GET /v1/models` and
-`GET /v1/health` for model and health information.
+## Accounts, sessions, and keys
 
-That API description is source documentation in a separate private repository.
-The local Retsu checkout is not the current remote main revision. It is not
-evidence of a deployed endpoint, valid account, live key, charged request, or
-customer acceptance. Repository access is required for the implementation.
+`services/Auth.ts` hashes and resolves `retsu_sk_live_…` and `retsu_sk_test_…`
+Bearer keys against the account and API-key tables. Revoked keys and suspended
+accounts fail before extraction. `http/account.ts` exposes the dashboard
+surface:
 
-## Billing acceptance
+```text
+POST /v1/auth/login
+POST /v1/auth/verify
+POST /v1/auth/invite
+POST /v1/auth/logout
+GET  /v1/me
+POST /v1/me/keys
+POST /v1/me/keys/:id/revoke
+GET  /v1/me/usage?days=30
+GET  /v1/me/ledger
+```
 
-Treat these as separate checks: an API request, an authenticated request, a
-credit reservation, a model response, a usage record, settlement, and a
-customer-visible receipt. A source schema or test fixture cannot replace a
-useful authorized paid-provider workflow.
+`services/Sessions.ts` sends a one-time magic link with a 15-minute token,
+stores only its hash, and creates a 30-day `retsu_session` cookie after
+verification. The dashboard can create a key that is shown once and revoke it.
+The session and key lifecycle is source-backed; account access and email
+delivery still need their runtime evidence.
 
-Do not put credentials, account identifiers, private payment records, or raw
-provider responses in this site. For QQ's local paid-provider limits, see
-[Troubleshooting](troubleshooting.md) and [Headless](headless.md).
+## Credits and Stripe
+
+`services/Ledger.ts` calls the per-account `AccountLedger` Durable Object for
+rate limits, balance, holds, releases, settlements, and idempotent credits.
+D1 mirrors ledger rows for account history. The Durable Object is the hot-path
+owner. D1 is the query and mirror store.
+
+`services/Billing.ts` creates a hosted Stripe Checkout Session. The browser
+receives a redirect URL, so card data does not pass through the Worker. The
+Stripe webhook verifies its signature and timestamp, accepts completed payment
+events, and credits the account once using the Checkout Session id and recorded
+event ids. A cancelled checkout returns the user to the site without credit.
+Webhook signature failure, stale events, unpaid sessions, duplicate events,
+backend failure, reserve failure, release, and settlement failure remain
+distinct outcomes.
+
+Useful source routes are:
+
+```text
+GET  /v1/billing/packs
+POST /v1/billing/checkout {"pack":"starter"}
+POST /v1/billing/webhook
+```
+
+The source includes test coverage for duplicate webhook delivery and billing
+configuration. That does not prove a live Stripe account, hosted checkout,
+settled money, or customer acceptance.
+
+## QQ usage metadata
+
+QQ headless records can carry optional `billing.cents` metadata. That field is
+not the Retsu credit ledger and does not charge an account. See [Headless](headless.md)
+for QQ's local contract and [Providers](providers.md) for provider credentials.

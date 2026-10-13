@@ -1,39 +1,51 @@
 # Get started with the stack
 
-Set up QQ first. Then choose the smallest workflow that matches your task.
+Start with the smallest local QQ journey, then choose the source-backed
+extension that matches the work. The detailed QQ guides remain authoritative
+for installation, providers, configuration, and CLI behavior.
 
-## Set up QQ
+## First local journey
 
-Follow [Install](install.md), then follow [Quickstart](quickstart.md) to store
-a provider credential, select a model, run `qq doctor`, and open a first
-session. The existing pages contain the complete commands and platform paths.
+Follow [Install](install.md) and [Quickstart](quickstart.md), then verify the
+local binary and project boundary:
 
-For a repository with sensitive project configuration, review the file before
-running `qq trust`. Project configuration can declare providers, MCP servers,
-models, and grants. QQ does not load those sensitive sections until you trust
-the project. See [Permissions and trust](permissions.md).
+```sh
+qq --version
+qq doctor
+qq config paths
+qq ask "Reply with pong"
+```
 
-## Pick a workflow
+The first command identifies the binary. `doctor` reports local readiness;
+`config paths` shows where QQ reads its configuration. The `ask` command
+exercises the configured agent path. A local response does not establish a
+hosted deployment or durable customer workflow.
 
-Use the TUI when you want interactive approvals, a persistent session, and
-visible tool calls. Use [headless commands](headless.md) when a script or CI
-job owns the prompt. Use `qq serve` when several clients need one long-running
-local server.
+For an interactive session, run `qq`. For a bounded script, use
+`qq run --approval auto "Summarize the README"` only when the repository's
+approval policy allows it. Review [Headless](headless.md) and
+[Permissions and trust](permissions.md) before using automation. Never copy
+credentials, session databases, or raw prompts into documentation.
 
-Use [MCP servers](mcp.md) when an external tool host is needed. Inspect its
-descriptors before pinning them. MCP does not grant a tool permission by
-itself. Approval policy and workspace grants still apply.
+## Choose a surface
 
-The native client sources use QQ's HTTP and SSE contract. They do not replace
-the QQ agent loop. The assistant source adds a private store around QQ; it does
-not turn a local source candidate into a hosted service.
+| Need | Start here | Source boundary |
+| --- | --- | --- |
+| Interactive approvals and session history | [Quickstart](quickstart.md) | QQ TUI and agent loop |
+| Script or CI prompt | [Headless](headless.md) | QQ headless command and typed records |
+| External tools | [MCP servers](mcp.md), then `qq mcp inspect NAME` | QQ MCP client, grants, and approvals |
+| Native client integration | [Native modes](startup-native-modes.md) | Candidate HTTP/SSE clients; pairing remains unaccepted |
+| Account-backed extraction | [API and billing](startup-api-billing.md) | Private Retsu Worker/DO/D1 source; hosted runtime unverified |
+| Delivery planning | [Feature map](startup-feature-map.md) | Source, candidate, planned, and unverified labels |
 
-## Check what is true
+The public CLI dispatch is in
+[src/cli.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/cli.rs);
+server routes are in
+[crates/qq-server/src/lib.rs](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-server/src/lib.rs).
 
-Before reporting a workflow as complete, identify its subject and evidence.
-`cargo build` proves compilation for that source. A local executable journey
-proves only the exercised local path. A provider response, a device session,
-a deployment, and a customer result require their own evidence.
+## Report what happened
 
-Use [Recovery](startup-recovery.md) when a command times out, a session needs
-reopening, or a source candidate needs an explicit adoption decision.
+Record the exact source or binary revision, command, environment, expected
+result, observed result, and remaining dependency. A compile check proves
+compilation. A local provider response, native connection, hosted deployment,
+payment event, and customer result each require their own evidence.

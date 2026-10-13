@@ -1,39 +1,48 @@
 # Data and models
 
-QQ, the assistant, and Retsu own different data. Keep those stores separate
-when you document or operate them.
+QQ, Retsu Grip, and the reviewed data platform own different records and
+lifecycles. Keep their source and acceptance claims separate.
 
-## QQ data
+## QQ runtime data
 
-QQ stores sessions, events, runs, transcripts, trust state, and configuration
-under its user-scoped data directories. The OS credential store keeps provider
-secrets. The [configuration reference](configuration.md) describes layered
-configuration, and [Install](install.md) describes safe session-store backup
-before an upgrade.
+QQ owns sessions, events, runs, transcripts, configuration, trust state, and
+provider credentials. The TUI and native clients consume bounded snapshots;
+they do not become a second transcript authority. See [Concepts](concepts.md),
+[Configuration](configuration.md), and [Install](install.md) for the released
+store and backup procedures.
 
-QQ's protocol gives clients versioned commands and events. The TUI, headless
-commands, and server use the same core runtime. Native clients read bounded
-snapshots rather than recreating session state.
+The assistant candidate owns project bindings, scoped memory, drafts, pending
+intent, and recovery metadata in its private SQLite store. It does not own QQ
+credentials or copy the authoritative QQ transcript.
 
-## Assistant data
+## Grip model and API data
 
-The assistant candidate stores project bindings, conversations, scoped memory,
-drafts, pending intent, and recovery metadata in a private SQLite store. It
-does not own QQ provider credentials or copy the authoritative QQ transcript.
-Memory scope and provenance stay explicit. A memory result is reference data,
-not execution authority.
+The private Retsu source separates request text and schema, model output,
+usage, API keys, accounts, credits, and billing ledger records. `grip serve`
+is a stateless model backend. The gateway owns customer identity, rate limits,
+credits, and usage. [The Retsu API reference](https://github.com/retsu-AI/retsu/blob/b889cd9e531438e4c54b25aa5ff9dc281c5e6888/docs/reference/api.md)
+requires repository access and describes the request and response contract.
 
-## Retsu data and models
+## Platform2 local workflow
 
-Retsu's Grip design separates extraction requests, schema definitions, model
-weights, usage records, and key or credit state. The model backend enforces
-schema and span invariants. The gateway owns customer-facing authentication and
-billing. The current local checkout is a private source snapshot, so its
-model and deployment claims remain source-level until independently verified.
+The separately owned platform2 candidate records a local reviewed workflow in
+`docs/09-local-reviewed-data-experiment.md` and maps its features in
+`docs/LOCAL-MODEL-LOOP-FEATURE-MAP.md`. Its source covers dataset identity,
+annotation inputs, manifest-backed release, provenance, replay, validation,
+backup, and recovery receipts. The companion source includes multimodal
+audio, vision, and text readiness records plus local workflow videos and
+receipts. These files are private source evidence and require repository
+access.
 
-## Model status
+Platform2 is not the same source as `sys-0` or `platform`. Those repositories
+provide reused references and comparison material. Their presence does not
+prove that a hosted labeling product, model registry, API, or customer
+workflow is deployed.
 
-A model name in configuration identifies a route. It does not prove that a
-credential resolves, that a provider accepts a request, or that a deployment
-serves that model. Record the route, source revision, execution environment,
-and observed response separately.
+## Model claims
+
+A model name identifies a route or a release record. It does not prove that a
+credential resolves, a provider accepts a request, a dataset is published, or
+an evaluation passed on the current source. Report the source revision,
+dataset or model identity, execution environment, input, expected result, and
+observed result separately.

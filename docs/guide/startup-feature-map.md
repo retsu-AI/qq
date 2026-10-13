@@ -1,38 +1,44 @@
 # Feature map
 
-This map connects a user journey to its owner, source entrypoint, storage
-boundary, guide, and evidence limit. A source pin identifies a revision. It
-does not establish acceptance.
+Use this table to move from a user journey to its source entrypoint and guide.
+The status is for the reviewed snapshot in the [overview](startup-overview.md).
 
-## QQ journeys
+## QQ features
 
-| Journey | Source entrypoint | Durable owner | Guide | Current basis |
-| --- | --- | --- | --- | --- |
-| Interactive terminal | `src/main.rs`, `crates/qq-tui/` | QQ session store | [The TUI](tui.md) | Implemented source |
-| One-shot prompt | `src/main.rs::ask` | Provider response stream | [Headless](headless.md) | Implemented source |
-| Durable headless run | `src/headless.rs`, `crates/qq-protocol/src/headless.rs` | QQ SQLite store | [Headless](headless.md) | Implemented source |
-| Local server | `crates/qq-server/` | QQ server and store | [Headless](headless.md) | Implemented source |
-| Provider credentials | `crates/qq-auth/`, `src/main.rs` | OS credential store | [Providers](providers.md) | Implemented source |
-| External tools | `crates/qq-mcp/`, `crates/qq-harness/` | MCP host and QQ plan | [MCP](mcp.md) | Implemented source |
+| Feature or process | Source entrypoint | Guide | Status |
+| --- | --- | --- | --- |
+| CLI dispatch | [`src/cli.rs`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/cli.rs) and [`src/main.rs`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/main.rs) | [CLI](cli.md) | Implemented source |
+| TUI sessions and rendering | [`crates/qq-tui/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-tui) | [The TUI](tui.md) | Implemented source |
+| Configuration layers | [`crates/qq-config/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-config) | [Configuration](configuration.md) | Implemented source |
+| Trust and project policy | [`docs/guide/permissions.md`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/docs/guide/permissions.md) | [Permissions](permissions.md) | Implemented source |
+| Provider adapters | [`crates/qq-provider/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-provider) | [Providers](providers.md) | Implemented source |
+| Credential storage and OAuth | [`crates/qq-auth/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-auth) | [Providers](providers.md) | Implemented source |
+| Sessions, history, replay, and persistence | [`crates/qq-core/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-core) | [Concepts](concepts.md) | Implemented source |
+| Headless `ask`, `run`, and `serve` | [`src/headless.rs`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/headless.rs) and [`crates/qq-server/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-server) | [Headless](headless.md) | Implemented source |
+| Built-in tool permissions | [`docs/design/tools.md`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/docs/design/tools.md) | [Permissions](permissions.md) | Implemented source |
+| Packs, profiles, and skills | [`crates/qq-config/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-config) | [Configuration](configuration.md) | Implemented source |
+| MCP client and catalog | [`crates/qq-mcp/`](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84/crates/qq-mcp) | [MCP](mcp.md) | Implemented source |
+| JEV observer | [`src/advisory.rs`](https://github.com/retsu-AI/qq/blob/9bae6937b50a013f652db8963ac3590103eb4b84/src/advisory.rs) | [Troubleshooting](troubleshooting.md) | Implemented source, advisory only |
 
-## Startup components
+## Startup features
 
-| Component | Source entrypoint | Storage or authority | Guide | Current basis |
-| --- | --- | --- | --- | --- |
-| Assistant gateway | Rust assistant `src/bin/qq-assistant-converse.rs` candidate | Assistant SQLite store plus QQ authority | [Assistant gateway](startup-assistant.md) | Candidate source |
-| Mac client | `Sources/QQClientCore`, Mac client sources | Local client SQLite; QQ owns sessions | [Native modes](startup-native-modes.md) | Candidate source |
-| iOS client | iOS client sources and shared core | Device storage; QQ remains host authority | [Native modes](startup-native-modes.md) | Candidate source |
-| Retsu API gateway | Retsu API package and Worker source | Customer key, credits, usage | [API and billing](startup-api-billing.md) | Candidate or private source |
-| Grip model backend | `grip serve` source design | Model process and metering sidecar | [Infrastructure](startup-infrastructure.md) | Planned deployment boundary |
-| Observability | QQ tracing and proposed Sentry boundary | Privacy-safe diagnostics | [Observability](startup-observability.md) | Planned composition |
+| Feature or process | Reviewed source | Guide | Status |
+| --- | --- | --- | --- |
+| Assistant project and memory journal | Rust assistant `docs/units/U1A.md`, `U2A.md`, `U2B-CLI.md` | [Assistant](startup-assistant.md) | Candidate source |
+| Assistant gateway and nodes | Rust assistant plus Mac and iOS private worktrees | [Assistant](startup-assistant.md) | Candidate source |
+| Direct and assistant native modes | `SPEC.md`, `SHARED-CLIENT-CONTRACT.md` in Mac and iOS candidates | [Native modes](startup-native-modes.md) | Future composition |
+| Retsu Effect gateway | `packages/api/src/index.ts`, `http/public.ts` | [API and billing](startup-api-billing.md) | Source snapshot |
+| Retsu auth and sessions | `services/Auth.ts`, `services/Sessions.ts`, `http/account.ts` | [API and billing](startup-api-billing.md) | Source snapshot |
+| Retsu extraction and usage | `services/Extract.ts`, `services/Ledger.ts` | [API and billing](startup-api-billing.md) | Source snapshot |
+| Stripe checkout and webhook | `services/Billing.ts`, `http/account.ts` | [API and billing](startup-api-billing.md) | Source snapshot |
+| Grip model and SDK | `crates/grip-server/`, `docs/reference/api.md`, SDK directories | [Data and models](startup-data-models.md) | Candidate or planned deployment |
+| Platform2 dataset and annotation loop | `docs/09-local-reviewed-data-experiment.md`, `docs/LOCAL-MODEL-LOOP-FEATURE-MAP.md` | [Data and models](startup-data-models.md) | Private local source |
+| Cloudflare gateway and web | `packages/api/wrangler.jsonc`, `packages/web/worker/index.ts` | [Infrastructure](startup-infrastructure.md) | Source snapshot |
+| Modal Grip backend | `packages/api/worker-configuration.d.ts`, `infra/modal/` | [Infrastructure](startup-infrastructure.md) | Source snapshot |
+| AWS ECS and Temporal target | Selected startup specification | [Infrastructure](startup-infrastructure.md) | Planned, not deployed |
+| Tracing, request IDs, health, catalog | `crates/qq-server/src/lib.rs`, Retsu `http/respond.ts`, gateway `index.ts` | [Observability](startup-observability.md) | Implemented source |
+| Sentry error routing | Selected startup specification | [Observability](startup-observability.md) | Planned |
 
-The assistant and native rows describe separate private repositories. Access to
-those repositories is required. Their local checks do not prove provider,
-device, hosted, or customer acceptance.
-
-## Read the map correctly
-
-The guide links to source names rather than private transcripts or local host
-paths. If a source row says candidate, read its acceptance section before
-using it as a product claim. If a row says planned, do not document an
-endpoint, credential flow, or deployment as available.
+Private repositories and candidate branches require access. A table row does
+not certify its runtime, deployment, provider, device, billing, or customer
+acceptance.

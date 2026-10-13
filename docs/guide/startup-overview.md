@@ -1,50 +1,51 @@
 # Startup systems overview
 
-This guide describes the current QQ and Retsu startup systems. It tells you
-where to start and labels the boundary between source behavior, candidate work,
-planned work, and runtime or deployment evidence.
+This guide is the landing page for the current QQ and Retsu startup systems.
+Choose a task card, then read the source and evidence boundary on its page.
 
-## Choose a path
+## Task cards
 
-| You want to | Start here | Current basis |
+| I need to… | Start here | What the page gives you |
 | --- | --- | --- |
-| Use the terminal agent | [Quickstart](quickstart.md) | Implemented QQ release behavior |
-| Develop QQ | [Develop QQ](startup-qq-development.md) | QQ source and repository workflow |
-| Use a native client | [Direct and assistant modes](startup-native-modes.md) | Candidate Mac and iOS client sources |
-| Run an assistant gateway | [Assistant gateway and nodes](startup-assistant.md) | Candidate Rust assistant sources |
-| Call the extraction API | [API and billing](startup-api-billing.md) | Separate Retsu API source |
-| Operate a deployment | [Infrastructure](startup-infrastructure.md) | Plans and private infrastructure source |
+| Install and run QQ | [Get started with the stack](startup-getting-started.md) | The smallest terminal path and its current source boundary |
+| Change QQ safely | [Develop QQ](startup-qq-development.md) | Source entrypoints, checks, review, adoption, and rollback |
+| Find a feature | [Feature map](startup-feature-map.md) | Component ownership, exact source links, and status |
+| Understand the assistant | [Assistant gateway and nodes](startup-assistant.md) | Rust gateway, node, memory, and QQ authority boundaries |
+| Compare native modes | [Direct and assistant modes](startup-native-modes.md) | Current client source, embedded Tailscale, and open acceptance |
+| Operate API or billing | [API and billing](startup-api-billing.md) | Cloudflare Worker, D1, AccountLedger, Modal, and Stripe flow |
+| Operate data and models | [Data and models](startup-data-models.md) | Grip and platform2 source workflows, with hosted limits |
+| Operate staging or production | [Infrastructure](startup-infrastructure.md) | Current Cloudflare and Modal source versus the selected AWS target |
+| Diagnose a failure | [Observability](startup-observability.md) and [Recovery](startup-recovery.md) | Bounded signals and explicit recovery decisions |
+| Connect tools or protocols | [MCP and ACP](startup-mcp-acp.md) | QQ MCP client, helper server, and ACP status |
+| Edit these pages | [Maintain the documentation](startup-maintenance.md) | Source links, status labels, and site checks |
 
-The detailed QQ pages remain authoritative for released terminal behavior. Use
-[Install](install.md), [Providers](providers.md), [CLI](cli.md), and
-[Troubleshooting](troubleshooting.md) instead of copying those procedures here.
+## Source snapshots
 
-## System boundaries
+These identities are the basis for this guide family. A source revision does
+not prove deployment or customer acceptance.
 
-QQ is one Rust binary. Its TUI, `qq ask`, `qq run`, and `qq serve` paths share
-the agent runtime, provider adapters, tool executor, and SQLite session store.
-The [architecture design](../design/architecture.md) records this source
-boundary.
+| Area | Snapshot | Access and limit |
+| --- | --- | --- |
+| QQ | `9bae6937b50a013f652db8963ac3590103eb4b84`, origin `main` | Public source; [QQ source](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84) |
+| Retsu | `b889cd9e531438e4c54b25aa5ff9dc281c5e6888`, local `main`, 2026-09-30 snapshot | Private repository access required; local snapshot was 65 commits behind its remote at review |
+| Assistant Rust | `ebd0dbb39cdb63cdc5eb9968366a568c442289b8`, branch `codex/rust-assistant-slice` | Private candidate source; provider and hosted acceptance unverified |
+| Assistant Mac | `a4a1d247a26c7019e4d4cec1ea84f3cd4ed309cd`, branch `feat/local-mac-assistant` | Private candidate source; native acceptance unverified |
+| Assistant iOS | `a3ef908573b73fbc3fe35dd00336fa4ef2eab21a`, branch `feat/ios-paired-continuation` | Private candidate source; device and remote acceptance unverified |
+| Data platform | `cea2df0f756b5bb3523de168f7e488a05b932ffc`, branch `codex/data-review-experiment-20261013` | Private candidate source; hosted product unverified |
 
-The assistant is a separate Rust project that uses QQ as its execution engine.
-Its private store owns project bindings, memory, and pending intent metadata.
-QQ owns credentials, sessions, transcripts, runs, provider calls, and tools.
-The assistant source is a candidate and its provider and native acceptance are
-unverified.
+QQ links point to public source. Private repository links require access and
+are omitted where a stable public URL does not exist. No page publishes local
+host paths, raw receipts, account identifiers, credentials, or private chats.
 
-Retsu is a separate product repository. Its Grip service has a gateway and a
-private model backend in its source design. The local private main snapshot is
-not evidence of a deployed service. Repository access is required for that
-source.
+## Status terms
 
-## Status vocabulary
+**Implemented source** means the reviewed source contains the behavior.
+**Candidate source** means a separate source unit still needs composition or
+independent acceptance. **Planned** means the reviewed source names work that
+is not implemented in this snapshot. **Runtime unverified** means source and
+local checks do not prove a live provider, host, device, deployment, payment,
+or customer journey.
 
-- **Implemented source** means the checked source contains the behavior.
-- **Candidate source** means a separate source unit describes or implements a
-  slice that still needs composition or independent acceptance.
-- **Planned** means the source or plan names work that is not implemented here.
-- **Runtime or deployment unverified** means source and local checks do not
-  prove a live provider, hosted service, native device, or customer journey.
-
-Open the [feature map](startup-feature-map.md) for the source entrypoint and
-status of each documented journey.
+The detailed QQ pages remain authoritative for released terminal behavior.
+Use [Install](install.md), [Providers](providers.md), [CLI](cli.md), and
+[Troubleshooting](troubleshooting.md) instead of copying those procedures.

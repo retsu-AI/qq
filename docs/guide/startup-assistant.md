@@ -1,42 +1,42 @@
 # Assistant gateway and nodes
 
-The assistant is a separate client and orchestration layer around QQ. QQ
-remains the execution engine for models, sessions, transcripts, runs, tools,
-and provider credentials.
+The assistant is a candidate Rust client and orchestration layer around QQ.
+QQ remains the execution engine for providers, sessions, transcripts, runs,
+tools, and approvals.
 
-## Gateway boundary
+## Implemented local journal
 
-The Rust assistant candidate stores projects, scoped memory, conversations, and
-pending intent metadata in its own private SQLite database. It resolves a
-canonical QQ workspace, creates or inspects a QQ session, prepares a bounded
-prompt, and records the exact intent and receipt state.
+The Rust candidate documents an executable conversation path in
+`docs/units/U2B-CLI.md`. It registers projects, stores scoped memory, prepares
+an exact prompt, records pending and uncertain operations, and inspects the
+receipt-derived run. The U1A and U2A documents describe schema migration,
+scope isolation, byte-preserving intent, and recovery rules.
 
-The assistant does not mirror the QQ transcript as its source of truth. It does
-not store provider credentials. A lost reply remains uncertain and needs an
-explicit same-intent inspection or retry. Ordinary startup does not resend a
-pending operation.
+The assistant store owns project bindings, conversations, memory, drafts, and
+pending intent. QQ owns provider credentials, session and run state, tool
+execution, and authoritative events. A lost response stays uncertain. The
+assistant does not invent a replacement request or silently replay it.
 
-The candidate executable uses typed JSON input and bounded output. It refuses
-unknown fields, malformed identity, invalid revisions, and unsafe database
-ownership before changing domain state. The source and verification documents
-are in the private assistant repository. Repository access is required.
+This is a private candidate source at observed head
+`ebd0dbb39cdb63cdc5eb9968366a568c442289b8` on `codex/rust-assistant-slice`.
+Repository access is required. Local source checks do not prove useful model
+output, a hosted gateway, or a shipped assistant.
 
-## Node boundary
+## Planned gateway and node surfaces
 
-The Mac and iOS clients use QQ's HTTP and SSE contract. They display bounded
-QQ snapshots and send explicit commands. The clients own local selection,
-memory, drafts, and pending command identities. QQ owns session authority,
-event ordering, approvals, provider calls, and execution.
+The broader startup design names a gateway, authorized Mac and iOS nodes, a
+dashboard, and memory, context, tool, plugin, and model boundaries. Those are
+planned composition surfaces. They are not all implemented in the reviewed
+candidate.
 
-The current native sources describe local loopback transport first. Remote
-enrollment, TLS, revocation, device pairing, and durable reconnect remain
-separate acceptance units. A native source check does not prove a real device
-or provider journey.
+The Mac and iOS candidates own client selection, local memory, drafts, and
+pending command identities. QQ remains the host authority. The clients do not
+own a second agent engine or provider key store.
 
-## Current status
+## Acceptance boundary
 
-The gateway, Mac client, and iOS client are candidate source units. The full
-assistant composition is not a deployed service. Missing node behavior,
-provider output, hosted routing, and customer acceptance remain open. See
-[Direct and assistant modes](startup-native-modes.md) and [Recovery](startup-recovery.md)
-for the user-facing boundaries.
+Provider execution, authenticated host enrollment, device pairing, remote
+transport, revocation, dashboard behavior, and hosted deployment each need
+their own evidence. A local journal check or a typed gateway request cannot
+close those claims. See [Direct and assistant modes](startup-native-modes.md),
+[Infrastructure](startup-infrastructure.md), and [Recovery](startup-recovery.md).
