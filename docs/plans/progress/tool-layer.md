@@ -595,3 +595,8 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `nice` ×8 `sudo ls` reached `sudo` at the depth boundary, and the fallback skipped index 0. The boundary command is now included.
 - Suffix enumeration was quadratic (an 8 000-word `env -S` cloned about 32 M strings). All three sites now use `bounded_suffixes`, capped at 64 starts × 16 words. A 7 000-word regression classifies in 0.04 s and fails closed.
 - `approval` 93 tests pass. Merging after this round (lead decision); further findings become follow-up issues.
+
+### 2026-10-13 — T19 merge-round residuals (#281)
+
+- A match formed across an earlier deletion (`A--AB--B`: delete `--AB--`, then edit `AB`) was unique in both texts but made of unseen bytes. A later unread edit's match must now also not touch any earlier edit's written span. A regression covers it and failed before the fix.
+- Reusing the uniqueness span in `apply_one` (a redundant scan, perf only) is [ENG-1033](https://linear.app/retsu-ai/issue/ENG-1033).

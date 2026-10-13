@@ -321,9 +321,24 @@ pub(super) fn edit_file(
                         !text[next..].contains(old)
                     })
                 };
+                // After earlier edits, the current match must also be a span
+                // the model saw: unique in the plan-time bytes, and not
+                // touching any earlier edit's written span. A deletion
+                // writes an empty span, so `A--AB--B` with `--AB--` deleted
+                // forms a new `AB` from bytes either side of it. A match
+                // that reaches the span's edge is not provably original.
+                let untouched = |text: &str| {
+                    text.find(old).is_some_and(|start| {
+                        let end = start + old.len();
+                        file.changes
+                            .iter()
+                            .all(|change| end < change.wrote.start || change.wrote.end < start)
+                    })
+                };
                 once(&file.text)
                     && (file.changes.is_empty()
-                        || std::str::from_utf8(&file.original.bytes).is_ok_and(once))
+                        || (std::str::from_utf8(&file.original.bytes).is_ok_and(once)
+                            && untouched(&file.text)))
             }
             Form::InsertBefore { .. } | Form::InsertAfter { .. } => false,
         };
@@ -1232,6 +1247,41 @@ mod tests {
         );
         assert_no_current_hash(&refused, before);
         assert_eq!(fs::read(directory.path().join("a.txt")).unwrap(), before);
+    }
+
+    /// Review (#281): a match formed across an earlier deletion is made of
+    /// bytes either side of what the model removed, not a region it showed.
+    #[test]
+    fn a_match_formed_across_an_earlier_deletion_is_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "A--AB--B\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+
+        let refused = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"--AB--","new":""},{"path":"a.txt","old":"AB","new":"XY"}]}"#,
+        );
+        assert!(
+            refused.model_text.starts_with("edit 1: not_read: a.txt "),
+            "{}",
+            refused.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "A--AB--B\n"
+        );
+        // Disjoint edits in one batch still apply.
+        fs::write(directory.path().join("b.txt"), "one\ntwo\nthree\n").unwrap();
+        let applied = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"b.txt","old":"one","new":"1"},{"path":"b.txt","old":"three","new":"3"}]}"#,
+        );
+        assert!(!applied.is_error, "{}", applied.model_text);
     }
 
     /// Review (#281): overlapping occurrences are repeats. `aa` occurs at
