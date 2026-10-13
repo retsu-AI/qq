@@ -1329,6 +1329,32 @@ pub struct SessionSummary {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<RunOutcome>,
+    /// Held calls of the active run still waiting for a decision (protocol
+    /// 32), calls a human is asked first, at most [`MAX_PENDING_HOLDS`].
+    /// Exact at the summary's cursor, so a client that never loaded the
+    /// session's body still knows it is waiting; later `tool_approval_*` and
+    /// `tool_call_*` events move it on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_holds: Vec<PendingHold>,
+    /// The side question running for this session, if any (protocol 32).
+    /// Later `side_question_updated` events move it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_side_question: Option<RunId>,
+}
+
+/// Bound on [`SessionSummary::pending_holds`]: one model turn's tool calls,
+/// the most a run can hold at once.
+pub const MAX_PENDING_HOLDS: usize = 16;
+
+/// One held call in [`SessionSummary::pending_holds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingHold {
+    pub tool_call_id: ToolCallId,
+    /// An approval delegate is still deciding; a human is asked only after
+    /// `tool_approval_escalated`. Absent means a human is being asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delegated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3530,6 +3556,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             summary: Some("intent: ship compaction".to_owned()),
             before_bytes: 3_200_000,
@@ -3591,6 +3619,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: None,
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
         };
         let encoded = serde_json::to_value(&updated).unwrap();
@@ -3651,6 +3681,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
@@ -3885,6 +3917,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
@@ -4345,6 +4379,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 1,
                 last_outcome: None,
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }).unwrap(),
             "run_id": id::<RunId>(4),
         });

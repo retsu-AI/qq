@@ -312,12 +312,13 @@ show the pane as `qq` with one state for every session the window follows:
 | herdr state | When |
 | --- | --- |
 | `blocked` | any session has an approval or question waiting for you (the message names it) |
-| `working` | otherwise, any session is running or queued, including while an approval delegate decides a held call |
+| `working` | otherwise, any session is running, queued, or answering a side question, including while an approval delegate decides a held call |
 | `idle` | nothing is running |
 
 herdr's notifications and `herdr agent wait` follow these states. The
-focused session is reported for restore: after a herdr server restart the
-pane runs `qq --session ID` and reopens it. Quitting `qq` clears the pane.
+focused session's root is reported for restore: after a herdr server
+restart the pane runs `qq --session ID` and reopens it, with a sub-agent
+session reopening as its tree. Quitting `qq` clears the pane.
 
 Reports go to the socket herdr names in `HERDR_SOCKET_PATH`, only when
 `HERDR_ENV=1` and `HERDR_PANE_ID` are set, and never delay the TUI: each

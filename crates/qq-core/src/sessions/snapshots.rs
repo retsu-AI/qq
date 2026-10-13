@@ -582,9 +582,52 @@ pub(super) fn load_session_summary_with_accounting(
                         .as_deref()
                         .map(serde_json::from_str)
                         .transpose()?,
+                    pending_holds: Vec::new(),
+                    running_side_question: None,
                 })
             },
         )
+        .and_then(|mut summary| {
+            // Who the session waits on, exact at this transaction: a client
+            // that never loads the body still knows. Calls a human is asked
+            // come first so the bound never hides one. Only an active run
+            // holds calls, so idle sessions skip the lookup.
+            if let Some(run_id) = summary.active_run_id {
+                let mut statement = connection.prepare_cached(
+                    "SELECT id, approval_delegated FROM tool_calls
+                      WHERE run_id = ?1 AND state = 'awaiting_approval'
+                        AND approval_resolution IS NULL
+                      ORDER BY approval_delegated, turn_ordinal, call_ordinal
+                      LIMIT ?2",
+                )?;
+                summary.pending_holds = statement
+                    .query_map(
+                        params![
+                            run_id.to_string(),
+                            u64::try_from(MAX_PENDING_HOLDS).expect("hold bound fits u64")
+                        ],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                    )?
+                    .map(|row| {
+                        let (id, delegated) = row?;
+                        Ok(PendingHold {
+                            tool_call_id: parse_id(&id)?,
+                            delegated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+            }
+            summary.running_side_question = connection
+                .prepare_cached(
+                    "SELECT id FROM side_questions WHERE session_id = ?1 AND state = 'running'",
+                )?
+                .query_row([session_id.to_string()], |row| row.get::<_, String>(0))
+                .optional()?
+                .as_deref()
+                .map(parse_id)
+                .transpose()?;
+            Ok(summary)
+        })
 }
 
 /// Estimated cost of one usage report under `pricing`, in USD nanos. `None`

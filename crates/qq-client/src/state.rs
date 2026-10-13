@@ -16,10 +16,10 @@ use std::{
 
 use qq_protocol::{
     AgentProfileId, ApprovalResolution, DelegateIdentity, EditPreview, FetchPreview, MessageId,
-    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, QuestionPreview, RunActivity,
-    RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
-    ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
-    WorkspaceId,
+    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, PendingHold, QuestionPreview,
+    RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot,
+    ToolCallState, WorkspaceId,
 };
 
 mod reduce;
@@ -262,6 +262,20 @@ impl SessionStore {
         self.index().depth.get(&id).copied().unwrap_or(0)
     }
 
+    /// The root of `id`'s tree, `id` itself for a root. `None` when `id` or
+    /// an ancestor is not loaded, so a caller never mistakes a child for a
+    /// root. Bounded by the tree depth.
+    #[must_use]
+    pub fn root_of(&self, mut id: SessionId) -> Option<SessionId> {
+        for _ in 0..=self.depth(id) {
+            match self.get(&id)?.summary.parent_id {
+                Some(parent) => id = parent,
+                None => return Some(id),
+            }
+        }
+        None
+    }
+
     /// Direct children of `parent`, oldest-first.
     #[must_use]
     pub fn children_of(&self, parent: SessionId) -> &[SessionId] {
@@ -294,20 +308,24 @@ impl SessionStore {
     }
 
     /// One state for everything this store follows, most urgent wins: any
-    /// hold waiting for a human, else any session running or queued, else
-    /// idle. Holds an approval delegate is still deciding count as work.
+    /// hold waiting for a human, else any session running, queued, or
+    /// answering a side question, else idle. Holds an approval delegate is
+    /// still deciding count as work. Reads only summary-level state, which
+    /// the server projects for every session, so cold sessions count too.
     #[must_use]
     pub fn activity(&self) -> StoreActivity {
         let mut working = false;
         for id in self.thread_order() {
             let view = &self.sessions[id];
             let live = &view.live;
+            // `with_delegate` is a subset of `awaiting_approval`.
             if live.awaiting_approval.len() > live.with_delegate.len() {
                 return StoreActivity::Blocked {
                     session_title: view.summary.title.clone(),
                 };
             }
             working |= !live.awaiting_approval.is_empty()
+                || view.summary.running_side_question.is_some()
                 || matches!(
                     view.summary.status,
                     SessionStatus::Running | SessionStatus::Queued
@@ -426,15 +444,10 @@ impl SessionStore {
                     .any(|call| call.id == *id && call.state == ToolCallState::Running)
             });
             view.approval_previews = previous.approval_previews;
-            // Who decides a hold is known only from its request event; keep
-            // it for holds the body still reports as waiting.
-            view.live.with_delegate = previous
-                .live
-                .with_delegate
-                .intersection(&view.live.awaiting_approval)
-                .copied()
-                .collect();
         }
+        // The summary's holds are exact at this snapshot's cursor; the
+        // body's bounded tool-call window may not reach every one.
+        view.live.set_holds(&view.summary.pending_holds);
         view.side_questions = snapshot.side_questions;
         view.messages = Some(messages);
         view.tool_calls = Some(tool_calls);
@@ -918,6 +931,8 @@ impl SessionView {
         loaded_through: u64,
     ) -> Self {
         let activity = summary.active_run_id.zip(summary.activity);
+        let mut live = LiveStatus::default();
+        live.set_holds(&summary.pending_holds);
         Self {
             side_questions: Vec::new(),
             summary,
@@ -925,7 +940,7 @@ impl SessionView {
             tool_calls: None,
             context_window,
             activity,
-            live: LiveStatus::default(),
+            live,
             reasoning: HashMap::new(),
             runs: HashMap::new(),
             last_focused: 0,
@@ -989,6 +1004,7 @@ impl SessionView {
             }
             (None, _) => self.activity = None,
         }
+        self.live.set_holds(&summary.pending_holds);
         self.summary = summary;
         self.context_window = context_window;
     }
@@ -1099,6 +1115,17 @@ impl LiveStatus {
             }
             self.tail.drain(..start);
         }
+    }
+
+    /// Replace the hold sets with a summary's projection, which is exact at
+    /// the summary's cursor; events after it move the sets on.
+    pub fn set_holds(&mut self, holds: &[PendingHold]) {
+        self.awaiting_approval = holds.iter().map(|hold| hold.tool_call_id).collect();
+        self.with_delegate = holds
+            .iter()
+            .filter(|hold| hold.delegated)
+            .map(|hold| hold.tool_call_id)
+            .collect();
     }
 
     pub fn note_tool_call(&mut self, call: &ToolCallSnapshot) {

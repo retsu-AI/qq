@@ -1748,6 +1748,80 @@ async fn reviewer_escalation_leaves_the_call_waiting_for_a_client() {
 }
 
 #[tokio::test]
+async fn the_session_summary_says_who_a_hold_waits_on_until_it_settles() {
+    // ENG-1034 (PR #289 review): a client that never loaded the session's
+    // body, or attached after the request event, learns from the summary
+    // alone whether a held call needs a human.
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "unsure".to_owned(),
+    }));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let holds = |snapshot: WorkspaceSnapshot| snapshot.sessions[0].pending_holds.clone();
+    let request = SnapshotRequest {
+        workspace_id: harness.workspace_id,
+        focused_session_id: None,
+        include_sessions: Vec::new(),
+        session_limit: 1,
+        message_limit: 8,
+    };
+    assert_eq!(
+        holds(harness.runtime.snapshot(request.clone()).await.unwrap()),
+        [qq_protocol::PendingHold {
+            tool_call_id: tool_call.id,
+            delegated: true,
+        }],
+        "the reviewer is deciding"
+    );
+
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::ToolApprovalEscalated { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        holds(harness.runtime.snapshot(request.clone()).await.unwrap()),
+        [qq_protocol::PendingHold {
+            tool_call_id: tool_call.id,
+            delegated: false,
+        }],
+        "escalated: a human is asked"
+    );
+
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    // Every summary the run published after the answer is clear of it.
+    for event in &observed {
+        if let SessionEvent::RunFinished { session, .. } = &event.event {
+            assert!(session.pending_holds.is_empty());
+        }
+    }
+    assert!(holds(harness.runtime.snapshot(request).await.unwrap()).is_empty());
+}
+
+#[tokio::test]
 async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
     // DA1: the reviewer is the configured delegate for the calls `auto`
     // holds. Its Deny settles the call as a tool error that names the

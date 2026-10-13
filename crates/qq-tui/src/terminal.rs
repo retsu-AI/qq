@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EndSynchronizedUpdate},
 };
 use futures_util::{Stream, StreamExt};
-use qq_protocol::SessionId;
+use qq_protocol::{SessionEvent, SessionEventEnvelope, SessionId};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
     time::{Duration, MissedTickBehavior, interval},
@@ -235,7 +235,18 @@ where
                 if let ClientUpdate::SnapshotFailed(failure) = &update {
                     last_client_failure = Some(failure.message().to_owned());
                 }
-                state_may_change = true;
+                // Streamed deltas are most updates while runs stream and
+                // never change idle/working/blocked; skip the fold for them.
+                state_may_change |= !matches!(
+                    &update,
+                    ClientUpdate::Event(SessionEventEnvelope {
+                        event: SessionEvent::TextAppended { .. }
+                            | SessionEvent::ReasoningDelta { .. }
+                            | SessionEvent::ToolCallOutputDelta { .. }
+                            | SessionEvent::RunActivityChanged { .. },
+                        ..
+                    })
+                );
                 app.apply_client_update(update)
             }
             highlighted = renderer.highlighter.next() => {
@@ -344,14 +355,18 @@ where
         if quit {
             break;
         }
-        // After input or a client update, so a focus change or a new session
-        // also moves herdr's resume target; frame and animation ticks change
-        // nothing herdr shows. Deduplicated in the sink.
+        // After input or a state-bearing client update, so a focus change or
+        // a new session also moves herdr's resume target; frame and animation
+        // ticks change nothing herdr shows. Deduplicated in the sink.
         if state_may_change && let Some(herdr) = &herdr {
             state_may_change = false;
             herdr.update(crate::herdr::Report {
                 activity: app.sessions.activity(),
-                session: app.focused(),
+                // `--session` opens roots only; a focused child resumes as
+                // its tree.
+                session: app
+                    .focused()
+                    .and_then(|focused| app.sessions.root_of(focused)),
             });
         }
     }

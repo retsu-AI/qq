@@ -21,6 +21,10 @@ const SOURCE: &str = "qq";
 const AGENT: &str = "qq";
 /// Bound on one request: connect, write, and read the acknowledgement.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+/// Bytes of acknowledgement read before giving up on a newline. The answer's
+/// content is ignored; this only bounds what a misbehaving peer can make us
+/// buffer.
+const MAX_ANSWER_BYTES: u64 = 4096;
 /// herdr caps `message` presentation text; longer text is cut client-side.
 const MAX_MESSAGE_CHARS: usize = 80;
 
@@ -55,7 +59,9 @@ impl HerdrPane {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Report {
     pub(crate) activity: StoreActivity,
-    /// The session herdr reopens with `qq --session <id>` after a restart.
+    /// The root session herdr reopens with `qq --session <id>` after a
+    /// restart. `--session` opens roots only, so callers pass the focused
+    /// session's root.
     pub(crate) session: Option<SessionId>,
 }
 
@@ -71,7 +77,7 @@ pub(crate) struct Reporter {
 impl Reporter {
     pub(crate) fn spawn(pane: HerdrPane) -> Self {
         let (latest, mut changes) = watch::channel(None::<Report>);
-        let seq = SeqClock::new();
+        let seq = SeqClock::default();
         let task = {
             let pane = pane.clone();
             let seq = seq.clone();
@@ -138,25 +144,35 @@ impl ReportSink {
 }
 
 /// herdr ignores a report whose `seq` is not above the last one it accepted
-/// from this source, including across QQ restarts, so the clock starts at
-/// wall-clock microseconds and only ever increments.
-#[derive(Debug, Clone)]
+/// from this source, including across QQ restarts. Each value is the later
+/// of wall-clock microseconds and one past the previous value, so it always
+/// increases within a process and a restarted QQ starts above everything
+/// an earlier one sent once the wall clock has passed it.
+#[derive(Debug, Clone, Default)]
 struct SeqClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
 
 impl SeqClock {
-    fn new() -> Self {
-        let start = std::time::SystemTime::now()
+    fn next(&self) -> u64 {
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
             });
-        Self(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            start,
-        )))
+        self.next_at(now)
     }
 
-    fn next(&self) -> u64 {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    fn next_at(&self, now_micros: u64) -> u64 {
+        let mut issued = 0;
+        // The closure always returns `Some`, so the update cannot fail.
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |previous| {
+                issued = now_micros.max(previous.saturating_add(1));
+                Some(issued)
+            },
+        );
+        issued
     }
 }
 
@@ -210,18 +226,21 @@ enum SendError {
     Unsupported,
 }
 
-/// One request: connect, write one JSON line, wait for one line back.
+/// One request: connect, write one JSON line, wait for one line back. The
+/// read is bounded in time and bytes.
 #[cfg(unix)]
 async fn send(socket: &std::path::Path, request: &Value) -> Result<(), SendError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     let exchange = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await?;
         let mut line = request.to_string();
         line.push('\n');
         stream.write_all(line.as_bytes()).await?;
-        let mut answer = String::new();
-        let read = BufReader::new(stream).read_line(&mut answer).await?;
+        let mut answer = Vec::new();
+        let read = BufReader::new(stream.take(MAX_ANSWER_BYTES))
+            .read_until(b'\n', &mut answer)
+            .await?;
         if read == 0 {
             return Err(SendError::NoAnswer);
         }
@@ -395,19 +414,23 @@ mod tests {
     }
 
     #[test]
-    fn the_sequence_starts_at_wall_clock_and_strictly_increases() {
+    fn the_sequence_follows_wall_clock_and_strictly_increases() {
+        let clock = SeqClock::default();
+        assert_eq!(clock.next_at(1_000), 1_000);
+        // Reports faster than the clock ticks, or a clock stepped back,
+        // still increase.
+        assert_eq!(clock.clone().next_at(1_000), 1_001);
+        assert_eq!(clock.next_at(10), 1_002);
+        assert_eq!(clock.next_at(5_000), 5_000);
+        // A restarted QQ continues above what this one sent once the wall
+        // clock has moved past it.
+        assert!(SeqClock::default().next_at(5_001) > 5_000);
+        // The real clock is in microseconds since the epoch.
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        let clock = SeqClock::new();
-        let first = clock.next();
-        let shared = clock.clone();
-        let second = shared.next();
-        assert!(u128::from(first) > before);
-        assert_eq!(second, first + 1);
-        // A restarted QQ continues above what this one sent.
-        assert!(SeqClock::new().next() > first);
+        assert!(u128::from(SeqClock::default().next()) >= before);
     }
 
     #[tokio::test]
@@ -529,5 +552,22 @@ mod tests {
         let started = tokio::time::Instant::now();
         reporter.release().await;
         assert!(started.elapsed() < REQUEST_TIMEOUT * 3);
+    }
+
+    #[tokio::test]
+    async fn an_endless_answer_without_a_newline_is_read_only_to_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("flood.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let chunk = [b'x'; 1024];
+            while stream.write_all(&chunk).await.is_ok() {}
+        });
+        // The read stops at the byte bound, well before the timeout; the
+        // answer's content is ignored either way.
+        let started = tokio::time::Instant::now();
+        assert!(send(&socket, &json!({})).await.is_ok());
+        assert!(started.elapsed() < REQUEST_TIMEOUT);
     }
 }

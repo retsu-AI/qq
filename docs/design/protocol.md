@@ -68,7 +68,12 @@ nothing; an unknown side-question id is a client error. These do not alter
 the main session transcript or accounting. Version 32 also adds
 `delegated: true` to `tool_approval_requested` when an approval delegate
 decides the hold before any human; it is omitted (false) otherwise, so
-every earlier hold encodes unchanged.
+every earlier hold encodes unchanged. Session summaries gain
+`pending_holds` (the active run's held calls, each with `delegated` when a
+delegate decides first) and `running_side_question`, both exact at the
+summary's cursor and omitted when empty, so a client knows a session is
+waiting or answering without loading its body or having seen the request
+event.
 
 Golden fixtures for the current version live under
 `crates/qq-protocol/tests/fixtures/v32/`; the `v17`–`v31` directories are
@@ -253,6 +258,9 @@ answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 `prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
 `side_questions`, the isolated side-question rows behind protocol 32.
+Schema 45 adds `tool_calls.approval_delegated`, behind
+`SessionSummary.pending_holds`; holds written before it read as waiting for
+a human.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -1555,6 +1563,15 @@ activity.
 session. It is absent when unknown. A successful compaction or a model change
 clears it until another prompt turn reports usage; clients must not reconstruct
 it from cumulative run billing.
+
+`pending_holds` lists the active run's calls still awaiting a decision, at
+most 16, calls a human is asked ordered first: `{ "tool_call_id": "...",
+"delegated": true }`, where `delegated` (omitted when false) means an
+approval delegate decides before any human. `running_side_question` is the
+id of the session's running side question. Both are exact at the summary's
+cursor; `tool_approval_*`, `tool_call_*`, `run_finished`, and
+`side_question_updated` events move them on. A client that never loaded the
+session's body uses them to tell idle, working, and waiting apart.
 
 **`RunSnapshot`**
 
