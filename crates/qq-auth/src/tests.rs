@@ -19,6 +19,14 @@ use sha2::Digest as _;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {label}");
+        thread::yield_now();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FakeMode {
     #[default]
@@ -2956,21 +2964,18 @@ fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
         }));
     }
     start.wait();
-    while !gate.entered.load(Ordering::SeqCst) {
-        thread::yield_now();
-    }
-    while store
-        .stored_resolution
-        .0
-        .lock()
-        .unwrap()
-        .flights
-        .values()
-        .next()
-        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 7)
-    {
-        thread::yield_now();
-    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    wait_until("cold followers", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 7)
+    });
     gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert_eq!(worker.join().unwrap(), b"secret");
@@ -3005,21 +3010,18 @@ fn stored_keyring_resolution_failure_is_shared_and_retryable() {
             )
         }));
     }
-    while !gate.entered.load(Ordering::SeqCst) {
-        thread::yield_now();
-    }
-    while store
-        .stored_resolution
-        .0
-        .lock()
-        .unwrap()
-        .flights
-        .values()
-        .next()
-        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 3)
-    {
-        thread::yield_now();
-    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    wait_until("failure followers", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 3)
+    });
     gate.release.store(true, Ordering::SeqCst);
     for worker in workers {
         assert!(matches!(
@@ -3119,18 +3121,17 @@ fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
             )
         })
     };
-    while store
-        .stored_resolution
-        .0
-        .lock()
-        .unwrap()
-        .flights
-        .values()
-        .next()
-        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 1)
-    {
-        thread::yield_now();
-    }
+    wait_until("panic follower", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 1)
+    });
     keyring.release.store(true, Ordering::SeqCst);
     assert!(owner.join().is_err());
     assert!(matches!(
@@ -3241,16 +3242,15 @@ fn stored_keyring_resolution_revalidates_after_capacity_wait() {
         let result = worker_store.resolve_with_epoch(&SecretRef::Stored(target.name.clone()), None);
         done_tx.send(result).unwrap();
     });
-    while coordinator
-        .0
-        .lock()
-        .unwrap()
-        .capacity_waiters
-        .load(Ordering::SeqCst)
-        == 0
-    {
-        thread::yield_now();
-    }
+    wait_until("capacity waiter", || {
+        coordinator
+            .0
+            .lock()
+            .unwrap()
+            .capacity_waiters
+            .load(Ordering::SeqCst)
+            > 0
+    });
     assert_eq!(keyring.read_count("provider/target"), 0);
 
     // Rotate the index while the request is waiting. Releasing one flight must
@@ -3288,9 +3288,7 @@ fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
             .send(owner_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
             .unwrap();
     });
-    while !gate.entered.load(Ordering::SeqCst) {
-        thread::yield_now();
-    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
     let follower_store = store.clone();
     let (follower_tx, follower_rx) = std::sync::mpsc::channel();
     let follower = thread::spawn(move || {
@@ -3298,18 +3296,17 @@ fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
             .send(follower_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
             .unwrap();
     });
-    while store
-        .stored_resolution
-        .0
-        .lock()
-        .unwrap()
-        .flights
-        .values()
-        .next()
-        .is_none_or(|flight| flight.followers.load(Ordering::SeqCst) < 1)
-    {
-        thread::yield_now();
-    }
+    wait_until("coordinator poison follower", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 1)
+    });
     let coordinator = Arc::clone(&store.stored_resolution);
     assert!(
         thread::spawn(move || {
@@ -3351,9 +3348,7 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
             .send(owner_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
             .unwrap();
     });
-    while !gate.entered.load(Ordering::SeqCst) {
-        thread::yield_now();
-    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
     let follower_store = store.clone();
     let (follower_tx, follower_rx) = std::sync::mpsc::channel();
     let follower = thread::spawn(move || {
@@ -3361,7 +3356,12 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
             .send(follower_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
             .unwrap();
     });
+    let deadline = Instant::now() + Duration::from_secs(1);
     let flight = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for result follower"
+        );
         if let Some(flight) = store
             .stored_resolution
             .0
