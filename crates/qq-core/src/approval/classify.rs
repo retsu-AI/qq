@@ -227,9 +227,15 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
         }
     }
     if program == "timeout" {
+        // GNU duration: a floating-point number (`30`, `.5`, `1e3`, `inf`)
+        // with an optional `s`/`m`/`h`/`d` suffix. `timeout` itself rejects
+        // anything else before launching, so this only has to tell the
+        // duration apart from the inner command.
         let duration = args.get(own)?.as_deref()?;
-        let number = duration.trim_end_matches(['s', 'm', 'h', 'd']);
-        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        let number = duration
+            .strip_suffix(['s', 'm', 'h', 'd'])
+            .unwrap_or(duration);
+        if number.parse::<f64>().is_err() {
             return None;
         }
         own += 1;
@@ -237,6 +243,41 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
     // The inner command must exist and have a literal program.
     args.get(own)?.as_deref()?;
     Some(own)
+}
+
+/// A program `peel` looks through: a launcher or a wrapper whose inner
+/// command is recorded.
+fn is_wrapper(program: &str) -> bool {
+    matches!(
+        program,
+        "timeout"
+            | "time"
+            | "nice"
+            | "nohup"
+            | "stdbuf"
+            | "env"
+            | "ionice"
+            | "chrt"
+            | "taskset"
+            | "setsid"
+            | "unbuffer"
+            | "command"
+            | "builtin"
+            | "exec"
+            | "xargs"
+            | "sudo"
+            | "doas"
+            | "su"
+            | "pkexec"
+            | "watch"
+            | "strace"
+            | "ltrace"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "dash"
+            | "ksh"
+    )
 }
 
 fn parser() -> Parser {
@@ -523,16 +564,18 @@ impl Collector<'_> {
     /// (judged Forbidden by the rules), and a launcher with a foreign option.
     /// `sh -c STRING` parses the string as a program of its own.
     fn peel(&mut self, command: SimpleCommand, depth: usize) {
-        if depth >= MAX_WRAPPER_DEPTH {
-            // Too deep to see what finally runs: what is left is nested, so
-            // it can never be allowed.
+        let program = command.program().map(str::to_owned);
+        // `depth` wrappers are already peeled. Past the limit, a command that
+        // would itself be peeled is too deep to see through: it is nested, so
+        // it can never be allowed. The command reached after exactly
+        // `MAX_WRAPPER_DEPTH` peels is judged normally.
+        if depth >= MAX_WRAPPER_DEPTH && program.as_deref().is_some_and(is_wrapper) {
             self.commands.push(SimpleCommand {
                 nested: true,
                 ..command
             });
             return;
         }
-        let program = command.program().map(str::to_owned);
         // Only the bare name reaches the system launcher through `PATH`;
         // `./timeout` or `/tmp/nohup` is whatever program sits there.
         let bare = command
@@ -593,8 +636,52 @@ impl Collector<'_> {
                     self.peel(inner, depth + 1);
                 }
             }
-            "nice" | "nohup" | "time" | "stdbuf" | "ionice" | "chrt" | "setsid" | "unbuffer"
-            | "command" | "builtin" | "exec" => {
+            "taskset" | "chrt" => {
+                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd: skip the
+                // options and the one positional before the command. `-p`
+                // retargets a running process; there is no inner command.
+                let retargets = args.iter().any(|a| {
+                    a.as_deref().is_some_and(|w| {
+                        w == "--pid"
+                            || (w.starts_with('-') && !w.starts_with("--") && w.contains('p'))
+                    })
+                });
+                if retargets {
+                    return;
+                }
+                let mut skip = 0;
+                while let Some(Some(word)) = args.get(skip) {
+                    if word.starts_with('-') {
+                        skip += 1;
+                        if program == "taskset" && matches!(word.as_str(), "-c" | "--cpu-list") {
+                            // `-c LIST` replaces the mask positional.
+                            skip += 1;
+                            break;
+                        }
+                        if program == "chrt"
+                            && matches!(
+                                word.as_str(),
+                                "-T" | "-P"
+                                    | "-D"
+                                    | "--sched-runtime"
+                                    | "--sched-period"
+                                    | "--sched-deadline"
+                            )
+                        {
+                            skip += 1;
+                        }
+                    } else {
+                        // The mask or the priority.
+                        skip += 1;
+                        break;
+                    }
+                }
+                if let Some(inner) = inner_from(skip) {
+                    self.peel(inner, depth + 1);
+                }
+            }
+            "nice" | "nohup" | "time" | "stdbuf" | "ionice" | "setsid" | "unbuffer" | "command"
+            | "builtin" | "exec" => {
                 // Skip the wrapper's own dash options (and `nice -n 5`).
                 let mut skip = 0;
                 while let Some(Some(word)) = args.get(skip) {
