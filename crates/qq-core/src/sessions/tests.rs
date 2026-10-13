@@ -6498,6 +6498,89 @@ fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
     assert!(!format!("{captured:?}").contains("prompt 0"));
 }
 
+#[tokio::test]
+async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("settled-summary.sqlite"))
+        .await
+        .unwrap();
+    let (_, _, parent) = create_claimed_parent(&store, directory.path()).await;
+    let model = Arc::new(test_resolved_model(
+        "test/model",
+        "test-model",
+        256,
+        Some(budget_pricing()),
+    ));
+    let (summary, _) = store
+        .start_in_run_compaction(&parent, &model, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = store
+        .finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::RunFinished { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        store
+            .finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        store.start_in_run_summary_request(&summary).await,
+        Err(SessionRuntimeError::Unavailable)
+    ));
+    let stale = store
+        .persist_in_run_summary_turn(
+            &summary,
+            ModelTurnCommit {
+                turn_ordinal: 1,
+                message: Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "late summary".to_owned(),
+                    }],
+                ),
+                calls: Vec::new(),
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: Some(usage(7, 3)),
+                estimated_cost_usd_nanos: Some(13_000),
+                accounting: None,
+                truncated: false,
+                notice: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(stale, Err(SessionRuntimeError::Unavailable)),
+        "{stale:?}"
+    );
+    let id = summary.identity.run_id.to_string();
+    store
+        .call(Priority::Control, move |connection| {
+            let turns: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM model_turns WHERE run_id = ?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(turns, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
 #[test]
 fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
     let directory = TempDir::new().unwrap();

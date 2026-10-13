@@ -455,6 +455,144 @@ async fn a_summarizer_the_provider_rejects_fails_closed_without_retrying() {
 }
 
 #[tokio::test]
+async fn stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_totals() {
+    for cancel in [true, false] {
+        let mut script = Script::tools(24, 2_048, Some(16 * 1_024));
+        script.summary_prefix = Some(support::SummaryPrefix::Calls);
+        script.summary_hang_after_prefix = true;
+        script.summary_usage = Some(qq_provider::ProviderUsage {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_tokens: None,
+        });
+        script.pricing = Some(qq_protocol::ModelPricing {
+            input_usd_nanos_per_token: 1_000,
+            output_usd_nanos_per_token: 2_000,
+            cache_read_usd_nanos_per_token: Some(0),
+            cache_write_usd_nanos_per_token: Some(0),
+            context_tier: None,
+            provenance: "deterministic test pricing".to_owned(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut fixture = support::Fixture::open(directory.path(), script.clone()).await;
+        let run_id = fixture
+            .submit_with_limits(qq_protocol::RunLimits {
+                max_duration_ms: Some(5_000),
+                ..qq_protocol::RunLimits::default()
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while fixture.observed.lock().unwrap().summary_requests < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the second summary request must really hang");
+        if cancel {
+            fixture
+                .runtime
+                .command(
+                    qq_protocol::CommandId::generate().unwrap(),
+                    qq_protocol::SessionCommand::CancelRun { run_id },
+                )
+                .await
+                .unwrap();
+        }
+        let mut live = Vec::new();
+        let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let event = fixture.events.next().await.unwrap().unwrap();
+                let finished = match &event.event {
+                    SessionEvent::RunFinished {
+                        run_id: finished,
+                        outcome,
+                        ..
+                    } if *finished == run_id => Some(outcome.clone()),
+                    _ => None,
+                };
+                live.push(event);
+                if let Some(outcome) = finished {
+                    break outcome;
+                }
+            }
+        })
+        .await
+        .expect("cancel or original deadline stops a hung summary");
+        if cancel {
+            assert_eq!(outcome, RunOutcome::Cancelled);
+        } else {
+            assert!(
+                matches!(outcome, RunOutcome::BudgetExhausted { exhaustion } if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+            );
+        }
+        fixture.runtime.close().await.unwrap();
+        assert_eq!(fixture.observed.lock().unwrap().summary_requests, 2);
+        let reopened = SessionRuntime::open(
+            SessionRuntimeOptions::new(fixture.database.clone()),
+            Arc::new(support::Loader {
+                script,
+                observed: Arc::clone(&fixture.observed),
+            }),
+        )
+        .await
+        .unwrap();
+        reopened.close().await.unwrap();
+        assert_eq!(
+            fixture.observed.lock().unwrap().summary_requests,
+            2,
+            "restart never reissues the pending summary"
+        );
+        let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+        let (rows, usage, cost): (u64, String, u64) = connection.query_row(
+            "SELECT COUNT(*), t.usage_json, t.estimated_cost_usd_nanos FROM model_turns t JOIN runs r ON r.id = t.run_id WHERE r.kind = 'compaction'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(rows, 1);
+        let usage: qq_protocol::TokenUsage = serde_json::from_str(&usage).unwrap();
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, cost),
+            (7, 3, 13_000)
+        );
+        let internal: (u64, u64, u64) = connection.query_row(
+            "SELECT COUNT(*), SUM(outcome_json IS NOT NULL), SUM(usage_json IS NULL AND estimated_cost_usd_nanos IS NULL) FROM runs WHERE kind = 'compaction'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(internal, (1, 1, 1));
+        let first = live.first().unwrap().cursor;
+        let last = live.last().unwrap().cursor;
+        let replay: Vec<qq_protocol::SessionEventEnvelope> = connection.prepare(
+            "SELECT envelope_json FROM events WHERE workspace_id = ?1 AND sequence BETWEEN ?2 AND ?3 ORDER BY sequence").unwrap()
+            .query_map(rusqlite::params![first.workspace_id.to_string(), first.sequence, last.sequence], |row| row.get::<_, String>(0)).unwrap()
+            .map(|row| serde_json::from_str(&row.unwrap()).unwrap()).collect();
+        assert_eq!(replay, live);
+        let terminal: Vec<qq_protocol::SessionEventEnvelope> = connection
+            .prepare("SELECT envelope_json FROM events ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+            .collect();
+        assert_eq!(
+            terminal
+                .iter()
+                .filter(|event| matches!(event.event, SessionEvent::RunFinished { .. }))
+                .count(),
+            2
+        );
+        let observed = fixture.observed.lock().unwrap();
+        assert_eq!(
+            observed
+                .calls
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            observed.calls.len()
+        );
+    }
+}
+
+#[tokio::test]
 async fn cancelling_during_a_summarizer_backoff_cancels_the_run_and_starts_no_new_step() {
     // The failed attempt's compaction run has settled before the backoff,
     // so a cancel during the sleep leaves nothing running and no retry.
