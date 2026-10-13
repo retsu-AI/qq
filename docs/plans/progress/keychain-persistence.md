@@ -52,3 +52,20 @@ Keychain persistence, real QQ authentication, or provider completion.
 Shell syntax, ShellCheck, and whitespace checks pass. No new repository test
 suite was added or run. No standalone deslop tool was installed; the author
 reviewed the small diff directly and added no explanatory code comments.
+
+### 2026-10-13 independent review repair
+
+- `52d8f3d` received Request Changes: idle legacy migration lost rollback bytes,
+  writable payloads overstated immutability, and unexpected selectors were replaced.
+- The revised installer preserves verified legacy bytes before selection on both
+  platforms, publishes mode `0555`, and refuses unknown selectors or extra hard links.
+- The existing native-process probe now demonstrates idle migration, executable
+  rollback, read-only adoption, hard-link and special-node refusal, inspection
+  failure, retained-checksum failure, recovery, and owned cleanup on macOS.
+- The first run exposed a staging-link removal prompt; `rm -f` on that owned
+  path repaired it. A later socket fixture exceeded macOS's path limit; shortening
+  the owned fixture path repaired the probe. Both failed receipts are preserved.
+- Final probe, shell syntax, ShellCheck, and whitespace checks pass. Receipts are
+  `installer-probe-review-fixes*` in the existing external evidence directory.
+- No Linux execution, device-node creation, malicious same-user race, live QQ,
+  Keychain, signing, or provider acceptance is claimed. Fresh review is pending.

@@ -120,9 +120,40 @@ else
 fi
 
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
-[ ! -d "$INSTALL_DIR/qq" ] || fail "$INSTALL_DIR/qq is a directory"
+file_sha() {
+  hash_output="$( $SHA256 "$1")" || fail "cannot checksum $1; nothing was selected"
+  printf '%s\n' "$hash_output" | awk '{print tolower($1)}'
+}
 
-if [ "$os" = Darwin ] && [ -e "$INSTALL_DIR/qq" ] && [ ! -L "$INSTALL_DIR/qq" ]; then
+legacy_sha=""
+selected_sha=""
+if [ -L "$INSTALL_DIR/qq" ]; then
+  selected_target="$(readlink "$INSTALL_DIR/qq")" || fail "cannot inspect $INSTALL_DIR/qq"
+  selected_sha="${selected_target#.qq-versions/qq-}"
+  [ "$selected_target" = ".qq-versions/qq-$selected_sha" ] && [ "${#selected_sha}" -eq 64 ] \
+    || fail "$INSTALL_DIR/qq is not an installer selection link"
+  case "$selected_sha" in
+    *[!0-9a-f]*) fail "$INSTALL_DIR/qq is not an installer selection link" ;;
+  esac
+elif [ -e "$INSTALL_DIR/qq" ]; then
+  [ -f "$INSTALL_DIR/qq" ] && [ -x "$INSTALL_DIR/qq" ] \
+    || fail "$INSTALL_DIR/qq must be a regular executable or installer selection link"
+  legacy_sha="$(file_sha "$INSTALL_DIR/qq")"
+fi
+
+link_count() {
+  case "$os" in
+    Darwin) stat -f '%l' "$1" ;;
+    Linux) stat -c '%h' "$1" ;;
+  esac
+}
+
+if [ -n "$legacy_sha" ]; then
+  [ "$(link_count "$INSTALL_DIR/qq")" = 1 ] \
+    || fail "$INSTALL_DIR/qq has multiple hard links or could not be inspected; nothing was selected"
+fi
+
+if [ "$os" = Darwin ] && [ -n "$legacy_sha" ]; then
   command -v lsof >/dev/null 2>&1 || fail "lsof is required to check the existing macOS executable before upgrading"
   if lsof -t -- "$INSTALL_DIR/qq" > "$tmp/active-pids" 2> "$tmp/process-errors"; then
     active_pids="$(tr '\n' ' ' < "$tmp/active-pids")"
@@ -137,19 +168,39 @@ fi
 versions="$INSTALL_DIR/.qq-versions"
 [ ! -L "$versions" ] || fail "$versions must not be a symbolic link"
 mkdir -p "$versions" || fail "cannot create $versions"
-binary_sha="$( $SHA256 "$binary" | awk '{print tolower($1)}')"
-retained_binary="$versions/qq-$binary_sha"
-[ ! -L "$retained_binary" ] && [ ! -d "$retained_binary" ] \
-  || fail "$retained_binary must be a regular executable"
+binary_sha="$(file_sha "$binary")"
 install_stage="$(mktemp -d "$INSTALL_DIR/.qq-install.XXXXXX")" \
   || fail "cannot stage an installation in $INSTALL_DIR"
-install -m 755 "$binary" "$install_stage/qq" || fail "cannot stage qq"
-if ! ln "$install_stage/qq" "$retained_binary" 2>/dev/null; then
+
+retain_binary() (
+  retained_binary="$versions/qq-$2"
+  if [ -e "$retained_binary" ] || [ -L "$retained_binary" ]; then
+    [ ! -L "$retained_binary" ] && [ -f "$retained_binary" ] && [ -x "$retained_binary" ] \
+      || fail "$retained_binary must be a regular executable"
+  else
+    install -m 555 "$1" "$install_stage/payload" || fail "cannot stage $1"
+    staged_sha="$(file_sha "$install_stage/payload")"
+    [ "$staged_sha" = "$2" ] || fail "the staged executable changed while copying; nothing was selected"
+    ln "$install_stage/payload" "$retained_binary" 2>/dev/null || true
+    rm -f "$install_stage/payload" || fail "cannot remove the temporary publication link"
+  fi
   [ ! -L "$retained_binary" ] && [ -f "$retained_binary" ] && [ -x "$retained_binary" ] \
-    || fail "cannot preserve the immutable executable at $retained_binary"
-  retained_sha="$( $SHA256 "$retained_binary" | awk '{print tolower($1)}')"
-  [ "$retained_sha" = "$binary_sha" ] || fail "the retained executable does not match its checksum; nothing was selected"
+    || fail "cannot preserve the executable at $retained_binary"
+  [ "$(link_count "$retained_binary")" = 1 ] \
+    || fail "$retained_binary has multiple hard links or could not be inspected; nothing was selected"
+  retained_sha="$(file_sha "$retained_binary")"
+  [ "$retained_sha" = "$2" ] || fail "the retained executable does not match its checksum; nothing was selected"
+  chmod 555 "$retained_binary" || fail "cannot make the retained executable read-only; nothing was selected"
+)
+
+if [ -n "$selected_sha" ]; then
+  [ -f "$versions/qq-$selected_sha" ] || fail "the current selection has no retained executable"
+  retain_binary "$versions/qq-$selected_sha" "$selected_sha"
 fi
+if [ -n "$legacy_sha" ]; then
+  retain_binary "$INSTALL_DIR/qq" "$legacy_sha"
+fi
+retain_binary "$binary" "$binary_sha"
 ln -s ".qq-versions/qq-$binary_sha" "$install_stage/selected"
 mv -f "$install_stage/selected" "$INSTALL_DIR/qq" || fail "cannot select $INSTALL_DIR/qq"
 

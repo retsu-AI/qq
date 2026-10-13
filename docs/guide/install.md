@@ -27,8 +27,10 @@ QQ_VERSION=0.1.5 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
 
 `sh install.sh --help` lists the options. To upgrade, run it again.
 The installer keeps each executable in `.qq-versions` beside `qq` and selects
-it through a symbolic link. Existing executable files remain available to
-processes that started before an update.
+it through a symbolic link. A legacy regular executable is copied into that
+store before the first successful migration. Retained files are read-only;
+the installer never overwrites their bytes. Existing retained executables remain
+available to processes that started before an update.
 
 ## Homebrew (macOS, Linux)
 
@@ -147,6 +149,13 @@ leaves the installed file untouched if it finds users. This check is a snapshot;
 do not start another client during the transition. Later installer updates
 select a retained executable without rewriting older payloads. Other install
 routes own their executable lifecycle.
+
+The installer refuses unexpected files at `qq`, foreign selection links, and
+executables with multiple hard links. It verifies the checksum of an existing
+retained payload before using it. These checks protect the installer transition;
+the same user can still deliberately change permissions or replace files.
+To return to an earlier release, rerun the installer with its `--version` after
+the same quiescent transition. The matching retained executable is reused.
 
 The installer preserves credentials and does not change Keychain access
 control. Stable signing identity and a compatible designated requirement are

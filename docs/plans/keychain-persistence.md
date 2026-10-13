@@ -41,6 +41,27 @@ existing same-hash payload, then renames the selection symlink atomically.
 Signals remove only installer-owned staging files. Prior payloads are retained
 release artifacts, not temporary build output. There is no automatic pruning.
 
+A successful legacy regular-file migration first copies and verifies the old
+executable into the same retained store on both supported operating systems.
+It preserves both old and new payloads before replacing the selector. Inspection,
+copy, checksum, or publication failure leaves the original selection unchanged.
+Rollback can therefore select the old retained bytes after an idle migration.
+
+Published payloads are mode `0555`. Existing payloads must be regular executable
+files with the expected checksum and exactly one hard link; a verified writable
+payload from an earlier installer is made read-only before selection. Legacy
+regular executables must also have exactly one hard link. Additional links are
+refused rather than changing permissions through an unknown alias. Temporary
+publication links are removed before verification and selection; a concurrent
+installer that observes that transient link may fail safely and be retried.
+
+The selector accepts absence, a regular executable, or the installer's relative
+`.qq-versions/qq-<sha256>` link to a verified retained payload. Other links,
+directories, FIFOs, sockets, and devices are refused without replacement.
+These checks prevent accidental mutation by this installer, not deliberate
+tampering or filesystem races by the same user, who controls the directory and
+can change permissions. Read-only retention is not an OS immutability guarantee.
+
 Before replacing a regular macOS installation, `lsof` checks its current file
 users. A busy or failed inspection leaves selection unchanged. The check cannot
 prevent a concurrent new launch, identify already-exited requesters in an OS
@@ -74,4 +95,5 @@ persistent authorization or guarantees that the OS never asks to unlock.
 
 Rollback selects the retained prior signed artifact after the same quiescent
 transition. Session data, backups, credential items, and diagnostic receipts
-are preserved. The selected payload remains immutable until no longer in use.
+are preserved. The installer keeps prior payloads read-only and never overwrites
+their bytes.
