@@ -58,7 +58,7 @@ not prove deployment or customer acceptance.
 | Area | Snapshot | Access and limit |
 | --- | --- | --- |
 | QQ | `9bae6937b50a013f652db8963ac3590103eb4b84`, origin `main` | Public source; [QQ source](https://github.com/retsu-AI/qq/tree/9bae6937b50a013f652db8963ac3590103eb4b84) |
-| Retsu | `8d58080829231bb74e180c6de4e8f687c4606200`, origin `main`, 2026-10-09 fetched snapshot | Private repository access required; `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` is historical and older auth/session source |
+| Retsu | `8d58080829231bb74e180c6de4e8f687c4606200`, origin `main`, refreshed 2026-10-13 | Private repository access required; `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` is historical and older auth/session source |
 | Assistant Rust | `ebd0dbb39cdb63cdc5eb9968366a568c442289b8`, branch `codex/rust-assistant-slice` | Private candidate source; provider and hosted acceptance unverified |
 | Assistant Mac | `a4a1d247a26c7019e4d4cec1ea84f3cd4ed309cd`, branch `feat/local-mac-assistant` | Private candidate source; native acceptance unverified |
 | Assistant iOS | `a3ef908573b73fbc3fe35dd00336fa4ef2eab21a`, branch `feat/ios-paired-continuation` | Private candidate source; device and remote acceptance unverified |
@@ -73,7 +73,7 @@ host paths, raw receipts, account identifiers, credentials, or private chats.
 **Implemented source** means the reviewed source contains the behavior.
 **Candidate source** means a separate source unit still needs composition or
 independent acceptance. **Planned** means the reviewed source names work that
-is not implemented in this snapshot. **Runtime unverified** means source and
+is not implemented in this snapshot. **Runtime or deployment unverified** means source and
 local checks do not prove a live provider, host, device, deployment, payment,
 or customer journey.
 

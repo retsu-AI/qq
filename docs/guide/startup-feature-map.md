@@ -22,7 +22,7 @@ The status is for the reviewed snapshot in the [overview](startup-overview.md).
 
 ## Startup features
 
-Retsu rows use current origin/main pin `8d58080829231bb74e180c6de4e8f687c4606200` (fetched 2026-10-09; private repository access required). The older `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` snapshot is historical.
+Retsu rows use origin/main pin `8d58080829231bb74e180c6de4e8f687c4606200`, refreshed on 2026-10-13. Private repository access is required. The older `b889cd9e531438e4c54b25aa5ff9dc281c5e6888` snapshot is historical.
 
 | Feature or process | Reviewed source | Guide | Status |
 | --- | --- | --- | --- |

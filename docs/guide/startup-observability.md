@@ -26,7 +26,7 @@ that a provider accepted a prompt.
 ## Current Retsu request evidence
 
 The current private Retsu source pin is
-`8d58080829231bb74e180c6de4e8f687c4606200` (origin/main fetched 2026-10-09;
+`8d58080829231bb74e180c6de4e8f687c4606200` (commit dated 2026-10-09, origin/main fetched 2026-10-13;
 repository access required). The earlier `b889cd9e531438e4c54b25aa5ff9dc281c5e6888`
 snapshot is historical context. Current request identity and response
 instrumentation are in

@@ -2,7 +2,7 @@
 
 QQ's local runtime and Retsu's hosted extraction gateway have separate owners.
 The current Retsu source pin for this page is
-`8d58080829231bb74e180c6de4e8f687c4606200` (origin/main fetched 2026-10-09;
+`8d58080829231bb74e180c6de4e8f687c4606200` (commit dated 2026-10-09, origin/main fetched 2026-10-13;
 repository access required). The earlier `b889cd9e531438e4c54b25aa5ff9dc281c5e6888`
 snapshot is historical context only; its cookie and account route details must
 not be read as the current implementation.
