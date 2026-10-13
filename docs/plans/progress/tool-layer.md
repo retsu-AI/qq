@@ -568,3 +568,11 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git branch --contains=HEAD created` is a listing. The attached filter forms now select list mode, like the separated forms.
 - `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
 - `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.
+
+### 2026-10-13 — T18 last residuals (#283)
+
+- `env -S 'su\cdo'`: `\c` now ends the split string.
+- taskset scanning starts at the last leading option word, so 16 repeated `-a` cannot use up the bounded starts.
+- `INSTA_UPDATE` was removed from the harmless set: `always` rewrites snapshots.
+- `git --html-path`/`--man-path`/`--info-path`/`--version`/`--help` print and exit, so the words after them are not judged as a subcommand. `git --html-path push --force` is now Prompt, not a false Forbidden.
+- `approval` 93 tests pass.

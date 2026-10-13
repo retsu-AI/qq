@@ -296,6 +296,11 @@ pub(crate) fn judge(
                     skip += 1;
                 }
                 Some("--no-pager" | "-P" | "--no-optional-locks") => skip += 1,
+                // Queries that print and exit: nothing after them runs.
+                Some("--html-path" | "--man-path" | "--info-path" | "--version" | "--help") => {
+                    args.truncate(skip + 1);
+                    break;
+                }
                 // Any other dash word before the subcommand is a global
                 // option this table does not know (`--no-advice`, a newer
                 // flag). It is skipped so the subcommand is still judged,
@@ -1227,7 +1232,6 @@ fn harmless_env(name: &str) -> bool {
             | "TZ"
             | "CI"
             | "NEXTEST_PROFILE"
-            | "INSTA_UPDATE"
             // This repository's test and bench knobs that only choose what
             // runs or how long. `QQ_UPDATE_FIXTURES`/`QQ_UPDATE_GOLDENS`
             // rewrite checked-in files and `QQ_CONFIG*` changes what runs,
@@ -1457,6 +1461,7 @@ mod tests {
             "git branch --list --format x 'f*'",
             "git branch --contains=HEAD created",
             "git branch --merged=main 'f*'",
+            "git --version",
             // T18 review round 6: listing-filter operands; standard fds.
             "git branch --contains HEAD",
             "git branch --merged main -a",
@@ -1623,6 +1628,9 @@ mod tests {
             // nests its command, so it never allows.
             "nice nice nice nice nice nice nice nice nice echo sudo",
             "env NO_COLOR=1 cargo test",
+            "INSTA_UPDATE=always cargo test",
+            // A terminal query: nothing after it runs, so no false Forbidden.
+            "git --html-path push --force",
             // T18 review round 8 (final): only enumerated QQ_ knobs; a value
             // option eats the next word; the boundary wrapper is judged.
             "QQ_UPDATE_FIXTURES=1 cargo test -p qq-protocol --test wire_fixtures",
@@ -1865,6 +1873,10 @@ mod tests {
             "env -S 'su\"\"do ls'",
             "env -S 'su\\do ls'",
             "nice nice nice nice nice nice nice nice sudo ls",
+            // T18 review round 10: env -S `\c` ends the string; taskset's
+            // tail is judged past the start cap.
+            "env -S 'su\\cdo'",
+            "taskset -a -a -a -a -a -a -a -a -a -a -a -a -a -a -a -a -c 0 sudo ls",
             // T18 review round 9: candidates are whole, so a deep `--force`
             // is judged.
             "env -S 'git push -v -v -v -v -v -v -v -v -v -v -v -v -v -v -v --force origin main'",

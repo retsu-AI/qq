@@ -982,9 +982,10 @@ Any assignment before a command keeps it from `Allow` unless it is in a
 short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,
 `RUST_TEST_THREADS`, `RUST_MIN_STACK`, `NO_COLOR`, `CLICOLOR*`, `TERM`,
 `COLUMNS`, `LINES`, `LANG`, `LC_ALL`, `TZ`, `CI`, `NEXTEST_PROFILE`,
-`INSTA_UPDATE`, `QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and
+`QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and
 `QQ_SOAK_EXPECT_COMPLETED`. `QQ_*` as a whole is not inert:
-`QQ_UPDATE_FIXTURES` rewrites checked-in fixtures. Many variables name a program the tool will
+`QQ_UPDATE_FIXTURES` rewrites checked-in fixtures, as `INSTA_UPDATE` does
+snapshots. Many variables name a program the tool will
 run (`RUSTDOC`, `CC`, `GIT_EXTERNAL_DIFF`), so this is an allowlist. An
 `export` or `declare -x` is a construct and was never `Allow`. `ionice`, `chrt`, and `taskset` are not launchers
 because they can retarget a running process; with `-p` they launch
