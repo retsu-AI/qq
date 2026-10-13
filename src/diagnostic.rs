@@ -259,6 +259,12 @@ pub(crate) struct DiagnosticSession {
     started: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    Closed,
+    Incomplete,
+}
+
 impl DiagnosticSession {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         let mut options = OpenOptions::new();
@@ -373,9 +379,9 @@ impl DiagnosticSession {
         )
     }
 
-    pub(crate) fn close(&self) {
+    pub(crate) fn close(&self) -> CloseOutcome {
         if self.closed.swap(true, Ordering::AcqRel) {
-            return;
+            return CloseOutcome::Closed;
         }
         if let Ok(mut tx) = self.tx.lock() {
             tx.take();
@@ -391,16 +397,17 @@ impl DiagnosticSession {
                     let _ = join.join();
                 }
             }
+            CloseOutcome::Closed
         } else {
             self.failed.store(true, Ordering::Relaxed);
+            CloseOutcome::Incomplete
         }
-        let _ = (self.session_id, self.pid);
     }
 }
 
 impl Drop for DiagnosticSession {
     fn drop(&mut self) {
-        self.close();
+        let _ = self.close();
     }
 }
 
@@ -460,7 +467,7 @@ mod tests {
             route: Route::StoredKeyring,
             endpoint: Endpoint::Other,
         });
-        session.close();
+        assert_eq!(session.close(), CloseOutcome::Closed);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("CacheHit"));
         assert!(text.contains("Summary"));
@@ -497,7 +504,7 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        session.close();
+        assert_eq!(session.close(), CloseOutcome::Closed);
         let lines = fs::read_to_string(&path).unwrap();
         assert_eq!(lines.lines().filter(|line| line.contains("CacheHit")).count(), 255);
         assert!(lines.lines().any(|line| line.contains("Summary")));
