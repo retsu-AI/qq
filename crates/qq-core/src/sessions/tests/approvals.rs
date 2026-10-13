@@ -1240,7 +1240,13 @@ async fn shell_approval_requests_carry_the_command_and_auto_mode_asks_for_prompt
     let shell = observed
         .iter()
         .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalRequested { shell, .. } => shell.clone(),
+            SessionEvent::ToolApprovalRequested {
+                shell, delegated, ..
+            } => {
+                // No reviewer configured: the human is asked now.
+                assert!(!delegated);
+                shell.clone()
+            }
             _ => None,
         })
         .expect("shell approval requests carry the command");
@@ -1283,9 +1289,14 @@ async fn reviewer_approval_executes_a_held_call_without_a_client() {
     .await;
     let observed = collect_through_finished(&mut harness.events).await;
     assert!(
-        observed
-            .iter()
-            .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. }))
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalRequested {
+                delegated: true,
+                ..
+            }
+        )),
+        "the request says the reviewer decides first (ENG-1034)"
     );
     assert!(observed.iter().any(|event| matches!(
         &event.event,
@@ -2208,8 +2219,16 @@ async fn ask_mode_never_consults_the_reviewer() {
         Some(reviewer),
     )
     .await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     assert!(consulted.lock().unwrap().is_empty());
+    // A configured reviewer that is not consulted does not mark the hold.
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalRequested {
+            delegated: false,
+            ..
+        }
+    )));
     respond_approval(
         &harness.runtime,
         harness.run_id,

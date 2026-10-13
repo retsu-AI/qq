@@ -270,8 +270,12 @@ impl SessionStore {
                 edit,
                 question,
                 fetch,
+                delegated,
             } => {
                 if let Some(session) = self.get_mut(&session_id) {
+                    if tool_call.state == ToolCallState::AwaitingApproval && *delegated {
+                        session.live.with_delegate.insert(tool_call.id);
+                    }
                     if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
                         effects.push(StateEffect::Attention(Attention::ApprovalRequested {
                             session_title: session.summary.title.clone(),
@@ -304,6 +308,7 @@ impl SessionStore {
                 if let Some(session) = self.get_mut(&session_id)
                     && session.live.awaiting_approval.contains(tool_call_id)
                 {
+                    session.live.with_delegate.remove(tool_call_id);
                     session
                         .approval_previews
                         .entry(*tool_call_id)

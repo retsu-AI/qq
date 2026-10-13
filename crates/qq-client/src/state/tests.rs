@@ -398,6 +398,7 @@ fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         ),
         context(&[]),
@@ -456,6 +457,120 @@ fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
         context(&[]),
     );
     assert!(store[&session_id].approval_previews.is_empty());
+}
+
+#[test]
+fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wins() {
+    // ENG-1034: one state for a whole store. A hold the delegate is still
+    // deciding is work; it becomes a block when the delegate escalates, and
+    // a block in any session outranks work or idleness elsewhere.
+    let quiet = SessionId::from_bytes([3; 16]);
+    let busy = SessionId::from_bytes([5; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let held = ToolCallId::from_bytes([7; 16]);
+    let mut store = SessionStore::default();
+    assert_eq!(store.activity(), StoreActivity::Idle, "an empty store");
+    store.upsert_summary(summary(quiet), &[], 0);
+    store.upsert_summary(summary(busy), &[], 0);
+    store.warm_empty(busy);
+    assert_eq!(store.activity(), StoreActivity::Idle);
+
+    let running = SessionSummary {
+        status: SessionStatus::Running,
+        active_run_id: Some(run_id),
+        ..summary(busy)
+    };
+    store.upsert_summary(running.clone(), &[], 0);
+    assert_eq!(store.activity(), StoreActivity::Working);
+
+    let call = |state: ToolCallState| ToolCallSnapshot {
+        id: held,
+        session_id: busy,
+        run_id,
+        turn_ordinal: 0,
+        call_ordinal: 0,
+        provider_call_id: "call_0".to_owned(),
+        name: "shell".to_owned(),
+        arguments: String::new(),
+        state,
+        result: None,
+        is_error: false,
+        display: None,
+    };
+    let requested = |delegated| SessionEvent::ToolApprovalRequested {
+        tool_call: call(ToolCallState::AwaitingApproval),
+        shell: None,
+        edit: None,
+        question: None,
+        fetch: None,
+        delegated,
+    };
+    store.reduce_event(&envelope(1, busy, requested(true)), context(&[]));
+    assert_eq!(
+        store.activity(),
+        StoreActivity::Working,
+        "the delegate is deciding"
+    );
+
+    // A snapshot reload rebuilds live status from the body; who decides the
+    // still-pending hold survives it.
+    let mut snapshot = SessionSnapshot {
+        side_questions: Vec::new(),
+        summary: running.clone(),
+        messages: Vec::new(),
+        runs: Vec::new(),
+        tool_calls: vec![call(ToolCallState::AwaitingApproval)],
+        has_older_tool_calls: false,
+        has_older_messages: false,
+    };
+    store.install_session_snapshot(snapshot.clone(), &[], 1);
+    assert_eq!(store.activity(), StoreActivity::Working);
+
+    store.reduce_event(
+        &envelope(
+            2,
+            busy,
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id: held,
+                delegate: Some(qq_protocol::DelegateIdentity::Reviewer),
+                reason: "unsure".to_owned(),
+            },
+        ),
+        context(&[]),
+    );
+    let blocked = StoreActivity::Blocked {
+        session_title: running.title.clone(),
+    };
+    assert_eq!(store.activity(), blocked, "escalated to the human");
+    store.install_session_snapshot(snapshot.clone(), &[], 2);
+    assert_eq!(store.activity(), blocked, "and still after a reload");
+
+    // Answered: work again, then idle once the run settles.
+    store.reduce_event(
+        &envelope(
+            3,
+            busy,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: call(ToolCallState::Requested),
+                resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
+                delegate: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store.activity(), StoreActivity::Working);
+    store.upsert_summary(summary(busy), &[], 0);
+    assert_eq!(store.activity(), StoreActivity::Idle);
+
+    // A hold asked of the human directly blocks at once, even while another
+    // session is idle; a body loaded without its request event (a client
+    // that connects mid-hold) has no delegate record, so it is a block too.
+    store.reduce_event(&envelope(4, busy, requested(false)), context(&[]));
+    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
+    let mut fresh = SessionStore::default();
+    snapshot.summary = running;
+    fresh.install_session_snapshot(snapshot, &[], 5);
+    assert!(matches!(fresh.activity(), StoreActivity::Blocked { .. }));
 }
 
 #[test]

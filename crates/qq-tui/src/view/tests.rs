@@ -675,6 +675,7 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
                     ],
                 })),
                 fetch: None,
+                delegated: false,
             },
         )
     }));
@@ -760,6 +761,7 @@ fn approval_prompts_render_edit_previews_as_colored_diffs() {
                 }),
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     }));
@@ -2939,6 +2941,7 @@ fn background_approvals_surface_a_banner_that_ctrl_g_jumps_to() {
             edit: None,
             question: None,
             fetch: None,
+            delegated: false,
         },
     ));
 
@@ -4409,6 +4412,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     }));
@@ -5298,6 +5302,7 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     }));

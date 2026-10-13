@@ -2155,6 +2155,11 @@ pub enum SessionEvent {
         /// Present when the held call is `fetch` (protocol 22).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fetch: Option<Box<FetchPreview>>,
+        /// The hold goes to an approval delegate first (protocol 32): a
+        /// human is asked only after `tool_approval_escalated`. Absent means
+        /// the human is asked now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        delegated: bool,
     },
     ToolApprovalResolved {
         tool_call: ToolCallSnapshot,
@@ -3022,6 +3027,7 @@ mod tests {
             edit: None,
             question: None,
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&requested).unwrap();
         assert_eq!(encoded["type"], "tool_approval_requested");
@@ -3043,6 +3049,7 @@ mod tests {
             }),
             question: None,
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&edit_requested).unwrap();
         assert_eq!(encoded["edit"]["path"], "src/lib.rs");
@@ -3067,6 +3074,7 @@ mod tests {
                 }],
             })),
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&question_requested).unwrap();
         assert_eq!(

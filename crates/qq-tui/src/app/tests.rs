@@ -237,6 +237,7 @@ fn a_command_past_the_grant_cap_approves_once_and_says_why() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     });
@@ -365,6 +366,7 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         )
     });
@@ -434,6 +436,7 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
                     ],
                 })),
                 fetch: None,
+                delegated: false,
             },
         )
     };
@@ -527,6 +530,7 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
             }),
             question: None,
             fetch: None,
+            delegated: false,
         },
     ));
     assert_eq!(
@@ -2622,6 +2626,7 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -3248,6 +3253,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
     assert!(matches!(
         attention(effects),

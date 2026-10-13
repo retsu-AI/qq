@@ -293,6 +293,33 @@ impl SessionStore {
             .collect()
     }
 
+    /// One state for everything this store follows, most urgent wins: any
+    /// hold waiting for a human, else any session running or queued, else
+    /// idle. Holds an approval delegate is still deciding count as work.
+    #[must_use]
+    pub fn activity(&self) -> StoreActivity {
+        let mut working = false;
+        for id in self.thread_order() {
+            let view = &self.sessions[id];
+            let live = &view.live;
+            if live.awaiting_approval.len() > live.with_delegate.len() {
+                return StoreActivity::Blocked {
+                    session_title: view.summary.title.clone(),
+                };
+            }
+            working |= !live.awaiting_approval.is_empty()
+                || matches!(
+                    view.summary.status,
+                    SessionStatus::Running | SessionStatus::Queued
+                );
+        }
+        if working {
+            StoreActivity::Working
+        } else {
+            StoreActivity::Idle
+        }
+    }
+
     /// Sessions that need the user, most urgent first and then in tree
     /// order: approvals, then unread failures, then unread finishes.
     #[must_use]
@@ -399,6 +426,14 @@ impl SessionStore {
                     .any(|call| call.id == *id && call.state == ToolCallState::Running)
             });
             view.approval_previews = previous.approval_previews;
+            // Who decides a hold is known only from its request event; keep
+            // it for holds the body still reports as waiting.
+            view.live.with_delegate = previous
+                .live
+                .with_delegate
+                .intersection(&view.live.awaiting_approval)
+                .copied()
+                .collect();
         }
         view.side_questions = snapshot.side_questions;
         view.messages = Some(messages);
@@ -758,6 +793,9 @@ pub struct LiveStatus {
     /// Tool calls awaiting an approval answer. A set rather than a count so
     /// replayed or repeated events cannot drift it.
     pub awaiting_approval: BTreeSet<ToolCallId>,
+    /// The subset of `awaiting_approval` an approval delegate is deciding;
+    /// a hold leaves it when the delegate escalates to the human.
+    pub with_delegate: BTreeSet<ToolCallId>,
 }
 
 /// What one `ToolApprovalRequested` event said the call would do.
@@ -829,6 +867,18 @@ pub struct SessionView {
     pub unread: u32,
     /// The last run finished while unfocused and has not been looked at.
     pub finished_unread: bool,
+}
+
+/// What a store's sessions amount to for an external status line: see
+/// [`SessionStore::activity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreActivity {
+    Idle,
+    Working,
+    /// A held call waits for a human in the named session.
+    Blocked {
+        session_title: String,
+    },
 }
 
 /// Why a session needs the user, most urgent first.
@@ -1059,6 +1109,7 @@ impl LiveStatus {
             }
             ToolCallState::Running | ToolCallState::Requested => {
                 self.awaiting_approval.remove(&call.id);
+                self.with_delegate.remove(&call.id);
                 self.active_tool = Some(call.name.clone());
             }
             ToolCallState::Completed
@@ -1066,6 +1117,7 @@ impl LiveStatus {
             | ToolCallState::Denied
             | ToolCallState::Interrupted => {
                 self.awaiting_approval.remove(&call.id);
+                self.with_delegate.remove(&call.id);
                 if self.active_tool.as_deref() == Some(call.name.as_str()) {
                     self.active_tool = None;
                 }

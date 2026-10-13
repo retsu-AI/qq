@@ -573,6 +573,7 @@ fn current_version_streams_match_their_goldens() {
                                 }],
                             })),
                             fetch: None,
+                            delegated: false,
                         },
                     )),
                 },

@@ -664,6 +664,40 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
+            },
+        ),
+    );
+    // Version 32: the hold goes to an approval delegate before any human.
+    check(
+        "event_tool_approval_requested_delegated",
+        &envelope(
+            22,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"git push"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: Some(Box::new(ShellCommandPreview {
+                    command: "git push".to_owned(),
+                    cwd: None,
+                    verdict: Some(ShellVerdict::Prompt),
+                    reasons: vec!["publishes".to_owned()],
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
             },
         ),
     );
@@ -735,6 +769,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     }],
                 })),
                 fetch: None,
+                delegated: false,
             },
         ),
     );
@@ -766,6 +801,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         ),
     );

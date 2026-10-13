@@ -169,6 +169,10 @@ impl ToolGate for SessionToolGate {
                     // Register before publishing the request so a client
                     // response can never race past the waiting run.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    // Decided before publishing so the request says who is
+                    // asked first; see the comment on the review below.
+                    let consult =
+                        delegate.consults_reviewer(mode) && inner.approval_reviewer.is_some();
                     match inner
                         .store
                         .request_tool_approval(
@@ -179,6 +183,7 @@ impl ToolGate for SessionToolGate {
                                 edit: edit.clone(),
                                 question: None,
                                 fetch,
+                                delegated: consult,
                             },
                         )
                         .await
@@ -200,7 +205,6 @@ impl ToolGate for SessionToolGate {
                     // executes, Deny is final under Auto and Supervised, and
                     // Escalate (or a reviewer failure, which the reviewer must
                     // report as Escalate) reaches the human.
-                    let consult = delegate.consults_reviewer(mode);
                     let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
                         Some(reviewer) if consult => {
                             // Context is advisory: a missing brief must not

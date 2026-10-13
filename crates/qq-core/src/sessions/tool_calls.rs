@@ -494,6 +494,8 @@ pub(crate) struct ApprovalPreviews {
     pub(crate) edit: Option<EditPreview>,
     pub(crate) question: Option<QuestionPreview>,
     pub(crate) fetch: Option<FetchPreview>,
+    /// An approval delegate decides before any human is asked.
+    pub(crate) delegated: bool,
 }
 
 pub(super) fn request_tool_approval(
@@ -508,6 +510,7 @@ pub(super) fn request_tool_approval(
         edit,
         question,
         fetch,
+        delegated,
     } = previews;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -529,6 +532,7 @@ pub(super) fn request_tool_approval(
             edit,
             question: question.map(Box::new),
             fetch: fetch.map(Box::new),
+            delegated,
         },
     )?;
     transaction.commit()?;
