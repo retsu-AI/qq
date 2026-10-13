@@ -171,7 +171,7 @@ impl BuiltInTool {
             ),
             Self::EditFile => ToolSpec::new(
                 "edit_file",
-                "Apply one or more edits to files read earlier in this session, atomically. Each edit replaces old with new, or inserts new before/after an anchor. Fuzzy whitespace/indent matching is on unless fuzzy=false; the result names via=<strategy> when it was used. Set dry_run to preview.",
+                "Apply one or more edits to workspace files, atomically. Each edit replaces old with new, or inserts new before/after an anchor. A file not read in this session (or changed since) takes only edits whose old matches exactly once, unless if_hash equals the hash from its current read_file header. Fuzzy whitespace/indent matching is on unless fuzzy=false; the result names via=<strategy> when it was used. Set dry_run to preview.",
                 json!({
                     "type": "object",
                     "properties": {

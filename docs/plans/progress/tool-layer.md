@@ -24,6 +24,9 @@ newest last.
 | T15 | Default-shaped arguments read as absent | Shipped (`409dd758`) | [#267](https://github.com/retsu-AI/qq/pull/267) | D9 week-of-use qualification remains open |
 | T16 | Responses arguments from `*.done` events | Shipped (`1844b434`) | [#273](https://github.com/retsu-AI/qq/pull/273) | Captured-shape regressions; no post-fix live-provider claim |
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
+| T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
+| T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
+| T20 | Nudge past leading cd; placeholder handle (D10) | In review | `fix/eng-1035-t20-builtin-hints` [#285](https://github.com/retsu-AI/qq/pull/285) | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
 
 ## Entries
 
@@ -440,3 +443,237 @@ Five Codex findings on 4c10c447, all valid. I audited every `ToolOutput::error`/
 - Release upgrade notes name protocol 31, descriptor 13, schema 43, and the new exact-content project-pack trust requirement; guide version pins intentionally remain v0.1.5 until assets publish.
 - Release docs verification: docs-truth 23/23, fmt, workspace all-target/all-feature Clippy, build, and final default-parallel workspace tests passed; `git diff --check` passed.
 - Two earlier workspace runs hit existing headless/progress timeout failures; the headless isolated rerun passed. Serial run was declined and not retried; final normal workspace run passed. Logs `target/release-0.1.6-{clippy,tests,tests-rerun,tests-final}.log`; no root-cause claim.
+### 2026-10-11 — post-v0.1.6 audit (plan § D10)
+
+- Window 2026-10-08 12:34 (v0.1.6 `fef41a4`) → 2026-10-11. The queries were read-only `sqlite3` over `tool_calls` joined to `runs` and `sessions` (`approval_mode`), plus `events` `tool_approval_requested` `shell.reasons`. 1,473 calls, 72 errors (4.9 %); `read_file` 0.9 %, `search` 1.3 %. No `{}` arguments, no ranges+offset or empty form failures: T15/T16 hold on live data. D9's week closes 2026-10-15.
+- Shell under `auto`: 143 of 226 held (115 reviewer, 25 human, 3 denied). Top reasons: `nested_construct` 105, `dynamic_word` 67, `git_mutation` 33, `unlisted` 29. Human holds totalled 11.6 h.
+- Replay: an untracked crate in `/tmp/opencode/replay` calls `qq_core::classify_bench::classify` over every shell command in the window. Rewriting each held command to strip `timeout N`/`time`/`nice`, stream-only redirects, contained globs and `git -C`, and to map `git worktree list` and `git fetch` to reads, moves 40 of the 143 to `Allow`. The remainder are real prompts (30 shell file writes, 22 git mutations, 15 loops or variables, 10 workspace redirects).
+- Root causes confirmed by single-command probes: `timeout 300 cargo test` → prompt while `cargo test` → allow. `cd src && cargo test 2>&1` → prompt while `cd src && cargo test` → allow, because a list-level `2>&1` makes the list a `redirected_statement` body and marks it nested. `grep -n x docs/*.md` → prompt. `git -C a status` → prompt.
+- Edits: 9 of 61 `edit_file`/`write_file` calls failed `not_read`/`stale_file`. Traces show the text was seen through shell `grep`/`sed -n` or the file was changed by the model's own `python3` rewrite. There were 59 shell writes against 51 `edit_file` calls. Lead decision: accept a unique exact match without a read (T19, ADR-0057), and allow `git fetch` under `auto` (T18).
+- Nudge: 1 hint across 348 shell calls, because `builtin_alternative` reads the first word, which is `cd` in 310 of them (T20).
+- No code change. T18–T20 opened.
+
+### 2026-10-11 — D10 plan repairs from PR #280 review
+
+Seven Codex findings on `9bcb60a6`; all were valid and the plan is amended:
+
+- T18 launchers are now a closed set (`timeout`, `time`, `nice`, `nohup`, `stdbuf`), each with its own option grammar and a required inner command. `ionice` and the other process-retargeting tools are excluded (`ionice -c 3 -p 123`).
+- T18 `git fetch` is allowlisted (`-q`, `-v`, `--all`, `--no-tags`, plain remote and branch names). Force, prune, prune-tags, tags, refspecs and config prefixes keep `GitRemote`.
+- T18 no longer relaxes globs: a workspace filename can be program syntax (`e touch PWN` turns `sed -n *` into a command). Simulated replay without globs or destructive fetch forms: 26 of 143 held become `Allow` (25 without `git fetch`), down from the 40 first reported. The D10 acceptance target for held shell calls is moved from 40 % to 50 % to match.
+- T18 acceptance is a checked-in `d10_held` table of sanitized shapes, not the private session corpus (the repository is public). The `/tmp` replay stays advisory.
+- T19 covers only the `old` form; anchor inserts are anchor-only in the schema and still need a read. Refusals no longer return `h:`, which would have authorized the refused edit on the next call. The existing `if_hash` weakness (`mode=info`, 44 placeholder hashes) is decisions-needed row 12.
+- T20 no longer lists recent handles: a zero handle gets a parse-time `handle_placeholder` correction and needs no store query. `qq-protocol` `ToolErrorKind::of` is added to T20's owned paths.
+
+### 2026-10-11 — T18 in progress → in review (ENG-1031)
+
+- Branch `fix/t18-classifier-false-prompts`, stacked on `docs/tool-layer-d10-audit` (#280). The first implementation followed the plan at `9bcb60a6`, including globs and a fetch denylist. Before I pushed it, the plan was tightened in `3f36c947`, so I discarded that version and redid the slice against the tightened plan. The ledger numbers below are from the redone version.
+- Replay method (advisory): `/tmp/opencode/replay` is untracked. `src/main.rs` classifies every `cmds.jsonl` line whose `a` ends in `/auto` through `qq_core::classify_bench::classify`. Two copies of the crate were built with path dependencies on a detached `3f36c947` worktree and on this branch, and their outputs were diffed by line index.
+
+#### T18 receipt — 2026-10-11
+Commits: `f90c6736` (failing rows + `D10_HELD`), `dc169ad0` (fix), plus this docs commit.
+Tests: `rule_examples_hold` +122 rows; `D10_HELD` 30 shapes with before/after verdicts and a no-Forbidden-crossing assertion; reason asserts +8; workspace 2221 passed / 14 ignored.
+Gate `classify_command` (median of 3, ns): simple 3306 → 3565, pipeline 10196 → 10431, forbidden_wrapped 9326 → 8704, 1 KiB 164007 → 163260 (budget 200 µs). IO pressure `some avg10` was 19–71 % (another agent active); the medians are informative, and no tail is claimed.
+Replay (226 `auto`, 143 held): prompt 143 → 113, allow 83 → 113. 30 moved prompt→allow (all reviewer- or human-approved), 0 allow→prompt, and 0 in or out of Forbidden (0 before, 0 after). That is above the plan's ~26 because `git fetch` and `2>&1` lists combine in a few commands.
+Behavior changes beyond the plan text, conservative: `> 1` (a file named 1) now prompts. `git -C x push --force` is now Forbidden (it was Prompt). A bare or foreign-option launcher is `unlisted` (the five launchers left the allow tables). More than 8 wrappers is nested.
+Deviations: the brief's ≥ 40 replay target and glob item are superseded by `3f36c947`, so globs are unchanged. Executor MCP was unavailable, so Linear went through `linear` CLI and GitHub through `gh`.
+Docs: `tools.md` § Shell Classification.
+Evidence: `target/qq-perf/t18-2026-10-11/` (baseline.txt, candidate.txt, pressure-*, replay-*.jsonl, workspace-test.log).
+
+### 2026-10-11 — T19 edit freshness by exact match
+
+- Baseline `edit_batch` recorded before any code change, 3 runs. The first commit holds 10 failing regressions for shapes (a)–(i); (e), the `if_hash` mismatch, was already green as a guard.
+- Rebased onto 3f36c947 midway. The amended plan drops `h:` from refusals, so the code, tests, ADR, and design followed. Refusals now name the fix, and every refusal test asserts the current hash is absent. My draft decisions-needed row about anchors was dropped, because the amended plan already says only the `old` form qualifies.
+
+#### T19 receipt — 2026-10-11
+Commit(s): 7cae8be4 (red), 50344d7a, 7946a1e1, 035f09e0, + docs/ledger head.
+Tests: 12 added in `tools::edit::tests` (shapes (a)–(i), plus a stale fuzzy case and the note combination); 1 updated (`edits_and_overwrites_require_a_prior_read_in_this_session` now uses an anchor insert). Workspace 2230 passed / 1 failed / 14 ignored. The failure, `plan::tests::async_compilation_bounds_waiters_and_releases_cancelled_requests`, is pre-existing: it fails 2/3 on the base 3f36c947 on this host. qq-core lib 926/0 on 2 of 3 head runs.
+Gates: `edit_batch` medians of 3 (µs): exact dry 9384 → 8560, fuzzy dry 34144 → 29056, exact apply 9433 → 8389, single 1494 → 1446. Unchanged within noise; the baseline host was more loaded. `tool_dispatch` does not exercise edits and was not run.
+Digests: tool schema 568cef80… → cc630679… (`edit_file` description); prompt 18 → 19; descriptor golden a1b49276… → 09227e1b….
+Deviations: every `if_hash` in a batch is checked, not only the first per file. A unique `old` must also be unique in the plan-time bytes, not only after earlier edits. Approval preview has no freshness logic, so it is unchanged.
+Docs: ADR-0057 (Proposed), `docs/adr/README.md`, root.md reservation, `tools.md` § Edit Semantics and § Optimistic Concurrency.
+Open: independent review requested. Rebased onto T18 (#283) and retargeted.
+Evidence: target/qq-perf/t19-2026-10-11/ (untracked).
+
+### 2026-10-12 — T18 review repairs (#283)
+
+Six Codex findings on `9e3da002`, all reproduced against the branch before any fix:
+
+- `./timeout 5 cargo test` and `/tmp/nohup …` were peeled as launchers. Peeling is now limited to bare names. More broadly, a path-qualified program (`./ls`, `bin/cargo`, `target/debug/git`) is never `Allow`. That gap was already on `main` (`./cargo build` was allowed), because `program()` reduces to the basename.
+- `git -C /tmp/other …` inherited `path_escapes`' `/tmp` scratch exception. `-C` into `/tmp` now counts as an escape.
+- `GIT_DIR=/tmp/o/.git git status|fetch` was allowed. Git repository-selection and config variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, …) now make a `git` command `Prompt` with `path_outside_workspace`.
+- `git branch --list --no-list x` and `--list -f x HEAD` created branches, as verified in a scratch repository. `branch_lists` is now an allowlist of listing options, and `-l` is excluded (before git 2.23 it meant `--create-reflog`).
+- Plain `git fetch` falls back to `remote.<name>.fetch`, which may name local branches. Lead decision 2026-10-12: fetch stays `GitRemote` in every form. The allowlist and the matching `D10_HELD` rows are reverted to `Prompt`.
+- Production gates pass `workspace: None`, so `git -C /work/repo/sub` prompts in sessions. That fails closed and is documented. Threading the root through 48 `evaluate` sites is left for a follow-up.
+- Tests: about 35 new `rule_examples_hold` rows, 2 new `D10_HELD` rows, 6 reason asserts. `qq-core` 916 passed. One full-workspace run failed `schedules_ready_sessions_fairly` (a 2 s timeout under load, unrelated); it passed 3/3 alone and in a full `qq-core` run.
+- `classify_command` (one run on a loaded host, ns): simple 3261, pipeline 11222, forbidden_wrapped 8622, 1 KiB 161366 (budget 200 µs).
+- Advisory replay over the same 226 `auto` commands: allow 83 → 111, held 143 → 115 (28 recovered, 30 before these repairs; the 2 lost were plain `git fetch`).
+
+### 2026-10-12 — T19 review repairs (#281) and ADR renumber
+
+- ADR renumbered 0057 → 0058: #277 (workflow packs) proposed 0057 on 2026-10-09, before the T19 reservation. File, index row, root.md, design links, and code comments all moved. Merged T18's review repairs (#283) in.
+- Three Codex findings on `3b068a5d`, all valid:
+  - An `if_hash` mismatch named the current hash (`is h:<current> now`). That let the next call pass it and apply a fuzzy edit with no content seen, which the slice forbids. The same leak was in `write_file`, which Codex did not flag. Both now say `is not <given> now` and nothing else. Test (e) had pinned the leak as expected behavior; it now asserts the hash is absent on both tools.
+  - Uniqueness used `match_indices`, which skips overlapping occurrences, so `aa` in `aaa` counted once. It now searches again from the next character boundary. Regression covers ASCII and multi-byte overlaps.
+  - A later edit's matching `if_hash` set the file to `Proven` and dropped `note=unread` for the earlier exception-admitted edit. A separate `admitted` field now records the weakest freshness any applied edit relied on.
+- The three new regressions failed against the pre-repair implementation and pass now. `qq-core` 929 passed; workspace fmt, clippy, test, and build are green.
+- The CI failure on `3b068a5d` was `wall_clock_budget_settles_a_hanging_provider_without_a_final_response`, the same flaky timing test noted in the T15 entries. It is not in this slice's paths.
+- `edit_batch` A/B on a loaded host (2 runs each, µs): exact dry 8525/8711 → 8973/8891, single 1462/1474 → 1525/1521. The bench reads the file first, so it never takes the uniqueness scan; the difference is noise.
+
+### 2026-10-13 — T19 review follow-up (#280 second round)
+
+- Two #280 findings concerned T19's behavior. Per-edit `if_hash` checking and `replace_all` with a duplicate `old` on an unread file (which refuses `not_read`) were already implemented and tested, the latter in `a_duplicate_old_on_an_unread_file_is_not_read`. Added `a_later_same_file_if_hash_mismatch_refuses_the_batch`: a correct hash on edit 0 and a stale one on edit 1 refuse the batch, with no hash in the text and the file untouched.
+
+### 2026-10-13 — T18 review repairs, round 2 (#283)
+
+- `git -C link status`, where `link` is a workspace symlink, reached `Allow`. Lexical containment cannot see a symlink, and the gates have no root to resolve against. A `-C` command now never allows. The hops are still skipped so `git -C sub push --force` stays `Forbidden`. The `D10_HELD` `-C` row is moved to Prompt. Ordinary operands (`cat link/x`, `cd link`) were lexical before T18 and remain so; that gap is noted in `tools.md` as separate.
+- `taskset -c 0 sudo ls` and `chrt -f 10 sudo ls` were `Prompt` under `full`, so they ran. Both wrappers now peel past their mask or priority positional, so a `Forbidden` inner command is found; with `-p` they launch nothing.
+- Exactly eight launchers before `cargo test` prompted. The depth limit now applies to peeling a ninth wrapper, not to judging the command after the eighth.
+- `timeout 1e3`/`timeout inf` prompted. The duration is parsed as a float with an optional unit suffix.
+- Rows added for each. `approval` tests 92 pass. `classify_command` 1 KiB 164 µs. Advisory replay unchanged at 111 allow / 115 prompt (only two traced `-C` commands, both already held).
+
+### 2026-10-12 — final T18 replay receipt (supersedes the 2026-10-11 counts)
+
+- Rule set: T18 as merged for review. Launchers are peeled by bare name only, through eight wrappers. Stream-only list redirects stay flat. `git worktree list` and `git branch --list` are reads. `git fetch` keeps `GitRemote` in every form, and every `-C` command prompts. Globs are unchanged.
+- Advisory replay over the same 226 `auto` shell commands: allow 83 → 111, held 143 → 115 (28 recovered, 51 % still held), nothing into or out of `Forbidden`. This is the number the plan uses. The 26/25 figures in the 2026-10-11 entries came from a simulation that still allowed `git fetch`, and are superseded.
+- Plan amendments from the second #280 review: T13 takes T18–T20 as inputs; T18/T19 integrate as a stack with one writer per ledger entry; T20 is narrowed (nudge past a leading `cd` only, 9-range reads stay a correction, the `read_tool_result` dispatch path is owned, focused regressions are listed).
+
+### 2026-10-13 — T18 review repairs, round 3 (#283)
+
+This round closes each class of gap, not only the reported instance:
+
+- Environment: `GIT_CONFIG_PARAMETERS` could set `core.fsmonitor` to an outside executable that `git status` runs. Every `GIT_*` assignment on `git` now prompts. Program-substitution variables on any program (`*_WRAPPER`, `*PAGER`, `*EDITOR`, `CARGO_*`, `RUSTC*`, `RUSTFLAGS`, `SHELL`, `VISUAL`, `BROWSER`) prompt as well; `RUSTC_WRAPPER=/tmp/x cargo build` had been allowed on `main`.
+- Git global options: `git -C sub -c k=v push --force` was Prompt (and ran under `full`) because only consecutive `-C` pairs were skipped. All global options are now skipped before the subcommand. Any of them except `--no-pager`, `-P`, and `--no-optional-locks` prompts.
+- `chrt -o 0 sudo -p x ls` was not peeled, because a `-p` in the launched command was read as chrt's own. `-p` is now looked for only among the wrapper's options.
+- `/dev/stdout-copy` counted as a stream. Only exact `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` do.
+- About 40 new rows. `approval` 92 tests pass. `classify_command` 1 KiB 167 µs. Replay unchanged (111 allow / 115 prompt).
+
+### 2026-10-13 — T18 review repairs, round 4 (#283)
+
+- `/usr/bin/timeout 5 sudo ls` had dropped from Forbidden to Prompt; my round-1 repair stopped peeling path-qualified launchers. The launcher still stays a command of its own (never allowed), but its apparent tail is now judged as nested, so the result is Forbidden again. Rows cover `./nice sudo ls` and `bin/nohup rm -rf /` too.
+- `git -C "$PWD" push --force` stopped the global-option scan at the dynamic operand, so `push` was not judged. A dynamic operand of any two-word global option is now skipped and marks the command dynamic.
+- `printf x > '&1'` passed as a descriptor duplication. The internal duplication marker now starts with NUL, which no shell word can contain.
+- `timeout --foreground` leaves the command's children untimed, so it is no longer a transparent option.
+- `approval` 92 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 5 (#283)
+
+Each fix covers the whole class: the classifier's argument scanning must never hide the command a wrapper launches.
+
+- Git globals: `--attr-source HEAD` (two-word) and any unknown dash word before the subcommand (`--no-advice`, future flags) are skipped, so `push --force` is judged. Unknown globals also make the command non-allowable.
+- `taskset`/`chrt`: every dash word is the wrapper's, and both the next word and the one after it are judged as the command. This covers `taskset -c -a 0 sudo ls` and a dynamic `chrt -o "$?" sudo ls`. Both candidates are nested, so this only adds strictness.
+- `env -S STRING` / `--split-string` was allowed on `main` (`env -S'rm -rf target'`). It is now reparsed like `sh -c`.
+- Descriptor duplication counts as harmless only for 0–2 (`2>&1`, `/dev/fd/1`). `>&3` writes to an inherited file or socket.
+- 15 rows. `approval` 92 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 6 (#283)
+
+The last two rounds kept finding new names for the same three classes, so each is now closed by construction rather than by a longer list:
+
+- Environment: replaced the list of known-bad names with an allowlist of output and test knobs (`RUST_BACKTRACE`, `RUST_LOG`, `NO_COLOR`, `TERM`, `LANG`, `CI`, `QQ_*`, …). Any other assignment before a command keeps it from `Allow`; `RUSTDOC=/tmp/evil cargo doc` and `CC=…` had been allowed on `main`. Replay unchanged (111/115): the corpus used only `QQ_*`, plus `GIT_EDITOR`, which already prompted.
+- Buried commands: wherever the start of the launched command is not knowable (past the 8-wrapper limit, `chrt`/`taskset` with dynamic options, `env -S` with its own escape syntax), the command is recorded as unknown and every suffix of its words is judged, nested. This can over-report (`taskset 0x1 echo sudo` is Forbidden) but cannot miss.
+- `git branch` listing filters that take a value (`--contains X`, `--merged X`, `--sort X`, `--format X`) consume it, so `git branch --contains HEAD` is a read. `/dev/fd/0`–`2` count as streams in the word-only gate as well as in the judge.
+- `export GIT_*=…; git diff` was already Prompt (`export` is a construct) and is now pinned.
+- `approval` 92 tests pass. `classify_command` 1 KiB 161 µs.
+
+### 2026-10-13 — T19 description wording (#281)
+
+- The `edit_file` description said "unless if_hash is given". It now says "unless if_hash equals the hash from its current read_file header", so models do not send placeholder hashes expecting them to count. The tool-schema digest moved `cc630679…` → `9ecb4e7e…`. `qq-core` 930 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 7, final before merge (#283)
+
+- `git branch --format xx created` was allowed but creates `created`. `--sort` and `--format` take a value without selecting listing mode; only the filters (`--contains`, `--merged`, …) select it.
+- `env -S 'su""do ls'`: quotes are removed before splitting, so adjacent fragments join.
+- `env GIT_EXTERNAL_DIFF=… git diff` was allowed. `env NAME=VALUE` assignments now travel with the peeled command.
+- Past the depth cap, a clean launcher chain is followed to its program, so `nice` ×9 `echo sudo` is Prompt, not a false Forbidden. A non-chain tail is still judged at every suffix.
+- The `timeout` process-group cancellation leak predates T18 and is filed as [ENG-1032](https://linear.app/retsu-ai/issue/ENG-1032); `timeout` stays transparent (lead decision 2026-10-13).
+- Lead decision: merge after this round. Any further Codex findings become follow-up issues, not more PR rounds.
+
+### 2026-10-13 — T18 review repairs, round 8 (#283), final before merge
+
+- `QQ_*` was too broad: `QQ_UPDATE_FIXTURES` rewrites checked-in fixtures. Only `QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and `QQ_SOAK_EXPECT_COMPLETED` are inert.
+- `git branch --format --list created` creates `created`. A value option now consumes the next word before anything else is matched.
+- `nice` ×8 `sudo ls` reached `sudo` at the depth boundary, and the fallback skipped index 0. The boundary command is now included.
+- Suffix enumeration was quadratic (an 8 000-word `env -S` cloned about 32 M strings). All three sites now use `bounded_suffixes`, capped at 64 starts × 16 words. A 7 000-word regression classifies in 0.04 s and fails closed.
+- `approval` 93 tests pass. Merging after this round (lead decision); further findings become follow-up issues.
+
+### 2026-10-13 — T19 merge-round residuals (#281)
+
+- A match formed across an earlier deletion (`A--AB--B`: delete `--AB--`, then edit `AB`) was unique in both texts but made of unseen bytes. A later unread edit's match must now also not touch any earlier edit's written span. A regression covers it and failed before the fix.
+- Reusing the uniqueness span in `apply_one` (a redundant scan, perf only) is [ENG-1033](https://linear.app/retsu-ai/issue/ENG-1033).
+
+### 2026-10-13 — T18 merge-round residuals (#283)
+
+- The 16-word suffix window hid a deep `--force` (`env -S 'git push -v ×15 --force …'`). Candidates are whole again, and only the number of starts is bounded (16), which keeps the work linear.
+- `git branch --contains=HEAD created` is a listing. The attached filter forms now select list mode, like the separated forms.
+- `env -S 'echo ok' sudo ls`: the trailing argv now joins the split command, and the whole is still an unknown program. A trailing `sudo` argument therefore over-reports as Forbidden, the same intended fail-safe trade as `taskset 0x1 echo sudo`.
+- `approval` 93 tests pass. The 7 000-word size regression runs in 0.06 s.
+
+### 2026-10-13 — T20 started (ENG-1035)
+
+- Isolated worktree `.worktrees/t20`, base T19 `db44ecf2`; current tightened D10 spec governs.
+- Preserve oversized search/ranges corrections, skip only lexical relative unquoted `cd DIR &&`, correct zero handles before store lookup.
+- Pre-change `tool_dispatch` captured in `target/qq-perf/t20-2026-10-13/baseline.log`; focused regressions and workspace qualification next.
+
+### 2026-10-13 — T20 implementation and independent review
+
+- Test-first commit `cc481b02`: placeholder dispatch and leading-cd strict/hint tests failed on T19; oversized bounds guard passed. Four focused regressions now pass, including lexical prefix and attached option paths.
+- Hint and strict refusal eligibility are separate; no classifier reparse. Zero handles return `handle_placeholder` before a spill lookup, graded Correction. Prompt/marker already use symbolic handles and need no version change.
+- Independent second-agent review requested changes for attached `grep -f/tmp/patterns`; fixed conservatively for dash-prefixed slash operands and covered absolute/parent forms. Re-review verdict Approve implementation; qualification remains pending.
+
+### 2026-10-13 — T19 adjacency (#281)
+
+- The deletion-boundary guard used strict comparisons, so an edit adjacent to an earlier replacement (`abcd`: `ab`→`AB` then `cd`→`CD`) was refused. Written spans now use ordinary half-open overlap, and an empty deletion point counts only when it lies strictly inside the later match. `A--AB--B` is still refused. Adjacent and post-deletion edits apply (new rows).
+
+### 2026-10-13 — T18 last residuals (#283)
+
+- `env -S 'su\cdo'`: `\c` now ends the split string.
+- taskset scanning starts at the last leading option word, so 16 repeated `-a` cannot use up the bounded starts.
+- `INSTA_UPDATE` was removed from the harmless set: `always` rewrites snapshots.
+- `git --html-path`/`--man-path`/`--info-path`/`--version`/`--help` print and exit, so the words after them are not judged as a subcommand. `git --html-path push --force` is now Prompt, not a false Forbidden.
+- `approval` 93 tests pass.
+
+### 2026-10-13 — T18 residuals, round 11 (#283); merge
+
+- Bounded suffix starts now skip literal options and assignments (never a launched program), so `nice` ×8 `env A=1 … P=1 sudo ls` reaches `sudo`. This replaces the taskset-specific start offset.
+- `env -S` expands `${NAME}` from the command's literal assignments and the `NAME=VALUE` words before `-S`, so `CMD=sudo env -S '${CMD} ls'` is Forbidden.
+- `git -h`/`-v` are terminal like `--help`/`--version`.
+- `approval` 93 tests pass; the size regression runs in 0.06 s.
+- Merge state: #280 (38 threads) and #281 (7) are fully resolved; #283 is resolved after this push. Lead decision: merge now. Any later Codex finding on the classifier is filed against ENG-1033 with its command string and wrong verdict.
+
+### 2026-10-13 — T20 prerequisite expansion repair
+
+- T18 `89a5582f` fixes the three tracked residual verdicts but introduced recursive `env -S` expansion. Independent review found repeated `A='${A}${A}'` assignments double intermediate text; a bounded eight-assignment regression failed before the fix (`c612655`).
+- Substitution now reads only the original string, uses the last assignment, and refuses to expand beyond the classifier's existing 16 KiB bound. Regression enlarged to 40 repetitions after repair, plus last-assignment and cap cases. No huge input expansion executed.
+- This new resource regression is repaired before stack merge, rather than waived as a follow-up. Ownership recorded in root ledger; independent re-review and final gates pending.
+
+
+### 2026-10-13 — T20 qualification receipt (ENG-1035)
+
+Commit: source head `e58074c0`; prerequisite test-first `c612655` / repair `4dbf121`; T20 test-first `cc481b02`.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=2`: 2242 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 94 passed.
+Checks: `cargo fmt --all -- --check`; `CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --all-features -- -D warnings`; `CARGO_BUILD_JOBS=2 cargo build --workspace`: pass. Exact-test guard: 10 fixtures pass.
+Gate: `tool_dispatch`, 30 alternating saved-binary pairs, median 66.828 → 64.088 µs/iteration; paired ratio median 1.036, same-binary A/A 0.969 (30 pairs). Budget unchanged; no regression demonstrated within control noise (A/A ratio MAD 0.186).
+Gate: final `classify_command` 1 KiB median of 3: 163.433 µs ≤ 200 µs. This characterizes the inherited approval repair; T18 baseline receipt remains above.
+Host: no concurrent builds/tests/reviews during paired recording; IO some avg10 45.23 → 39.64 %. No tail or speedup claim.
+Review: independent agent `t20_review` Approve T20 and bounded prerequisite repair; attached absolute options and recursive expansion findings repaired.
+Earlier qualification runs hit headless timeouts under contention and TUI ANSI assertions with inherited `NO_COLOR=1`; final full rerun above is green, with no failed gate waived.
+Docs: tools design, plan ownership/wording, root ownership request, and this ledger; no protocol/schema/prompt version change from T20.
+Open: [#285](https://github.com/retsu-AI/qq/pull/285) hosted CI and main merge; D10 week-after-landing observation, ENG-1032 and ENG-1033 follow-ups remain separate.
+Evidence: `target/qq-perf/t20-2026-10-13/` (untracked; initial baseline recorded before first edit, original binary retained).
+
+### 2026-10-13 — T20 expansion-overflow refusal repair
+
+- Late #285 review found that the cap's early return dropped a visible `sudo` prefix, newly downgrading Forbidden to Prompt. Test-first `99a07e4` reproduced it below the raw-source limit; no merge was attempted after the finding.
+- Preserve and classify the bounded prefix, propagate overflow through nested collectors, and refuse every expanded-over-limit command with `command_too_long`, including under `full`. This also preserves the floor when a forbidden flag/program lies beyond the cap. Raw source over 16 KiB still prompts as before.
+- Focused `cargo test -p qq-core approval -- --test-threads=4`: 95 passed, 0 failed, including sudo, benign echo, late force, env option operands, and nested echo overflow. Independent `t20_review` verified this log and approved; design amended in the same repair. Final workspace and measurements are rerun before push.
+
+### 2026-10-13 — T20 final overflow qualification (supersedes earlier receipt)
+
+Commit: source `4f0185f1`; overflow test-first `99a07e4`, independent `t20_review` Approve.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=4`: 2243 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 95 passed.
+Checks: workspace formatting, all-target/all-feature Clippy with warnings denied, and workspace build pass; build jobs bounded to 2. Earlier exact-test guard's 10 fixtures remain applicable (script unchanged).
+Gate: `tool_dispatch`, 30 saved-baseline/candidate pairs: medians 58.888 → 59.162 µs; paired ratio median 0.974, same-binary A/A ratio median 1.036, A/A ratio MAD 0.124. No regression demonstrated within control noise; unchanged budget, no tail or speedup claim.
+Gate: `classify_command` 1 KiB median of 3: 167.050 µs ≤ 200 µs.
+Host: no concurrent session-owned build/test/review during measurement; shared-host IO pressure recorded in `pressure-overflow-{before,after}.txt`. Other workloads are outside this session's control.
+Evidence: `target/qq-perf/t20-2026-10-13/{workspace-test-overflow-qualified,clippy-overflow-qualified,build-overflow-qualified}.log`, `paired-overflow-{raw.log,summary.json}` (untracked).
+Open: final hosted CI, native stack merge, and immediate shipped-status reconciliation; D9/D10 observation and ENG-1032/ENG-1033 remain separate.

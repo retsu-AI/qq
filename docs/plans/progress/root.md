@@ -80,6 +80,8 @@ may append a **request** row; only root changes a request's status.
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 | 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
+| 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
+| 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Proposed 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -151,7 +153,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0057. Reserve here before opening a PR that adds an ADR.
+Next free number: 0059. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -489,3 +491,13 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-13 — T20 ownership clarification (ENG-1035)
+
+- The task index limited `runtime/run_loop.rs` to `read_tool_result` dispatch, but T20 also explicitly requires strict refusals to distinguish hint-only prefixed/outside-path commands. Its existing refusal lives in the same file. Extend ownership to that refusal expression; no classifier or broader dispatch changes.
+- Acceptance harness ownership includes `lib.rs` (one test-module declaration), `src/tests/t20.rs`, and `tools.rs` bounds tests. Independent second-agent review approved these policy changes; no shared manifest, dependency, CI, or system boundary change.
+
+### 2026-10-13 — T20 prerequisite resource repair
+
+- Integrated T18 `89a5582f` during qualification. Independent reviewer found its repeated `env -S` substitution can recursively double inserted assignment values. This new resource regression blocks the stack merge, outside the existing follow-up decision.
+- Extend this integration's ownership narrowly to `approval/classify.rs`: test-first bounded reproduction, one-pass substitution with last-assignment precedence, and `MAX_CLASSIFIED_BYTES` expansion cap. Carry the repair through the stack before main; no changes in another author's checkout.

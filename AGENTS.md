@@ -204,6 +204,22 @@ compatibility impact.
 - Prefer fast feedback loops and non-interactive commands. Report blockers and
   failed verification directly.
 
+## Code Review Rules
+
+These rules guide automated reviewers (Codex) as well as people.
+
+- Review plans in `docs/plans/` for unsafe, contradictory, or untestable
+  designs. Owned-path lists, ledger bookkeeping, and receipt wording are
+  process records, not findings, unless they would let unsafe code merge.
+- A resolved thread that carries a stated decision or a fixing commit is
+  settled. Raise it again only with new evidence: a reproduction or a
+  concrete input that the fix does not cover.
+- For shell classification (`crates/qq-core/src/approval/`), a finding
+  must name a command string and the verdict it wrongly gets. `Prompt`
+  where `Allow` would be safe is a usability issue, not a safety one.
+- Report each finding once, against the earliest PR in a stack that
+  introduces it.
+
 ## Definition Of Done
 
 A change is complete when its behavior and failure paths are tested, workspace

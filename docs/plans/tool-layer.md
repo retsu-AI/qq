@@ -4,12 +4,12 @@
 
 | | |
 | --- | --- |
-| Now | T15–T17 merged (#267, #273, #272); D9's week-of-use outcome measurement remains open. T13 ablations and T14/T11 are next; T10 remains gated |
+| Now | T15–T17 shipped in v0.1.6. The read side is at about 1 % in the first three days after release (D9 open until 2026-10-15). The D10 audit (2026-10-11) shows the remaining friction is the shell approval path and edit freshness, not read-side contracts. T18 is next, then T19 → T20 → T13 |
 | Shipped | T1–T9 and T12 (v0.1.0, #45, #49, #50): one bounding boundary with spill handles (ADR-0019), `search`/`tree`/`read_file` v2, `edit_file` v2 with the matching cascade, the CST shell classifier with a `Forbidden` tier (ADR-0020), `exec`, `@` mentions, `ask_user` and `fetch` with the `Interactive`/`Network` classes (ADR-0021). Their contracts are in [`../design/tools.md`](../design/tools.md); this plan keeps only the problem statements and the departures |
-| Open | D9 post-merge qualification; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
+| Open | D9 post-merge qualification; D10 T18 classifier false prompts, T19 edit freshness by exact match, T20 nudge and bound clamps; T11 `view_image`, T13 ablation harness, T14 `select_tools` index; T10 `terminal` gated on R6-terminal evidence |
 | Ledger | [`progress/tool-layer.md`](./progress/tool-layer.md) |
 
-Updated 2026-10-08. Opened 2026-09-11; supersedes the R6 search/patch/terminal
+Updated 2026-10-11. Opened 2026-09-11; supersedes the R6 search/patch/terminal
 candidates in `terminal-bench.md` § Phase 6 (which keep their
 evaluation method and acceptance targets). The per-feature harness catalog
 that motivated it is superseded by
@@ -315,6 +315,275 @@ calls, the stated target. With an unchanged model mix, empty-argument calls
 should be 0 or explained by a captured stream. Every `Failure` the TUI
 shows should be one a user would act on.
 
+### D10 — Post-v0.1.6 audit (2026-10-11; T18–T20)
+
+The data covers 2026-10-08 12:34 (v0.1.6, `fef41a4`) to 2026-10-11: 1,473
+calls, 72 `is_error` (4.9 %, down from 28–54 % on 2026-10-06/07). The
+queries were the D9 queries plus `events` `tool_approval_requested`
+(`shell.verdict`, `shell.reasons`) and `sessions.approval_mode`. All
+shell calls were replayed through the current `classify_command` (an
+untracked harness in `/tmp`; method in the ledger).
+
+| tool | calls | errors | rate |
+| --- | --- | --- | --- |
+| `search` | 476 | 6 | 1.3 % |
+| `read_file` | 350 | 3 | 0.9 % |
+| `shell` | 348 | 12 | 3.4 % |
+| `exec` | 62 | 7 | 11.3 % (all real outcomes) |
+| `edit_file` | 51 | 10 | 19.6 % |
+| `write_file` | 10 | 2 | 20 % |
+
+No empty `{}` arguments appeared (T16 holds), and so did no ranges+offset
+failure or empty form failure (T15 holds). The read side meets the 1 %
+target on three days of data. D9 still waits for its full week. The
+remaining friction has moved:
+
+1. **The shell approval path is the largest cost.** Under `auto`, 143 of
+   226 `shell` calls (63 %) were held for the reviewer or a human. The
+   reviewer approved 115, the human 25, and 3 were denied. Reviewer holds
+   cost 1.6 s each on average. Human holds stall the run for minutes to
+   hours (`approved_once` median ≈ 3 min, total 11.6 h over 25 calls).
+   Replaying the held commands identified false prompts with one reading
+   each:
+   - `timeout N cmd`, `time cmd`, and `nice cmd` are judged as the wrapper
+     (`unlisted`), not as the peeled inner command. `timeout 300 cargo test`
+     prompts while `cargo test` is allowed. Models wrap most long test runs
+     in `timeout`.
+   - A list-level fd redirect turns the list into a `redirected_statement`
+     whose body is not a `command`, so every command in it is marked
+     `nested`. `cd x && cargo test 2>&1 | grep y` prompts, while
+     `cargo test 2>&1 | grep y` and `cd x && cargo test | grep y` are
+     allowed. A redirect to a standard stream or `/dev/null` writes nothing
+     and should not nest.
+   - `git -C <dir> …` reads `-C` as the subcommand. `git worktree list`
+     and `git branch --list <pattern>` are reads judged as mutations.
+   - `git fetch` was planned to move to `Allow` in its plain form (lead
+     decision 2026-10-11). In review on 2026-10-12 that was reversed. With
+     no refspec on the command line, git applies `remote.<name>.fetch`
+     from its configuration. The classifier cannot see that, and it may
+     update local branches. Fetch keeps `GitRemote` in every form.
+   - Workspace-relative globs (`docs/*.md`, `crates/*/src`) also prompt,
+     as `dynamic_word`. This is **not** a false prompt. A glob expands to
+     filenames the workspace controls, and a filename can carry program
+     syntax. For example, a file named `e touch PWN` turns `sed -n *` into
+     a sed script that runs a command. Admitting globs would need a
+     per-program operand grammar, so it stays deferred.
+
+   The replay runs the T18 classifier as built (wrappers, stream redirects,
+   `git -C`, `worktree list`, `branch --list`, no fetch). It turns 28 of the
+   143 held commands into `Allow`. Allowing globs would add about 13 more,
+   which accounts for the gap from the 40 first reported.
+   The rest are real prompts: 30 file writes through the shell
+   (`python3 - <<EOF`, `sed -i`, `cat >`), 22 git mutations, 15 commands
+   with shell variables or loops, 10 redirects into the workspace, and the
+   remainder mixed.
+2. **Models edit through the shell because `edit_file` refuses.** Since
+   v0.1.6 there were 59 shell writes against 51 `edit_file` calls. 9 of 61
+   `edit_file`/`write_file` calls failed `not_read` or `stale_file`. In
+   every traced case the model had seen the text, either through
+   `grep`/`sed -n` in the shell or in its own earlier edit, or it had
+   changed the file itself with a shell script. Two `stale_file` failures
+   came straight after a model's own `python3` rewrite of the same file.
+   The `not_read` refusal costs a `read_file` round trip and pushes the
+   model toward `python3 - <<EOF` and `sed -i`. Those are held for
+   approval, invisible to the diff UI, and unchecked by the cascade. The
+   freshness rule protects against overwriting text the model never saw.
+   An exact `old` that matches exactly once already proves the model has
+   that region. This is a lead decision (2026-10-11, ADR-0058). Matching
+   bytes are weaker evidence than a recorded read: an `old` of `false` can
+   be guessed. They were accepted as enough for `auto`, for two reasons.
+   `edit_file` is a workspace-bounded mutation that `auto` already
+   executes without approval once a read is recorded, and that read
+   proves nothing about intent either. The alternative the data shows is
+   an unreviewed `sed -i` through the shell. `note=unread` keeps every
+   such edit visible, and under `ask` and `supervised` every edit is
+   still held. The model-facing contract changes with the behavior: the
+   `edit_file` description and the system prompt's read-before-edit
+   bullet say that a unique exact `old` applies to an unread file, and a
+   prompt-text test pins the wording. The `if_hash` path is weaker than either: `read_file
+   mode=info` returns `h:` without any content. Across the store, 44
+   `edit_file`/`write_file` calls also sent the placeholder
+   `h:000000000000`. T19 does not widen the `if_hash` path, and a separate
+   decision covers whether to narrow it (decisions-needed row 12).
+3. **Small refusals with one reading remain.** `search.max_per_file` > 50
+   refused 4 times (Claude). The `context` clamp from T15 did not cover it.
+   `read_file` with 9 ranges refused once (cap 8). `read_file` with
+   `include_ignored` refused twice (unknown field; RR10's drop-and-note
+   rule covers it). `read_tool_result` with the documented placeholder
+   handle `t:read_file:00000000:00000000` refused twice. The model copied
+   the prompt's example shape instead of a real handle.
+4. **The prefer-built-in nudge is effectively absent.** 154 of 348
+   shell calls were read-only file reads (`sed -n`, `grep`, `head`,
+   `cat`), and 1 carried a hint. `builtin_alternative` splits on the
+   first `|;&` and reads the first word, which is almost always `cd`. Shell
+   reads cost an approval round trip in compound form and lose the
+   built-ins' header, hash, gutter, and file-state record. The last of
+   these feeds observation 2.
+
+**T18 — classifier false prompts.** In `approval/{classify,rules}.rs`:
+
+- Transparent launchers are judged by the command they launch. Past
+  8 wrappers, the remaining launchers are skipped to the program they
+  launch, which is judged nested (fail-closed `Prompt`, so `nice` ×9 `echo
+  sudo` is not `Forbidden`). Wherever the start of the launched command is
+  not knowable (a tail that is not a clean launcher chain, dynamic
+  `chrt`/`taskset` options, `env -S` strings), the command is unknown and
+  every suffix of its words is judged, nested. A buried `sudo` is still
+  `Forbidden`. `env NAME=VALUE cmd` carries its assignments to `cmd`, so
+  the assignment rule applies. GNU `timeout` creates its own process
+  group, so shell cancellation can leave it running. That predates T18
+  and is ENG-1032. The set
+  is closed: `timeout`, `time`, `nice`, `nohup`, `stdbuf`. Each admits
+  only its own launch options: `timeout` takes `-s/--signal SIG`,
+  `-k/--kill-after D`, and `--preserve-status`, then a duration
+  (`--foreground` leaves children untimed, so it is excluded); `nice` takes `-n N`/`--adjustment=N`; `stdbuf` takes
+  `-i/-o/-e MODE`; `time` takes `-p`; `nohup` takes none. With
+  exactly those options *and* an inner command, the wrapper adds no tier
+  of its own. Any other option, or no inner command, leaves the wrapper
+  `Prompt` (`unlisted`). A path-qualified launcher (`/usr/bin/timeout`)
+  is never treated as transparent, but its tail is still judged, so
+  `/usr/bin/timeout 5 sudo ls` stays `Forbidden`. `ionice`, `chrt`, `taskset`, and `renice` are
+  not launchers here, because they can retarget a running process
+  (`ionice -c 3 -p 123`). `sudo`/`doas`/`su` stay `Forbidden`, and
+  `xargs` stays `Prompt`.
+- A `redirected_statement` whose redirects all write nothing does not
+  mark its body `nested`. Writing nothing means exactly `/dev/null`,
+  `/dev/stdin|stdout|stderr`, or duplicating descriptor 0–2 (`2>&1`).
+  `>&3` copies an inherited descriptor and is a write. `>1` and
+  `2> 1` write a file named `1` and stay `Prompt`.
+- `git -C <dir>`: skip the hops before reading the subcommand, so
+  `git -C sub push --force` stays `Forbidden`. A `-C` command is never
+  `Allow`, because a contained-looking hop can be a workspace symlink and
+  the gates classify with no workspace root. An escaping hop is `Prompt`
+  with `path_outside_workspace`.
+- `git worktree list` and `git branch --list [pattern]` become `Allow`.
+- `git fetch` keeps `GitRemote` in every form (see observation 1).
+- Hardening found in review: a path-qualified program (`./ls`,
+  `bin/cargo`, `./timeout`) is never `Allow`, and a path-qualified
+  launcher is never peeled. `git -C` into `/tmp` counts as an escape.
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`, and their kin make a `git`
+  command `Prompt`. Any assignment before a command (`RUSTDOC=`, `CC=`,
+  `GIT_EXTERNAL_DIFF=`, …) keeps it from `Allow`, except a short
+  allowlist of output and test knobs (`RUST_BACKTRACE`, `RUST_LOG`,
+  `NO_COLOR`, and enumerated `QQ_` bench/soak knobs; not `QQ_*`, since
+  `QQ_UPDATE_FIXTURES` rewrites fixtures). Many variables name a program to run, so a
+  denylist cannot be complete. `export`/`declare -x` is a construct and
+  never allows, so `export GIT_EXTERNAL_DIFF=x; git diff` prompts. `git branch` is a read only when every option is a
+  listing option, because `--list --no-list name` creates `name`.
+- Globs are unchanged and keep `dynamic_word` (see observation 1).
+- Every case above is a `match`/`not_match` row in `rule_examples_hold`,
+  plus the adversarial rows: `timeout 5 sudo ls` (Forbidden), `nice rm -rf
+  target` (Prompt), `timeout --verbose 5 ls` and bare `nice` (Prompt),
+  `ionice -c 3 -p 123` and `ionice -c 3 cargo build` (Prompt),
+  `git -C ../other status` and `git -C /tmp/other status` (Prompt), plain
+  `git fetch origin` (Prompt), `./timeout 5 cargo test` (Prompt),
+  `GIT_DIR=/tmp/o/.git git status` (Prompt), and
+  `git branch --list --no-list x` (Prompt). Two glob rows stay
+  `not_match`: `sed -n *` and `grep -n x docs/*.md`.
+
+Gate: `classify_command` bench unchanged (≤ 200 µs / 1 KiB). Acceptance
+is checked in, so a fresh checkout can reproduce it. A `d10_held` table
+in the rules tests carries at least 25 sanitized command shapes, each
+with its expected verdict. The shapes are taken from the held corpus
+with paths and names made generic: each relaxation's matching shapes
+and the real prompts it must not admit (shell writes, git mutations,
+loops). The table also asserts that no row's tier crosses `Forbidden`.
+The live session corpus is not committed (the repository is public and
+the commands are private work). Rerunning the untracked replay from the
+ledger is advisory evidence. As built, about 28 of 143 held become
+`Allow`, and no command changes into or out of `Forbidden`.
+
+**T19 — edit freshness by exact unique match.** In `tools/edit.rs`: when a
+file has no recorded read and no `if_hash`, an `old`/`new` edit whose
+`old` matches exactly once by the `exact` strategy is applied, and the
+header gains `note=unread`. Only the `old` form qualifies. In the schema,
+`insert_before`/`insert_after` are exclusive of `old`, so every anchor
+insert is anchor-only and still needs a read. The rule applies per file
+across a batch: every edit to an unread file must qualify, or the batch
+fails. A fuzzy match, an ambiguous match, an anchor insert, and
+`write_file` over an existing file still require a read or `if_hash`, and
+keep `not_read`, because no text proves what the model saw. `stale_file`
+(a recorded read whose hash no longer matches) follows the same rule: a
+unique exact match applies with `note=changed_since_read`. An `if_hash`
+mismatch stays an error, because the model asserted a version. Refusals
+do **not** carry the current `h:`. Handing back the hash would authorize
+the same fuzzy edit or overwrite on the next call without the model
+seeing any content. The message instead names the cheapest fix: extend
+`old` until it is exact and unique, or `read_file` the ranges around the
+edit. The applied edit records the new hash in `FileState` as before. This changes `tools.md` § Optimistic Concurrency
+step 2 and needs ADR-0058 (reserved). The concurrency argument still
+holds. The match runs against the bytes read at plan time, and the
+apply-time exclusive section re-hashes against that same `before_hash`.
+A writer that lands in between therefore fails the edit with
+`stale_file`, and the edit is never misapplied. Regressions cover the traced
+shapes: a shell-modified file then an exact edit, a never-read file with a
+unique `old`, a duplicate `old` on an unread file (`not_read`, not
+`ambiguous`), an overlapping repeat (`aa` in `aaa`, `not_read`), a fuzzy-only match on an unread file (`not_read`), an anchor
+insert on an unread file (`not_read`), a mixed batch where one edit to an
+unread file does not qualify (whole batch refused, nothing written), an
+`if_hash` mismatch (unchanged), and a refusal text that contains no `h:`
+of the current content. Gate: `edit_batch` unchanged.
+
+**T20 — nudge past leading cd; placeholder spill correction.**
+
+- `builtin_alternative` skips a leading `cd DIR &&` and then judges the
+  first program, as today. `DIR` must be relative with no `..`, since
+  `read_file` is workspace-confined. Even then, under `strict` a skipped
+  prefix only hints and never refuses, because the classifier cannot
+  prove `DIR` is not a symlink out of the workspace. Only an unprefixed
+  command whose every path operand is relative with no `..` is refused
+  under `strict`. `sed -n 1,5p /tmp/log` and any absolute or `..`
+  operand only hint. A relative operand through a workspace symlink is
+  refused, and the refusal is a correction the model recovers from by
+  running the shell form. That residual is accepted, because `strict` is
+  an ablation arm, not a default. `cd DIR;` is not skipped, because with `;` the
+  next command runs in either directory depending on whether `cd`
+  succeeded. `cd x && sed -n 1,20p a.rs`
+  hints `read_file ranges`. A replaceable program later in a list or
+  pipeline (`cargo test && grep x log`) gets no hint and no `strict`
+  refusal: the compound needs the shell. The skip uses no classifier
+  reparse. It accepts only a
+  leading `cd` whose operand is one unquoted word with no shell
+  metacharacters. A quoted or escaped operand (`cd 'x;grep y z' && …`) is
+  not skipped, so that command gets no hint and no refusal, and is a
+  listed regression. The hint stays a result suffix, and only `strict` refuses.
+- `search.max_per_file` above 50 keeps the current
+  `invalid_max_per_file` correction. A clamp would show 50 matches with
+  `+N more in file` and no `next=` cursor for the rest, which is a
+  partial success with no continuation. `read_file` with more than 8 ranges
+  keeps the current `invalid_ranges` correction: a silent partial read
+  breaks the rule that every truncation carries a continuation.
+- `read_tool_result` with an all-zero handle answers with
+  `handle_placeholder: t:…:00000000:00000000 is the example shape; copy
+  the handle from the …[qq: … t:…]… marker of the result you want`,
+  not `spill_missing`. The check is a parse-time `match` on the handle
+  in `read_tool_result` dispatch (`runtime/run_loop.rs`, where
+  `SpillHandle::parse` and the store miss are mapped today). It needs no
+  store query. Listing recent handles
+  would need a new session-scoped store query, which is out of scope.
+  `handle_placeholder` joins the `Correction` list in
+  `ToolErrorKind::of`. The prompt and the marker never show a zero
+  handle; any example uses `t:<tool>:<call8>:<digest8>`.
+- `read_file.include_ignored` and similar unknown fields belong to RR10
+  (ENG-872). T20 does not take them.
+- Regressions: `sed -n 1,5p a` hints and `strict` refuses;
+  `cargo test && grep x log`, `cd 'x;grep y z' && cargo test`, and
+  `cd missing; sed -n 1,5p a` neither hint nor refuse; `cd /tmp && sed
+  -n 1,5p log` neither hints nor refuses; `sed -n 1,5p /tmp/log` hints
+  but is not refused; `cd x && sed -n 1,5p a` hints but
+  is not refused under `strict`; `max_per_file=80`
+  and a 9-range read still fail with their corrections; a zero handle
+  returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`
+  grades it `Correction`.
+
+Acceptance for D10: rerun the D10 queries over a week after T18–T20 land,
+with an unchanged model mix. Under `auto`, held `shell` calls drop below
+50 % (T18 alone accounts for about 51 %; the rest has to come from
+T19 moving shell writes onto `edit_file` and T20 moving shell reads onto
+built-ins), `edit_file`/`write_file` `not_read`+`stale_file` drop below 3 %,
+the shell-write to `edit_file` ratio falls, and at least half of shell
+read-only file reads carry a hint.
+
 ### New effect classes and wire impact
 
 Shipped with T6–T9: `EffectClass::{Network, Interactive}`,
@@ -340,17 +609,26 @@ table is `tools.md` § Approval Policy.
 | T10 | `terminal` (gated on R6-terminal evidence) | L | T4, T6 | `tools/terminal.rs`, `sessions` process ownership | process-tree cleanup test; no descendants after cancel |
 | T11 | `view_image` + provider image content block (`vision` feature) | M | provider content-block change | `tools/image.rs`, `qq-provider` | minimal profile unchanged |
 | T12 | `@` mentions: grammar, ranges field, dirs/globs, `@diff`/`@sha`, completion | M | T2 | `qq-tui` composer, `src/headless.rs`, `qq-protocol/src/input.rs` | TUI render gate unchanged |
-| T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7 | `benchmarks/tools/` | Phase 6 acceptance |
+| T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7, T18–T20 | `benchmarks/tools/` | Phase 6 acceptance |
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
+| T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
+| T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools/specs.rs` (`edit_file` description), `runtime/prompt.rs` (read-before-edit bullet, prompt version), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
+| T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (strict built-in refusal and `read_tool_result` dispatch), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
-(the "safety" release, v0.1.0) → T12 → T8 → T9; remaining: T13 → T14 → T11
-→ T10, with T15 → T16 → T17 ahead of T13 so the ablations measure the
-corrected contract. T13 runs paired evaluations over the shipped arms and again after T12;
-T10 waits for its evidence.
+(the "safety" release, v0.1.0) → T12 → T8 → T9 → T15 → T16 → T17 (v0.1.6);
+remaining: T18 → T19 → T20 → T13 → T14 → T11 → T10. T18–T20 come ahead of
+T13 for the same reason T15–T17 did: the ablations should measure the
+corrected contract, and A4's `auto` prompt rate is meaningless while 28 of
+every 143 holds are classifier bugs. T18 and T19 touch disjoint code and
+may be built in parallel worktrees. They share `tools.md` and the one
+ledger, so they integrate as a stack (T19 on T18). The T19 branch takes
+the T18 branch by merge, and each slice appends only its own dated
+ledger entries. T20 follows T18 and T19. T13 runs paired evaluations over the shipped
+arms and again after T12; T10 waits for its evidence.
 
 ## Ablation Plan
 
@@ -424,4 +702,6 @@ and the ledger; ADR-0021 and `tools.md` § Network Tools (T8/T9).
 | `tree-sitter` parse latency on huge commands | > 16 KiB skips parsing (`Prompt`); thread-local parser; bench gate |
 | Spill store grows the SQLite file | Per-session 64 MiB cap, LRU eviction, pruned with sessions; store worker unchanged |
 | Fuzzy edit applies to the wrong block | Cascade never widens ambiguity; disproportionate guard; `via=` makes drift visible; `fuzzy=false` available |
+| T19 unread edit clobbers text the model never saw | Only a unique *exact* `old` qualifies, so the model must reproduce the bytes it replaces; fuzzy, ambiguous, anchor inserts, and `write_file` overwrites still refuse; refusals never return the current hash, which would authorize the refused edit; apply-time re-hash unchanged; `note=unread` keeps it visible |
+| T18 wrapper or fetch relaxation opens an escape | Closed launcher set with per-wrapper option grammars and a required inner command; process-retargeting tools excluded; `git fetch` kept held (configured refspecs); globs not relaxed (filenames can be program syntax); adversarial `not_match` rows for each; Forbidden tier frozen by the `d10_held` table |
 | Protocol churn | All changes additive and `skip_serializing_if`; wire fixtures extended, not replaced |

@@ -61,9 +61,37 @@ pub fn valid_env_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// The first simple program of a pipeline, when it has a bounded built-in
-/// the model should have used instead. Returns `(program, builtin)`.
-pub(crate) fn builtin_alternative(command: &str) -> Option<(&'static str, &'static str)> {
+/// A hint may name an equivalent without claiming the shell is replaceable.
+/// Prefixed or compound commands and uncertain paths still need the shell.
+pub(crate) struct BuiltinAlternative {
+    pub(crate) program: &'static str,
+    pub(crate) builtin: &'static str,
+    pub(crate) refuse: bool,
+}
+
+/// Judge the first program, optionally past one lexical `cd DIR &&`.
+pub(crate) fn builtin_alternative(command: &str) -> Option<BuiltinAlternative> {
+    let mut command = command.trim_start();
+    let mut prefixed = false;
+    if command.split_whitespace().next() == Some("cd") {
+        let (prefix, rest) = command.split_once("&&")?;
+        let mut words = prefix.split_whitespace();
+        let _ = words.next();
+        let directory = words.next()?;
+        if prefix.contains(['\n', '\r'])
+            || words.next().is_some()
+            || directory.starts_with(['/', '-', '~'])
+            || directory.split('/').any(|part| part == "..")
+            || directory.contains([
+                '|', ';', '&', '\'', '"', '\\', '$', '`', '*', '?', '[', ']', '<', '>', '(', ')',
+                '{', '}', '!', '#',
+            ])
+        {
+            return None;
+        }
+        command = rest.trim_start();
+        prefixed = true;
+    }
     let first = command
         .trim_start()
         .split(['|', ';', '&', '\n'])
@@ -78,7 +106,7 @@ pub(crate) fn builtin_alternative(command: &str) -> Option<(&'static str, &'stat
     }
     let program = program.rsplit('/').next().unwrap_or(program);
     let rest: Vec<&str> = words.collect();
-    Some(match program {
+    let (program, builtin) = match program {
         "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" => ("grep", "search"),
         "find" | "fd" | "fdfind" => (
             if program == "find" { "find" } else { "fd" },
@@ -98,6 +126,26 @@ pub(crate) fn builtin_alternative(command: &str) -> Option<(&'static str, &'stat
         #[cfg(feature = "tool-fetch")]
         "curl" | "wget" => (if program == "curl" { "curl" } else { "wget" }, "fetch"),
         _ => return None,
+    };
+    // The lexical nudge cannot prove shell expansion or a changed directory's
+    // containment. Only plain relative operands qualify for strict refusal.
+    let refuse = !prefixed
+        && !command.contains([
+            '|', ';', '&', '\n', '\r', '\'', '"', '\\', '$', '`', '*', '?', '[', ']', '<', '>',
+            '(', ')', '{', '}',
+        ])
+        && command.split_whitespace().all(|word| {
+            // A short option can attach its path (`grep -f/tmp/patterns`).
+            // Without an option grammar, do not assert containment for it.
+            !(word.starts_with('-') && word.contains('/'))
+                && word.split('=').all(|operand| {
+                    !operand.starts_with(['/', '~']) && !operand.split('/').any(|part| part == "..")
+                })
+        });
+    Some(BuiltinAlternative {
+        program,
+        builtin,
+        refuse,
     })
 }
 
@@ -123,7 +171,42 @@ mod tests {
     }
 
     #[test]
+    fn t20_prefixes_and_path_operands_do_not_overstate_replaceability() {
+        for command in [
+            "cd /tmp && sed -n 1,5p log",
+            "cd ../x && sed -n 1,5p a",
+            "cd 'x;grep y z' && cargo test",
+            "cd x\\ y && sed -n 1,5p a",
+            "cd missing; sed -n 1,5p a",
+            "cd\nx && sed -n 1,5p a",
+            "cargo test && grep x log",
+            "cargo test | grep x log",
+        ] {
+            assert!(builtin_alternative(command).is_none(), "{command}");
+        }
+        for (command, refuse) in [
+            ("sed -n 1,5p a", true),
+            ("cd x && sed -n 1,5p a", false),
+            ("cd x&&sed -n 1,5p a", false),
+            ("cd ü+x@2 && sed -n 1,5p a", false),
+            ("sed -n 1,5p /tmp/log", false),
+            ("cat a ../log", false),
+            ("head --file=/tmp/log", false),
+            ("grep -f/tmp/patterns a", false),
+            ("grep -f../patterns a", false),
+            ("cat '$HOME/log'", false),
+            ("cat {a,/tmp/log}", false),
+            ("cat a | head", false),
+        ] {
+            let alternative = builtin_alternative(command).expect(command);
+            assert_eq!(alternative.refuse, refuse, "{command}");
+        }
+    }
+
+    #[test]
     fn builtin_alternatives_name_the_first_program_only() {
+        let builtin_alternative =
+            |command| super::builtin_alternative(command).map(|hint| (hint.program, hint.builtin));
         assert_eq!(
             builtin_alternative("grep -rn TODO src"),
             Some(("grep", "search"))

@@ -1628,11 +1628,11 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 13 and prompt 18: capability-aware
-        // sub-agent authority guidance).
+        // changing the encoding (descriptor 13 and prompt 19: a unique exact
+        // edit applies to an unread file, T19).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "a1b49276d62a65130c359014c3b79d0e3ffae49296af4ab19e7c56882a7ad88c"
+            "09227e1b85d9f653569105b81e6b3acbceb73b3e8865d7135cced13b3dc7c40f"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v13\0".len()..]).unwrap();

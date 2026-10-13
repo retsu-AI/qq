@@ -1970,6 +1970,7 @@ pub enum RuntimeConfigError {
 #[cfg(test)]
 mod tests {
     mod progress;
+    mod t20;
 
     use std::{
         sync::{
@@ -9596,6 +9597,14 @@ mod tests {
         const CONTROL_BULLET: &str = "- A sub-agent still working may also send its latest \
             progress report as a notice. Call wait_agents when your next step needs specific \
             answers, and cancel_agent for a sub-agent whose answer you no longer need.\n";
+        const READ_FIRST_BULLET: &str = "- Read a file with read_file before editing or \
+            overwriting it; edits without a prior read in this session are rejected unless \
+            if_hash carries the h:<hash> from that file's header.";
+        const EXACT_EDIT_BULLET: &str = "- Read a file with read_file before overwriting it or \
+            editing by anchor; an edit to a file not read in this session (or changed since) \
+            applies only when its old matches exactly once, and the result says note=unread or \
+            note=changed_since_read. If one is refused, extend old until it is exact and \
+            unique, or read the lines around it.";
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
@@ -9628,9 +9637,12 @@ mod tests {
             None,
         );
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control bullet, and
-        // prompt 16 rewords only the first and last delegation bullets; undo
-        // them, then the brief bullet.
+        // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
+        // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
+        // bullet, and prompt 16 rewords only the first and last delegation
+        // bullets; undo them, then the brief bullet.
+        assert!(prompt.contains(EXACT_EDIT_BULLET), "{prompt}");
+        let prompt = prompt.replacen(EXACT_EDIT_BULLET, READ_FIRST_BULLET, 1);
         assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
         let v16 = prompt.replacen(CONTROL_BULLET, "", 1);
         assert!(v16.contains(BACKGROUND_SPAWN), "{v16}");
@@ -9646,12 +9658,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // Every built-in declaration is unchanged.
+        // Every built-in declaration is unchanged except `edit_file`'s
+        // description, which T19 (ADR-0058) rewords.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+            "9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb"
         );
         let spawn = specs.last().unwrap();
         assert!(

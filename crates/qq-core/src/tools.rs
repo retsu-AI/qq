@@ -276,6 +276,34 @@ mod tests {
     }
 
     #[test]
+    fn t20_oversized_search_and_ranges_keep_lossless_corrections() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), "x\n".repeat(100)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments, code) in [
+            (
+                "search",
+                r#"{"query":"x","max_per_file":80}"#,
+                "invalid_max_per_file:",
+            ),
+            (
+                "read_file",
+                r#"{"path":"a","ranges":["1","2","3","4","5","6","7","8","9"]}"#,
+                "invalid_ranges:",
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(result.is_error, "{}", result.model_text);
+            assert!(result.model_text.starts_with(code), "{}", result.model_text);
+            assert_eq!(
+                qq_protocol::ToolErrorKind::of(name, &result.model_text),
+                qq_protocol::ToolErrorKind::Correction
+            );
+        }
+    }
+
+    #[test]
     fn read_file_ranges_merge_align_and_report_bounds() {
         let directory = tempfile::tempdir().unwrap();
         let content: String = (1..=120).map(|n| format!("line {n}\n")).collect();
@@ -1477,7 +1505,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+            "9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb"
         );
     }
 
@@ -1659,11 +1687,12 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
+        // ADR-0058: a unique exact `old` is proof enough; an anchor is not.
         let edit = run_tool(
             &workspace,
             &state,
             "edit_file",
-            r#"{"edits":[{"path":"note.txt","old":"content","new":"changed"}]}"#,
+            r#"{"edits":[{"path":"note.txt","insert_after":"content","new":"changed"}]}"#,
         );
         assert!(edit.is_error);
         assert!(edit.model_text.contains("read_file"), "{}", edit.model_text);
