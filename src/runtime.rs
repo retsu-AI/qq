@@ -376,7 +376,7 @@ impl RuntimeFactory {
     /// `Persist` records the files exactly as `qq trust` does; `Session`
     /// admits them for this process only. Either way the configuration is
     /// then loaded and the client's model state recomputed. Blocking:
-    /// trust-state I/O, the load, and credential probes. An empty pending
+    /// trust-state/configuration I/O and credential index metadata only. An empty pending
     /// set is not an error: the files were trusted meanwhile (another `qq
     /// trust`) and the load simply succeeds.
     pub fn resolve_trust(
@@ -611,6 +611,11 @@ impl RuntimeFactory {
             {
                 continue;
             }
+            if client_credential_presence(provider, &registered)
+                != ClientCredentialPresence::Missing
+            {
+                continue;
+            }
             let remedy = match provider.access() {
                 Some(ProviderAccess::Http(access)) => match access.auth() {
                     HttpCredential::ApiKey {
@@ -645,9 +650,6 @@ impl RuntimeFactory {
                 },
                 None => continue,
             };
-            if provider_credential_present(provider, &registered) {
-                continue;
-            }
             remedies.push(ProviderRemedy {
                 provider: provider_id.clone(),
                 remedy,
@@ -2285,6 +2287,35 @@ enum RouteAdmission<'a> {
 /// [`RuntimeFactory::provider_authenticated`] without the secret read: the
 /// same credential sources, checked for presence. Endpoint binding is not
 /// checked; a mismatch fails at the request that reads the credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientCredentialPresence {
+    Present,
+    Missing,
+    Unknown,
+}
+
+/// Client bootstrap cannot inspect AWS files or ask the OS for a secret.
+/// An unresolved AWS source remains unknown until server authorization.
+fn client_credential_presence(
+    provider: &ProviderConfig,
+    registered: &BTreeSet<String>,
+) -> ClientCredentialPresence {
+    match provider.access() {
+        Some(
+            ProviderAccess::AmazonBedrock {
+                auth: BedrockAuth::Aws(_),
+                ..
+            }
+            | ProviderAccess::AmazonBedrockMantle {
+                auth: BedrockAuth::Aws(_),
+                ..
+            },
+        ) => ClientCredentialPresence::Unknown,
+        _ if provider_credential_present(provider, registered) => ClientCredentialPresence::Present,
+        _ => ClientCredentialPresence::Missing,
+    }
+}
+
 fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<String>) -> bool {
     let reference_present = |reference: &qq_config::SecretRef| match reference {
         qq_config::SecretRef::Env(variable) => environment_variable_set(variable),
@@ -2331,18 +2362,10 @@ fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<
             | ProviderAccess::AmazonBedrockMantle { auth, .. },
         ) => match auth {
             BedrockAuth::ApiKey(reference) => reference_present(reference),
-            // The client presence path may inspect environment names, but it
-            // must not read AWS config/credentials files before first paint.
-            // Server-side authorization retains the full AWS chain.
-            BedrockAuth::Aws(AwsAuth::Profile(_)) => false,
-            BedrockAuth::Aws(AwsAuth::DefaultChain) => {
-                environment_variable_set("AWS_ACCESS_KEY_ID")
-                    && environment_variable_set("AWS_SECRET_ACCESS_KEY")
-                    || (environment_variable_set("AWS_WEB_IDENTITY_TOKEN_FILE")
-                        && environment_variable_set("AWS_ROLE_ARN"))
-                    || environment_variable_set("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
-                    || environment_variable_set("AWS_CONTAINER_CREDENTIALS_FULL_URI")
-            }
+            // Plan route admission retains configured AWS sources. The
+            // client's separate presence path never reaches this file I/O.
+            BedrockAuth::Aws(AwsAuth::Profile(profile)) => aws_profile_configured(profile),
+            BedrockAuth::Aws(AwsAuth::DefaultChain) => aws_default_chain_source().is_some(),
         },
         None => false,
     }
@@ -2377,6 +2400,11 @@ pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    static AWS_PROFILE_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn aws_profile_configured(profile: &str) -> bool {
     if profile.is_empty() {
         return false;
@@ -2393,6 +2421,8 @@ pub(crate) fn aws_profile_configured(profile: &str) -> bool {
     let config_header = format!("[profile {profile}]");
     let credentials_header = format!("[{profile}]");
     files.into_iter().flatten().any(|path| {
+        #[cfg(test)]
+        AWS_PROFILE_FILE_READS.with(|reads| reads.set(reads.get() + 1));
         std::fs::read_to_string(path).is_ok_and(|content| {
             content.lines().any(|line| {
                 let line = line.trim();
@@ -6928,6 +6958,123 @@ mod tests {
         assert!(remedies.iter().all(|remedy| remedy.provider != "openai"));
         assert!(remedies.iter().any(|remedy| remedy.provider == "anthropic"));
         assert!(factory.client_model_options(&client).is_empty());
+    }
+
+    #[test]
+    fn client_aws_presence_defers_files_and_plan_preserves_configured_routes() {
+        const CHILD_MODE: &str = "QQ_TEST_CLIENT_AWS_PRESENCE";
+        let Ok(mode) = std::env::var(CHILD_MODE) else {
+            // Environment changes are confined to a child test process; no
+            // parallel test or real AWS configuration is changed or inspected.
+            let fixture = RuntimeFixture::new();
+            let config = fixture.path("aws-config");
+            let credentials = fixture.path("aws-credentials");
+            fs::write(&config, "[profile work]\n").unwrap();
+            fs::write(&credentials, "[work]\n").unwrap();
+            for mode in ["configured", "unreadable"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args([
+                    "--exact",
+                    "runtime::tests::client_aws_presence_defers_files_and_plan_preserves_configured_routes",
+                    "--nocapture",
+                ]);
+                for variable in [
+                    "AWS_ACCESS_KEY_ID",
+                    "AWS_SECRET_ACCESS_KEY",
+                    "AWS_SESSION_TOKEN",
+                    "AWS_DEFAULT_PROFILE",
+                    "AWS_WEB_IDENTITY_TOKEN_FILE",
+                    "AWS_ROLE_ARN",
+                    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                ] {
+                    command.env_remove(variable);
+                }
+                command.env(CHILD_MODE, mode).env("AWS_PROFILE", "work");
+                if mode == "configured" {
+                    command
+                        .env("AWS_CONFIG_FILE", &config)
+                        .env("AWS_SHARED_CREDENTIALS_FILE", &credentials);
+                } else {
+                    // Reading a directory as a file fails on supported hosts.
+                    command
+                        .env("AWS_CONFIG_FILE", fixture.path("data"))
+                        .env("AWS_SHARED_CREDENTIALS_FILE", fixture.path("managed"));
+                }
+                let output = command.output().unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}{}",
+                    stdout,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    stdout.contains("running 1 test")
+                        && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored"),
+                    "{mode} child must execute its fixture: {stdout}"
+                );
+                println!("AWS {mode} isolated fixture:\n{stdout}");
+            }
+            return;
+        };
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory_with_credentials(CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(PanicKeyring),
+        ));
+        let request = fixture.request(r#"(
+            version: 1, model: "cp-profile/test",
+            policy: (allowed_providers: ["cp-profile", "cp-chain"]),
+            providers: {
+                "cp-profile": AmazonBedrock(region: "us-east-1", auth: Aws(Profile("work")), models: {"test": ()}),
+                "cp-chain": AmazonBedrock(region: "us-east-1", auth: Aws(DefaultChain), models: {"test": ()}),
+            },
+        )"#);
+        AWS_PROFILE_FILE_READS.with(|reads| reads.set(0));
+        let client = factory.load_for_client(&request).unwrap();
+        let state = factory.tui_model_state(&client, &request);
+        assert!(state.models.is_empty());
+        assert!(state.model.is_none());
+        assert!(state.tui_model.model.is_none());
+        assert!(state.unauthenticated_providers.is_empty());
+        assert_eq!(AWS_PROFILE_FILE_READS.with(|reads| reads.get()), 0);
+
+        if mode == "configured" {
+            let snapshot = factory.load(&request).unwrap();
+            let options = factory.model_options_for_plan(&snapshot);
+            assert!(options.iter().any(|option| option.provider == "cp-profile"));
+            assert!(options.iter().any(|option| option.provider == "cp-chain"));
+            assert!(AWS_PROFILE_FILE_READS.with(|reads| reads.get()) > 0);
+        } else {
+            assert!(!aws_profile_configured("work"));
+            assert_eq!(AWS_PROFILE_FILE_READS.with(|reads| reads.get()), 2);
+        }
+    }
+
+    #[test]
+    fn client_unavailable_credential_index_never_reports_definite_missing() {
+        let fixture = RuntimeFixture::new();
+        let paths = CredentialPaths::new(fixture.path("data"));
+        let credentials = CredentialStore::with_backend(paths.clone(), Arc::new(PanicKeyring));
+        let factory = fixture.factory_with_credentials(credentials.clone());
+        let request = fixture.request(r#"(version: 1, model: "openai/gpt-5.6")"#);
+        let client = factory.load_for_client(&request).unwrap();
+
+        for corrupt in [true, false] {
+            if corrupt {
+                fs::write(paths.index_file(), "not a credential index").unwrap();
+            } else {
+                fs::remove_file(paths.index_file()).unwrap();
+                fs::create_dir(paths.index_file()).unwrap();
+            }
+            assert!(credentials.list().is_err());
+            let state = factory.tui_model_state(&client, &request);
+            assert!(state.unauthenticated_providers.is_empty());
+            assert!(state.models.is_empty());
+            assert!(state.model.is_none());
+            assert!(state.tui_model.model.is_none());
+        }
     }
 
     #[test]

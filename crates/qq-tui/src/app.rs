@@ -530,7 +530,7 @@ impl App {
     }
 
     /// The trust prompt's answer, resolved by the composition root. Applies
-    /// the now-loadable catalog and credential remedies while retaining the
+    /// credential remedies while retaining the
     /// configured route only as request metadata, then drops the prompt, so
     /// the OB1/OB2 guidance takes over exactly as if the TUI had started
     /// with a trusted project.
@@ -542,13 +542,13 @@ impl App {
         self.trust_resolving = false;
         self.pending_trust.clear();
         self.unauthenticated_providers = resolved.unauthenticated_providers;
-        // Through the catalog path so the sort, per-session context windows,
-        // and an open picker are refreshed like a server catalog update.
         // Keep the configured route as request metadata only. The app's
         // usable/default model remains empty until the server's Models update
         // returns its authoritative selected value.
         let requested_selection = resolved.model;
-        self.apply_model_options(resolved.models, None);
+        // Trust resolution is not a server catalog response. Keep rows empty
+        // until ClientUpdate::Models supplies authoritative options/selection.
+        self.apply_model_options(Vec::new(), None);
         self.set_info(match choice {
             TrustChoice::Persist => format!(
                 "trusted {} file{}",

@@ -4638,7 +4638,7 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
     assert_eq!(app.mode(), Mode::Compose);
     assert!(app.pending_trust.is_empty());
     assert!(app.model.model.is_none());
-    assert_eq!(app.models.len(), 1);
+    assert!(app.models.is_empty());
     assert_eq!(app.unauthenticated_providers.len(), 1);
     assert_eq!(
         app.visible_status(),

@@ -513,7 +513,13 @@ where the router already falls back to the configured choice. The isolated
 TUI QA profile offers only its fixture route. The attached TUI keeps its
 bootstrap model list empty until the server's authoritative `Models` response;
 credential-index presence remains presentation-only and cannot create a
-selectable or authenticated model. The optional model-discovery
+selectable or authenticated model.
+Client remedies treat unreadable credential metadata and unresolved AWS profile
+or default-chain sources as unknown. The client does not inspect AWS credential
+files; plan route admission retains the server's configured AWS-source checks.
+Trust refresh clears local rows and keeps the configured route as request
+metadata until the server returns authoritative options and selection.
+The optional model-discovery
 cache lookup uses a cached result only when the cache scope can be derived
 without secure-store I/O: Codex, XAI, stored secret references, and a
 built-in API-key fallback without an explicit non-stored reference skip the
