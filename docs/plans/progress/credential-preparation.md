@@ -4,8 +4,9 @@
 
 - Owner: `/root/jev_contract_trace`; independent verifier: `jev_final_verifier`.
 - Base: `eddff56e054e4ad6f16a4156660f3918782ac49d`.
-- Candidate: `1d7054d` (capacity/poison/client-flow repairs plus trust catalog
-  selection separation and unknown-presence fail-closed handling).
+- Candidate: `f662612` (capacity/poison/client-flow repairs plus trust catalog
+  selection separation, deterministic fanout, and unknown AWS fail-closed
+  handling).
 - Baseline: `baseline-cold-same-key.cast` and matching logs recorded 8 Keyring reads
   for one cold same-key request where the regression expected 1.
 - Focused checks on the candidate: three `qq-auth` coalescing/failure-retry/distinct-key
@@ -24,3 +25,8 @@ The follow-up adds predicate capacity waiting, target epoch/secret rotation whil
 saturated, active coordinator poison cleanup, trust-to-Models separation, and
 AWS presence checks that inspect environment names only. Live attached-TUI behavior
 remains root-owned acceptance.
+
+The parent exact-head capture at `8b49271` exposed a three-read fanout oracle;
+the retained failed receipt remains historical. The current fixture holds the
+owner read until three followers are joined and expects one failed read plus one
+later successful retry.
