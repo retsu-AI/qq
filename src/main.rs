@@ -2486,6 +2486,44 @@ mod tests {
     }
 
     #[test]
+    fn credential_diagnostic_cli_activation_runs_real_process_pipeline() {
+        let root = private_tempdir();
+        let path = root.path().join("diagnostic.jsonl");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::credential_diagnostic_cli_child", "--nocapture"])
+            .env("QQ_DIAGNOSTIC_CHILD_PATH", &path)
+            .env_remove("QQ_JEV_API_KEY")
+            .env_remove("TYPESAFE_API_KEY")
+            .env_remove("QQ_JEV_ACTIVATION")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.lines().any(|line| line.contains("Summary")));
+        assert!(!text.contains("diagnostic.jsonl"));
+    }
+
+    #[test]
+    fn credential_diagnostic_cli_child() {
+        use clap::Parser as _;
+        let Some(path) = std::env::var_os("QQ_DIAGNOSTIC_CHILD_PATH") else {
+            return;
+        };
+        let cli = cli::Cli::try_parse_from([
+            "qq",
+            "--credential-diagnostics",
+            path.to_str().unwrap(),
+            "version",
+        ])
+        .unwrap();
+        let session = diagnostic::DiagnosticSession::open(
+            cli.credential_diagnostics.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(session.close(), diagnostic::CloseOutcome::Closed);
+    }
+
+    #[test]
     fn isolated_tui_qa_rejects_registered_jev_without_reading_its_value() {
         let root = private_tempdir();
         let canonical = root.path().canonicalize().unwrap();
