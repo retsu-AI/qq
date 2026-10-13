@@ -500,3 +500,9 @@ Six Codex findings on `9e3da002`, all reproduced against the branch before any f
 - Exactly eight launchers before `cargo test` prompted. The depth limit now applies to peeling a ninth wrapper, not to judging the command after the eighth.
 - `timeout 1e3`/`timeout inf` prompted. The duration is parsed as a float with an optional unit suffix.
 - Rows added for each. `approval` tests 92 pass. `classify_command` 1 KiB 164 µs. Advisory replay unchanged at 111 allow / 115 prompt (only two traced `-C` commands, both already held).
+
+### 2026-10-12 — final T18 replay receipt (supersedes the 2026-10-11 counts)
+
+- Rule set: T18 as merged for review. Launchers are peeled by bare name only, through eight wrappers. Stream-only list redirects stay flat. `git worktree list` and `git branch --list` are reads. `git fetch` keeps `GitRemote` in every form, and every `-C` command prompts. Globs are unchanged.
+- Advisory replay over the same 226 `auto` shell commands: allow 83 → 111, held 143 → 115 (28 recovered, 51 % still held), nothing into or out of `Forbidden`. This is the number the plan uses. The 26/25 figures in the 2026-10-11 entries came from a simulation that still allowed `git fetch`, and are superseded.
+- Plan amendments from the second #280 review: T13 takes T18–T20 as inputs; T18/T19 integrate as a stack with one writer per ledger entry; T20 is narrowed (nudge past a leading `cd` only, 9-range reads stay a correction, the `read_tool_result` dispatch path is owned, focused regressions are listed).
