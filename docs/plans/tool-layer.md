@@ -422,12 +422,14 @@ remaining friction has moved:
 - Transparent launchers are judged by the command they launch. The set
   is closed: `timeout`, `time`, `nice`, `nohup`, `stdbuf`. Each admits
   only its own launch options: `timeout` takes `-s/--signal SIG`,
-  `-k/--kill-after D`, `--preserve-status`, `--foreground`, then a
-  duration; `nice` takes `-n N`/`--adjustment=N`; `stdbuf` takes
+  `-k/--kill-after D`, and `--preserve-status`, then a duration
+  (`--foreground` leaves children untimed, so it is excluded); `nice` takes `-n N`/`--adjustment=N`; `stdbuf` takes
   `-i/-o/-e MODE`; `time` takes `-p`; `nohup` takes none. With
   exactly those options *and* an inner command, the wrapper adds no tier
   of its own. Any other option, or no inner command, leaves the wrapper
-  `Prompt` (`unlisted`). `ionice`, `chrt`, `taskset`, and `renice` are
+  `Prompt` (`unlisted`). A path-qualified launcher (`/usr/bin/timeout`)
+  is never treated as transparent, but its tail is still judged, so
+  `/usr/bin/timeout 5 sudo ls` stays `Forbidden`. `ionice`, `chrt`, `taskset`, and `renice` are
   not launchers here, because they can retarget a running process
   (`ionice -c 3 -p 123`). `sudo`/`doas`/`su` stay `Forbidden`, and
   `xargs` stays `Prompt`.
@@ -504,8 +506,10 @@ of the current content. Gate: `edit_batch` unchanged.
 
 **T20 — the nudge reaches compound commands; small clamps.**
 
-- `builtin_alternative` skips leading navigation (`cd DIR &&`, `cd DIR;`)
-  and then judges the first program, as today. `cd x && sed -n 1,20p a.rs`
+- `builtin_alternative` skips a leading `cd DIR &&` and then judges the
+  first program, as today. `cd DIR;` is not skipped, because with `;` the
+  next command runs in either directory depending on whether `cd`
+  succeeded. `cd x && sed -n 1,20p a.rs`
   hints `read_file ranges`. A replaceable program later in a list or
   pipeline (`cargo test && grep x log`) gets no hint and no `strict`
   refusal: the compound needs the shell. The skip uses no classifier
@@ -514,8 +518,10 @@ of the current content. Gate: `edit_batch` unchanged.
   metacharacters. A quoted or escaped operand (`cd 'x;grep y z' && …`) is
   not skipped, so that command gets no hint and no refusal, and is a
   listed regression. The hint stays a result suffix, and only `strict` refuses.
-- `search.max_per_file` above 50 clamps with `note=max_per_file_clamped=50`
-  (same shape as T15's `context`). `read_file` with more than 8 ranges
+- `search.max_per_file` above 50 keeps the current
+  `invalid_max_per_file` correction. A clamp would show 50 matches with
+  `+N more in file` and no `next=` cursor for the rest, which is a
+  partial success with no continuation. `read_file` with more than 8 ranges
   keeps the current `invalid_ranges` correction: a silent partial read
   breaks the rule that every truncation carries a continuation.
 - `read_tool_result` with an all-zero handle answers with
@@ -532,10 +538,9 @@ of the current content. Gate: `edit_batch` unchanged.
 - `read_file.include_ignored` and similar unknown fields belong to RR10
   (ENG-872). T20 does not take them.
 - Regressions: `cd x && sed -n 1,5p a` hints and `strict` refuses;
-  `cargo test && grep x log` and `cd 'x;grep y z' && cargo test` neither
-  hint nor refuse; `max_per_file=80`
-  returns the clamped result with its note, combined with `context`'s by
-  a comma; a 9-range read still fails `invalid_ranges`; a zero handle
+  `cargo test && grep x log`, `cd 'x;grep y z' && cargo test`, and
+  `cd missing; sed -n 1,5p a` neither hint nor refuse; `max_per_file=80`
+  and a 9-range read still fail with their corrections; a zero handle
   returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`
   grades it `Correction`.
 
@@ -579,7 +584,7 @@ table is `tools.md` § Approval Policy.
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
 | T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
-| T20 | Nudge past leading `cd`; `max_per_file` clamp; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (`read_tool_result` dispatch only), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
+| T20 | Nudge past a leading `cd DIR &&`; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (`read_tool_result` dispatch only), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9 → T15 → T16 → T17 (v0.1.6);
