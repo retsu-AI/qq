@@ -227,9 +227,13 @@ pub(crate) fn judge(
         .map(|arg| arg.as_deref().unwrap_or("\u{0}"))
         .collect();
     // `git -C <dir>…` runs git in `<dir>`. The subcommand is read after every
-    // `-C` hop, and the hops, joined as git joins them, must stay inside the
-    // workspace.
+    // `-C` hop; the joined hops either escape or are unproven.
     let mut git_dir_escapes = false;
+    // A lexically contained hop is still unproven: a workspace symlink can
+    // point anywhere, and the gates classify without a root to resolve it
+    // against. The subcommand is read (so `git -C sub push --force` stays
+    // Forbidden), but the command never reaches the allow table.
+    let mut git_dir_unproven = false;
     if program == "git" {
         let mut dir = String::new();
         let mut hops = 0;
@@ -252,6 +256,7 @@ pub(crate) fn judge(
             // Containment without `path_escapes`' writable-temporary
             // exception: `/tmp/other` is another repository, not scratch.
             git_dir_escapes = Path::new(&dir).starts_with("/tmp") || path_escapes(&dir, workspace);
+            git_dir_unproven = !git_dir_escapes;
             args.drain(..hops);
         }
     }
@@ -296,6 +301,9 @@ pub(crate) fn judge(
     }
     if dynamic {
         return (Decision::Prompt, Some(RuleId::DynamicWord));
+    }
+    if git_dir_unproven {
+        return (Decision::Prompt, Some(RuleId::Unlisted));
     }
     if !path_qualified && allow(program, &literal_args, workspace) {
         return (Decision::Allow, None);
@@ -1331,19 +1339,18 @@ mod tests {
             "timeout 60 nice cargo test 2>&1 | tail -n 40",
             "FOO=1 timeout 300 cargo test",
             "cd sub && timeout 300 cargo test -q",
+            // T18 review: the command after exactly eight launchers is
+            // judged; GNU duration grammar.
+            "nice nice nice nice nice nice nice nice cargo test",
+            "timeout 1e3 cargo test",
+            "timeout inf cargo test",
+            "timeout .5m cargo test",
             // T18: a list-level redirect to a stream does not nest the list.
             "cd src && cargo test 2>&1",
             "cd src && cargo test 2>&1 | grep -n FAILED",
             "cd src && cargo test 2>/dev/null",
             "cd src && cargo test >/dev/stderr 2>&1",
             "cargo build; cargo test &>/dev/null",
-            // T18: git -C with a contained directory.
-            "git -C sub status",
-            "git -C crates/qq-core log --oneline -3",
-            "git -C a -C b diff --stat",
-            // Absolute and inside the workspace. Production gates classify
-            // with no workspace root, so there this prompts (fails closed).
-            "git -C /work/repo/sub status",
             // T18: listing reads.
             "git worktree list",
             "git worktree list --porcelain",
@@ -1459,6 +1466,10 @@ mod tests {
             "nohup -p cargo test",
             "stdbuf -x L cargo test",
             "nohup",
+            // T18 review: nine wrappers are too deep to see through.
+            "nice nice nice nice nice nice nice nice nice cargo test",
+            "timeout 1e3x cargo test",
+            "timeout nope cargo test",
             // T18 adversarial: retargeting tools are not launchers.
             "ionice -c 3 -p 123",
             "ionice -c 3 cargo build",
@@ -1512,6 +1523,13 @@ mod tests {
             "./ls",
             "target/debug/git status",
             "nice ./ls",
+            // T18 review: a contained-looking -C hop may be a symlink out of
+            // the workspace, so -C never allows.
+            "git -C sub status",
+            "git -C link status",
+            "git -C crates/qq-core log --oneline -3",
+            "git -C a -C b diff --stat",
+            "git -C /work/repo/sub status",
             // T18 review: -C into /tmp is another repository.
             "git -C /tmp/other status",
             "git -C /tmp/other log --oneline",
@@ -1649,6 +1667,12 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review: taskset and chrt run their inner command, so a
+            // Forbidden inner command is found through them.
+            "taskset -c 0 sudo ls",
+            "taskset 0x1 sudo ls",
+            "chrt -f 10 sudo ls",
+            "chrt -d -T 100 -P 200 0 sudo ls",
             // T18 adversarial: launching never hides a Forbidden command.
             "nohup sudo ls",
             "stdbuf -oL doas ls",
@@ -1735,7 +1759,7 @@ mod tests {
             (
                 "git -C sub log --oneline -3; git -C sub status --short",
                 Prompt,
-                Allow,
+                Prompt,
             ),
             (
                 "./timeout 400 cargo test -q -p a 2>&1 | tail",

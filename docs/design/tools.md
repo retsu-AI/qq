@@ -941,7 +941,8 @@ and is never allowed. Commands over 16 KiB skip parsing and prompt.
 when it has only its own options and an inner command follows:
 
 - `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, `--preserve-status`,
-  and `--foreground`, then a duration.
+  and `--foreground`, then a duration (a float such as `30`, `1e3`, or
+  `inf`, with an optional `s`/`m`/`h`/`d` suffix).
 - `nice`: `-n N` or `--adjustment=N`.
 - `stdbuf`: `-i/-o/-e MODE`.
 - `time`: `-p`.
@@ -953,10 +954,13 @@ target` is `Prompt`, and `timeout 5 sudo ls` is `Forbidden`. A launcher
 with any other option, or with nothing to launch, is `unlisted`.
 
 The other wrappers are recorded as commands of their own, and the command
-they wrap counts as nested, so it is never allowed. These are `env`,
-`xargs`, `sudo`, `doas`, and `su`, plus `ionice`, `chrt`, `taskset`, and
-`renice`, which are not launchers because they can retarget a running
-process. `sh -c STRING` is reparsed.
+they wrap is recorded as nested. It is judged, so a `Forbidden` inner
+command is found, but it is never allowed. These are `env`, `xargs`,
+`sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset` (after its mask or
+priority positional). `ionice`, `chrt`, and `taskset` are not launchers
+because they can retarget a running process; with `-p` they launch
+nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
+reparsed. Past 8 wrappers, a ninth is not looked through.
 
 A redirect writes nothing when its target is `/dev/null`, `/dev/std*`, or
 a descriptor duplication (`2>&1`, `>&2`). `> 1` writes a file named `1`. A
@@ -969,11 +973,17 @@ glob expands to filenames the workspace controls, and a filename can be
 program syntax: a file named `e touch PWN` turns `sed -n *` into a script
 that runs a command.
 
-`git -C <dir>` is skipped before the subcommand is read. The joined
-directory of every `-C` hop must stay inside the workspace. An escape is
-`Prompt` with `path_outside_workspace`, and `git -C sub push --force` is
-still `Forbidden`. `git worktree list` and `git branch --list [pattern]`
-are reads.
+`git -C <dir>` is skipped before the subcommand is read, so `git -C sub
+push --force` is still `Forbidden`. A `-C` command is never `Allow`. A hop
+that escapes lexically is `Prompt` with `path_outside_workspace`. One that
+looks contained is `Prompt` too, because a workspace symlink can point
+anywhere and the gates have no root to resolve it against. `git worktree
+list` and `git branch --list [pattern]` are reads.
+
+Containment of ordinary operands (`cat link/x`, `cd link`) is still
+lexical and does not resolve symlinks. That predates T18 and is tracked
+separately. `-C` is closed here because it changes which repository git
+acts on.
 
 `git fetch` keeps `git_remote` in every form. With no refspec on the
 command line git applies `remote.<name>.fetch` from its configuration,

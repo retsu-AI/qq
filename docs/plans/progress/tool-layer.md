@@ -492,3 +492,11 @@ Six Codex findings on `9e3da002`, all reproduced against the branch before any f
 - Tests: about 35 new `rule_examples_hold` rows, 2 new `D10_HELD` rows, 6 reason asserts. `qq-core` 916 passed. One full-workspace run failed `schedules_ready_sessions_fairly` (a 2 s timeout under load, unrelated); it passed 3/3 alone and in a full `qq-core` run.
 - `classify_command` (one run on a loaded host, ns): simple 3261, pipeline 11222, forbidden_wrapped 8622, 1 KiB 161366 (budget 200 µs).
 - Advisory replay over the same 226 `auto` commands: allow 83 → 111, held 143 → 115 (28 recovered, 30 before these repairs; the 2 lost were plain `git fetch`).
+
+### 2026-10-13 — T18 review repairs, round 2 (#283)
+
+- `git -C link status`, where `link` is a workspace symlink, reached `Allow`. Lexical containment cannot see a symlink, and the gates have no root to resolve against. A `-C` command now never allows. The hops are still skipped so `git -C sub push --force` stays `Forbidden`. The `D10_HELD` `-C` row is moved to Prompt. Ordinary operands (`cat link/x`, `cd link`) were lexical before T18 and remain so; that gap is noted in `tools.md` as separate.
+- `taskset -c 0 sudo ls` and `chrt -f 10 sudo ls` were `Prompt` under `full`, so they ran. Both wrappers now peel past their mask or priority positional, so a `Forbidden` inner command is found; with `-p` they launch nothing.
+- Exactly eight launchers before `cargo test` prompted. The depth limit now applies to peeling a ninth wrapper, not to judging the command after the eighth.
+- `timeout 1e3`/`timeout inf` prompted. The duration is parsed as a float with an optional unit suffix.
+- Rows added for each. `approval` tests 92 pass. `classify_command` 1 KiB 164 µs. Advisory replay unchanged at 111 allow / 115 prompt (only two traced `-C` commands, both already held).
