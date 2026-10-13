@@ -1274,3 +1274,9 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Performance and independent review receipts above. Protocol/descriptor/schema unchanged; tools design amended. AC17 ready to submit on reviewed consolidation parent #291. Full-plan gates remain open.
 
 - AC17 submitted as ready [PR #294](https://github.com/retsu-AI/qq/pull/294), base consolidation branch #291. ENG-872 In Review. Awaiting Codex opening-description thumbs-up; not merged.
+
+### 2026-10-13 — AC3 stack qualification starts (ENG-1029)
+
+- Dependent branch `fix/eng-1029-ac3-durable-summary-spend` starts on qualified AC17 #294 (`10ad59a9`), in the same isolated stack worktree. Adopt source from draft #279 (`455d3181`) into this branch after baseline; original AC3 checkout remains untouched. Root records scope/ownership.
+- Independent audit requires known completed summarizer-subturn usage to survive retries/drop, successful and failed compaction spend to constrain caller token/cost remainder, and deadline/hang/replay coverage. Completed tool-rejection subturns currently lose known usage on a later transient fault; truncated subturn usage is also ignored by existing summarization. Unknown usage remains unknown, never fabricated zero; existing store accounting must not be charged twice.
+- Pre-change `turn_overhead` release binary saved from `10ad59a9`, one characterization run completed: turns 10/100/1,000 = 16.096 / 16.422 / 16.797 ms. This is initial baseline evidence, not final controlled qualification. Raw binary/logs under root `target/qq-perf/ac3-stack-2026-10-13/`; full A/B+A/A follows implemented candidate.
