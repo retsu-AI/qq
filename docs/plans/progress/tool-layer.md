@@ -574,3 +574,7 @@ The last two rounds kept finding new names for the same three classes, so each i
 - `git branch` listing filters that take a value (`--contains X`, `--merged X`, `--sort X`, `--format X`) consume it, so `git branch --contains HEAD` is a read. `/dev/fd/0`–`2` count as streams in the word-only gate as well as in the judge.
 - `export GIT_*=…; git diff` was already Prompt (`export` is a construct) and is now pinned.
 - `approval` 92 tests pass. `classify_command` 1 KiB 161 µs.
+
+### 2026-10-13 — T19 description wording (#281)
+
+- The `edit_file` description said "unless if_hash is given". It now says "unless if_hash equals the hash from its current read_file header", so models do not send placeholder hashes expecting them to count. The tool-schema digest moved `cc630679…` → `9ecb4e7e…`. `qq-core` 930 tests pass.
