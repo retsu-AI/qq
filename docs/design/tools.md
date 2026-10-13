@@ -927,7 +927,7 @@ over every simple command anywhere in the tree (ADR-0020):
 | tier | reached by | under `auto` | under `full` |
 | --- | --- | --- | --- |
 | `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, stream-only redirects) whose every command, once launchers are peeled, is a listed read/build shape with workspace-relative operands | executes | executes |
-| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes other than a plain `fetch`, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
+| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
 | `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | refused | **refused** |
 
 `Forbidden` is refused under every mode as a tool error naming the rule and
@@ -975,13 +975,25 @@ directory of every `-C` hop must stay inside the workspace. An escape is
 still `Forbidden`. `git worktree list` and `git branch --list [pattern]`
 are reads.
 
-`git fetch` updates only `FETCH_HEAD` and remote-tracking refs, so its
-plain form is `Allow`. It is admitted by allowlist. The only options
-allowed are `-q`, `-v`, `--all`, and `--no-tags`. Every other argument
-must be a remote or branch name, with no leading `-`, `+`, `.`, `/`, or
-`~`, and no `:`. Any other form keeps `git_remote`. That covers force,
-prune, tags, refspecs, `--depth`, `--upload-pack`, URLs, paths, and a
-`git -c` prefix.
+`git fetch` keeps `git_remote` in every form. With no refspec on the
+command line git applies `remote.<name>.fetch` from its configuration,
+which the classifier cannot read and which may update local branches.
+
+A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
+`Allow`, and a path-qualified launcher is not peeled: the allow tables
+name programs reached through `PATH`, and a path names whatever file sits
+there. A `git` command with a repository-selection variable (`GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, and their kin) is
+`Prompt` with `path_outside_workspace`. `git -C` into `/tmp` is an escape:
+the writable-temporary exception covers scratch files, not other
+repositories. `git branch` is a read only when every option is a listing
+option. Git's last option wins (`--list --no-list name` creates `name`),
+so the check is an allowlist.
+
+The approval gates and the approval preview classify without the
+workspace root, so every absolute operand counts as an escape, including
+one inside the workspace. This fails closed. Only the bench and the rule
+tests pass a root.
 
 The rules are a static table in `approval/rules.rs` whose
 `match`/`not_match` examples run as one unit test. `ShellCommandPreview`

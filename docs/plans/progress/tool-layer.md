@@ -478,3 +478,17 @@ Behavior changes beyond the plan text, conservative: `> 1` (a file named 1) now 
 Deviations: the brief's ≥ 40 replay target and glob item are superseded by `3f36c947`, so globs are unchanged. Executor MCP was unavailable, so Linear went through `linear` CLI and GitHub through `gh`.
 Docs: `tools.md` § Shell Classification.
 Evidence: `target/qq-perf/t18-2026-10-11/` (baseline.txt, candidate.txt, pressure-*, replay-*.jsonl, workspace-test.log).
+
+### 2026-10-12 — T18 review repairs (#283)
+
+Six Codex findings on `9e3da002`, all reproduced against the branch before any fix:
+
+- `./timeout 5 cargo test` and `/tmp/nohup …` were peeled as launchers. Peeling is now limited to bare names. More broadly, a path-qualified program (`./ls`, `bin/cargo`, `target/debug/git`) is never `Allow`. That gap was already on `main` (`./cargo build` was allowed), because `program()` reduces to the basename.
+- `git -C /tmp/other …` inherited `path_escapes`' `/tmp` scratch exception. `-C` into `/tmp` now counts as an escape.
+- `GIT_DIR=/tmp/o/.git git status|fetch` was allowed. Git repository-selection and config variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, …) now make a `git` command `Prompt` with `path_outside_workspace`.
+- `git branch --list --no-list x` and `--list -f x HEAD` created branches, as verified in a scratch repository. `branch_lists` is now an allowlist of listing options, and `-l` is excluded (before git 2.23 it meant `--create-reflog`).
+- Plain `git fetch` falls back to `remote.<name>.fetch`, which may name local branches. Lead decision 2026-10-12: fetch stays `GitRemote` in every form. The allowlist and the matching `D10_HELD` rows are reverted to `Prompt`.
+- Production gates pass `workspace: None`, so `git -C /work/repo/sub` prompts in sessions. That fails closed and is documented. Threading the root through 48 `evaluate` sites is left for a follow-up.
+- Tests: about 35 new `rule_examples_hold` rows, 2 new `D10_HELD` rows, 6 reason asserts. `qq-core` 916 passed. One full-workspace run failed `schedules_ready_sessions_fairly` (a 2 s timeout under load, unrelated); it passed 3/3 alone and in a full `qq-core` run.
+- `classify_command` (one run on a loaded host, ns): simple 3261, pipeline 11222, forbidden_wrapped 8622, 1 KiB 161366 (budget 200 µs).
+- Advisory replay over the same 226 `auto` commands: allow 83 → 111, held 143 → 115 (28 recovered, 30 before these repairs; the 2 lost were plain `git fetch`).
