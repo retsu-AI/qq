@@ -17,6 +17,7 @@ use qq_server as server;
 mod advisory;
 mod catalog;
 mod cli;
+mod diagnostic;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
