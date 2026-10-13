@@ -357,11 +357,11 @@ remaining friction has moved:
      and should not nest.
    - `git -C <dir> …` reads `-C` as the subcommand. `git worktree list`
      and `git branch --list <pattern>` are reads judged as mutations.
-   - `git fetch` in its plain form (`git fetch [-q] [remote [branch…]]`)
-     updates only `FETCH_HEAD` and remote-tracking refs, and publishes
-     nothing. It moves to `Allow` (lead decision 2026-10-11), like
-     `cargo build`, which also uses the network. Forms that force,
-     prune, or write named local refs keep `GitRemote`.
+   - `git fetch` was planned to move to `Allow` in its plain form (lead
+     decision 2026-10-11). In review on 2026-10-12 that was reversed. With
+     no refspec on the command line, git applies `remote.<name>.fetch`
+     from its configuration. The classifier cannot see that, and it may
+     update local branches. Fetch keeps `GitRemote` in every form.
    - Workspace-relative globs (`docs/*.md`, `crates/*/src`) also prompt,
      as `dynamic_word`. This is **not** a false prompt. A glob expands to
      filenames the workspace controls, and a filename can carry program
@@ -369,10 +369,10 @@ remaining friction has moved:
      a sed script that runs a command. Admitting globs would need a
      per-program operand grammar, so it stays deferred.
 
-   The replay simulates the T18 fixes: wrappers, stream redirects, `git -C`,
-   `worktree list`, and plain `git fetch`. Those fixes turn 26 of the 143
-   held commands into `Allow`, 25 of them without `git fetch`. Allowing
-   globs would add 13 more, which is the gap from the 40 first reported.
+   The replay runs the T18 classifier as built (wrappers, stream redirects,
+   `git -C`, `worktree list`, `branch --list`, no fetch). It turns 28 of the
+   143 held commands into `Allow`. Allowing globs would add about 13 more,
+   which accounts for the gap from the 40 first reported.
    The rest are real prompts: 30 file writes through the shell
    (`python3 - <<EOF`, `sed -i`, `cat >`), 22 git mutations, 15 commands
    with shell variables or loops, 10 redirects into the workspace, and the
@@ -429,23 +429,22 @@ remaining friction has moved:
   reading the subcommand. When it escapes, the verdict is `Prompt` with
   `path_outside_workspace`.
 - `git worktree list` and `git branch --list [pattern]` become `Allow`.
-- `git fetch` becomes `Allow` only by allowlist. The options may be only
-  `-q/--quiet`, `-v/--verbose`, `--all`, and `--no-tags`. Every other
-  argument must be a remote or branch name: no leading `-`, no `:`, and
-  no leading `+`. Anything else keeps `GitRemote`, and that covers
-  `-f/--force`, `-p/--prune`, `-P/--prune-tags`, `--tags`, `--refmap`,
-  `--update-head-ok`, `--upload-pack`, `--depth`/`--unshallow`,
-  `--recurse-submodules`, any `src:dst` or `+` refspec, and a `git -c …`
-  config prefix.
+- `git fetch` keeps `GitRemote` in every form (see observation 1).
+- Hardening found in review: a path-qualified program (`./ls`,
+  `bin/cargo`, `./timeout`) is never `Allow`, and a path-qualified
+  launcher is never peeled. `git -C` into `/tmp` counts as an escape.
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`, and their kin make a `git`
+  command `Prompt`. `git branch` is a read only when every option is a
+  listing option, because `--list --no-list name` creates `name`.
 - Globs are unchanged and keep `dynamic_word` (see observation 1).
 - Every case above is a `match`/`not_match` row in `rule_examples_hold`,
   plus the adversarial rows: `timeout 5 sudo ls` (Forbidden), `nice rm -rf
   target` (Prompt), `timeout --verbose 5 ls` and bare `nice` (Prompt),
   `ionice -c 3 -p 123` and `ionice -c 3 cargo build` (Prompt),
-  `git -C ../other status` (Prompt), and each listed `git fetch`
-  exclusion, at least `--prune`, `--force`, `--prune-tags`, `--tags`,
-  `origin main:main`, `origin +main`, `--upload-pack=x origin`, and
-  `git -c core.sshCommand=x fetch` (Prompt). Two glob rows stay
+  `git -C ../other status` and `git -C /tmp/other status` (Prompt), plain
+  `git fetch origin` (Prompt), `./timeout 5 cargo test` (Prompt),
+  `GIT_DIR=/tmp/o/.git git status` (Prompt), and
+  `git branch --list --no-list x` (Prompt). Two glob rows stay
   `not_match`: `sed -n *` and `grep -n x docs/*.md`.
 
 Gate: `classify_command` bench unchanged (≤ 200 µs / 1 KiB). Acceptance
@@ -457,8 +456,8 @@ and the real prompts it must not admit (shell writes, git mutations,
 loops). The table also asserts that no row's tier crosses `Forbidden`.
 The live session corpus is not committed (the repository is public and
 the commands are private work). Rerunning the untracked replay from the
-ledger is advisory evidence: about 26 of 143 held become `Allow`, and
-no command changes into or out of `Forbidden`.
+ledger is advisory evidence. As built, about 28 of 143 held become
+`Allow`, and no command changes into or out of `Forbidden`.
 
 **T19 — edit freshness by exact unique match.** In `tools/edit.rs`: when a
 file has no recorded read and no `if_hash`, an `old`/`new` edit whose
@@ -516,7 +515,7 @@ of the current content. Gate: `edit_batch` unchanged.
 
 Acceptance for D10: rerun the D10 queries over a week after T18–T20 land,
 with an unchanged model mix. Under `auto`, held `shell` calls drop below
-50 % (T18 alone accounts for about 52 %; the rest has to come from
+50 % (T18 alone accounts for about 51 %; the rest has to come from
 T19 moving shell writes onto `edit_file` and T20 moving shell reads onto
 built-ins), `edit_file`/`write_file` `not_read`+`stale_file` drop below 3 %,
 the shell-write to `edit_file` ratio falls, and at least half of shell
@@ -552,7 +551,7 @@ table is `tools.md` § Approval Policy.
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
-| T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, allowlisted plain `git fetch` (D10); globs unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
+| T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
 | T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
 | T20 | Nudge over the classifier's command list; `max_per_file`/ranges clamps; placeholder spill handle (D10) | S | T18 | `runtime/shell_policy.rs`, `tools/{shell,search,read}.rs`, `runtime/spill.rs`, `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged |
 
@@ -639,5 +638,5 @@ and the ledger; ADR-0021 and `tools.md` § Network Tools (T8/T9).
 | Spill store grows the SQLite file | Per-session 64 MiB cap, LRU eviction, pruned with sessions; store worker unchanged |
 | Fuzzy edit applies to the wrong block | Cascade never widens ambiguity; disproportionate guard; `via=` makes drift visible; `fuzzy=false` available |
 | T19 unread edit clobbers text the model never saw | Only a unique *exact* `old` qualifies, so the model must reproduce the bytes it replaces; fuzzy, ambiguous, anchor inserts, and `write_file` overwrites still refuse; refusals never return the current hash, which would authorize the refused edit; apply-time re-hash unchanged; `note=unread` keeps it visible |
-| T18 wrapper or fetch relaxation opens an escape | Closed launcher set with per-wrapper option grammars and a required inner command; process-retargeting tools excluded; `git fetch` by allowlist, not denylist; globs not relaxed (filenames can be program syntax); adversarial `not_match` rows for each; Forbidden tier frozen by the `d10_held` table |
+| T18 wrapper or fetch relaxation opens an escape | Closed launcher set with per-wrapper option grammars and a required inner command; process-retargeting tools excluded; `git fetch` kept held (configured refspecs); globs not relaxed (filenames can be program syntax); adversarial `not_match` rows for each; Forbidden tier frozen by the `d10_held` table |
 | Protocol churn | All changes additive and `skip_serializing_if`; wire fixtures extended, not replaced |
