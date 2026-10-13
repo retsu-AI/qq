@@ -626,6 +626,207 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
 }
 
 #[test]
+fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
+    for snapshot in [false, true] {
+        for internal_first in [false, true] {
+            let session_id = SessionId::from_bytes([3; 16]);
+            let prompt = RunId::from_bytes([4; 16]);
+            let compaction = RunId::from_bytes([5; 16]);
+            let mut running = summary(session_id);
+            running.status = SessionStatus::Running;
+            running.active_run_id = Some(prompt);
+            let mut store = SessionStore::default();
+            if snapshot {
+                let runs = [prompt, compaction]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                    "id": id, "session_id": session_id, "status": "running", "correlation": {}
+                })).unwrap()
+                    })
+                    .collect();
+                store.install_session_snapshot(
+                    qq_protocol::SessionSnapshot {
+                        side_questions: Vec::new(),
+                        summary: running.clone(),
+                        messages: vec![message(8, session_id, prompt, "work")],
+                        runs,
+                        tool_calls: Vec::new(),
+                        has_older_tool_calls: false,
+                        has_older_messages: false,
+                    },
+                    &[],
+                    2,
+                );
+            } else {
+                store.upsert_summary(running.clone(), &[], 0);
+                store.warm_empty(session_id);
+                store
+                    .get_mut(&session_id)
+                    .unwrap()
+                    .messages
+                    .as_mut()
+                    .unwrap()
+                    .push(message(8, session_id, prompt, "work"));
+                for (index, run_id) in [prompt, compaction].into_iter().enumerate() {
+                    store.reduce_event(
+                        &envelope(
+                            index as u64 + 1,
+                            session_id,
+                            SessionEvent::RunStarted {
+                                session: Box::new(running.clone()),
+                                run_id,
+                                plan: None,
+                            },
+                        ),
+                        context(&[]),
+                    );
+                }
+            }
+            let mut idle = running.clone();
+            idle.active_run_id = None;
+            idle.status = SessionStatus::Idle;
+            let order = if internal_first {
+                [compaction, prompt]
+            } else {
+                [prompt, compaction]
+            };
+            let mut effects = Vec::new();
+            for (index, run_id) in order.into_iter().enumerate() {
+                let session = if internal_first && index == 0 {
+                    running.clone()
+                } else {
+                    idle.clone()
+                };
+                effects.extend(store.reduce_event(
+                    &envelope(
+                        index as u64 + 3,
+                        session_id,
+                        SessionEvent::RunFinished {
+                            session: Box::new(session),
+                            run_id,
+                            outcome: RunOutcome::Interrupted,
+                            usage: None,
+                            context_tokens: None,
+                            final_output: None,
+                        },
+                    ),
+                    context(&[]),
+                ));
+            }
+            assert_eq!(
+                store[&session_id].unread, 1,
+                "snapshot={snapshot}, internal_first={internal_first}, {effects:?}"
+            );
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|effect| matches!(
+                        effect,
+                        StateEffect::Attention(Attention::RunFinished { .. })
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let prompt = RunId::from_bytes([4; 16]);
+    let compaction = RunId::from_bytes([5; 16]);
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(prompt);
+    let mut live = SessionStore::default();
+    let mut replay = SessionStore::default();
+    for store in [&mut live, &mut replay] {
+        store.upsert_summary(running.clone(), &[], 0);
+        store.warm_empty(session_id);
+        let view = store.get_mut(&session_id).unwrap();
+        view.messages
+            .as_mut()
+            .unwrap()
+            .push(message(8, session_id, prompt, "work in progress"));
+        view.live.active_tool = Some("shell".to_owned());
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([7; 16]));
+    }
+    let events = [
+        envelope(
+            1,
+            session_id,
+            SessionEvent::RunActivityChanged {
+                run_id: prompt,
+                activity: qq_protocol::RunActivity::Compacting,
+            },
+        ),
+        envelope(
+            2,
+            session_id,
+            SessionEvent::ModelTurnCompleted {
+                run_id: compaction,
+                turn_ordinal: 1,
+                model: qq_protocol::ModelSelection {
+                    model: Some("test/summary".to_owned()),
+                    ..qq_protocol::ModelSelection::default()
+                },
+                usage: Some(qq_protocol::TokenUsage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    ..qq_protocol::TokenUsage::default()
+                }),
+                estimated_cost_usd_nanos: Some(13_000),
+            },
+        ),
+        envelope(
+            3,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running),
+                run_id: compaction,
+                outcome: RunOutcome::Failed {
+                    failure: qq_protocol::RunFailure {
+                        kind: qq_protocol::RunFailureKind::ProviderUnavailable,
+                        message: "summary request failed after measured prefix".to_owned(),
+                    },
+                },
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+    ];
+    for (index, event) in events.iter().enumerate() {
+        let effects = live.reduce_event(event, context(&[]));
+        let decoded: SessionEventEnvelope =
+            serde_json::from_str(&serde_json::to_string(event).unwrap()).unwrap();
+        let replay_effects = replay.reduce_event(&decoded, context(&[]));
+        assert_eq!(effects, replay_effects);
+        assert_eq!(project(&live, &[]), project(&replay, &[]));
+        assert!(effects.is_empty());
+        let view = &live[&session_id];
+        assert_eq!(view.summary.active_run_id, Some(prompt));
+        assert_eq!(
+            view.activity,
+            Some((prompt, qq_protocol::RunActivity::Compacting))
+        );
+        assert_eq!(view.live.active_tool.as_deref(), Some("shell"));
+        assert_eq!(view.live.awaiting_approval.len(), 1);
+        assert_eq!(view.unread, 0);
+        assert!(!view.finished_unread);
+        assert!(!view.runs.contains_key(&prompt));
+        if index == 1 {
+            assert_eq!(view.runs[&compaction].turns, 1);
+            assert_eq!(view.runs[&compaction].live_cost_usd_nanos, Some(13_000));
+        }
+    }
+}
+
+#[test]
 fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
     // AC3: a transient summarizer outage settles one failed compaction run
     // per attempt while the prompt run keeps the session. Those finishes

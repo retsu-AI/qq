@@ -525,3 +525,9 @@ Scope includes `lib.rs`, `runtime/{compaction,run_loop,budget}.rs`, `sessions/{i
 ### 2026-10-13 — AC3 owned compaction lookup schema reservation
 
 AC3 reserves session-store schema 44 → 45 for a non-unique partial `runs_owned_compaction` index on `auto_compaction_for_run_id`, restricted to internal compaction owners. The new exact child-spend receipt needs this lookup; test-first query-plan evidence currently shows `SCAN runs`, which scales with stored history. Own `sessions/store/schema.rs`, migration/receipt tests, protocol schema-history and guide version amendments. No new columns, wire or descriptor change. Upgrade/reopen/data-preservation and index-use evidence are required before push.
+
+### 2026-10-13 — AC3 shared client regression ownership
+
+AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existing ModelTurnCompleted/RunFinished projection: internal measured summarizer turns must remain scoped to their run, serialized replay must match live application, and internal failure must preserve the prompt's activity/approval state. No client wire or production seam change is authorized absent a concrete failing regression.
+
+AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
