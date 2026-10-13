@@ -999,9 +999,13 @@ because options and the positional may be dynamic. This over-reports
 (`taskset 0x1 echo sudo` is `Forbidden`) rather than miss a buried
 command. `env -S STRING` (`--split-string`) builds its command by `env`'s
 own splitting rules, so it is an unknown program, and every suffix of its
-roughly split words is judged too. Past 8 wrappers the tail is unseen:
-the command is unknown, and every suffix of its words is judged, so
-`nice` ×9 `sudo ls` is `Forbidden`.
+unquoted, `\_`-split words is judged too. Past 8 wrappers, any further
+launchers are skipped to the program they launch, which is judged nested
+(`Prompt`), so `nice` ×9 `sudo ls` is `Forbidden` while `nice` ×9 `echo
+sudo` is not. A tail that is not a clean launcher chain is judged at every
+suffix. `env NAME=VALUE cmd` carries its assignments to `cmd`. Because
+GNU `timeout` creates its own process group, shell cancellation can leave
+it running. That predates T18 and is ENG-1032.
 
 Any assignment before a command keeps it from `Allow` unless it is in a
 short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,

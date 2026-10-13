@@ -578,3 +578,12 @@ The last two rounds kept finding new names for the same three classes, so each i
 ### 2026-10-13 — T19 description wording (#281)
 
 - The `edit_file` description said "unless if_hash is given". It now says "unless if_hash equals the hash from its current read_file header", so models do not send placeholder hashes expecting them to count. The tool-schema digest moved `cc630679…` → `9ecb4e7e…`. `qq-core` 930 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 7, final before merge (#283)
+
+- `git branch --format xx created` was allowed but creates `created`. `--sort` and `--format` take a value without selecting listing mode; only the filters (`--contains`, `--merged`, …) select it.
+- `env -S 'su""do ls'`: quotes are removed before splitting, so adjacent fragments join.
+- `env GIT_EXTERNAL_DIFF=… git diff` was allowed. `env NAME=VALUE` assignments now travel with the peeled command.
+- Past the depth cap, a clean launcher chain is followed to its program, so `nice` ×9 `echo sudo` is Prompt, not a false Forbidden. A non-chain tail is still judged at every suffix.
+- The `timeout` process-group cancellation leak predates T18 and is filed as [ENG-1032](https://linear.app/retsu-ai/issue/ENG-1032); `timeout` stays transparent (lead decision 2026-10-13).
+- Lead decision: merge after this round. Any further Codex findings become follow-up issues, not more PR rounds.

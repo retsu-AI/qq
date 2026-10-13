@@ -660,15 +660,17 @@ fn branch_lists(args: &[&str]) -> bool {
             | "--no-abbrev" | "--show-current" => {}
             // Listing filters that take a value: the next word is the
             // value, not a branch name.
-            "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at"
-            | "--sort" | "--format" => {
+            // Filters select listing mode and take a value.
+            "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at" => {
                 list_mode = true;
                 expect_value = true;
             }
+            // Formatting takes a value but does not select listing mode:
+            // `git branch --format x name` creates `name`.
+            "--sort" | "--format" => expect_value = true,
             _ if std::mem::take(&mut expect_value) => {}
+            arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {}
             arg if [
-                "--sort=",
-                "--format=",
                 "--abbrev=",
                 "--color=",
                 "--column=",
@@ -1440,10 +1442,11 @@ mod tests {
             "cd src && cargo test 2>/dev/null",
             "cd src && cargo test >/dev/stderr 2>&1",
             "cargo build; cargo test &>/dev/null",
+            "git branch --list --format x 'f*'",
             // T18 review round 6: listing-filter operands; standard fds.
             "git branch --contains HEAD",
             "git branch --merged main -a",
-            "git branch --sort -committerdate --format x",
+            "git branch --sort -committerdate --format x --list",
             "git branch --points-at HEAD --list 'f*'",
             "cargo test >/dev/fd/1",
             "cargo test 2>/dev/fd/2",
@@ -1599,6 +1602,19 @@ mod tests {
             "printf x > /dev/stdoutx",
             "printf x > /dev/fd/../x",
             "printf x > /dev/fd/",
+            // T18 review round 7: past the depth cap a clean launcher chain
+            // reaches its real program, whose arguments are not programs:
+            // Prompt (unknown, fail-closed), not a false Forbidden. `env`
+            // nests its command, so it never allows.
+            "nice nice nice nice nice nice nice nice nice echo sudo",
+            "env NO_COLOR=1 cargo test",
+            // T18 review round 7: env NAME=VALUE carries the assignment; a
+            // format option does not make a branch name a pattern.
+            "env GIT_EXTERNAL_DIFF='touch PWN' git diff",
+            "env -i RUSTDOC=/tmp/x cargo doc",
+            "git branch --format xx created",
+            "git branch --sort=-committerdate created",
+            "git branch --sort x created",
             // T18 review round 6: any assignment outside the harmless set,
             // including an exported one, keeps the command from Allow.
             "RUSTDOC=/tmp/evil cargo doc",
@@ -1823,6 +1839,9 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review round 7: env -S quote joining.
+            "env -S 'su\"\"do ls'",
+            "env -S 'su\\do ls'",
             // T18 review round 6: depth exhaustion, env -S escapes, and a
             // dynamic chrt option still find the buried command.
             "nice nice nice nice nice nice nice nice nice sudo ls",
