@@ -524,7 +524,7 @@ unread file does not qualify (whole batch refused, nothing written), an
 `if_hash` mismatch (unchanged), and a refusal text that contains no `h:`
 of the current content. Gate: `edit_batch` unchanged.
 
-**T20 — the nudge reaches compound commands; small clamps.**
+**T20 — nudge past leading cd; placeholder spill correction.**
 
 - `builtin_alternative` skips a leading `cd DIR &&` and then judges the
   first program, as today. `DIR` must be relative with no `..`, since
@@ -542,7 +542,7 @@ of the current content. Gate: `edit_batch` unchanged.
   hints `read_file ranges`. A replaceable program later in a list or
   pipeline (`cargo test && grep x log`) gets no hint and no `strict`
   refusal: the compound needs the shell. The skip uses no classifier
-  reparse, so `approval/classify.rs` is untouched. It accepts only a
+  reparse. It accepts only a
   leading `cd` whose operand is one unquoted word with no shell
   metacharacters. A quoted or escaped operand (`cd 'x;grep y z' && …`) is
   not skipped, so that command gets no hint and no refusal, and is a

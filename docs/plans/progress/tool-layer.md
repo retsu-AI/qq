@@ -26,7 +26,7 @@ newest last.
 | T17 | `ToolErrorKind` severity in clients | Shipped (`6d46e257`) | [#272](https://github.com/retsu-AI/qq/pull/272) | No wire field or protocol bump |
 | T18 | Classifier false prompts (D10) | In review | `fix/t18-classifier-false-prompts` [#283](https://github.com/retsu-AI/qq/pull/283) | [ENG-1031](https://linear.app/retsu-ai/issue/ENG-1031); stacked on #280; independent review required (approval) |
 | T19 | Edit freshness by exact unique match (D10) | In review | `fix/t19-edit-freshness-exact-match` [#281](https://github.com/retsu-AI/qq/pull/281) | [ENG-1030](https://linear.app/retsu-ai/issue/ENG-1030); ADR-0058 Proposed; stacked on T18 (#283); evidence `target/qq-perf/t19-2026-10-11/` |
-| T20 | Nudge past leading cd; placeholder handle (D10) | In progress | `fix/eng-1035-t20-builtin-hints` | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
+| T20 | Nudge past leading cd; placeholder handle (D10) | In review | `fix/eng-1035-t20-builtin-hints` | ENG-1035; stacked on T19; baseline `target/qq-perf/t20-2026-10-13/` |
 
 ## Entries
 
@@ -645,3 +645,18 @@ The last two rounds kept finding new names for the same three classes, so each i
 - T18 `89a5582f` fixes the three tracked residual verdicts but introduced recursive `env -S` expansion. Independent review found repeated `A='${A}${A}'` assignments double intermediate text; a bounded eight-assignment regression failed before the fix (`c612655`).
 - Substitution now reads only the original string, uses the last assignment, and refuses to expand beyond the classifier's existing 16 KiB bound. Regression enlarged to 40 repetitions after repair, plus last-assignment and cap cases. No huge input expansion executed.
 - This new resource regression is repaired before stack merge, rather than waived as a follow-up. Ownership recorded in root ledger; independent re-review and final gates pending.
+
+
+### 2026-10-13 — T20 qualification receipt (ENG-1035)
+
+Commit: source head `e58074c0`; prerequisite test-first `c612655` / repair `4dbf121`; T20 test-first `cc481b02`.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=2`: 2242 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 94 passed.
+Checks: `cargo fmt --all -- --check`; `CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --all-features -- -D warnings`; `CARGO_BUILD_JOBS=2 cargo build --workspace`: pass. Exact-test guard: 10 fixtures pass.
+Gate: `tool_dispatch`, 30 alternating saved-binary pairs, median 66.828 → 64.088 µs/iteration; paired ratio median 1.036, same-binary A/A 0.969 (30 pairs). Budget unchanged; no regression demonstrated within control noise (A/A ratio MAD 0.186).
+Gate: final `classify_command` 1 KiB median of 3: 163.433 µs ≤ 200 µs. This characterizes the inherited approval repair; T18 baseline receipt remains above.
+Host: no concurrent builds/tests/reviews during paired recording; IO some avg10 45.23 → 39.64 %. No tail or speedup claim.
+Review: independent agent `t20_review` Approve T20 and bounded prerequisite repair; attached absolute options and recursive expansion findings repaired.
+Earlier qualification runs hit headless timeouts under contention and TUI ANSI assertions with inherited `NO_COLOR=1`; final full rerun above is green, with no failed gate waived.
+Docs: tools design, plan ownership/wording, root ownership request, and this ledger; no protocol/schema/prompt version change from T20.
+Open: hosted CI and main merge; D10 week-after-landing observation, ENG-1032 and ENG-1033 follow-ups remain separate.
+Evidence: `target/qq-perf/t20-2026-10-13/` (untracked; initial baseline recorded before first edit, original binary retained).
