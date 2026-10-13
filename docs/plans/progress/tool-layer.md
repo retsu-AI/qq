@@ -546,3 +546,11 @@ This round closes each class of gap, not only the reported instance:
 - `chrt -o 0 sudo -p x ls` was not peeled, because a `-p` in the launched command was read as chrt's own. `-p` is now looked for only among the wrapper's options.
 - `/dev/stdout-copy` counted as a stream. Only exact `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` do.
 - About 40 new rows. `approval` 92 tests pass. `classify_command` 1 KiB 167 µs. Replay unchanged (111 allow / 115 prompt).
+
+### 2026-10-13 — T18 review repairs, round 4 (#283)
+
+- `/usr/bin/timeout 5 sudo ls` had dropped from Forbidden to Prompt; my round-1 repair stopped peeling path-qualified launchers. The launcher still stays a command of its own (never allowed), but its apparent tail is now judged as nested, so the result is Forbidden again. Rows cover `./nice sudo ls` and `bin/nohup rm -rf /` too.
+- `git -C "$PWD" push --force` stopped the global-option scan at the dynamic operand, so `push` was not judged. A dynamic operand of any two-word global option is now skipped and marks the command dynamic.
+- `printf x > '&1'` passed as a descriptor duplication. The internal duplication marker now starts with NUL, which no shell word can contain.
+- `timeout --foreground` leaves the command's children untimed, so it is no longer a transparent option.
+- `approval` 92 tests pass.

@@ -70,13 +70,13 @@ impl SimpleCommand {
 }
 
 /// A redirect target that writes nothing: the null device, a standard
-/// stream, or a descriptor duplication (`2>&1`, recorded as `&1`).
+/// stream, or a descriptor duplication (`2>&1`, recorded as `\0&1`).
 pub(crate) fn stream_target(target: &str) -> bool {
     matches!(
         target,
         "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
     ) || target
-        .strip_prefix('&')
+        .strip_prefix("\u{0}&")
         .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -199,7 +199,9 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
     let (with_value, alone, attached): (&[&str], &[&str], &[&str]) = match program {
         "timeout" => (
             &["-s", "--signal", "-k", "--kill-after"],
-            &["--preserve-status", "--foreground"],
+            // `--foreground` leaves the command's children untimed, so it
+            // changes what cancellation reaches and is not transparent.
+            &["--preserve-status"],
             &["--signal=", "--kill-after="],
         ),
         "nice" => (&["-n"], &[], &["--adjustment="]),
@@ -388,15 +390,18 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
     let target = node
         .named_children(&mut node.walk())
         .find(|c| c.kind() != "file_descriptor");
-    // `2>&1` duplicates a descriptor; `> 1` writes a file named `1`. The
-    // duplication is recorded as `&1` so the two cannot be confused.
+    // `2>&1` duplicates a descriptor; `> 1` writes a file named `1`, and
+    // `> '&1'` a file named `&1`. The duplication is recorded as `\0&1` so
+    // none of them can be confused.
     let duplicates = node
         .children(&mut node.walk())
         .any(|token| matches!(token.kind(), ">&" | "<&"));
     let literal = target.and_then(|c| {
         let word = literal_word(c, source)?;
+        // The marker starts with NUL, which no shell word can contain, so
+        // a file literally named `&1` cannot pass as a duplication.
         Some(if duplicates && c.kind() == "number" {
-            format!("&{word}")
+            format!("\u{0}&{word}")
         } else {
             word
         })
@@ -586,18 +591,34 @@ impl Collector<'_> {
             .is_some_and(|word| !word.contains('/'));
         if let Some(own) = program
             .as_deref()
-            .filter(|_| bare)
             .and_then(|program| launcher_words(program, command.args()))
         {
-            // The launcher changes how long, how nicely, or how buffered the
-            // inner command runs, never what it does, so it adds no tier.
-            self.peel(
-                SimpleCommand {
+            if bare {
+                // The launcher changes how long, how nicely, or how buffered
+                // the inner command runs, never what it does, so it adds no
+                // tier.
+                self.peel(
+                    SimpleCommand {
+                        argv: command.argv[own + 1..].to_vec(),
+                        ..command
+                    },
+                    depth + 1,
+                );
+            } else {
+                // A path-qualified launcher may be anything, so it stays a
+                // command of its own (never allowed). Its apparent tail is
+                // still judged, nested, so `/usr/bin/timeout 5 sudo ls` is
+                // Forbidden.
+                let inner = SimpleCommand {
                     argv: command.argv[own + 1..].to_vec(),
-                    ..command
-                },
-                depth + 1,
-            );
+                    redirects: command.redirects.clone(),
+                    raw_redirects: command.raw_redirects.clone(),
+                    assignments: Vec::new(),
+                    nested: true,
+                };
+                self.commands.push(command);
+                self.peel(inner, depth + 1);
+            }
             return;
         }
         self.commands.push(command.clone());

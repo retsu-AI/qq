@@ -972,8 +972,9 @@ and is never allowed. Commands over 16 KiB skip parsing and prompt.
 `stdbuf`. They are judged by the command they launch. A launcher qualifies
 when it has only its own options and an inner command follows:
 
-- `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, `--preserve-status`,
-  and `--foreground`, then a duration (a float such as `30`, `1e3`, or
+- `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, and
+  `--preserve-status`, then a duration. `--foreground` is excluded because
+  it leaves the command's children untimed (a float such as `30`, `1e3`, or
   `inf`, with an optional `s`/`m`/`h`/`d` suffix).
 - `nice`: `-n N` or `--adjustment=N`.
 - `stdbuf`: `-i/-o/-e MODE`.
@@ -983,7 +984,11 @@ when it has only its own options and an inner command follows:
 A qualifying launcher is replaced by its inner command at the same level,
 so it adds no tier. `timeout 300 cargo test` is `Allow`, `nice rm -rf
 target` is `Prompt`, and `timeout 5 sudo ls` is `Forbidden`. A launcher
-with any other option, or with nothing to launch, is `unlisted`.
+with any other option, or with nothing to launch, is `unlisted`. A
+path-qualified launcher (`/usr/bin/timeout`, `./nice`) is not treated as
+the launcher, because it may be any file. It stays `unlisted`, but its
+apparent inner command is still judged, as nested, so `/usr/bin/timeout 5
+sudo ls` is `Forbidden`.
 
 The other wrappers are recorded as commands of their own, and the command
 they wrap is recorded as nested. It is judged, so a `Forbidden` inner
@@ -1024,9 +1029,8 @@ command line git applies `remote.<name>.fetch` from its configuration,
 which the classifier cannot read and which may update local branches.
 
 A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
-`Allow`, and a path-qualified launcher is not peeled: the allow tables
-name programs reached through `PATH`, and a path names whatever file sits
-there. An assignment that substitutes a program or a repository is
+`Allow`, because the allow tables name programs reached through `PATH`
+and a path names whatever file sits there. An assignment that substitutes a program or a repository is
 never `Allow`. That covers every `GIT_*` variable on `git` (including
 `GIT_CONFIG_PARAMETERS`, which can set `core.fsmonitor` to an outside
 executable that `git status` runs), plus `*_WRAPPER`, `*PAGER`,

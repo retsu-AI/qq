@@ -232,13 +232,24 @@ pub(crate) fn judge(
     // never allowed. A `-C` hop that escapes lexically says so.
     let mut git_dir_escapes = false;
     let mut git_globals_unproven = false;
+    // A global option's operand was a dynamic word. It was skipped so the
+    // subcommand is judged, and the command still reads as dynamic.
+    let mut git_option_dynamic = false;
     if program == "git" {
         let mut dir = String::new();
         let mut skip = 0;
         loop {
             match args.get(skip).copied() {
                 Some("-C") => match args.get(skip + 1).copied() {
-                    Some(hop) if hop != "\u{0}" => {
+                    // A dynamic directory (`-C "$PWD"`) is still a two-word
+                    // option: skip it so the subcommand is judged, and keep
+                    // the command dynamic. Containment is unknowable.
+                    Some("\u{0}") => {
+                        git_option_dynamic = true;
+                        git_globals_unproven = true;
+                        skip += 2;
+                    }
+                    Some(hop) => {
                         dir = if dir.is_empty() || Path::new(hop).is_absolute() {
                             hop.to_owned()
                         } else {
@@ -247,16 +258,17 @@ pub(crate) fn judge(
                         git_globals_unproven = true;
                         skip += 2;
                     }
-                    // A dynamic or missing directory: leave the words in
-                    // place so the command reads as dynamic or unlisted.
-                    _ => break,
+                    // `git -C` with nothing after it.
+                    None => break,
                 },
                 Some(
                     "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
                     | "--super-prefix" | "--config-env",
                 ) => {
-                    if args.get(skip + 1).is_none_or(|v| *v == "\u{0}") {
-                        break;
+                    match args.get(skip + 1).copied() {
+                        None => break,
+                        Some("\u{0}") => git_option_dynamic = true,
+                        Some(_) => {}
                     }
                     git_globals_unproven = true;
                     skip += 2;
@@ -299,7 +311,7 @@ pub(crate) fn judge(
         }
         args.drain(..skip);
     }
-    let dynamic = args.contains(&"\u{0}");
+    let dynamic = git_option_dynamic || args.contains(&"\u{0}");
     let literal_args: Vec<&str> = args.iter().copied().filter(|arg| *arg != "\u{0}").collect();
 
     // Forbidden shapes first: they win regardless of anything else.
@@ -1370,7 +1382,6 @@ mod tests {
             "timeout 300 cargo test",
             "timeout -s KILL -k 5 30 cargo test -p qq-core",
             "timeout --signal=TERM --kill-after=5 --preserve-status 30 cargo test",
-            "timeout --foreground 60 cargo build",
             "time cargo build",
             "time -p cargo build",
             "nice cargo build",
@@ -1541,6 +1552,12 @@ mod tests {
             "printf x > /dev/stdoutx",
             "printf x > /dev/fd/../x",
             "printf x > /dev/fd/",
+            // T18 review round 4: a file named `&1`, foreground timeout.
+            "printf x > '&1'",
+            "printf x > \"&2\"",
+            "cd . && cargo test > '&1'",
+            "timeout --foreground 1 cargo run",
+            "git -C \"$PWD\" status",
             // T18 review: nine wrappers are too deep to see through.
             "nice nice nice nice nice nice nice nice nice cargo test",
             "timeout 1e3x cargo test",
@@ -1742,6 +1759,14 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review round 4: a dynamic global-option operand is skipped
+            // so the subcommand is judged; a path-qualified launcher's tail
+            // is still inspected.
+            "git -C \"$PWD\" push --force origin main",
+            "git -c \"$K\" push --force",
+            "/usr/bin/timeout 5 sudo ls",
+            "./nice sudo ls",
+            "bin/nohup rm -rf /",
             // T18 review round 3: git globals before a forbidden subcommand,
             // and a launched command's own `-p` is not the wrapper's.
             "git -C sub -c core.pager=cat push --force origin main",
