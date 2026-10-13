@@ -120,13 +120,14 @@ async fn tool_call_budget_uses_remaining_allowance_then_final_response() {
             .count(),
         1
     );
-    let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(
-        requests.last().unwrap().tool_choice(),
-        qq_provider::ToolChoice::None
-    );
-    drop(requests);
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests.last().unwrap().tool_choice(),
+            qq_provider::ToolChoice::None
+        );
+    }
 
     // A later prompt in the same session gets a fresh per-run allowance.
     let second_run = queue_limited_prompt(

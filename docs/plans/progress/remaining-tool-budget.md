@@ -43,3 +43,7 @@
   that test, uses `max_tool_calls: Some(3)`, asserts three successful calls,
   one final `ToolChoice::None` request, one terminal exhaustion, an idle session,
   and a fresh one-call run in the same session.
+- The repaired candidate `ba84158` passed the focused session check, fmt,
+  workspace tests, and build; Clippy then reported only
+  `await_holding_lock` in the new session assertion. The lock assertions are
+  now in a lexical scope so no guard crosses the subsequent awaits.
