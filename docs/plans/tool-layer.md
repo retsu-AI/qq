@@ -423,10 +423,16 @@ remaining friction has moved:
 **T18 — classifier false prompts.** In `approval/{classify,rules}.rs`:
 
 - Transparent launchers are judged by the command they launch. Past
-  8 wrappers, or wherever the start of the launched command is not
-  knowable (dynamic `chrt`/`taskset` options, `env -S` strings), the
-  command is unknown and every suffix of its words is judged, nested.
-  A buried `sudo` is still `Forbidden`. The set
+  8 wrappers, the remaining launchers are skipped to the program they
+  launch, which is judged nested (fail-closed `Prompt`, so `nice` ×9 `echo
+  sudo` is not `Forbidden`). Wherever the start of the launched command is
+  not knowable (a tail that is not a clean launcher chain, dynamic
+  `chrt`/`taskset` options, `env -S` strings), the command is unknown and
+  every suffix of its words is judged, nested. A buried `sudo` is still
+  `Forbidden`. `env NAME=VALUE cmd` carries its assignments to `cmd`, so
+  the assignment rule applies. GNU `timeout` creates its own process
+  group, so shell cancellation can leave it running. That predates T18
+  and is ENG-1032. The set
   is closed: `timeout`, `time`, `nice`, `nohup`, `stdbuf`. Each admits
   only its own launch options: `timeout` takes `-s/--signal SIG`,
   `-k/--kill-after D`, and `--preserve-status`, then a duration
@@ -511,7 +517,7 @@ A writer that lands in between therefore fails the edit with
 `stale_file`, and the edit is never misapplied. Regressions cover the traced
 shapes: a shell-modified file then an exact edit, a never-read file with a
 unique `old`, a duplicate `old` on an unread file (`not_read`, not
-`ambiguous`), a fuzzy-only match on an unread file (`not_read`), an anchor
+`ambiguous`), an overlapping repeat (`aa` in `aaa`, `not_read`), a fuzzy-only match on an unread file (`not_read`), an anchor
 insert on an unread file (`not_read`), a mixed batch where one edit to an
 unread file does not qualify (whole batch refused, nothing written), an
 `if_hash` mismatch (unchanged), and a refusal text that contains no `h:`
@@ -523,8 +529,13 @@ of the current content. Gate: `edit_batch` unchanged.
   first program, as today. `DIR` must be relative with no `..`, since
   `read_file` is workspace-confined. Even then, under `strict` a skipped
   prefix only hints and never refuses, because the classifier cannot
-  prove `DIR` is not a symlink out of the workspace. Only a command with
-  no prefix is refused under `strict`. `cd DIR;` is not skipped, because with `;` the
+  prove `DIR` is not a symlink out of the workspace. Only an unprefixed
+  command whose every path operand is relative with no `..` is refused
+  under `strict`. `sed -n 1,5p /tmp/log` and any absolute or `..`
+  operand only hint. A relative operand through a workspace symlink is
+  refused, and the refusal is a correction the model recovers from by
+  running the shell form. That residual is accepted, because `strict` is
+  an ablation arm, not a default. `cd DIR;` is not skipped, because with `;` the
   next command runs in either directory depending on whether `cd`
   succeeded. `cd x && sed -n 1,20p a.rs`
   hints `read_file ranges`. A replaceable program later in a list or
@@ -557,7 +568,8 @@ of the current content. Gate: `edit_batch` unchanged.
 - Regressions: `sed -n 1,5p a` hints and `strict` refuses;
   `cargo test && grep x log`, `cd 'x;grep y z' && cargo test`, and
   `cd missing; sed -n 1,5p a` neither hint nor refuse; `cd /tmp && sed
-  -n 1,5p log` neither hints nor refuses; `cd x && sed -n 1,5p a` hints but
+  -n 1,5p log` neither hints nor refuses; `sed -n 1,5p /tmp/log` hints
+  but is not refused; `cd x && sed -n 1,5p a` hints but
   is not refused under `strict`; `max_per_file=80`
   and a 9-range read still fail with their corrections; a zero handle
   returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`
