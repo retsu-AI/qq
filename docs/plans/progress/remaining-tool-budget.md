@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch | Notes |
 | --- | --- | --- | --- | --- |
-| TB1 | Admit and cap remaining executable calls consistently | Implementation candidate ready for focused verification | fix/qq-tool-budget-20261013 | Baseline recorded on d223bf0; root owns live integration |
+| TB1 | Admit and cap remaining executable calls consistently | Session regression repaired; parent full gates pending | fix/qq-tool-budget-20261013 | Baseline recorded on d223bf0; root owns live integration |
 
 ## 2026-10-13
 
@@ -25,14 +25,21 @@
   raw/video evidence.
 - Parent recorded that baseline separately on clean `d223bf0`: both runtime
   regressions failed, including the six-call case with zero completed tools;
-  retained evidence is under `evidence/qq-tool-budget-20261013` (baseline
-  cast, runtime log, and checks receipt). The implementation draft now carries
+  retained evidence is under
+  `/Users/romanmondello/Documents/Codex/2026-07-26/rev/reviews/alignment-20261011/qq-recovery-20261012/qq-tool-budget-20261013`
+  (`baseline.cast`, `baseline-runtime-regressions.log`, and
+  `baseline-checks.json`). The implementation draft now carries
   a typed per-turn allowance from `BudgetMeter` into dispatch, preserves the
   tool-free final-response boundary, and keeps rejected calls out of charging.
 - Parent verified candidate `2813717` with the two runtime regressions and ten
   budget unit tests passing; the recorded baseline remains labeled separately.
-  Baseline files are `baseline.cast`, `baseline-runtime-regressions.log`, and
-  `baseline-checks.json` under `evidence/qq-tool-budget-20261013`; rendered
-  candidate footage is retained by the parent. Pinned formatting was then
+  Baseline files are retained at the absolute path above; rendered candidate
+  footage is retained by the parent. Pinned formatting was then
   applied to the two owned layouts in `lib.rs` and `runtime/budget.rs`; no
   tests or builds were rerun by this author.
+- The workspace gate later passed fmt, all-target/all-feature Clippy with
+  `-D warnings`, and build on `e6b0879`; workspace tests exposed only the stale
+  sessions expectation for the old fixed-turn reservation. This repair renames
+  that test, uses `max_tool_calls: Some(3)`, asserts three successful calls,
+  one final `ToolChoice::None` request, one terminal exhaustion, an idle session,
+  and a fresh one-call run in the same session.
