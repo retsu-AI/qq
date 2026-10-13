@@ -4,11 +4,11 @@
 
 | | |
 | --- | --- |
-| Now | AP0–AP4.2, AC0.1, AC10, AC11 and AC12.1 shipped on `main` through `a0caa722` (2026-10-06). AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**; evidence pending. AC1 next, then AC2/AC3 and AC5/AC6 as dependent PRs while AP5 collects normal-use evidence. AC0.2 and AC12.2/.3 remain planned. ADRs 0048–0050 and 0054 Proposed |
+| Now | AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped through main `ce768bbc` (2026-10-13). AC3 is in review (#279); AC17 argument tolerance is the next absorbed reliability slice. AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**, evidence pending. AC0.2, AC4–AC6, AC12.2/.3, AC13–AC20 and Goal 7 qualification remain open; AC1/AC2 performance qualification remains open. ADRs 0048–0050 and 0054 Proposed |
 | Research | [`../research/core-autonomy.md`](../research/core-autonomy.md) (findings 1–10); session-store evidence for the progress track in ADR-0054 § Context |
 | Ledger | [`progress/autonomous-core.md`](./progress/autonomous-core.md) |
 | Linear | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) (plan). One issue per slice is filed when the plan is accepted |
-| Absorbs | `mid-run-compaction.md` MRC-4 (as AC14) and MRC-5 (as Goal 5); plan deleted, its design is ADR-0039. Run-reliability RR12's identical-call loop result (as AC4) |
+| Absorbs | `mid-run-compaction.md` MRC-4 (as AC14) and MRC-5 (as Goal 5); plan deleted, its design is ADR-0039. The former run-reliability plan: RR8 residuals → AC18, RR10 → AC17, RR12 stream repair/latency → AC19/AC20, loop guard → AC4, continuation → AC5/AC6. RR1–RR7, RR8.1–RR8.4, RR9 and existing RR11 persistence are completed baseline; receipts are in the ledger |
 
 ## Goal
 
@@ -76,6 +76,21 @@ Measured acceptance for the whole plan:
      with no text.
    - After AP4, delegating runs spend under 20 % of wall time blocked on
      children (§ 4, merged intervals). The baseline is 40 %.
+
+7. **Reliable.** After the absorbed reliability repairs, record 7 consecutive
+   days of normal use with the dated audit's [read-only queries](../research/run-reliability.md#appendix--queries),
+   extended explicitly for current schema/outcomes and tool-error severity:
+   - Harness-caused failures < 5 % of prompt runs; a pause is reported
+     separately, never hidden by renaming it completed.
+   - Zero wedged sessions and zero `Exhausted` admissions; a failed prompt's
+     session accepts the next prompt.
+   - Tool-contract failures costing a model turn < 0.5 % of tool calls.
+   - Report provider sends per completed run and per failed run separately,
+     with sample counts. Mean sends per completed run may rise through useful
+     recovery; sends per failed run must fall against the dated baseline. Report
+     paused/interrupted chains separately and do not count a retry as a new task completion.
+   This evidence is separate from AP5's productivity report. No live reliability
+   target is claimed from fixture tests or historical shipped receipts alone.
 
 ## Non-goals
 
@@ -168,6 +183,10 @@ continuation link. Rendering them nicely is AC14.
 | AC14 | Surfaces for the new state: TUI shows in-run compaction activity, continuation chain, goal checklist, loop-guard rejections, stall reports and child answers delivered to a parent; headless reports compaction tokens/pause, continuations, goal status | MRC-4 | `crates/qq-tui/`, `crates/qq-client/src/state.rs`, `src/headless.rs`, `docs/design/{transcript,protocol,headless-contract}.md` | Reducer tests for each new event; headless goldens for the new protocol version; one TUI snapshot per state |
 | AC15 | Store write cost, **measure first**. (a) From AC0, record commits/s and WAL bytes/s at 1, 8, 32 and 100 streams. The worker already groups queued output and control writes into one commit (`store/worker.rs:239–300`) and activity is on the output lane (`store.rs:1162`), so this slice changes the commit path only if AC0 shows commits/s is a bottleneck at the target concurrency. (b) If it is: raise the effective group window, i.e. `OUTPUT_BATCH_DELAY` and `OUTPUT_GROUP_LIMIT` tuned by measurement, so concurrent streams share commits, with a p95 first-token and delta-latency budget that must hold. (c) If WAL bytes/s is the cost: stop duplicating chunk text. Keep committed event JSON wire-ready inside the transaction, per ADR-0003, and shrink the `message_chunks` side instead, so transcript assembly reads text from the committed event rows. (d) Any `synchronous` change needs its own ADR with numbers | 9 (C1) | `sessions/{store,streaming,transcript}.rs`, `store/worker.rs`, `sessions.rs` batch constants, schema + migration only for (c); ADR for (d) | AC0 numbers recorded before and after. For whichever of (b)/(c) lands: live, catch-up (ring and SQLite paging) and restart replay **byte-identical** to `main` for a recorded session fixture, including a migrated pre-change store; ADR-0003's "encoded once, inside the transaction" holds unchanged; first-token and delta p95 within budget. If AC0 shows neither cost matters at target concurrency, the slice closes with the measurement and no code |
 | AC16 | Retention: accept ADR-0038 and implement it. This bounds a **workspace** over time, not one live session: ADR-0038 never trims inside a live session and never touches a session with an active or queued run, and bytes are reclaimed only by deletion (§ 4) | 9 (C2) | owned by ENG-803; this plan supplies the soak evidence | ENG-803's acceptance. A multi-session soak (many short sessions over simulated days, with scheduled `prune --older-than`) keeps DB plus WAL under a bound proportional to the retained window. Archive alone is **not** claimed to bound storage |
+| AC17 | Tolerant read-only tool arguments (former RR10, ENG-872): coerce stringified arrays, correct safe bounded read-only integers and drop only demonstrably irrelevant unknown fields with a note; retain shipped context clamping, unknown-tool results and MCP no-argument normalization | Reliability audit R08; tool-layer T15 | `crates/qq-core/src/tools/{dispatch,search,read,tree}.rs`, `crates/qq-harness/src/mcp.rs`, `crates/qq-mcp/src/lib.rs` only if the bridge needs a remaining repair; `docs/design/tools.md` | Sanitized malformed-call fixtures execute once with deterministic notes; valid calls unchanged. Each additional integer clamp must name its field, reproduce an observed malformed call and preserve full-result access/continuation; no blanket clamping. `exec` extra `command`, malformed authority fields, unknown fields affecting paths/approval, oversized arrays/output, and `search.max_per_file` > 50 still refuse. No relaxation of Forbidden or containment. `tool_dispatch` within budget/noise; no added parse pass for already-valid calls |
+| AC18 | Truncation recovery (former RR8 residuals, ENG-870): incomplete tool call gets a durable not-executed re-issue result; exhausted continuation streak does not mislabel unfinished work Completed | Reliability audit R04; ADR-0048 outcome decision required | `runtime/run_loop.rs`, `sessions/{execution,tool_calls,transcript}.rs`, affected `qq-provider` adapters, `qq-protocol` pause/outcome types, client/headless mappings, `docs/design/{architecture,protocol,headless-contract}.md` | Mid-arguments cap produces one synthetic result and the next request asks for re-issue; no incomplete call executes, no side effect repeats, live/restart/replay agree. Exhaustion is bounded and preserves the partial answer; decide and document the appropriate non-completed outcome/pause reason under ADR-0048 before implementation, coordinate any wire bump with AC5/AC6. Auth/config/invariant failures stay failures. Fixtures include cancellation, deadline, neighboring complete calls and repeated truncation; `turn_overhead` within budget/noise; minimal provider profile if adapters change |
+| AC19 | Bounded stream repair (former RR12 stream items, ENG-874): normal-completion reasoning closure, unambiguous missing-call-id synthesis, display-only reasoning cap | Reliability audit R10; existing truncation/error auto-close is partial | `runtime/run_loop.rs`, affected `qq-provider` framing adapters, `qq-protocol` reasoning/display contract only if needed, `docs/design/{providers,protocol,transcript}.md` | One fixture per observed quirk. Close an open reasoning block at a valid terminal event; synthesize collision-free ids only when call identity/order is unambiguous; ambiguous/duplicate calls remain refused. Display cap does not weaken provider/storage/output bounds or lose authoritative tool data. Cancellation/replay/persist-before-publish unchanged; `turn_overhead` within budget/noise and minimal provider profile for adapter changes |
+| AC20 | Latency diagnostics (former RR12 stats item, ENG-874), measure first | Reliability audit R12; Goal 2 | AC0 evidence first; `runtime/run_loop.rs`, `sessions/`, `qq-client::state::RunStats`, `qq-protocol` only after a concrete consumer is established | Identify a latency question and consumer that existing run-level first-token/tool timing cannot answer. Record bounded per-turn diagnostic measurements and their overhead. Add persistent stats/wire/schema only with measured benefit, explicit versioning and live/replay agreement; disabled diagnostics add no hot-path work. May close with evidence and no runtime change |
 
 ### Order and dependencies
 
@@ -178,7 +197,9 @@ AP0 ─┬─ AP1 ───────────────┐
 AC0 ─┬─ AC1 ─┬─ AC2 ─ AC3 ─ AC5 ─ AC6 ─ AC14
      │       └─ AC4 + goals G0 ─ G2 ─ G3 ─ G4 ─ G5
      ├─ AC10 ─ AC11 ─ AC12.1 ─ AC12.2 ─ AC12.3 ─ AC13
-     └─ AC15 ─ (AC16 with ENG-803)
+     ├─ AC15 ─ (AC16 with ENG-803)
+     └─ AC17 (independent) ; AC18/AC19 after AC3 ─ Goal 7
+AC0 measurements ─ AC20 (only with a concrete latency question)
 ```
 
 | Priority | Slices | What you see when it merges |
@@ -223,6 +244,12 @@ AC0 ─┬─ AC1 ─┬─ AC2 ─ AC3 ─ AC5 ─ AC6 ─ AC14
 - Independent review is required (per `workflow.md` § 4) for AP3a, AP3b, AP4,
   AC1–AC3, AC5, AC6 and AC15 (and goals G0–G3), because they touch
   `sessions/`, the run loop or the store.
+
+Absorbed reliability order: AC17 first; AC18/AC19 share the run loop and
+land as dependent slices after AC3 rather than competing writers. AC18's
+outcome decision coordinates with AC5/AC6. AC4 keeps its goals G0 dependency
+and evaluation gate. AC20 is optional evidence-led work; it does not gate
+functional recovery. Goal 7 qualifies the integrated repairs after landing.
 
 ### Protocol and schema sequencing
 
@@ -367,12 +394,15 @@ re-exports whatever types its signatures name.
 
 ## Acceptance for the plan
 
-1. The six Goal measurements, each recorded in the ledger with commands and
+1. The seven Goal measurements, each recorded in the ledger with commands and
    numbers.
 2. ADR-0048, 0049, 0050 and 0054 Accepted (or superseded by what was built).
    `architecture.md` § Runtime, § Hosting Boundary and § Repository Layout,
    `protocol.md`, `headless-contract.md` and `tools.md` are amended as built.
-3. `run-reliability.md` RR12's loop item is marked moved to AC4.
+3. Absorbed reliability work has one owner here: AC17–AC20, AC4 and AC5/AC6.
+   The retired plan/ledger have no live links; completed behavior lives in design
+   and the dated baseline/receipt mapping remains in this ledger. RR11 does not
+   reintroduce current hashes in refusals (ADR-0058).
    `harness-scale-audit` F19 and F28 are cross-referenced to AC11 and the
    live check in Goal 5.
 4. The plan is deleted and its durable content moves to `design/`.

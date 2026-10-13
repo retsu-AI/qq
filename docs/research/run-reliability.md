@@ -5,7 +5,7 @@ at the revisions recorded in
 [`harness-comparison.md`](harness-comparison.md)
 § Scope. This document records evidence and proposes work; it does not claim
 implementation. Implementation status lives in
-[`../plans/progress/run-reliability.md`](../plans/progress/run-reliability.md).
+[`../plans/progress/autonomous-core.md`](../plans/progress/autonomous-core.md).
 
 ## Question
 

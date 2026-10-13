@@ -87,8 +87,8 @@ appended below, newest last.
 | AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Shipped (13d9c585) | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271) | Merged by lead; final qualification below: dispatch median +4.0% vs A/A +0.14%, open with the lead |
-| AC2 | Bounds reset at seams | In review | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | `fix/eng-1017-ac2-bounds-reset-at-seams` | ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
-| AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
+| AC2 | Bounds reset at seams | Shipped (`9bae6937`) | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | [#278](https://github.com/retsu-AI/qq/pull/278) | Performance receipt remains outstanding; ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
+| AC3 | No single-shot fatal faults | In review | [ENG-1029](https://linear.app/retsu-ai/issue/ENG-1029) | [#279](https://github.com/retsu-AI/qq/pull/279) | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
@@ -102,6 +102,14 @@ appended below, newest last.
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
 | AC16 | Retention (ENG-803) | Planned | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) | | Evidence from AC0 |
+| AC17 | Tolerant read-only arguments (was RR10) | Planned | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
+| AC18 | Truncated-call recovery and honest exhaustion outcome (RR8 residuals) | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | Synthetic re-issue missing; exhaustion still fails; ADR-0048 outcome decision before implementation |
+| AC19 | Bounded stream repair (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | Normal completion, missing ids, reasoning display cap remain |
+| AC20 | Evidence-led latency diagnostics (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | No permanent stats or wire/schema work without a measured consumer |
+| RR11 baseline | Session read-hash persistence | Shipped (existing behavior) | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | Durable `session_files`, claim reload, restart/edit regression; obsolete hash-return acceptance superseded by ADR-0058 |
+| RR baseline | RR1–RR7, RR4.1/RR7.1, RR8.1–RR8.4, RR9 | Shipped | | | Receipt mapping below; RR8 residuals remain AC18 |
+| Goal 7 | Seven-day integrated reliability qualification | Planned | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | | Distinct from AP5; no live acceptance claimed |
+| Docs consolidation | Absorb reliability plan and remove stale ownership | In review | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | `docs/eng-1036-reliability-consolidation` | Docs only; existing open performance/live gates preserved |
 
 ## Entries
 
@@ -1235,3 +1243,14 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Tests (each fails on `13d9c585` or under the old cutoff rule): soak `separated_empty_truncations_each_recover_with_a_fresh_retry`, `scripted_soak_completes_across_context_windows` (500 turns), `forty_in_run_compactions_complete_off_the_between_run_budget` (≥ 40), `forty_mib_of_streamed_text_across_windows_completes` (900 × 48 KiB); `an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live` (ENG-991); `the_between_run_fold_still_stops_at_its_step_budget`; reservation/step assertions added to `one_run_spanning_several_windows_compacts_its_own_turns_and_completes`. The single-window 4 MiB test is unchanged.
 - Gates: `cargo fmt --all -- --check`; workspace all-target/all-feature Clippy `-D warnings`; `cargo test -p qq-core --lib` 915 passed; qq-core integration/examples passed; `cargo test --workspace --exclude qq-core` 1,291 passed; ignored soak suite 6 passed; `cargo build --workspace`; `git diff --check`.
 - Hot path: two field moves and one `Vec<u32>` push per settled turn; `turn_overhead` not re-measured for this slice yet.
+
+### 2026-10-13 — Reliability consolidation baseline and ownership (ENG-1036)
+
+- User authorizes consolidation of run-reliability into this plan/ledger, deleting the superseded pair and repairing stale references in indexes, related plans/research, and tools design. Isolated `.worktrees/reliability-consolidation`; base main `ce768bbc`. AC3 remains owned by its open PR; no runtime files changed.
+- Completed baseline: RR1 #108, RR2 #116, RR3 #117, RR4 #120 (ADR-0040), RR5 #118, RR6 #126, RR7 #127, RR7.1 #195, RR4.1 #196, RR8.1–RR8.4 #198–#201, RR9 #150 (DA2). Full dated receipts remain in [Git history at the pre-consolidation ledger](https://github.com/retsu-AI/qq/blob/ce768bbc2fb7a25b227fe3405734a316adf020a1/docs/plans/progress/run-reliability.md); historical research remains evidence, not current status.
+- RR11 already persists hashes with results (`sessions/tool_calls.rs`), reloads on claim (`claim.rs`), and has `file_state_survives_restart_and_auto_mode_applies_the_edit_without_prompting`; no new schema/persistence implementation is scheduled. T19/ADR-0058 supersedes its unsafe current-hash-on-refusal requirement.
+- Open ownership: RR10 → AC17 (ENG-872); both RR8 residuals → AC18 (ENG-870); RR12 stream repair/stats → AC19/AC20 (ENG-874); repeated-call guard stays AC4; continuation stays AC5/AC6. AC20 requires a measured consumer; AC18's non-completed exhaustion outcome is a future ADR decision, not shipped behavior.
+- Reconciled source/tracker: AC2 shipped #278 (`9bae6937`), AC3 in review #279 (ENG-1029). AC1/AC2 performance qualification, AP5, AC0.2 and Goal 7 live evidence remain open; no historical test receipt establishes the live targets.
+- Docs-only: no new tests or performance measurement warranted; workspace gates and independent plan review run before push. No protocol/schema/descriptor change.
+- Validation: workspace fmt, all-target/all-feature Clippy `-D warnings`, build and tests pass (2,243 passed / 0 failed / 14 ignored; nested embedding child invocation excluded). RR11 restart/edit regression passes. Independent review: Approve after integer-scope/amplification corrections. 166 relative doc links resolve; no live references to retired files; `git diff --check` passes. Logs: `target/qq-perf/reliability-consolidation-2026-10-13/` (untracked).
+- Tracker reconciliation: ENG-870/872/874 now point here under ENG-978; stale attachments removed. ENG-873 Done as verified existing behavior; AC2 remains in review for outstanding performance evidence. ENG-1036 docs PR pending publication.

@@ -505,3 +505,7 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 ### 2026-10-13 — T18–T20 shipped-status reconciliation ownership
 
 T20 owns the immediate docs follow-up for tool-layer plan/ledger status and ADR-0058 acceptance in the ADR file, index, and root reservation after native stack merge. Source unchanged; remaining observations and ENG-1032/ENG-1033 stay open.
+
+### 2026-10-13 — Reliability consolidation shared-doc ownership (ENG-1036)
+
+User-authorized docs-only slice owns autonomous-core plan/ledger, retirement of run-reliability plan/ledger, and stale-reference corrections in docs indexes, related plans/research and tools design. AC3's source/review work remains separately owned. Accepted ADRs and historical root/ledger entries are preserved; dead receipt pointers use pinned Git history. No ADR number, protocol or schema change is reserved by this consolidation.
