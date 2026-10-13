@@ -148,12 +148,20 @@ pub(crate) fn classify_command(command: &str, workspace: Option<&std::path::Path
     }
     // Every simple command anywhere in the tree, wrappers peeled.
     let mut commands = Vec::new();
+    let mut expansion_overflow = false;
     let mut collector = Collector {
         source: command.as_bytes(),
         commands: &mut commands,
+        expansion_overflow: &mut expansion_overflow,
         nested_shells: 0,
     };
     collector.collect(root, false);
+    if expansion_overflow {
+        // Truncated expansion can hide a forbidden program or flag. Full
+        // approval must not execute a command we stopped examining.
+        decision = Decision::Forbidden;
+        reasons.push(RuleId::CommandTooLong);
+    }
     if commands.is_empty() && !root.has_error() {
         // A bare assignment, a comment, or a construct with no command.
         decision = decision.max(Decision::Prompt);
@@ -215,7 +223,10 @@ pub(crate) fn classify_command(command: &str, workspace: Option<&std::path::Path
     // Reasons carry only what set the decision: a Forbidden verdict does not
     // list the Prompt rules beneath it.
     if decision == Decision::Forbidden {
-        reasons.retain(|rule| rule.tier() == Decision::Forbidden);
+        reasons.retain(|rule| {
+            rule.tier() == Decision::Forbidden
+                || (expansion_overflow && *rule == RuleId::CommandTooLong)
+        });
     }
     Verdict { decision, reasons }
 }
@@ -447,6 +458,7 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
 struct Collector<'a> {
     source: &'a [u8],
     commands: &'a mut Vec<SimpleCommand>,
+    expansion_overflow: &'a mut bool,
     nested_shells: usize,
 }
 
@@ -768,10 +780,9 @@ impl Collector<'_> {
                                 },
                                 None => (rest, ""),
                             };
-                            // The unknown command above keeps this held if
-                            // expansion exceeds the classifier's byte bound.
                             if piece.len() > MAX_CLASSIFIED_BYTES.saturating_sub(text.len()) {
-                                return;
+                                *self.expansion_overflow = true;
+                                break;
                             }
                             text.push_str(piece);
                             rest = next;
@@ -949,6 +960,7 @@ impl Collector<'_> {
                                     let mut sub = Collector {
                                         source: word.as_bytes(),
                                         commands: self.commands,
+                                        expansion_overflow: self.expansion_overflow,
                                         nested_shells: self.nested_shells,
                                     };
                                     if root.has_error() {
@@ -993,9 +1005,11 @@ mod tests {
         let mut parser = parser();
         let tree = parser.parse(command, None).unwrap();
         let mut out = Vec::new();
+        let mut expansion_overflow = false;
         let mut collector = Collector {
             source: command.as_bytes(),
             commands: &mut out,
+            expansion_overflow: &mut expansion_overflow,
             nested_shells: 0,
         };
         collector.collect(tree.root_node(), false);
@@ -1010,6 +1024,7 @@ mod tests {
     fn env_split_expansion_overflow_preserves_the_forbidden_floor() {
         for command in [
             format!("A=xxxxxxxx env -S 'sudo {}'", "${A}".repeat(2049)),
+            format!("A=xxxxxxxx env -S 'echo {}'", "${A}".repeat(2049)),
             format!(
                 "A=xxxxxxxx env -S 'git push {} --force'",
                 "${A}".repeat(2049)
@@ -1017,10 +1032,9 @@ mod tests {
             format!("A=xxxxxxxx env -S '-u {} sudo ls'", "${A}".repeat(2049)),
         ] {
             assert!(command.len() <= MAX_CLASSIFIED_BYTES);
-            assert_eq!(
-                classify_command(&command, None).decision,
-                Decision::Forbidden
-            );
+            let verdict = classify_command(&command, None);
+            assert_eq!(verdict.decision, Decision::Forbidden);
+            assert!(verdict.reasons.contains(&RuleId::CommandTooLong));
         }
     }
 
@@ -1029,6 +1043,13 @@ mod tests {
         let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(40));
         let found = commands(&command);
         assert!(found.iter().flatten().flatten().all(|word| word.len() < 32));
+        let nested = format!(
+            "sh -c \"A=xxxxxxxx env -S 'echo {}'\"",
+            "\\${A}".repeat(2049)
+        );
+        let verdict = classify_command(&nested, None);
+        assert_eq!(verdict.decision, Decision::Forbidden);
+        assert!(verdict.reasons.contains(&RuleId::CommandTooLong));
         let value = "x".repeat(1024);
         let command = format!("A={value} env -S '{}'", "${A}".repeat(32));
         assert!(

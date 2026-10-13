@@ -660,3 +660,9 @@ Earlier qualification runs hit headless timeouts under contention and TUI ANSI a
 Docs: tools design, plan ownership/wording, root ownership request, and this ledger; no protocol/schema/prompt version change from T20.
 Open: [#285](https://github.com/retsu-AI/qq/pull/285) hosted CI and main merge; D10 week-after-landing observation, ENG-1032 and ENG-1033 follow-ups remain separate.
 Evidence: `target/qq-perf/t20-2026-10-13/` (untracked; initial baseline recorded before first edit, original binary retained).
+
+### 2026-10-13 — T20 expansion-overflow refusal repair
+
+- Late #285 review found that the cap's early return dropped a visible `sudo` prefix, newly downgrading Forbidden to Prompt. Test-first `99a07e4` reproduced it below the raw-source limit; no merge was attempted after the finding.
+- Preserve and classify the bounded prefix, propagate overflow through nested collectors, and refuse every expanded-over-limit command with `command_too_long`, including under `full`. This also preserves the floor when a forbidden flag/program lies beyond the cap. Raw source over 16 KiB still prompts as before.
+- Focused `cargo test -p qq-core approval -- --test-threads=4`: 95 passed, 0 failed, including sudo, benign echo, late force, env option operands, and nested echo overflow. Independent `t20_review` verified this log and approved; design amended in the same repair. Final workspace and measurements are rerun before push.

@@ -979,7 +979,12 @@ over every simple command anywhere in the tree (ADR-0020):
 an alternative; only a grant that quotes the exact command string lifts it
 (prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep so the
 inner command is judged too. Past that depth, what is left counts as nested
-and is never allowed. Commands over 16 KiB skip parsing and prompt.
+and is never allowed. Commands over 16 KiB skip parsing and prompt. Literal assignment substitution
+inside `env -S` reads the original string once, with the last assignment winning;
+inserted values are never recursively expanded. Expanded text is capped at
+16 KiB. Expansion overflow is Forbidden (`command_too_long`) even under `full`,
+because the unexamined tail can contain a forbidden program or flag. The bounded
+prefix is still classified for specific refusal reasons.
 
 **Launchers** are a closed set: `timeout`, `time`, `nice`, `nohup`, and
 `stdbuf`. They are judged by the command they launch. A launcher qualifies
