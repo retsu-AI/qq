@@ -962,12 +962,25 @@ The other wrappers are recorded as commands of their own, and the command
 they wrap is recorded as nested. It is judged, so a `Forbidden` inner
 command is found, but it is never allowed. These are `env`, `xargs`,
 `sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset`. For `chrt` and
-`taskset`, both the word after the options and the one after it are
-judged as the command, so a dynamic or misread positional cannot hide it.
-`env -S STRING` (`--split-string`) is reparsed like `sh -c STRING`. `ionice`, `chrt`, and `taskset` are not launchers
+`taskset`, every suffix of the arguments is judged as the command,
+because options and the positional may be dynamic. This over-reports
+(`taskset 0x1 echo sudo` is `Forbidden`) rather than miss a buried
+command. `env -S STRING` (`--split-string`) builds its command by `env`'s
+own splitting rules, so it is an unknown program, and every suffix of its
+roughly split words is judged too. Past 8 wrappers the tail is unseen:
+the command is unknown, and every suffix of its words is judged, so
+`nice` ×9 `sudo ls` is `Forbidden`.
+
+Any assignment before a command keeps it from `Allow` unless it is in a
+short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,
+`RUST_TEST_THREADS`, `RUST_MIN_STACK`, `NO_COLOR`, `CLICOLOR*`, `TERM`,
+`COLUMNS`, `LINES`, `LANG`, `LC_ALL`, `TZ`, `CI`, `NEXTEST_PROFILE`,
+`INSTA_UPDATE`, and `QQ_*`. Many variables name a program the tool will
+run (`RUSTDOC`, `CC`, `GIT_EXTERNAL_DIFF`), so this is an allowlist. An
+`export` or `declare -x` is a construct and was never `Allow`. `ionice`, `chrt`, and `taskset` are not launchers
 because they can retarget a running process; with `-p` they launch
 nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
-reparsed. Past 8 wrappers, a ninth is not looked through.
+reparsed. 
 
 A redirect writes nothing when its target is exactly `/dev/null`,
 `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `/dev/fd/0`–`2`, or when it
@@ -1001,11 +1014,7 @@ which the classifier cannot read and which may update local branches.
 
 A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
 `Allow`, because the allow tables name programs reached through `PATH`
-and a path names whatever file sits there. An assignment that substitutes a program or a repository is
-never `Allow`. That covers every `GIT_*` variable on `git` (including
-`GIT_CONFIG_PARAMETERS`, which can set `core.fsmonitor` to an outside
-executable that `git status` runs), plus `*_WRAPPER`, `*PAGER`,
-`*EDITOR`, `CARGO_*`, `RUSTC*`, and `RUSTFLAGS` on any program.
+and a path names whatever file sits there.
 
 Git's global options before the subcommand (`-C`, `-c`, `--git-dir`,
 `--work-tree`, `--exec-path`, `--config-env`, `--attr-source`, `--bare`,

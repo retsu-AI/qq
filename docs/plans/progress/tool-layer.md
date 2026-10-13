@@ -534,3 +534,13 @@ Each fix covers the whole class: the classifier's argument scanning must never h
 - `env -S STRING` / `--split-string` was allowed on `main` (`env -S'rm -rf target'`). It is now reparsed like `sh -c`.
 - Descriptor duplication counts as harmless only for 0–2 (`2>&1`, `/dev/fd/1`). `>&3` writes to an inherited file or socket.
 - 15 rows. `approval` 92 tests pass.
+
+### 2026-10-13 — T18 review repairs, round 6 (#283)
+
+The last two rounds kept finding new names for the same three classes, so each is now closed by construction rather than by a longer list:
+
+- Environment: replaced the list of known-bad names with an allowlist of output and test knobs (`RUST_BACKTRACE`, `RUST_LOG`, `NO_COLOR`, `TERM`, `LANG`, `CI`, `QQ_*`, …). Any other assignment before a command keeps it from `Allow`; `RUSTDOC=/tmp/evil cargo doc` and `CC=…` had been allowed on `main`. Replay unchanged (111/115): the corpus used only `QQ_*`, plus `GIT_EDITOR`, which already prompted.
+- Buried commands: wherever the start of the launched command is not knowable (past the 8-wrapper limit, `chrt`/`taskset` with dynamic options, `env -S` with its own escape syntax), the command is recorded as unknown and every suffix of its words is judged, nested. This can over-report (`taskset 0x1 echo sudo` is Forbidden) but cannot miss.
+- `git branch` listing filters that take a value (`--contains X`, `--merged X`, `--sort X`, `--format X`) consume it, so `git branch --contains HEAD` is a read. `/dev/fd/0`–`2` count as streams in the word-only gate as well as in the judge.
+- `export GIT_*=…; git diff` was already Prompt (`export` is a construct) and is now pinned.
+- `approval` 92 tests pass. `classify_command` 1 KiB 161 µs.
