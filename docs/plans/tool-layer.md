@@ -423,11 +423,15 @@ remaining friction has moved:
   not launchers here, because they can retarget a running process
   (`ionice -c 3 -p 123`). `sudo`/`doas`/`su` stay `Forbidden`, and
   `xargs` stays `Prompt`.
-- A `redirected_statement` whose redirects are all to fd numbers,
-  `/dev/null`, or `/dev/std*` does not mark its body `nested`.
-- `git -C <dir>`: when `<dir>` is literal and contained, skip it before
-  reading the subcommand. When it escapes, the verdict is `Prompt` with
-  `path_outside_workspace`.
+- A `redirected_statement` whose redirects all write nothing does not
+  mark its body `nested`. Writing nothing means `/dev/null`, `/dev/std*`,
+  or a real descriptor duplication (`>&`/`<&` with a number). `>1` and
+  `2> 1` write a file named `1` and stay `Prompt`.
+- `git -C <dir>`: skip the hops before reading the subcommand, so
+  `git -C sub push --force` stays `Forbidden`. A `-C` command is never
+  `Allow`, because a contained-looking hop can be a workspace symlink and
+  the gates classify with no workspace root. An escaping hop is `Prompt`
+  with `path_outside_workspace`.
 - `git worktree list` and `git branch --list [pattern]` become `Allow`.
 - `git fetch` keeps `GitRemote` in every form (see observation 1).
 - Hardening found in review: a path-qualified program (`./ls`,
@@ -492,26 +496,36 @@ of the current content. Gate: `edit_batch` unchanged.
 
 **T20 — the nudge reaches compound commands; small clamps.**
 
-- `builtin_alternative` walks the classifier's `SimpleCommand` list
-  (already computed for the verdict) instead of splitting on the first
-  word. It names the first read-only program that a built-in replaces.
-  `cd x && sed -n 1,20p a.rs` hints `read_file ranges`. The hint stays a
-  result suffix (`hint`) and a refusal only under `strict`.
+- `builtin_alternative` skips leading navigation (`cd DIR &&`, `cd DIR;`)
+  and then judges the first program, as today. `cd x && sed -n 1,20p a.rs`
+  hints `read_file ranges`. A replaceable program later in a list or
+  pipeline (`cargo test && grep x log`) gets no hint and no `strict`
+  refusal: the compound needs the shell. It stays a string-level prefix
+  skip with no classifier reparse, so `approval/classify.rs` is
+  untouched. The hint stays a result suffix, and only `strict` refuses.
 - `search.max_per_file` above 50 clamps with `note=max_per_file_clamped=50`
   (same shape as T15's `context`). `read_file` with more than 8 ranges
-  reads the first 8 with `note=ranges_truncated=8`. That is not lossless,
-  so the note names the dropped ranges.
+  keeps the current `invalid_ranges` correction: a silent partial read
+  breaks the rule that every truncation carries a continuation.
 - `read_tool_result` with an all-zero handle answers with
   `handle_placeholder: t:…:00000000:00000000 is the example shape; copy
   the handle from the …[qq: … t:…]… marker of the result you want`,
-  not `spill_missing`. The check is a parse-time `match` in
-  `runtime/spill.rs` and needs no store query. Listing recent handles
+  not `spill_missing`. The check is a parse-time `match` on the handle
+  in `read_tool_result` dispatch (`runtime/run_loop.rs`, where
+  `SpillHandle::parse` and the store miss are mapped today). It needs no
+  store query. Listing recent handles
   would need a new session-scoped store query, which is out of scope.
   `handle_placeholder` joins the `Correction` list in
   `ToolErrorKind::of`. The prompt and the marker never show a zero
   handle; any example uses `t:<tool>:<call8>:<digest8>`.
 - `read_file.include_ignored` and similar unknown fields belong to RR10
   (ENG-872). T20 does not take them.
+- Regressions: `cd x && sed -n 1,5p a` hints and `strict` refuses;
+  `cargo test && grep x log` neither hints nor refuses; `max_per_file=80`
+  returns the clamped result with its note, combined with `context`'s by
+  a comma; a 9-range read still fails `invalid_ranges`; a zero handle
+  returns `handle_placeholder` through dispatch, and `ToolErrorKind::of`
+  grades it `Correction`.
 
 Acceptance for D10: rerun the D10 queries over a week after T18–T20 land,
 with an unchanged model mix. Under `auto`, held `shell` calls drop below
@@ -546,23 +560,25 @@ table is `tools.md` § Approval Policy.
 | T10 | `terminal` (gated on R6-terminal evidence) | L | T4, T6 | `tools/terminal.rs`, `sessions` process ownership | process-tree cleanup test; no descendants after cancel |
 | T11 | `view_image` + provider image content block (`vision` feature) | M | provider content-block change | `tools/image.rs`, `qq-provider` | minimal profile unchanged |
 | T12 | `@` mentions: grammar, ranges field, dirs/globs, `@diff`/`@sha`, completion | M | T2 | `qq-tui` composer, `src/headless.rs`, `qq-protocol/src/input.rs` | TUI render gate unchanged |
-| T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7 | `benchmarks/tools/` | Phase 6 acceptance |
+| T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7, T18–T20 | `benchmarks/tools/` | Phase 6 acceptance |
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
 | T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no Forbidden tier change |
 | T19 | Edit freshness: a unique exact `old` applies with `note=unread`/`changed_since_read`; anchors, fuzzy, ambiguous and overwrites still refuse, with no `h:` in the refusal (D10) | S | — | `tools/edit.rs`, `tools/write.rs` (message only), `tools.md` § Optimistic Concurrency, ADR-0058 | `edit_batch` unchanged |
-| T20 | Nudge over the classifier's command list; `max_per_file`/ranges clamps; placeholder spill handle (D10) | S | T18 | `runtime/shell_policy.rs`, `tools/{shell,search,read}.rs`, `runtime/spill.rs`, `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged |
+| T20 | Nudge past leading `cd`; `max_per_file` clamp; placeholder spill handle (D10) | S | T18, T19 | `runtime/shell_policy.rs`, `tools/{shell,search}.rs`, `runtime/spill.rs`, `runtime/run_loop.rs` (`read_tool_result` dispatch only), `runtime/prompt.rs`, `qq-protocol` `ToolErrorKind::of` (one code) | `tool_dispatch` unchanged; focused regressions in § T20 |
 
 Delivery order was T1 → T2 → T3 → T4 (the "token" release) → T5 → T6 → T7
 (the "safety" release, v0.1.0) → T12 → T8 → T9 → T15 → T16 → T17 (v0.1.6);
 remaining: T18 → T19 → T20 → T13 → T14 → T11 → T10. T18–T20 come ahead of
 T13 for the same reason T15–T17 did: the ablations should measure the
-corrected contract, and A4's `auto` prompt rate is meaningless while 26 of
-every 143 holds are classifier bugs. T18 and T19 touch disjoint paths and
-may run in parallel worktrees. T20 follows T18 because it reads the
-classifier's command list. T13 runs paired evaluations over the shipped
+corrected contract, and A4's `auto` prompt rate is meaningless while 28 of
+every 143 holds are classifier bugs. T18 and T19 touch disjoint code and
+may be built in parallel worktrees. They share `tools.md` and the one
+ledger, so they integrate as a stack (T19 on T18). The T19 branch takes
+the T18 branch by merge, and each slice appends only its own dated
+ledger entries. T20 follows T18 and T19. T13 runs paired evaluations over the shipped
 arms and again after T12; T10 waits for its evidence.
 
 ## Ablation Plan

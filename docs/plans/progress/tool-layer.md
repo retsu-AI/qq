@@ -463,3 +463,9 @@ Seven Codex findings on `9bcb60a6`; all were valid and the plan is amended:
 - T18 acceptance is a checked-in `d10_held` table of sanitized shapes, not the private session corpus (the repository is public). The `/tmp` replay stays advisory.
 - T19 covers only the `old` form; anchor inserts are anchor-only in the schema and still need a read. Refusals no longer return `h:`, which would have authorized the refused edit on the next call. The existing `if_hash` weakness (`mode=info`, 44 placeholder hashes) is decisions-needed row 12.
 - T20 no longer lists recent handles: a zero handle gets a parse-time `handle_placeholder` correction and needs no store query. `qq-protocol` `ToolErrorKind::of` is added to T20's owned paths.
+
+### 2026-10-12 — final T18 replay receipt (supersedes the 2026-10-11 counts)
+
+- Rule set: T18 as merged for review. Launchers are peeled by bare name only, through eight wrappers. Stream-only list redirects stay flat. `git worktree list` and `git branch --list` are reads. `git fetch` keeps `GitRemote` in every form, and every `-C` command prompts. Globs are unchanged.
+- Advisory replay over the same 226 `auto` shell commands: allow 83 → 111, held 143 → 115 (28 recovered, 51 % still held), nothing into or out of `Forbidden`. This is the number the plan uses. The 26/25 figures in the 2026-10-11 entries came from a simulation that still allowed `git fetch`, and are superseded.
+- Plan amendments from the second #280 review: T13 takes T18–T20 as inputs; T18/T19 integrate as a stack with one writer per ledger entry; T20 is narrowed (nudge past a leading `cd` only, 9-range reads stay a correction, the `read_tool_result` dispatch path is owned, focused regressions are listed).
