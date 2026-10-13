@@ -3405,4 +3405,5 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
         .resolve(&SecretRef::Stored("provider/result".to_owned()))
         .unwrap();
     assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/result"), 2);
 }

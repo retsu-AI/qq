@@ -1112,6 +1112,19 @@ impl CredentialStore {
                 });
             }
         };
+        let mut result = match flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => {
+                let mut result = poisoned.into_inner();
+                let failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                *result = Some(Err(failure.clone()));
+                state.flights.remove(&key);
+                flight.ready.notify_all();
+                wake.notify_all();
+                owner_guard.completed = true;
+                return Err(failure.into_auth_error(name));
+            }
+        };
         if let Ok(secret) = &outcome {
             state.cache.entries.push_back(StoredResolutionCacheEntry {
                 name: name.to_owned(),
@@ -1125,17 +1138,6 @@ impl CredentialStore {
             }
         }
         state.flights.remove(&key);
-        let mut result = match flight.result.lock() {
-            Ok(result) => result,
-            Err(poisoned) => {
-                let mut result = poisoned.into_inner();
-                let failure = StoredResolutionFailure::Coordinator("lock_poisoned");
-                *result = Some(Err(failure.clone()));
-                flight.ready.notify_all();
-                owner_guard.completed = true;
-                return Err(failure.into_auth_error(name));
-            }
-        };
         *result = Some(outcome.clone());
         flight.ready.notify_all();
         wake.notify_all();
