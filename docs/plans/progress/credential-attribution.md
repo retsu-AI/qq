@@ -36,3 +36,8 @@
 
 - Candidate `3df536d2077bdceeb4abd6a6a8559a38f32ae02d` adds distinct reviewer-store construction for opt-in runtime factories and typed Codex/XAI request-time read start/return events, while preserving the no-diagnostic `RuntimeFactory::system()` path.
 - Stored events now include owner/join/finish lifecycle records; endpoint classification remains enum-only and never serializes URLs. Focused auth and CLI selectors passed after this change (1 and 5 executed tests respectively); parent still requires a real public composition fixture and same-reviewer exact-head assessment.
+
+## 2026-10-13 — boundary correction checkpoint
+
+- Candidate `97c68c703736eb3a0ad90f328f392d6a9fad2c54` removes the eager reviewer-store construction and keeps the pre-existing shared checkpoint store unchanged. Codex/XAI start/return events now occur inside the existing blocking credential operation, so permit wait is not mislabeled as backend I/O; OAuth events carry no fabricated flight/coordinator IDs.
+- Focused auth and CLI selectors both passed after the correction. Remaining acceptance work is the public composition/resource-failure matrix and independent exact-head review; no live credential/provider execution was performed.
