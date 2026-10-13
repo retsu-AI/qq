@@ -3,7 +3,7 @@ use std::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rmcp::{
@@ -18,6 +18,7 @@ use rmcp::{
 };
 
 use super::*;
+use tokio::time::Instant;
 
 /// A tiny in-process MCP server spoken to over a duplex pipe, so client
 /// behavior is exercised without a subprocess or the network.
@@ -451,7 +452,7 @@ async fn calls_succeed_fail_and_map_server_errors_without_reconnecting() {
     assert_eq!(fixture.connects(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn call_timeouts_are_errors_and_do_not_wedge_the_shared_client() {
     let fixture = Fixture::new(&["echo", "slow"]);
     let mut fast_timeout = settings("srv");
@@ -470,7 +471,7 @@ async fn call_timeouts_are_errors_and_do_not_wedge_the_shared_client() {
     assert_eq!(fixture.connects(), 1, "a timeout must not reset the client");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_stops_a_call_without_wedging_the_shared_client() {
     let fixture = Fixture::new(&["echo", "slow"]);
     let mut slow = settings("srv");

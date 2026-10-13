@@ -7,6 +7,44 @@ struct DeadlineSession {
     events: SessionEventStream,
 }
 
+struct DeadlineTestWatchdog {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    signal: tokio::sync::oneshot::Receiver<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeadlineTestWatchdog {
+    fn new() -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (sender, signal) = tokio::sync::oneshot::channel();
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(30) {
+                if thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = sender.send(());
+        });
+        Self {
+            stop,
+            signal,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for DeadlineTestWatchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl DeadlineSession {
     async fn open(loader: Arc<dyn RuntimeLoader>, mode: ApprovalMode) -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -60,22 +98,67 @@ impl DeadlineSession {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_after_durable_tool_result_records_unavailable_checkpoint_before_settlement() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
+    let review_entered = Arc::new(tokio::sync::Notify::new());
     let mut harness = DeadlineSession::open(
-        Arc::new(BlockingCheckpointLoader { requests }),
+        Arc::new(BlockingCheckpointLoader {
+            requests,
+            review_entered: Arc::clone(&review_entered),
+        }),
         ApprovalMode::Auto,
     )
     .await;
     std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
-    let run_id = harness.submit("inspect the note", 500).await;
+    let mut watchdog = DeadlineTestWatchdog::new();
+    let keep_clock_running = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let run_id = tokio::select! {
+        run_id = harness.submit("inspect the note", 500) => run_id,
+        _ = &mut watchdog.signal => panic!("deadline fixture submit watchdog expired"),
+    };
 
-    let mut observed = collect_until(&mut harness.events, |event| {
-        matches!(event, SessionEvent::ToolCallFinished { .. })
-    })
-    .await;
-    observed.extend(collect_until(&mut harness.events, finished_for(run_id)).await);
+    let mut observed = Vec::new();
+    loop {
+        let event = tokio::select! {
+            event = harness.events.next() => event.unwrap().unwrap(),
+            _ = &mut watchdog.signal => panic!("deadline fixture watchdog expired; observed={observed:#?}"),
+        };
+        let done = matches!(event.event, SessionEvent::ToolCallFinished { .. })
+            || matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id);
+        observed.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. })),
+        "duration settled before the durable tool result: observed={observed:#?}"
+    );
+    tokio::select! {
+        () = review_entered.notified() => {}
+        _ = &mut watchdog.signal => panic!("deadline fixture reviewer watchdog expired; observed={observed:#?}"),
+    }
+    tokio::time::advance(Duration::from_millis(500)).await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    keep_clock_running.abort();
+    loop {
+        let event = tokio::select! {
+            event = harness.events.next() => event.unwrap().unwrap(),
+            _ = &mut watchdog.signal => panic!("deadline fixture terminal watchdog expired; observed={observed:#?}"),
+        };
+        let done = matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id);
+        observed.push(event);
+        if done {
+            break;
+        }
+    }
 
     let tool_finished = observed
         .iter()

@@ -603,21 +603,28 @@ struct ToolLoopLoader {
 
 struct BlockingCheckpointLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    review_entered: Arc<tokio::sync::Notify>,
 }
 
 impl RuntimeLoader for BlockingCheckpointLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
+        let review_entered = Arc::clone(&self.review_entered);
         Box::pin(async move {
-            struct BlockingReviewer;
+            struct BlockingReviewer {
+                review_entered: Arc<tokio::sync::Notify>,
+            }
             impl CheckpointReviewer for BlockingReviewer {
                 fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
+                    self.review_entered.notify_one();
                     Box::pin(std::future::pending())
                 }
             }
 
             Runtime::new(ToolLoopProvider { requests }, "test-model", 256)
-                .map(|runtime| runtime.with_checkpoint_reviewer(Arc::new(BlockingReviewer)))
+                .map(|runtime| {
+                    runtime.with_checkpoint_reviewer(Arc::new(BlockingReviewer { review_entered }))
+                })
                 .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,

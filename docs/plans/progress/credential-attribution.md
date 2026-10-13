@@ -8,6 +8,7 @@ Diagnostics are explicitly enabled by `--credential-diagnostics PATH` and remain
 | OAuth permit wait and backend return | `crates/qq-auth/src/codex.rs`, `xai.rs` | Existing held OAuth and waiter-abort cases |
 | Call-scoped TypeSafe purpose with shared cache | `src/runtime.rs`, `src/runtime/approval.rs`, `routing.rs` | Checkpoint, routing, approval and concurrent ordinary-call regressions |
 | Public activation and shared process identity | `src/cli.rs`, `src/main.rs`, `src/advisory.rs` | Existing CLI composition and separate-store fixtures |
+| Advisory journal exclusion and owner release | `src/advisory.rs` | Existing journal replay and rejection targets cover second-writer refusal, retained descriptors, partial records, foreign identity and changed budgets |
 | Exclusive private output and path-free errors | `src/diagnostic.rs`, `src/main.rs` | Existing activation boundary cases |
 | Bounded records, loss summary and shutdown | `src/diagnostic.rs` | Existing queue, exact-budget, writer-failure and completion cases |
 
