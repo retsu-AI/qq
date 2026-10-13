@@ -588,17 +588,42 @@ impl Collector<'_> {
             // command is an unknown program (`argv: [None]`), never allowed.
             // Every literal word of the tail is also judged as a program of
             // its own, so a buried `sudo` or `rm -rf /` is still Forbidden.
-            let words = command.argv.clone();
+            // Skip the remaining well-formed launchers (bounded by the
+            // argv) to reach the launched program, then judge it nested. A
+            // tail that is not a clean launcher chain is judged at every
+            // suffix instead, so nothing buried is missed.
+            let mut words: &[Option<String>] = &command.argv;
+            loop {
+                let Some(name) = words.first().and_then(Option::as_deref) else {
+                    break;
+                };
+                match launcher_words(basename(name), &words[1..]) {
+                    Some(own) if !name.contains('/') => words = &words[own + 1..],
+                    _ => break,
+                }
+            }
+            let clean = words
+                .first()
+                .and_then(Option::as_deref)
+                .is_some_and(|name| !is_wrapper(basename(name)) && !name.contains('/'));
+            let tails: Vec<Vec<Option<String>>> = if clean {
+                vec![words.to_vec()]
+            } else {
+                (1..command.argv.len())
+                    .map(|start| command.argv[start..].to_vec())
+                    .collect()
+            };
             self.commands.push(SimpleCommand {
+                argv: vec![None],
                 nested: true,
-                ..command
+                ..command.clone()
             });
-            for start in 1..words.len() {
+            for argv in tails {
                 self.commands.push(SimpleCommand {
-                    argv: words[start..].to_vec(),
-                    redirects: Vec::new(),
-                    raw_redirects: Vec::new(),
-                    assignments: Vec::new(),
+                    argv,
+                    redirects: command.redirects.clone(),
+                    raw_redirects: command.raw_redirects.clone(),
+                    assignments: command.assignments.clone(),
                     nested: true,
                 });
             }
@@ -690,11 +715,22 @@ impl Collector<'_> {
                             assignments: Vec::new(),
                             nested: true,
                         });
-                        let words: Vec<Option<String>> = string
-                            .unwrap_or_default()
-                            .replace("\\_", " ")
-                            .split(|c: char| c.is_whitespace() || c == '\'' || c == '"')
-                            .filter(|w| !w.is_empty())
+                        // Quotes join adjacent fragments (`su""do` is
+                        // `sudo`), so they are removed before splitting on
+                        // whitespace and the `\_` separator. Escapes other
+                        // than `\_` are dropped to their character.
+                        let text = string.unwrap_or_default().replace("\\_", " ");
+                        let mut unquoted = String::with_capacity(text.len());
+                        let mut chars = text.chars();
+                        while let Some(c) = chars.next() {
+                            match c {
+                                '\'' | '"' => {}
+                                '\\' => unquoted.extend(chars.next()),
+                                c => unquoted.push(c),
+                            }
+                        }
+                        let words: Vec<Option<String>> = unquoted
+                            .split_whitespace()
                             .map(|w| Some(w.to_owned()))
                             .collect();
                         for start in 0..words.len() {
@@ -720,7 +756,17 @@ impl Collector<'_> {
                         break;
                     }
                 }
-                if let Some(inner) = inner_from(skip) {
+                // `env NAME=VALUE cmd` is the same as `NAME=VALUE cmd`: the
+                // assignments travel with the inner command, so the
+                // assignment rules (`GIT_EXTERNAL_DIFF=…`) judge it.
+                let assigned: Vec<String> = args[..skip.min(args.len())]
+                    .iter()
+                    .filter_map(|a| a.as_deref())
+                    .filter(|w| !w.starts_with('-') && w.contains('='))
+                    .map(str::to_owned)
+                    .collect();
+                if let Some(mut inner) = inner_from(skip) {
+                    inner.assignments = assigned;
                     self.peel(inner, depth + 1);
                 }
             }
