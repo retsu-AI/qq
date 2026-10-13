@@ -35,7 +35,7 @@ credentials, session databases, or raw prompts into documentation.
 | Script or CI prompt | [Headless](headless.md) | QQ headless command and typed records |
 | External tools | [MCP servers](mcp.md), then `qq mcp inspect NAME` | QQ MCP client, grants, and approvals |
 | Native client integration | [Native modes](startup-native-modes.md) | Candidate HTTP/SSE clients; pairing remains unaccepted |
-| Account-backed extraction | [API and billing](startup-api-billing.md) | Private Retsu Worker/DO/D1 source; hosted runtime unverified |
+| Account-backed extraction | [API and billing](startup-api-billing.md) | Private Retsu Worker/DO/D1 source; Runtime or deployment unverified |
 | Delivery planning | [Feature map](startup-feature-map.md) | Source, candidate, planned, and unverified labels |
 
 The public CLI dispatch is in

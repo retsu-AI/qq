@@ -23,6 +23,26 @@ is a stateless model backend. The gateway owns customer identity, rate limits,
 credits, and usage. [The Retsu API reference](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/docs/reference/api.md)
 requires repository access and describes the request and response contract.
 
+## Product docs, SDKs, and web journeys
+
+The current Retsu source also contains the product documentation site under
+[`packages/docs/src/content/docs/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/packages/docs/src/content/docs),
+including the quickstart, schemas, limits and pricing, use cases, and
+TypeScript/Python SDK guides. Its generated OpenAPI entrypoint is
+[`packages/docs/src/pages/openapi.json.ts`](https://github.com/retsu-AI/retsu/blob/8d58080829231bb74e180c6de4e8f687c4606200/packages/docs/src/pages/openapi.json.ts).
+The implemented SDK sources are
+[`sdk/typescript/src/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/sdk/typescript/src)
+and [`sdk/python/src/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/sdk/python/src).
+
+The product web source covers public landing, pricing and legal pages plus
+auth, playground, dashboard, keys, usage, billing, settings, and admin
+routes in [`packages/web/src/routes/`](https://github.com/retsu-AI/retsu/tree/8d58080829231bb74e180c6de4e8f687c4606200/packages/web/src/routes).
+These are source-backed user journeys. Publication, an enabled hosted site,
+SDK package release, authenticated access, and customer acceptance remain
+Runtime or deployment unverified. Use the product docs for Retsu API and SDK
+procedures; this QQ hub maps ownership and evidence boundaries rather than
+copying those guides.
+
 ## Platform2 local workflow
 
 The separately owned platform2 candidate records a local reviewed workflow in

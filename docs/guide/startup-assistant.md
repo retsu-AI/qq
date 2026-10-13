@@ -18,7 +18,7 @@ execution, and authoritative events. A lost response stays uncertain. The
 assistant does not invent a replacement request or silently replay it.
 
 This is a private candidate source pinned for this guide at
-`ebd0dbb39cdb63cdc5eb9966a568c442289b8` on `codex/rust-assistant-slice`; a
+`ebd0dbb39cdb63cdc5eb9968366a568c442289b8` on `codex/rust-assistant-slice`; a
 later moving branch head is not used as acceptance evidence. The converse
 binary is `src/bin/qq-assistant-converse.rs` in that candidate.
 Repository access is required. Local source checks do not prove useful model

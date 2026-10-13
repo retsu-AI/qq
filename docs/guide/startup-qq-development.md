@@ -30,12 +30,13 @@ and the local server boundary in
    cleanup when those paths are part of the claim.
 7. Adopt the candidate explicitly, or retain the prior revision and record why.
 
-For a QQ source change, follow the repository runbook, including its `nub run
-build` path and docs-truth checks over every guide. Those checks parse command
-examples and compatibility labels; they are part of normal repository guidance.
-For this documentation-only delivery, the scoped checks are the guide sync and
-site check, and no Cargo suite was run. A green check still does not establish
-provider, deployment, payment, or customer acceptance.
+For a QQ source change, the normal Rust checks remain formatting, workspace
+tests, Clippy, and the workspace build. Separately, the website runbook
+uses `nub run build` for the docs-truth and static-site path; its checks parse
+command examples and compatibility labels across the guides. This
+documentation-only delivery is scoped to guide sync and site checks, so no
+Cargo suite was run. A green check still does not establish provider,
+deployment, payment, or customer acceptance.
 
 ## Evidence and delivery
 
