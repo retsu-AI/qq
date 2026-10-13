@@ -7023,9 +7023,13 @@ mod tests {
             CredentialPaths::new(fixture.path("data")),
             Arc::new(PanicKeyring),
         ));
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (allowed_providers: ["cp-profile", "cp-chain"]))"#,
+        )
+        .unwrap();
         let request = fixture.request(r#"(
             version: 1, model: "cp-profile/test",
-            policy: (allowed_providers: ["cp-profile", "cp-chain"]),
             providers: {
                 "cp-profile": AmazonBedrock(region: "us-east-1", auth: Aws(Profile("work")), models: {"test": (name: "Profile fixture")}),
                 "cp-chain": AmazonBedrock(region: "us-east-1", auth: Aws(DefaultChain), models: {"test": (name: "Chain fixture")}),
