@@ -206,18 +206,13 @@ pub(crate) fn judge(
     // (`RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC`, `PAGER`, `EDITOR`, …). Those
     // shapes are judged as written but never allowed. `is_dangerous_env`
     // above already refuses the loader and `PATH` class outright.
+    // An allowlist, not a list of known-bad names: any assignment other than
+    // a short set of output and test knobs may substitute a program
+    // (`RUSTDOC`, `GIT_EXTERNAL_DIFF`, `CC`, `MAKE`…), and the cost of a
+    // prompt on `FOO=1 cargo test` is one approval.
     let substitutes_program = command.assignments.iter().any(|assignment| {
         let name = assignment.split('=').next().unwrap_or("");
-        (program == "git" && name.starts_with("GIT_"))
-            || name.ends_with("_WRAPPER")
-            || name.ends_with("PAGER")
-            || name.ends_with("EDITOR")
-            || name.starts_with("CARGO_")
-            || name.starts_with("RUSTC")
-            || matches!(
-                name,
-                "RUSTDOCFLAGS" | "RUSTFLAGS" | "SHELL" | "VISUAL" | "BROWSER"
-            )
+        !harmless_env(name)
     });
     let mut args: Vec<&str> = command
         .args()
@@ -653,6 +648,7 @@ fn prompt(
 /// abbreviated long options make any denylist incomplete.
 fn branch_lists(args: &[&str]) -> bool {
     let mut list_mode = false;
+    let mut expect_value = false;
     let mut patterns = false;
     for arg in args {
         match *arg {
@@ -661,8 +657,15 @@ fn branch_lists(args: &[&str]) -> bool {
             "--list" => list_mode = true,
             "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
             | "-i" | "--ignore-case" | "--color" | "--no-color" | "--column" | "--no-column"
-            | "--no-abbrev" | "--show-current" | "--merged" | "--no-merged" | "--contains"
-            | "--no-contains" | "--points-at" => {}
+            | "--no-abbrev" | "--show-current" => {}
+            // Listing filters that take a value: the next word is the
+            // value, not a branch name.
+            "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at"
+            | "--sort" | "--format" => {
+                list_mode = true;
+                expect_value = true;
+            }
+            _ if std::mem::take(&mut expect_value) => {}
             arg if [
                 "--sort=",
                 "--format=",
@@ -1197,6 +1200,30 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Assignments that only change output, logging, or test selection. Any
+/// other assignment on a command keeps it from `Allow`.
+fn harmless_env(name: &str) -> bool {
+    matches!(
+        name,
+        "RUST_BACKTRACE"
+            | "RUST_LOG"
+            | "RUST_TEST_THREADS"
+            | "RUST_MIN_STACK"
+            | "NO_COLOR"
+            | "CLICOLOR"
+            | "CLICOLOR_FORCE"
+            | "TERM"
+            | "COLUMNS"
+            | "LINES"
+            | "LANG"
+            | "LC_ALL"
+            | "TZ"
+            | "CI"
+            | "NEXTEST_PROFILE"
+            | "INSTA_UPDATE"
+    ) || name.starts_with("QQ_")
+}
+
 fn is_dangerous_env(name: &str) -> bool {
     matches!(
         name,
@@ -1366,7 +1393,7 @@ mod tests {
             "mv a.txt sub/b.txt",
             "cargo test && git status | head",
             "cargo build; echo done",
-            "FOO=1 cargo test",
+            "NO_COLOR=1 cargo test",
             "python -m pytest tests",
             "python3 script.py",
             "node index.js",
@@ -1399,7 +1426,7 @@ mod tests {
             "stdbuf -o L cargo test",
             "stdbuf -oL -eL cargo test",
             "timeout 60 nice cargo test 2>&1 | tail -n 40",
-            "FOO=1 timeout 300 cargo test",
+            "RUST_BACKTRACE=1 timeout 300 cargo test",
             "cd sub && timeout 300 cargo test -q",
             // T18 review: the command after exactly eight launchers is
             // judged; GNU duration grammar.
@@ -1413,6 +1440,16 @@ mod tests {
             "cd src && cargo test 2>/dev/null",
             "cd src && cargo test >/dev/stderr 2>&1",
             "cargo build; cargo test &>/dev/null",
+            // T18 review round 6: listing-filter operands; standard fds.
+            "git branch --contains HEAD",
+            "git branch --merged main -a",
+            "git branch --sort -committerdate --format x",
+            "git branch --points-at HEAD --list 'f*'",
+            "cargo test >/dev/fd/1",
+            "cargo test 2>/dev/fd/2",
+            "RUST_BACKTRACE=1 RUST_LOG=debug cargo test",
+            "QQ_BENCH_ITERATIONS=2 cargo test",
+            "NO_COLOR=1 git log",
             // T18 review round 3: harmless globals and real stream devices.
             "git --no-pager log --oneline -3",
             "git -P diff --stat",
@@ -1562,6 +1599,15 @@ mod tests {
             "printf x > /dev/stdoutx",
             "printf x > /dev/fd/../x",
             "printf x > /dev/fd/",
+            // T18 review round 6: any assignment outside the harmless set,
+            // including an exported one, keeps the command from Allow.
+            "RUSTDOC=/tmp/evil cargo doc",
+            "CC=/tmp/x cargo build",
+            "MAKE=/tmp/x make",
+            "FOO=1 cargo test",
+            "export GIT_EXTERNAL_DIFF='touch PWN'; git diff",
+            "export X=1 && cargo test",
+            "declare -x GIT_PAGER=x; git log",
             // T18 review round 5: an inherited descriptor is a write, and env
             // -S is never a listed program.
             "cd . && echo secret >&3",
@@ -1569,7 +1615,7 @@ mod tests {
             "echo x >/dev/fd/3",
             "env -S'rm -rf target'",
             "env --split-string='ls' ",
-            "taskset 0x1 echo sudo",
+            "taskset 0x1 ls",
             // T18 review round 4: a file named `&1`, foreground timeout.
             "printf x > '&1'",
             "printf x > \"&2\"",
@@ -1777,6 +1823,13 @@ mod tests {
             "find . | xargs sudo rm",
             "cargo test && rm -rf /",
             "ls; sudo ls",
+            // T18 review round 6: depth exhaustion, env -S escapes, and a
+            // dynamic chrt option still find the buried command.
+            "nice nice nice nice nice nice nice nice nice sudo ls",
+            "nice nice nice nice nice nice nice nice nice nice rm -rf /",
+            "env -S 'sudo\\_ls'",
+            "chrt \"$(printf %s -o)\" 0 sudo ls",
+            "taskset \"$M\" sudo ls",
             // T18 review round 5: wrapper argument scanning cannot hide the
             // command. Unknown git globals are skipped; taskset/chrt judge
             // both candidates around a misread positional; env -S is a

@@ -76,7 +76,13 @@ impl SimpleCommand {
 pub(crate) fn stream_target(target: &str) -> bool {
     matches!(
         target,
-        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+        "/dev/null"
+            | "/dev/stdin"
+            | "/dev/stdout"
+            | "/dev/stderr"
+            | "/dev/fd/0"
+            | "/dev/fd/1"
+            | "/dev/fd/2"
     ) || target
         .strip_prefix("\u{0}&")
         .is_some_and(|fd| matches!(fd, "0" | "1" | "2"))
@@ -578,10 +584,24 @@ impl Collector<'_> {
         // it can never be allowed. The command reached after exactly
         // `MAX_WRAPPER_DEPTH` peels is judged normally.
         if depth >= MAX_WRAPPER_DEPTH && program.as_deref().is_some_and(is_wrapper) {
+            // Fail closed. Whatever the wrappers launch is unseen, so the
+            // command is an unknown program (`argv: [None]`), never allowed.
+            // Every literal word of the tail is also judged as a program of
+            // its own, so a buried `sudo` or `rm -rf /` is still Forbidden.
+            let words = command.argv.clone();
             self.commands.push(SimpleCommand {
                 nested: true,
                 ..command
             });
+            for start in 1..words.len() {
+                self.commands.push(SimpleCommand {
+                    argv: words[start..].to_vec(),
+                    redirects: Vec::new(),
+                    raw_redirects: Vec::new(),
+                    assignments: Vec::new(),
+                    nested: true,
+                });
+            }
             return;
         }
         // Only the bare name reaches the system launcher through `PATH`;
@@ -657,16 +677,38 @@ impl Collector<'_> {
                             .map(|rest| Some(rest.to_owned()))
                     };
                     if let Some(string) = split {
-                        self.peel(
-                            SimpleCommand {
-                                argv: vec![Some("sh".to_owned()), Some("-c".to_owned()), string],
-                                redirects: command.redirects.clone(),
-                                raw_redirects: command.raw_redirects.clone(),
-                                assignments: Vec::new(),
-                                nested: true,
-                            },
-                            depth + 1,
-                        );
+                        // `env -S` splits by its own rules (`\_` is a
+                        // separator, `\c` ends the string, `${VAR}`
+                        // expands), not shell syntax. The command it builds
+                        // is unknowable here: record an unknown program, and
+                        // judge every suffix of the roughly split words as a
+                        // nested program so a `sudo` inside is still found.
+                        self.commands.push(SimpleCommand {
+                            argv: vec![None],
+                            redirects: Vec::new(),
+                            raw_redirects: Vec::new(),
+                            assignments: Vec::new(),
+                            nested: true,
+                        });
+                        let words: Vec<Option<String>> = string
+                            .unwrap_or_default()
+                            .replace("\\_", " ")
+                            .split(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+                            .filter(|w| !w.is_empty())
+                            .map(|w| Some(w.to_owned()))
+                            .collect();
+                        for start in 0..words.len() {
+                            self.peel(
+                                SimpleCommand {
+                                    argv: words[start..].to_vec(),
+                                    redirects: command.redirects.clone(),
+                                    raw_redirects: command.raw_redirects.clone(),
+                                    assignments: Vec::new(),
+                                    nested: true,
+                                },
+                                depth + 1,
+                            );
+                        }
                         skip += 1;
                     } else if word == "-i" || word == "--ignore-environment" {
                         skip += 1;
@@ -683,44 +725,22 @@ impl Collector<'_> {
                 }
             }
             "taskset" | "chrt" => {
-                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd. Every
-                // dash word is the wrapper's (chrt's -T/-P/-D take a value);
-                // the next word is the mask, list, or priority, possibly
-                // dynamic. The command is judged from both that word and the
-                // one after, so a misread positional cannot hide it. Both
-                // candidates are nested, so this only ever adds strictness.
-                let mut skip = 0;
-                while let Some(Some(word)) = args.get(skip) {
-                    if !word.starts_with('-') {
-                        break;
-                    }
-                    skip += 1;
-                    if program == "chrt"
-                        && matches!(
-                            word.as_str(),
-                            "-T" | "-P"
-                                | "-D"
-                                | "--sched-runtime"
-                                | "--sched-period"
-                                | "--sched-deadline"
-                        )
-                    {
-                        skip += 1;
-                    }
-                }
-                // `-p`/`--pid` among the wrapper's own options (never the
-                // launched command's) retargets a running process: nothing
-                // is launched.
-                let retargets = args.iter().take(skip).any(|a| {
-                    a.as_deref().is_some_and(|w| {
-                        w == "--pid"
-                            || (w.starts_with('-') && !w.starts_with("--") && w.contains('p'))
-                    })
-                });
+                // taskset [opts] MASK cmd, chrt [opts] PRIORITY cmd. A `-p`
+                // among the leading dash words retargets a running process:
+                // nothing is launched.
+                let retargets = args
+                    .iter()
+                    .map_while(|a| a.as_deref().filter(|w| w.starts_with('-')))
+                    .any(|w| w == "--pid" || (!w.starts_with("--") && w.contains('p')));
                 if retargets {
                     return;
                 }
-                for start in [skip, skip + 1] {
+                // Otherwise every suffix of the arguments is judged as the
+                // command. Options and the positional may be dynamic (`chrt
+                // "$(printf -o)" 0 sudo ls`), so where the command starts is
+                // not knowable. Each candidate is nested, so this only ever
+                // adds strictness.
+                for start in 0..args.len() {
                     if let Some(inner) = inner_from(start) {
                         self.peel(inner, depth + 1);
                     }
