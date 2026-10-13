@@ -666,3 +666,14 @@ Evidence: `target/qq-perf/t20-2026-10-13/` (untracked; initial baseline recorded
 - Late #285 review found that the cap's early return dropped a visible `sudo` prefix, newly downgrading Forbidden to Prompt. Test-first `99a07e4` reproduced it below the raw-source limit; no merge was attempted after the finding.
 - Preserve and classify the bounded prefix, propagate overflow through nested collectors, and refuse every expanded-over-limit command with `command_too_long`, including under `full`. This also preserves the floor when a forbidden flag/program lies beyond the cap. Raw source over 16 KiB still prompts as before.
 - Focused `cargo test -p qq-core approval -- --test-threads=4`: 95 passed, 0 failed, including sudo, benign echo, late force, env option operands, and nested echo overflow. Independent `t20_review` verified this log and approved; design amended in the same repair. Final workspace and measurements are rerun before push.
+
+### 2026-10-13 — T20 final overflow qualification (supersedes earlier receipt)
+
+Commit: source `4f0185f1`; overflow test-first `99a07e4`, independent `t20_review` Approve.
+Tests: `env -u NO_COLOR TERM=xterm-256color cargo test --workspace -- --test-threads=4`: 2243 passed, 0 failed, 14 ignored (nested embedding child counted once); approval suite 95 passed.
+Checks: workspace formatting, all-target/all-feature Clippy with warnings denied, and workspace build pass; build jobs bounded to 2. Earlier exact-test guard's 10 fixtures remain applicable (script unchanged).
+Gate: `tool_dispatch`, 30 saved-baseline/candidate pairs: medians 58.888 → 59.162 µs; paired ratio median 0.974, same-binary A/A ratio median 1.036, A/A ratio MAD 0.124. No regression demonstrated within control noise; unchanged budget, no tail or speedup claim.
+Gate: `classify_command` 1 KiB median of 3: 167.050 µs ≤ 200 µs.
+Host: no concurrent session-owned build/test/review during measurement; shared-host IO pressure recorded in `pressure-overflow-{before,after}.txt`. Other workloads are outside this session's control.
+Evidence: `target/qq-perf/t20-2026-10-13/{workspace-test-overflow-qualified,clippy-overflow-qualified,build-overflow-qualified}.log`, `paired-overflow-{raw.log,summary.json}` (untracked).
+Open: final hosted CI, native stack merge, and immediate shipped-status reconciliation; D9/D10 observation and ENG-1032/ENG-1033 remain separate.
