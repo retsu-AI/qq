@@ -46,3 +46,8 @@
 
 - Candidate `7d12bee0c098aae8e1e6467d6bff0d819055e13c` adds a subprocess test-harness child that parses the actual public CLI option, opens the same diagnostic session path, closes it, and verifies the parent process reads the summary without path leakage.
 - The exact pinned selector executed 7 tests and passed; raw output is retained as `DI1-cli-composition-7d12bee.log`. This proves CLI parsing/activation and file safety, while credential-store composition and full failure matrix remain pending.
+
+## 2026-10-13 — two-store composition checkpoint
+
+- Candidate `4ea6cc8b0bade02cc719b50939f54cf7f0ef5bd7` adds a real production-path composition regression using two `CredentialStore::with_backend` stores and one `DiagnosticSession`. Both fake keyring reads are nonzero and successful; output asserts one PID/session, distinct store/coordinator IDs, and no secret leakage.
+- The focused selector executed 1 test and passed; raw output is retained as `DI1-composition-7d12bee-rerun.log`. An initial endpoint-required fixture failure was repaired by using the existing endpoint-bound resolution API.
