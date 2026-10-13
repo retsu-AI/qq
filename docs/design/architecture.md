@@ -877,14 +877,27 @@ One durable run follows a guarded loop:
    cannot shift replay off the live splice (ENG-991). In-run steps do not
    draw on `MAX_COMPACTION_STEPS`, which bounds one between-run fold; each
    must still shrink the context and is charged to the caller's token and
-   cost limits like any turn. Empty-output cap raises
+   cost limits like any turn. Each summarizer subrequest checks the current
+   caller remainder and original deadline before sending. Completed and
+   usage-bearing truncated subturns persist their actual assistant/replay
+   data and individual usage/cost before another request. Summarizer tool
+   calls remain evidence and never execute. An admitted request marks the
+   internal run's aggregate spend unknown until its receipt commits; a
+   later fault, cancellation or restart retains the measured prefix rows
+   without claiming that prefix is the whole attempt. Internal settlement
+   charges session cost once without releasing the prompt's active slot;
+   child-spend receipts include compactions belonging to the exact owned
+   runs without counting them as children. Terminal internal runs refuse
+   later request-start and model-turn writes. Empty-output cap raises
    (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
    completed turn restores the allowance. The summarizer is under the same
    turn recovery as a model turn (ADR-0048 § 2): a transient provider fault
    settles that compaction run failed and the loop re-issues the step after
    the `TurnRecoveryPolicy` backoff (`run_turn_retrying`); once
    `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
-   earlier turn durable. A rejected or stalled
+   earlier turn durable. Token or cost caps stop with `budget_exhausted`
+   when a failed attempt's spend is unknown; retry does not renew the
+   allowance or deadline. A rejected or stalled
    summarizer settles its run failed/cancelled, writes no marker, and the
    prompt run fails closed with the reason — the overflowing request is
    never sent. Cancelling the prompt run cascades to its in-run compaction.

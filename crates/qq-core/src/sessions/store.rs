@@ -1374,6 +1374,24 @@ impl Store {
             if claimed.identity.kind != RunKind::Compaction {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
+            // The worker executes this check and persistence without another
+            // job interleaving. A dropped executor cannot append after settlement.
+            let running = connection
+                .query_row(
+                    "SELECT status = 'running' AND outcome_json IS NULL
+                     AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL
+                     FROM runs WHERE id = ?1 AND session_id = ?2",
+                    params![
+                        claimed.identity.run_id.to_string(),
+                        claimed.identity.session_id.to_string()
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !running {
+                return Err(SessionRuntimeError::Unavailable);
+            }
             persist_model_turn(connection, store_id, &claimed, &turn, false)
         })
         .await
