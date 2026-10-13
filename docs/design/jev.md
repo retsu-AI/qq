@@ -79,6 +79,26 @@ answer is always treated as "no decision", never as a positive one.
 | Approval delegate | `jev_approval`, `QQ_JEV_APPROVAL` | A call the approval mode already holds, before `reviewer_model` and the human | 8 KiB per section, 64 KiB request, 5 s; confidence and winning probability ≥ 0.7 | Falls through to `reviewer_model`, then the human (ADR-0041) |
 | Advisory observer | `qq jev observe` (explicit command) | Completed runs on a running server | Finite request, token and cost allowance; synced JSONL journal | Records an unavailable receipt; never changes run outcomes |
 
+Checkpoint outcomes remain typed in client notices. Supported is `GREEN` at
+info level, insufficient evidence is `NEEDS EVIDENCE` at warning level, and
+reviewer unavailability is `UNAVAILABLE` at warning level. Partial support and
+contradiction remain `RED` errors. Final-mode evidence gaps do not spend a
+correction turn; enforce mode and consequential contradictory or partial
+outcomes retain bounded correction behavior.
+
+Checkpoint feedback also retains one bounded diagnostic row for each of the
+three fixed criteria (`task_coverage`, `direct_evidence`, and `consistency`).
+Each row contains only the validated choice, confidence, winning probability,
+and classified outcome; unknown or partially validated response fields are
+discarded with the generic unavailable result. The public verdict still uses
+the minimum confidence across criteria, so the aggregate value is not the
+confidence of the criterion that determined a contradiction or evidence gap.
+These rows contain no task text, candidate text, raw or unvalidated provider payload, tool
+arguments, endpoint, or credential. Feedback is supplied to bounded correction
+turns as well as persisted review events, so it is diagnostic evidence and can
+influence later model wording without changing classification, policy, or
+repair limits.
+
 Where each is specified in full:
 
 - Review: [ADR-0028](../adr/0028-mandatory-typed-jev-checkpoints.md).

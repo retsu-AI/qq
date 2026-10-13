@@ -4637,8 +4637,8 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
 
     assert_eq!(app.mode(), Mode::Compose);
     assert!(app.pending_trust.is_empty());
-    assert_eq!(app.model, selection);
-    assert_eq!(app.models.len(), 1);
+    assert!(app.model.model.is_none());
+    assert!(app.models.is_empty());
     assert_eq!(app.unauthenticated_providers.len(), 1);
     assert_eq!(
         app.visible_status(),
@@ -4654,8 +4654,24 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
             Effect::Send(ClientRequest::Models(selection.clone())),
         ]
     );
-    // With a usable model in hand, Alt-N creates a session as after an
-    // ordinary start.
+    // Before the server answers Models, Alt-N cannot create from the
+    // configured route that was sent as request metadata.
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+        .into_requests();
+    assert!(requests.is_empty());
+
+    app.apply_client_update(ClientUpdate::Models {
+        models: vec![ModelDescriptor {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            name: None,
+            context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
+            selection: selection.clone(),
+        }],
+        selected: Some(selection.clone()),
+    });
     let requests = app
         .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
         .into_requests();

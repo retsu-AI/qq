@@ -53,7 +53,8 @@ pub async fn render(
                 };
                 writeln!(
                     notices,
-                    "[jev] {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
+                    "[jev] {} {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}",
+                    checkpoint_label(outcome),
                 )?;
                 notices.flush()?;
             }
@@ -84,6 +85,16 @@ pub async fn render(
     }
 
     Err(OutputError::IncompleteRun)
+}
+
+pub(crate) fn checkpoint_label(outcome: qq_protocol::CheckpointOutcome) -> &'static str {
+    match outcome {
+        qq_protocol::CheckpointOutcome::Supported => "GREEN",
+        qq_protocol::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
+        qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+        qq_protocol::CheckpointOutcome::PartiallySupported
+        | qq_protocol::CheckpointOutcome::Contradicted => "RED",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +248,69 @@ mod tests {
 
         assert_eq!(output, b"answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] Supported ToolResult tool:call-1"));
+        assert!(notices.contains("[jev] GREEN Supported ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
+    }
+
+    #[tokio::test]
+    async fn writes_evidence_gap_notices_without_polluting_answer_stdout() {
+        let events = stream::iter([
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:gap".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                confidence_basis_points: None,
+                feedback: "no direct test evidence".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:unavailable".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                confidence_basis_points: None,
+                feedback: "reviewer unavailable".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:partial".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::PartiallySupported,
+                confidence_basis_points: None,
+                feedback: "candidate only partly supported".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:contradicted".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                confidence_basis_points: None,
+                feedback: "candidate contradicted".to_owned(),
+            },
+            RunEvent::OutputTextDelta {
+                text: "literal answer".to_owned(),
+            },
+            RunEvent::Completed,
+        ]);
+        let mut output = Vec::new();
+        let mut notices = Vec::new();
+
+        render(events, &mut output, &mut notices, OutputMode::Raw)
+            .await
+            .unwrap();
+
+        assert_eq!(output, b"literal answer\n");
+        let notices = String::from_utf8(notices).unwrap();
+        assert!(
+            notices.contains("[jev] NEEDS EVIDENCE InsufficientEvidence FinalCandidate final:gap")
+        );
+        assert!(notices.contains("[jev] UNAVAILABLE Unavailable FinalCandidate final:unavailable"));
+        assert!(notices.contains("[jev] RED PartiallySupported FinalCandidate final:partial"));
+        assert!(notices.contains("[jev] RED Contradicted FinalCandidate final:contradicted"));
+        assert!(!notices.contains("literal answer"));
     }
 }

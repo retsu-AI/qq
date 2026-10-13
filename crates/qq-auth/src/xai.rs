@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
-    resolve_provider_credential, validate_credential_name,
+    AuthError, CredentialBackend, CredentialDiagnosticEndpoint, CredentialDiagnosticRoute,
+    CredentialStore, MissingCredentialRemedies, Secret, resolve_provider_credential,
+    validate_credential_name,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
@@ -489,7 +490,7 @@ impl CredentialStore {
         if metadata.kind.as_deref() != Some("xai-oauth") {
             return Err(XaiAuthError::StoredCredentialInvalid.into());
         }
-        let secret = self.resolve_with_endpoint(
+        let secret = self.resolve_with_endpoint_uncached(
             &SecretRef::Stored(name.to_owned()),
             Some(XAI_CREDENTIAL_ENDPOINT),
         )?;
@@ -511,9 +512,11 @@ impl RequestCredentialProvider for XaiRequestCredentials {
         let explicit = self.explicit.clone();
         Box::pin(async move {
             let secret = store
-                .load_request_credential(move |store| {
-                    store.resolve_xai(&profile, explicit.as_ref())
-                })
+                .load_request_credential(
+                    CredentialDiagnosticRoute::XaiOAuth,
+                    CredentialDiagnosticEndpoint::Xai,
+                    move |store| store.resolve_xai(&profile, explicit.as_ref()),
+                )
                 .await?
                 .map_err(|error| map_request_credential_error(error, &self.remedies))?;
             RequestCredential::bearer(

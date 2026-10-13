@@ -1,4 +1,5 @@
 //! Explicit post-commit Jev observation; never part of authoritative execution.
+use qq_auth::CredentialDiagnosticSink;
 use qq_client::{
     SessionClient,
     observer::{EventSink, ObserverStep, SinkFuture},
@@ -596,7 +597,10 @@ impl EventSink for AdvisorySink {
     }
 }
 
-pub async fn run(args: crate::cli::JevObserveArgs) -> Result<(), AdvisoryError> {
+pub async fn run(
+    args: crate::cli::JevObserveArgs,
+    diagnostic: Option<Arc<dyn CredentialDiagnosticSink>>,
+) -> Result<(), AdvisoryError> {
     let cost = args.max_cost_usd * 1e9;
     if !cost.is_finite()
         || cost < 1.0
@@ -638,9 +642,10 @@ pub async fn run(args: crate::cli::JevObserveArgs) -> Result<(), AdvisoryError> 
         return Err(AdvisoryError::Budget);
     }
     let cursor = journal.cursor;
-    let reviewer = tokio::task::spawn_blocking(crate::runtime::advisory_reviewer)
-        .await
-        .map_err(|_| AdvisoryError::WorkerStopped)??;
+    let reviewer =
+        tokio::task::spawn_blocking(move || crate::runtime::advisory_reviewer(diagnostic))
+            .await
+            .map_err(|_| AdvisoryError::WorkerStopped)??;
     let mut sink = AdvisorySink {
         client: client.clone(),
         reviewer,

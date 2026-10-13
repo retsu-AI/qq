@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -18,6 +18,14 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest as _;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {label}");
+        thread::yield_now();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FakeMode {
@@ -34,6 +42,25 @@ struct FakeKeyring {
     values: Mutex<BTreeMap<String, Vec<u8>>>,
     reads: Mutex<BTreeMap<String, usize>>,
     break_index_after_set: Mutex<Option<PathBuf>>,
+    read_gate: Mutex<Option<Arc<ReadGate>>>,
+    entry_gate: Mutex<Option<(Arc<BackendEntryGate>, usize)>>,
+}
+
+#[derive(Default)]
+struct ReadGate {
+    entered: AtomicBool,
+    release: AtomicBool,
+}
+
+#[derive(Default)]
+struct BackendEntryGate {
+    entered: AtomicUsize,
+    release: AtomicBool,
+}
+
+fn join_bounded<T>(worker: thread::JoinHandle<T>) -> thread::Result<T> {
+    wait_until("worker completion", || worker.is_finished());
+    worker.join()
 }
 
 impl FakeKeyring {
@@ -61,6 +88,14 @@ impl FakeKeyring {
         *self.max_secret_len.lock().unwrap() = Some(limit);
     }
 
+    fn gate_next_read(&self, gate: Arc<ReadGate>) {
+        *self.read_gate.lock().unwrap() = Some(gate);
+    }
+
+    fn gate_reads_until_released(&self, gate: Arc<BackendEntryGate>, count: usize) {
+        *self.entry_gate.lock().unwrap() = Some((gate, count));
+    }
+
     fn check_mode(&self) -> Result<(), KeyringError> {
         match *self.mode.lock().unwrap() {
             FakeMode::Available => Ok(()),
@@ -72,13 +107,35 @@ impl FakeKeyring {
 
 impl KeyringBackend for FakeKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
-        self.check_mode()?;
+        let read_gate = self.read_gate.lock().unwrap().take();
+        if let Some(gate) = read_gate {
+            gate.entered.store(true, Ordering::SeqCst);
+            wait_until("backend read release", || {
+                gate.release.load(Ordering::SeqCst)
+            });
+        }
+        let entry_gate = {
+            let mut gate = self.entry_gate.lock().unwrap();
+            gate.as_mut().and_then(|(entry, remaining)| {
+                (*remaining > 0).then(|| {
+                    *remaining -= 1;
+                    Arc::clone(entry)
+                })
+            })
+        };
+        if let Some(gate) = entry_gate {
+            gate.entered.fetch_add(1, Ordering::SeqCst);
+            wait_until("distinct backend release", || {
+                gate.release.load(Ordering::SeqCst)
+            });
+        }
         *self
             .reads
             .lock()
             .unwrap()
             .entry(name.to_owned())
             .or_default() += 1;
+        self.check_mode()?;
         self.value(name).ok_or(KeyringError::Missing)
     }
 
@@ -793,6 +850,29 @@ fn keyring_success_records_and_resolves_the_backend() {
         store.status("openai").unwrap().unwrap().backend,
         CredentialBackend::Keyring
     );
+}
+
+#[test]
+fn stored_resolution_reuses_success_and_invalidates_on_epoch_change() {
+    let (store, keyring, _directory) = test_store();
+    store.set("openai", "first", false).unwrap();
+
+    let first = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    let second = store
+        .resolve_with_epoch(&SecretRef::Stored("openai".to_owned()), None)
+        .unwrap();
+    assert_eq!(first.expose_secret_str().unwrap(), "first");
+    assert_eq!(second.0.expose_secret_str().unwrap(), "first");
+    assert_eq!(keyring.read_count("openai"), 1);
+
+    store.set("openai", "rotated", false).unwrap();
+    let rotated = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    assert_eq!(rotated.expose_secret_str().unwrap(), "rotated");
+    assert_eq!(keyring.read_count("openai"), 2);
 }
 
 #[test]
@@ -2797,6 +2877,37 @@ fn insecure_existing_state_permissions_are_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn file_resolution_rechecks_private_permissions_after_a_warm_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (store, keyring, _directory) = test_store();
+    keyring.set_mode(FakeMode::Unavailable);
+    assert_eq!(
+        store.set("openai", "file secret", true).unwrap(),
+        CredentialBackend::File
+    );
+    assert_eq!(
+        store
+            .resolve(&SecretRef::Stored("openai".to_owned()))
+            .unwrap()
+            .expose_secret_str()
+            .unwrap(),
+        "file secret"
+    );
+
+    fs::set_permissions(
+        store.paths().fallback_file(),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.resolve(&SecretRef::Stored("openai".to_owned())),
+        Err(AuthError::InsecurePermissions { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn file_lock_serializes_concurrent_updates() {
     let (store, keyring, _directory) = test_store();
     keyring.set_mode(FakeMode::Unavailable);
@@ -2833,4 +2944,1270 @@ fn file_lock_serializes_concurrent_updates() {
             format!("secret-{index}")
         );
     }
+}
+
+#[test]
+fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store
+                .resolve_with_endpoint(
+                    &SecretRef::Stored("provider/work".to_owned()),
+                    Some("https://provider.example"),
+                )
+                .unwrap()
+                .expose_secret_bytes()
+                .to_vec()
+        }));
+    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    wait_until("cold followers", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 7)
+    });
+    gate.release.store(true, Ordering::SeqCst);
+    for worker in workers {
+        assert_eq!(join_bounded(worker).unwrap(), b"secret");
+    }
+
+    assert_eq!(keyring.read_count("provider/work"), 1);
+}
+
+struct DiagnosticCollector(Mutex<Vec<CredentialDiagnosticEvent>>, AtomicU64);
+
+fn diagnostic_collector() -> Arc<DiagnosticCollector> {
+    Arc::new(DiagnosticCollector(
+        Mutex::new(Vec::new()),
+        AtomicU64::new(1),
+    ))
+}
+
+struct LockProbingDiagnostic {
+    collector: Arc<DiagnosticCollector>,
+    coordinator: std::sync::Weak<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+    flights: Mutex<Vec<std::sync::Weak<StoredResolutionFlight>>>,
+}
+impl CredentialDiagnosticSink for LockProbingDiagnostic {
+    fn emit(&self, event: CredentialDiagnosticEvent) {
+        let coordinator = self.coordinator.upgrade().unwrap();
+        let state = coordinator
+            .0
+            .try_lock()
+            .expect("emitter still holds coordinator");
+        let mut flights = self.flights.lock().unwrap();
+        for flight in state.flights.values() {
+            flights.push(Arc::downgrade(flight));
+        }
+        drop(state);
+        for flight in flights.iter().filter_map(std::sync::Weak::upgrade) {
+            drop(
+                flight
+                    .result
+                    .try_lock()
+                    .expect("emitter still holds result"),
+            );
+        }
+        drop(flights);
+        self.collector.emit(event);
+    }
+    fn allocate_id(&self) -> Option<u64> {
+        self.collector.allocate_id()
+    }
+}
+
+impl CredentialDiagnosticSink for DiagnosticCollector {
+    fn emit(&self, event: CredentialDiagnosticEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+
+    fn allocate_id(&self) -> Option<u64> {
+        let current = self
+            .1
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .ok()?;
+        Some(current)
+    }
+}
+
+#[test]
+fn diagnostic_route_view_preserves_store_and_default_off_resources() {
+    let (store, keyring, _directory) = test_store();
+    assert!(matches!(
+        store.for_diagnostic_route(CredentialDiagnosticRoute::TypesafeReviewer),
+        std::borrow::Cow::Borrowed(original) if std::ptr::eq(original, &store)
+    ));
+    store
+        .set_with_metadata(
+            "typesafe-jev",
+            b"secret",
+            false,
+            Some("typesafe-jev"),
+            Some("https://api.typesafe.ai"),
+        )
+        .unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+    let next = collector.1.load(Ordering::Acquire);
+    let view = store.for_diagnostic_route(CredentialDiagnosticRoute::TypesafeReviewer);
+    assert!(Arc::ptr_eq(&store.keyring, &view.keyring));
+    assert!(Arc::ptr_eq(
+        &store.stored_resolution,
+        &view.stored_resolution
+    ));
+    assert!(Arc::ptr_eq(
+        &store.request_credential_permits,
+        &view.request_credential_permits
+    ));
+    let original = store.diagnostic.as_ref().unwrap();
+    let scoped = view.diagnostic.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&original.sink, &scoped.sink));
+    assert!(Arc::ptr_eq(&original.disabled, &scoped.disabled));
+    assert_eq!(original.store_id, scoped.store_id);
+    assert_eq!(original.coordinator_id, scoped.coordinator_id);
+    assert_eq!(original.route, CredentialDiagnosticRoute::StoredKeyring);
+    assert_eq!(scoped.route, CredentialDiagnosticRoute::TypesafeReviewer);
+    assert_eq!(collector.1.load(Ordering::Acquire), next);
+    let reference = SecretRef::Stored("typesafe-jev".into());
+    for current in [&*view, &store] {
+        assert_eq!(
+            current
+                .resolve_with_endpoint(&reference, Some("https://api.typesafe.ai"))
+                .unwrap()
+                .expose_secret_bytes(),
+            b"secret"
+        );
+    }
+    assert_eq!(keyring.read_count("typesafe-jev"), 1);
+    let events = collector.0.lock().unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CredentialDiagnosticEvent::BackendReadStarted {
+            route: CredentialDiagnosticRoute::TypesafeReviewer,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CredentialDiagnosticEvent::CacheHit {
+            route: CredentialDiagnosticRoute::StoredKeyring,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn stored_keyring_diagnostic_events_are_typed_and_secret_free() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/diagnostic",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    let collector = diagnostic_collector();
+    let probe = Arc::new(LockProbingDiagnostic {
+        collector: Arc::clone(&collector),
+        coordinator: Arc::downgrade(&store.stored_resolution),
+        flights: Mutex::new(Vec::new()),
+    });
+    let store = store.with_diagnostic_sink(probe);
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/diagnostic".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    let cached = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/diagnostic".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(cached.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/diagnostic"), 1);
+    let events = collector.0.lock().unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [
+            CredentialDiagnosticEvent::ResolutionAdmitted { .. },
+            CredentialDiagnosticEvent::OwnerAdmitted { .. },
+            CredentialDiagnosticEvent::BackendReadStarted { .. },
+            CredentialDiagnosticEvent::BackendReadReturned { .. },
+            CredentialDiagnosticEvent::ResolutionFinished { .. },
+            CredentialDiagnosticEvent::ResolutionAdmitted { .. },
+            CredentialDiagnosticEvent::CacheHit { .. },
+            CredentialDiagnosticEvent::ResolutionFinished { .. },
+        ]
+    ));
+    assert!(matches!(
+        events[6],
+        CredentialDiagnosticEvent::CacheHit {
+            outcome: CredentialDiagnosticOutcome::CacheHit,
+            ..
+        }
+    ));
+    assert!(matches!(
+        events[7],
+        CredentialDiagnosticEvent::ResolutionFinished {
+            coordinator_id: Some(_),
+            flight_id: None,
+            read_id: None,
+            outcome: CredentialDiagnosticOutcome::CacheHit,
+            ..
+        }
+    ));
+    let started = events.iter().find_map(|event| match event {
+        CredentialDiagnosticEvent::BackendReadStarted {
+            attempt_id,
+            read_id,
+            ..
+        } => Some((*attempt_id, *read_id)),
+        _ => None,
+    });
+    let returned = events.iter().find_map(|event| match event {
+        CredentialDiagnosticEvent::BackendReadReturned {
+            attempt_id,
+            read_id,
+            outcome: CredentialDiagnosticOutcome::Success,
+            ..
+        } => Some((*attempt_id, *read_id)),
+        _ => None,
+    });
+    assert_eq!(started, returned);
+    assert!(events.iter().all(|event| match event {
+        CredentialDiagnosticEvent::BackendReadStarted {
+            store_id,
+            coordinator_id,
+            flight_id,
+            read_id,
+            ..
+        }
+        | CredentialDiagnosticEvent::BackendReadReturned {
+            store_id,
+            coordinator_id,
+            flight_id,
+            read_id,
+            ..
+        } => *store_id != 0 && coordinator_id.is_some() && *flight_id != Some(*read_id),
+        CredentialDiagnosticEvent::CacheHit {
+            store_id,
+            coordinator_id,
+            outcome,
+            ..
+        } =>
+            *store_id != 0
+                && *coordinator_id != 0
+                && matches!(outcome, CredentialDiagnosticOutcome::CacheHit),
+        CredentialDiagnosticEvent::OwnerAdmitted {
+            store_id,
+            coordinator_id,
+            ..
+        }
+        | CredentialDiagnosticEvent::FlightJoined {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && *coordinator_id != 0,
+        CredentialDiagnosticEvent::ResolutionFinished {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && coordinator_id.is_some(),
+        CredentialDiagnosticEvent::ResolutionAdmitted {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && coordinator_id.is_some(),
+        CredentialDiagnosticEvent::OwnerUnwind {
+            store_id,
+            coordinator_id,
+            ..
+        } => *store_id != 0 && *coordinator_id != 0,
+    }));
+}
+
+#[test]
+fn stored_keyring_resolution_failure_is_shared_and_retryable() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    keyring.set_mode(FakeMode::Failure);
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        }));
+    }
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    wait_until("failure followers", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 3)
+    });
+    gate.release.store(true, Ordering::SeqCst);
+    for worker in workers {
+        assert!(matches!(
+            join_bounded(worker).unwrap(),
+            Err(AuthError::KeyringFailure { .. })
+        ));
+    }
+
+    keyring.set_mode(FakeMode::Available);
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/work"), 2);
+    let events = collector.0.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                CredentialDiagnosticEvent::BackendReadReturned {
+                    outcome: CredentialDiagnosticOutcome::Failure,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::Failure,
+                    ..
+                }
+            ))
+            .count(),
+        4
+    );
+}
+
+#[derive(Default)]
+struct PanicOnceKeyring {
+    panic_next: AtomicBool,
+    release: AtomicBool,
+    entered: AtomicBool,
+    values: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl KeyringBackend for PanicOnceKeyring {
+    fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+        if self.panic_next.swap(false, Ordering::SeqCst) {
+            self.entered.store(true, Ordering::SeqCst);
+            wait_until("panic backend release", || {
+                self.release.load(Ordering::SeqCst)
+            });
+            panic!("test owner panic");
+        }
+        self.values
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or(KeyringError::Missing)
+    }
+
+    fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), secret.to_vec());
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<(), KeyringError> {
+        self.values.lock().unwrap().remove(name);
+        Ok(())
+    }
+}
+
+#[test]
+fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(PanicOnceKeyring::default());
+    keyring.panic_next.store(true, Ordering::SeqCst);
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let store = CredentialStore::with_backends(paths, keyring.clone(), protected);
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+
+    let owner = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    wait_until("panic backend entry", || {
+        keyring.entered.load(Ordering::SeqCst)
+    });
+    let follower = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    wait_until("panic follower", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 1)
+    });
+    keyring.release.store(true, Ordering::SeqCst);
+    assert!(join_bounded(owner).is_err());
+    assert!(matches!(
+        join_bounded(follower).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "owner_panic"
+        })
+    ));
+
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    let events = collector.0.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, CredentialDiagnosticEvent::BackendReadStarted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, CredentialDiagnosticEvent::BackendReadReturned { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                CredentialDiagnosticEvent::OwnerUnwind {
+                    outcome: CredentialDiagnosticOwnerUnwind::OwnerPanic,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::OwnerPanic,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn stored_keyring_resolution_keeps_distinct_keys_independent() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/one", "one", false).unwrap();
+    store.set("provider/two", "two", false).unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+
+    let gate = Arc::new(BackendEntryGate::default());
+    keyring.gate_reads_until_released(Arc::clone(&gate), 2);
+    let mut workers = Vec::new();
+    for name in ["provider/one", "provider/two"] {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store
+                .resolve(&SecretRef::Stored(name.to_owned()))
+                .unwrap()
+                .expose_secret_str()
+                .unwrap()
+                .to_owned()
+        }));
+    }
+    wait_until("both distinct backend entries", || {
+        gate.entered.load(Ordering::SeqCst) == 2
+    });
+    assert_eq!(keyring.read_count("provider/one"), 0);
+    assert_eq!(keyring.read_count("provider/two"), 0);
+    gate.release.store(true, Ordering::SeqCst);
+    let mut values = workers
+        .into_iter()
+        .map(|worker| join_bounded(worker).unwrap())
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, ["one", "two"]);
+    assert_eq!(keyring.read_count("provider/one"), 1);
+    assert_eq!(keyring.read_count("provider/two"), 1);
+    let events = collector.0.lock().unwrap();
+    let reads: BTreeSet<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            CredentialDiagnosticEvent::BackendReadStarted { read_id, .. } => Some(*read_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads.len(), 2);
+}
+
+#[test]
+fn stored_keyring_resolution_fails_closed_when_coordinator_is_poisoned() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/work", "secret", false).unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        join_bounded(thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("poison coordinator for test");
+        }))
+        .is_err()
+    );
+
+    let result = store.resolve(&SecretRef::Stored("provider/work".to_owned()));
+    assert!(matches!(
+        result,
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert_eq!(keyring.read_count("provider/work"), 0);
+    assert!(matches!(
+        collector.0.lock().unwrap().as_slice(),
+        [CredentialDiagnosticEvent::ResolutionFinished {
+            flight_id: None,
+            read_id: None,
+            outcome: CredentialDiagnosticOutcome::LockPoisoned,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn stored_keyring_resolution_revalidates_after_capacity_wait() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/target", "target", false).unwrap();
+    let epoch = store.epoch().unwrap();
+    let target = StoredResolutionKey {
+        name: "provider/target".to_owned(),
+        endpoint: None,
+        epoch,
+    };
+    let coordinator = Arc::clone(&store.stored_resolution);
+    let mut held = Vec::new();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            let key = StoredResolutionKey {
+                name: format!("held/{index}"),
+                endpoint: None,
+                epoch,
+            };
+            let flight = Arc::new(StoredResolutionFlight {
+                flight_id: 0,
+                result: Mutex::new(None),
+                ready: std::sync::Condvar::new(),
+                followers: AtomicUsize::new(0),
+            });
+            state.flights.insert(key.clone(), Arc::clone(&flight));
+            held.push((key, flight));
+        }
+    }
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_store = store.clone();
+    let worker = thread::spawn(move || {
+        let result = worker_store.resolve_with_epoch(&SecretRef::Stored(target.name.clone()), None);
+        done_tx.send(result).unwrap();
+    });
+    wait_until("capacity waiter", || {
+        coordinator
+            .0
+            .lock()
+            .unwrap()
+            .capacity_waiters
+            .load(Ordering::SeqCst)
+            > 0
+    });
+    assert_eq!(keyring.read_count("provider/target"), 0);
+
+    // Rotate the index while the request is waiting. Releasing one flight must
+    // cause the public call to reload the current epoch before reading.
+    store.set("provider/target", "rotated", false).unwrap();
+    let (key, flight) = held.pop().unwrap();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        state.flights.remove(&key);
+    }
+    flight.ready.notify_all();
+    coordinator.1.notify_all();
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("capacity wait must recover after a flight is released")
+        .unwrap();
+    join_bounded(worker).unwrap();
+    assert_eq!(result.0.expose_secret_bytes(), b"rotated");
+    assert!(result.1 > epoch);
+    assert_eq!(keyring.read_count("provider/target"), 1);
+}
+
+#[test]
+fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/active", "secret", false).unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    wait_until("coordinator poison follower", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .is_some_and(|flight| flight.followers.load(Ordering::SeqCst) >= 1)
+    });
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        join_bounded(thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("active coordinator poison");
+        }))
+        .is_err()
+    );
+    gate.release.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    join_bounded(owner).unwrap();
+    join_bounded(follower).unwrap();
+    assert!(store.stored_resolution.0.lock().is_err());
+    let events = collector.0.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        CredentialDiagnosticEvent::ResolutionFinished {
+            outcome: CredentialDiagnosticOutcome::LockPoisoned,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/result", "secret", false).unwrap();
+    store
+        .set("provider/capacity", "capacity-secret", false)
+        .unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+
+    let epoch = store.epoch().unwrap();
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    wait_until("keyring read entry", || gate.entered.load(Ordering::SeqCst));
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let flight = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for result follower"
+        );
+        if let Some(flight) = store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            && flight.followers.load(Ordering::SeqCst) >= 1
+        {
+            break Arc::clone(flight);
+        }
+        thread::yield_now();
+    };
+    // The active owner is the 64th reserved flight. A distinct request must
+    // reach the actual capacity condvar before the owner's poisoned result
+    // frees its slot. No test-side notification releases this waiter.
+    {
+        let mut state = store.stored_resolution.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES - 1 {
+            state.flights.insert(
+                StoredResolutionKey {
+                    name: format!("held/{index}"),
+                    endpoint: None,
+                    epoch,
+                },
+                Arc::new(StoredResolutionFlight {
+                    flight_id: 0,
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    followers: AtomicUsize::new(0),
+                }),
+            );
+        }
+        assert_eq!(state.flights.len(), MAX_STORED_RESOLUTION_CACHE_ENTRIES);
+    }
+    let capacity_store = store.clone();
+    let (capacity_tx, capacity_rx) = std::sync::mpsc::channel();
+    let capacity_worker = thread::spawn(move || {
+        capacity_tx
+            .send(capacity_store.resolve(&SecretRef::Stored("provider/capacity".to_owned())))
+            .unwrap();
+    });
+    wait_until("saturated result-poison capacity waiter", || {
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .capacity_waiters
+            .load(Ordering::SeqCst)
+            > 0
+    });
+    assert_eq!(keyring.read_count("provider/capacity"), 0);
+    let poisoned_result = Arc::clone(&flight);
+    assert!(
+        join_bounded(thread::spawn(move || {
+            let _guard = poisoned_result.result.lock().unwrap();
+            panic!("active result poison");
+        }))
+        .is_err()
+    );
+    gate.release.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    join_bounded(owner).unwrap();
+    join_bounded(follower).unwrap();
+    let capacity_secret = capacity_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("poison cleanup must wake the saturated capacity waiter")
+        .unwrap();
+    assert_eq!(capacity_secret.expose_secret_bytes(), b"capacity-secret");
+    join_bounded(capacity_worker).unwrap();
+    assert_eq!(keyring.read_count("provider/capacity"), 1);
+    {
+        let state = store.stored_resolution.0.lock().unwrap();
+        assert!(
+            state
+                .flights
+                .keys()
+                .all(|key| key.name != "provider/result")
+        );
+        assert!(
+            state
+                .cache
+                .entries
+                .iter()
+                .all(|entry| entry.name != "provider/result")
+        );
+    }
+    let secret = store
+        .resolve(&SecretRef::Stored("provider/result".to_owned()))
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/result"), 2);
+    let events = collector.0.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        CredentialDiagnosticEvent::ResolutionFinished {
+            outcome: CredentialDiagnosticOutcome::LockPoisoned,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn diagnostic_held_owner_follower_and_cache_do_not_invent_backend_return() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/held", "held-secret", false).unwrap();
+    let collector = diagnostic_collector();
+    let store = store.with_diagnostic_sink(collector.clone());
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(gate.clone());
+    let owner_store = store.clone();
+    let owner =
+        thread::spawn(move || owner_store.resolve(&SecretRef::Stored("provider/held".into())));
+    wait_until("diagnostic owner entry", || {
+        gate.entered.load(Ordering::SeqCst)
+    });
+    let follower_store = store.clone();
+    let follower =
+        thread::spawn(move || follower_store.resolve(&SecretRef::Stored("provider/held".into())));
+    wait_until("diagnostic follower", || {
+        collector
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, CredentialDiagnosticEvent::FlightJoined { .. }))
+    });
+    {
+        let events = collector.0.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, CredentialDiagnosticEvent::BackendReadStarted { .. }))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            CredentialDiagnosticEvent::BackendReadReturned { .. }
+                | CredentialDiagnosticEvent::ResolutionFinished { .. }
+        )));
+    }
+    gate.release.store(true, Ordering::SeqCst);
+    assert_eq!(
+        join_bounded(owner).unwrap().unwrap().expose_secret_bytes(),
+        b"held-secret"
+    );
+    assert_eq!(
+        join_bounded(follower)
+            .unwrap()
+            .unwrap()
+            .expose_secret_bytes(),
+        b"held-secret"
+    );
+    assert_eq!(
+        store
+            .resolve(&SecretRef::Stored("provider/held".into()))
+            .unwrap()
+            .expose_secret_bytes(),
+        b"held-secret"
+    );
+    assert_eq!(keyring.read_count("provider/held"), 1);
+    let events = collector.0.lock().unwrap();
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CredentialDiagnosticEvent::BackendReadStarted {
+                attempt_id,
+                flight_id: Some(flight),
+                read_id,
+                ..
+            } => Some((*attempt_id, *flight, *read_id)),
+            _ => None,
+        })
+        .collect();
+    let returns: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CredentialDiagnosticEvent::BackendReadReturned {
+                attempt_id,
+                flight_id: Some(flight),
+                read_id,
+                outcome: CredentialDiagnosticOutcome::Success,
+                ..
+            } => Some((*attempt_id, *flight, *read_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, returns);
+    assert_eq!(starts.len(), 1);
+    let (attempt, flight, read) = starts[0];
+    assert_ne!(attempt, flight);
+    assert_ne!(flight, read);
+    assert_ne!(attempt, read);
+    let joined: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CredentialDiagnosticEvent::FlightJoined {
+                attempt_id,
+                flight_id,
+                ..
+            } => Some((*attempt_id, *flight_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(joined.len(), 1);
+    assert_eq!(joined[0].1, flight);
+    assert_ne!(joined[0].0, attempt);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::Success,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    flight_id: None,
+                    read_id: None,
+                    outcome: CredentialDiagnosticOutcome::CacheHit,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn diagnostic_backend_failures_keep_results_and_typed_outcomes() {
+    for mode in [None, Some(FakeMode::Unavailable), Some(FakeMode::Failure)] {
+        let (store, keyring, _directory) = test_store();
+        store
+            .set("provider/error", "private-value-marker", false)
+            .unwrap();
+        if let Some(mode) = mode {
+            keyring.set_mode(mode);
+        } else {
+            keyring.erase("provider/error");
+        }
+        let collector = diagnostic_collector();
+        let store = store.with_diagnostic_sink(collector.clone());
+        assert!(
+            store
+                .resolve(&SecretRef::Stored("provider/error".into()))
+                .is_err()
+        );
+        assert_eq!(keyring.read_count("provider/error"), 1);
+        let events = collector.0.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    CredentialDiagnosticEvent::BackendReadReturned { .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            (mode, event),
+            (
+                None,
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::Missing,
+                    ..
+                }
+            ) | (
+                Some(FakeMode::Unavailable),
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::Unavailable,
+                    ..
+                }
+            ) | (
+                Some(FakeMode::Failure),
+                CredentialDiagnosticEvent::ResolutionFinished {
+                    outcome: CredentialDiagnosticOutcome::Failure,
+                    ..
+                }
+            )
+        )));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostic_oauth_waiter_abort_is_not_backend_return() {
+    for (route, endpoint) in [
+        (
+            CredentialDiagnosticRoute::CodexOAuth,
+            CredentialDiagnosticEndpoint::ChatGpt,
+        ),
+        (
+            CredentialDiagnosticRoute::XaiOAuth,
+            CredentialDiagnosticEndpoint::Xai,
+        ),
+    ] {
+        let (store, _keyring, _directory) = test_store();
+        let collector = diagnostic_collector();
+        let store = store.with_diagnostic_sink(collector.clone());
+        let mut permits = Vec::new();
+        for _ in 0..REQUEST_CREDENTIAL_CONCURRENCY {
+            permits.push(
+                Arc::clone(&store.request_credential_permits)
+                    .acquire_owned()
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(ReadGate::default());
+        let held = gate.clone();
+        let waiter = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            store
+                .load_request_credential(route, endpoint, move |_| {
+                    held.entered.store(true, Ordering::SeqCst);
+                    wait_until("fake OAuth backend release", || {
+                        held.release.load(Ordering::SeqCst)
+                    });
+                    Ok::<_, AuthError>(42)
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        assert!(collector.0.lock().unwrap().is_empty());
+        assert!(!waiter.is_finished());
+        drop(permits);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.entered.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        {
+            let events = collector.0.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(matches!(
+                events[0],
+                CredentialDiagnosticEvent::ResolutionAdmitted {
+                    coordinator_id: None,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                events[1],
+                CredentialDiagnosticEvent::BackendReadStarted {
+                    coordinator_id: None,
+                    flight_id: None,
+                    ..
+                }
+            ));
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, CredentialDiagnosticEvent::BackendReadReturned { .. }))
+            );
+        }
+        gate.release.store(true, Ordering::SeqCst);
+        while collector.0.lock().unwrap().len() < 4 {
+            assert!(Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        let events = collector.0.lock().unwrap();
+        let started = match events[1] {
+            CredentialDiagnosticEvent::BackendReadStarted {
+                attempt_id,
+                read_id,
+                route: observed_route,
+                endpoint: observed_endpoint,
+                ..
+            } => {
+                assert_eq!(observed_route, route);
+                assert_eq!(observed_endpoint, endpoint);
+                (attempt_id, read_id)
+            }
+            _ => panic!("missing actual start"),
+        };
+        let returned = match events[2] {
+            CredentialDiagnosticEvent::BackendReadReturned {
+                attempt_id,
+                read_id,
+                route: observed_route,
+                endpoint: observed_endpoint,
+                ..
+            } => {
+                assert_eq!(observed_route, route);
+                assert_eq!(observed_endpoint, endpoint);
+                (attempt_id, read_id)
+            }
+            _ => panic!("missing actual return"),
+        };
+        assert_eq!(started, returned);
+        assert_ne!(started.0, started.1);
+        assert!(matches!(
+            events[2],
+            CredentialDiagnosticEvent::BackendReadReturned {
+                coordinator_id: None,
+                flight_id: None,
+                outcome: CredentialDiagnosticOutcome::Success,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[3],
+            CredentialDiagnosticEvent::ResolutionFinished {
+                coordinator_id: None,
+                flight_id: None,
+                read_id: Some(_),
+                outcome: CredentialDiagnosticOutcome::Success,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn diagnostic_endpoint_class_uses_the_actual_host_only() {
+    assert_eq!(
+        diagnostic_endpoint(Some("https://api.typesafe.ai/v1")),
+        CredentialDiagnosticEndpoint::Typesafe
+    );
+    assert_eq!(
+        diagnostic_endpoint(Some(
+            "https://typesafe.ai.attacker.example/?url=https://x.ai"
+        )),
+        CredentialDiagnosticEndpoint::Other
+    );
+    assert_eq!(
+        diagnostic_endpoint(Some("https://attacker.example/?openai.com=localhost")),
+        CredentialDiagnosticEndpoint::Other
+    );
+    assert_eq!(
+        diagnostic_endpoint(Some("http://[::1]:8080")),
+        CredentialDiagnosticEndpoint::CustomLoopback
+    );
+    assert_eq!(
+        diagnostic_endpoint(Some("http://127.0.0.1:1234")),
+        CredentialDiagnosticEndpoint::CustomLoopback
+    );
 }

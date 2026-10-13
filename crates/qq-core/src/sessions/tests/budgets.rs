@@ -73,7 +73,7 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
 }
 
 #[tokio::test]
-async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
+async fn tool_call_budget_uses_remaining_allowance_then_final_response() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
         usage: None,
@@ -81,13 +81,12 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
         hang: false,
     })
     .await;
-    // Each turn issues one call, but a turn may issue sixteen: the meter
-    // must reserve room for a full turn, so three calls fit and the
-    // fourth turn becomes the final response.
+    // Each working turn issues one call. The three-call bound therefore
+    // admits three tool turns, then one tool-free final response.
     let run_id = queue_limited_prompt(
         &harness,
         RunLimits {
-            max_tool_calls: Some(3 + crate::MAX_TOOL_CALLS_PER_TURN as u32),
+            max_tool_calls: Some(3),
             ..RunLimits::default()
         },
     )
@@ -96,11 +95,78 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     let exhaustion = exhaustion_of(&observed, run_id);
     assert_eq!(exhaustion.limit, BudgetLimitKind::ToolCalls);
     assert!(exhaustion.final_response);
-    let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
     assert_eq!(
-        requests.last().unwrap().tool_choice(),
-        qq_provider::ToolChoice::None
+        observed
+            .iter()
+            .filter(|event| matches!(
+                event.event,
+                SessionEvent::ToolCallFinished { ref tool_call }
+                    if !tool_call.is_error
+            ))
+            .count(),
+        3
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::RunFinished { .. }))
+            .count(),
+        1
+    );
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests.last().unwrap().tool_choice(),
+            qq_provider::ToolChoice::None
+        );
+    }
+
+    // A later prompt in the same session gets a fresh per-run allowance.
+    let second_run = queue_limited_prompt(
+        &harness,
+        RunLimits {
+            max_tool_calls: Some(1),
+            ..RunLimits::default()
+        },
+    )
+    .await;
+    let second_observed = collect_until(&mut harness.events, finished_for(second_run)).await;
+    assert_eq!(
+        second_observed
+            .iter()
+            .filter(|event| matches!(
+                event.event,
+                SessionEvent::ToolCallFinished { ref tool_call }
+                    if !tool_call.is_error
+            ))
+            .count(),
+        1
+    );
+    let second_exhaustion = exhaustion_of(&second_observed, second_run);
+    assert_eq!(second_exhaustion.limit, BudgetLimitKind::ToolCalls);
+    assert!(second_exhaustion.final_response);
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(harness.session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.focused.unwrap().summary.status,
+        SessionStatus::Idle
     );
 }
 

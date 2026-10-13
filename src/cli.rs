@@ -53,6 +53,11 @@ pub struct Cli {
     #[arg(long, value_name = "ID")]
     pub session: Option<qq_protocol::SessionId>,
 
+    /// Write bounded, secret-free credential attribution records to this new
+    /// file. Disabled by default; the path is never appended or replaced.
+    #[arg(long, value_name = "PATH")]
+    pub credential_diagnostics: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

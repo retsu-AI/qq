@@ -449,16 +449,22 @@ impl SessionStore {
                 spend,
                 ..
             } => {
-                let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
+                let (level, label) = match outcome {
+                    qq_protocol::CheckpointOutcome::Supported => (NoticeLevel::Info, "GREEN"),
+                    qq_protocol::CheckpointOutcome::InsufficientEvidence => {
+                        (NoticeLevel::Warning, "NEEDS EVIDENCE")
+                    }
+                    qq_protocol::CheckpointOutcome::Unavailable => {
+                        (NoticeLevel::Warning, "UNAVAILABLE")
+                    }
+                    qq_protocol::CheckpointOutcome::PartiallySupported
+                    | qq_protocol::CheckpointOutcome::Contradicted => (NoticeLevel::Error, "RED"),
+                };
                 effects.push(StateEffect::Notice {
                     session: Some(session_id),
-                    level: if supported {
-                        NoticeLevel::Info
-                    } else {
-                        NoticeLevel::Error
-                    },
+                    level,
                     text: format!(
-                        "Jev {outcome:?} {correlation}: {feedback}; reviewer spend {}",
+                        "Jev {label} {outcome:?} {correlation}: {feedback}; reviewer spend {}",
                         spend
                             .as_ref()
                             .and_then(|spend| spend.estimated_cost_usd_nanos)

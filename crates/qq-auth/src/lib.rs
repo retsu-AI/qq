@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, VecDeque},
     env,
     ffi::OsString,
     fmt,
@@ -21,6 +21,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use thiserror::Error;
 
 use qq_protocol::CredentialEpoch;
@@ -31,6 +33,151 @@ mod xai;
 
 pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
+
+/// The small, typed boundary used by opt-in credential attribution.  The
+/// auth crate never formats or writes diagnostics. This boundary carries no
+/// secret values; the application owns the sink and its privacy policy.
+pub trait CredentialDiagnosticSink: Send + Sync {
+    fn emit(&self, event: CredentialDiagnosticEvent);
+    fn allocate_id(&self) -> Option<u64>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CredentialDiagnosticRoute {
+    StoredKeyring,
+    CodexOAuth,
+    XaiOAuth,
+    DirectConfiguredKeyring,
+    TypesafeReviewer,
+    OtherKnown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CredentialDiagnosticEndpoint {
+    Typesafe,
+    ChatGpt,
+    Xai,
+    CustomLoopback,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "kind")]
+pub enum CredentialDiagnosticEvent {
+    ResolutionAdmitted {
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        attempt_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
+    OwnerAdmitted {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
+    FlightJoined {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
+    CacheHit {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+        outcome: CredentialDiagnosticOutcome,
+    },
+    BackendReadStarted {
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        flight_id: Option<u64>,
+        read_id: u64,
+        attempt_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+    },
+    BackendReadReturned {
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        flight_id: Option<u64>,
+        read_id: u64,
+        attempt_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+        outcome: CredentialDiagnosticOutcome,
+    },
+    ResolutionFinished {
+        store_id: u64,
+        coordinator_id: Option<u64>,
+        attempt_id: u64,
+        flight_id: Option<u64>,
+        read_id: Option<u64>,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+        outcome: CredentialDiagnosticOutcome,
+    },
+    OwnerUnwind {
+        store_id: u64,
+        coordinator_id: u64,
+        attempt_id: u64,
+        flight_id: u64,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
+        outcome: CredentialDiagnosticOwnerUnwind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CredentialDiagnosticOutcome {
+    Success,
+    CacheHit,
+    OwnerPanic,
+    LockPoisoned,
+    Missing,
+    Unavailable,
+    Failure,
+    CoordinatorFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CredentialDiagnosticOwnerUnwind {
+    OwnerPanic,
+    LockPoisoned,
+}
+
+struct CredentialDiagnosticContext {
+    sink: Arc<dyn CredentialDiagnosticSink>,
+    store_id: u64,
+    coordinator_id: u64,
+    route: CredentialDiagnosticRoute,
+    disabled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CredentialDiagnosticContext {
+    fn id(&self) -> u64 {
+        match self.sink.allocate_id() {
+            Some(id) => id,
+            None => {
+                self.disabled.store(true, Ordering::Release);
+                0
+            }
+        }
+    }
+
+    fn emit(&self, event: CredentialDiagnosticEvent) {
+        if !self.disabled.load(Ordering::Acquire) {
+            self.sink.emit(event);
+        }
+    }
+}
 
 pub const KEYRING_SERVICE: &str = "dev.qq";
 pub const MAX_CREDENTIAL_NAME_LEN: usize = 128;
@@ -52,6 +199,86 @@ const WINDOWS_PROTECTED_MAGIC: &[u8] = b"QQDPAPI\x01";
 const REQUEST_CREDENTIAL_CONCURRENCY: usize = 4;
 const REQUEST_CREDENTIAL_CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_CREDENTIAL_LOAD_TIMEOUT: Duration = Duration::from_secs(65);
+/// Successful stored resolutions are reused briefly to avoid repeated OS
+/// keyring reads during one application refresh. The durable credential epoch
+/// remains the primary invalidation boundary; this TTL bounds changes made
+/// directly in an external keychain that QQ's index cannot observe.
+const STORED_RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_STORED_RESOLUTION_CACHE_ENTRIES: usize = 64;
+
+fn is_resolution_capacity_wait(error: &AuthError) -> bool {
+    matches!(
+        error,
+        AuthError::CredentialCoordinator {
+            operation: "capacity_wait"
+        }
+    )
+}
+
+fn diagnostic_endpoint(endpoint: Option<&str>) -> CredentialDiagnosticEndpoint {
+    let Some(value) = endpoint else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    for (label, class) in [
+        ("typesafe", CredentialDiagnosticEndpoint::Typesafe),
+        ("chatgpt", CredentialDiagnosticEndpoint::ChatGpt),
+        ("xai", CredentialDiagnosticEndpoint::Xai),
+    ] {
+        if value.eq_ignore_ascii_case(label) {
+            return class;
+        }
+    }
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    let Some(host) = url.host_str() else {
+        return CredentialDiagnosticEndpoint::Other;
+    };
+    for (domain, class) in [
+        ("typesafe.ai", CredentialDiagnosticEndpoint::Typesafe),
+        ("openai.com", CredentialDiagnosticEndpoint::ChatGpt),
+        ("chatgpt.com", CredentialDiagnosticEndpoint::ChatGpt),
+        ("x.ai", CredentialDiagnosticEndpoint::Xai),
+    ] {
+        if host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+        {
+            return class;
+        }
+    }
+    if host == "localhost"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        CredentialDiagnosticEndpoint::CustomLoopback
+    } else {
+        CredentialDiagnosticEndpoint::Other
+    }
+}
+
+fn diagnostic_outcome(
+    outcome: &Result<Secret, StoredResolutionFailure>,
+) -> CredentialDiagnosticOutcome {
+    match outcome {
+        Ok(_) => CredentialDiagnosticOutcome::Success,
+        Err(StoredResolutionFailure::Missing) => CredentialDiagnosticOutcome::Missing,
+        Err(StoredResolutionFailure::Unavailable) => CredentialDiagnosticOutcome::Unavailable,
+        Err(StoredResolutionFailure::Failure) => CredentialDiagnosticOutcome::Failure,
+        Err(StoredResolutionFailure::Coordinator("owner_panic")) => {
+            CredentialDiagnosticOutcome::OwnerPanic
+        }
+        Err(StoredResolutionFailure::Coordinator("lock_poisoned")) => {
+            CredentialDiagnosticOutcome::LockPoisoned
+        }
+        Err(StoredResolutionFailure::Coordinator(_)) => {
+            CredentialDiagnosticOutcome::CoordinatorFailure
+        }
+    }
+}
 
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -311,6 +538,9 @@ pub enum AuthError {
         #[source]
         source: io::Error,
     },
+
+    #[error("credential resolution coordinator failed while attempting to {operation}")]
+    CredentialCoordinator { operation: &'static str },
 }
 
 #[derive(Clone)]
@@ -324,6 +554,144 @@ pub struct CredentialStore {
     xai_client: Arc<dyn xai::XaiTokenClient>,
     xai_refresh: Arc<Mutex<()>>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
+    stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+    diagnostic: Option<Arc<CredentialDiagnosticContext>>,
+}
+
+#[derive(Default)]
+struct StoredResolutionCache {
+    entries: VecDeque<StoredResolutionCacheEntry>,
+}
+
+struct StoredResolutionCacheEntry {
+    name: String,
+    endpoint: Option<String>,
+    epoch: CredentialEpoch,
+    expires_at: std::time::Instant,
+    secret: Secret,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StoredResolutionKey {
+    name: String,
+    endpoint: Option<String>,
+    epoch: CredentialEpoch,
+}
+
+#[derive(Default)]
+struct StoredResolutionCoordinator {
+    cache: StoredResolutionCache,
+    flights: HashMap<StoredResolutionKey, Arc<StoredResolutionFlight>>,
+    #[cfg(test)]
+    capacity_waiters: AtomicUsize,
+}
+
+struct StoredResolutionFlight {
+    flight_id: u64,
+    result: Mutex<Option<Result<Secret, StoredResolutionFailure>>>,
+    ready: std::sync::Condvar,
+    #[cfg(test)]
+    followers: AtomicUsize,
+}
+
+struct StoredResolutionOwnerGuard {
+    coordinator: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+    key: StoredResolutionKey,
+    flight: Arc<StoredResolutionFlight>,
+    failure: StoredResolutionFailure,
+    completed: bool,
+    diagnostic: Option<Arc<CredentialDiagnosticContext>>,
+    attempt_id: u64,
+    endpoint: CredentialDiagnosticEndpoint,
+    read_id: u64,
+}
+
+impl Drop for StoredResolutionOwnerGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = match self.coordinator.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.flights.remove(&self.key);
+        let mut result = match self.flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *result = Some(Err(self.failure.clone()));
+        self.flight.ready.notify_all();
+        self.coordinator.1.notify_all();
+        drop(result);
+        drop(state);
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::OwnerUnwind {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                attempt_id: self.attempt_id,
+                flight_id: self.flight.flight_id,
+                route: context.route,
+                endpoint: self.endpoint,
+                outcome: if matches!(
+                    self.failure,
+                    StoredResolutionFailure::Coordinator("lock_poisoned")
+                ) {
+                    CredentialDiagnosticOwnerUnwind::LockPoisoned
+                } else {
+                    CredentialDiagnosticOwnerUnwind::OwnerPanic
+                },
+            });
+            context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                attempt_id: self.attempt_id,
+                flight_id: Some(self.flight.flight_id),
+                read_id: Some(self.read_id),
+                route: context.route,
+                endpoint: self.endpoint,
+                outcome: diagnostic_outcome(&Err(self.failure.clone())),
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoredResolutionFailure {
+    Missing,
+    Unavailable,
+    Failure,
+    Coordinator(&'static str),
+}
+
+impl StoredResolutionFailure {
+    fn from_auth_error(error: AuthError) -> Self {
+        match error {
+            AuthError::StoredCredentialMissing { .. } => Self::Missing,
+            AuthError::KeyringUnavailable { .. } => Self::Unavailable,
+            AuthError::KeyringFailure { .. } => Self::Failure,
+            AuthError::CredentialCoordinator { operation } => Self::Coordinator(operation),
+            _ => Self::Failure,
+        }
+    }
+
+    fn into_auth_error(self, name: &str) -> AuthError {
+        match self {
+            Self::Missing => AuthError::StoredCredentialMissing {
+                name: name.to_owned(),
+                backend: CredentialBackend::Keyring,
+            },
+            Self::Unavailable => AuthError::KeyringUnavailable {
+                operation: "read",
+                name: name.to_owned(),
+            },
+            Self::Failure => AuthError::KeyringFailure {
+                operation: "read",
+                name: name.to_owned(),
+            },
+            Self::Coordinator(operation) => AuthError::CredentialCoordinator { operation },
+        }
+    }
 }
 
 impl CredentialStore {
@@ -362,13 +730,46 @@ impl CredentialStore {
             SecretRef::Env(variable) => resolve_environment(variable),
             SecretRef::Stored(name) => {
                 validate_credential_name(name)?;
-                let _lock = self.lock_state_shared()?;
-                let index = self.load_index()?;
-                self.resolve_stored_from_index(&index, name, expected_endpoint)
+                loop {
+                    let result = {
+                        let _lock = self.lock_state_shared()?;
+                        let index = self.load_index()?;
+                        let epoch = CredentialEpoch::new(index.revision);
+                        self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                    };
+                    match result {
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
+                        result => return result,
+                    }
+                }
             }
             SecretRef::Value(value) => Ok(Secret::from_secret_bytes(
                 value.expose_secret().as_bytes().to_vec(),
             )),
+        }
+    }
+
+    /// Resolves a stored reference without the successful-read memo. OAuth
+    /// refresh paths use this after their own expiry deadline or refresh lock
+    /// says the durable value must be checked again.
+    pub(crate) fn resolve_with_endpoint_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<Secret, AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                self.resolve_stored_from_index(&index, name, expected_endpoint)
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                self.resolve_with_endpoint(reference, expected_endpoint)
+            }
         }
     }
 
@@ -386,6 +787,38 @@ impl CredentialStore {
         match reference {
             SecretRef::Stored(name) => {
                 validate_credential_name(name)?;
+                loop {
+                    let result = {
+                        let _lock = self.lock_state_shared()?;
+                        let index = self.load_index()?;
+                        let epoch = CredentialEpoch::new(index.revision);
+                        self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                            .map(|secret| (secret, epoch))
+                    };
+                    match result {
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
+                        result => return result,
+                    }
+                }
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                Ok((secret, self.epoch()?))
+            }
+        }
+    }
+
+    pub(crate) fn resolve_with_epoch_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<(Secret, CredentialEpoch), AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
                 let _lock = self.lock_state_shared()?;
                 let index = self.load_index()?;
                 let epoch = CredentialEpoch::new(index.revision);
@@ -393,7 +826,7 @@ impl CredentialStore {
                 Ok((secret, epoch))
             }
             SecretRef::Env(_) | SecretRef::Value(_) => {
-                let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                let secret = self.resolve_with_endpoint_uncached(reference, expected_endpoint)?;
                 Ok((secret, self.epoch()?))
             }
         }
@@ -685,17 +1118,87 @@ impl CredentialStore {
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
+            stored_resolution: Arc::new((
+                Mutex::new(StoredResolutionCoordinator::default()),
+                std::sync::Condvar::new(),
+            )),
+            diagnostic: None,
         }
+    }
+
+    /// Enables the process-local, opt-in attribution sink for this store and
+    /// its clones. No credential read is performed by this method.
+    pub fn with_diagnostic_sink(mut self, sink: Arc<dyn CredentialDiagnosticSink>) -> Self {
+        let Some(store_id) = sink.allocate_id() else {
+            return self;
+        };
+        let Some(coordinator_id) = sink.allocate_id() else {
+            return self;
+        };
+        self.diagnostic = Some(Arc::new(CredentialDiagnosticContext {
+            sink,
+            store_id,
+            coordinator_id,
+            route: CredentialDiagnosticRoute::StoredKeyring,
+            disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }));
+        self
+    }
+
+    pub fn with_diagnostic_sink_as(
+        mut self,
+        sink: Arc<dyn CredentialDiagnosticSink>,
+        route: CredentialDiagnosticRoute,
+    ) -> Self {
+        let Some(store_id) = sink.allocate_id() else {
+            return self;
+        };
+        let Some(coordinator_id) = sink.allocate_id() else {
+            return self;
+        };
+        self.diagnostic = Some(Arc::new(CredentialDiagnosticContext {
+            sink,
+            store_id,
+            coordinator_id,
+            route,
+            disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }));
+        self
+    }
+
+    /// Attributes one known caller without changing the store's identity,
+    /// coordinator, cache, backend, or the route of other concurrent callers.
+    /// Disabled diagnostics borrow the store without cloning or allocation.
+    pub fn for_diagnostic_route(
+        &self,
+        route: CredentialDiagnosticRoute,
+    ) -> std::borrow::Cow<'_, Self> {
+        let Some(context) = &self.diagnostic else {
+            return std::borrow::Cow::Borrowed(self);
+        };
+        let mut view = self.clone();
+        view.diagnostic = Some(Arc::new(CredentialDiagnosticContext {
+            sink: Arc::clone(&context.sink),
+            store_id: context.store_id,
+            coordinator_id: context.coordinator_id,
+            route,
+            disabled: Arc::clone(&context.disabled),
+        }));
+        std::borrow::Cow::Owned(view)
     }
 
     async fn load_request_credential<T, F>(
         &self,
+        route: CredentialDiagnosticRoute,
+        endpoint: CredentialDiagnosticEndpoint,
         operation: F,
     ) -> Result<Result<T, AuthError>, qq_provider::RequestCredentialError>
     where
         T: Send + 'static,
         F: FnOnce(CredentialStore) -> Result<T, AuthError> + Send + 'static,
     {
+        let attempt_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
+        let read_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
         let permit = tokio::time::timeout(
             REQUEST_CREDENTIAL_CAPACITY_TIMEOUT,
             Arc::clone(&self.request_credential_permits).acquire_owned(),
@@ -703,10 +1206,68 @@ impl CredentialStore {
         .await
         .map_err(|_| qq_provider::RequestCredentialError::CapacityUnavailable)?
         .map_err(|_| qq_provider::RequestCredentialError::WorkerFailed)?;
+        if let Some(context) = self.diagnostic.as_ref()
+            && attempt_id != 0
+        {
+            context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
+                store_id: context.store_id,
+                coordinator_id: None,
+                attempt_id,
+                route,
+                endpoint,
+            });
+        }
         let store = self.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            operation(store)
+            let diagnostic = store.diagnostic.clone();
+            if let Some(context) = diagnostic.as_ref()
+                && read_id != 0
+            {
+                context.emit(CredentialDiagnosticEvent::BackendReadStarted {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    attempt_id,
+                    route,
+                    endpoint,
+                });
+            }
+            let result = operation(store);
+            if let Some(context) = diagnostic.as_ref()
+                && read_id != 0
+            {
+                context.emit(CredentialDiagnosticEvent::BackendReadReturned {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    flight_id: None,
+                    read_id,
+                    attempt_id,
+                    route,
+                    endpoint,
+                    outcome: if result.is_ok() {
+                        CredentialDiagnosticOutcome::Success
+                    } else {
+                        CredentialDiagnosticOutcome::Failure
+                    },
+                });
+                context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                    store_id: context.store_id,
+                    coordinator_id: None,
+                    attempt_id,
+                    flight_id: None,
+                    read_id: Some(read_id),
+                    route,
+                    endpoint,
+                    outcome: if result.is_ok() {
+                        CredentialDiagnosticOutcome::Success
+                    } else {
+                        CredentialDiagnosticOutcome::Failure
+                    },
+                });
+            }
+            result
         });
         tokio::time::timeout(REQUEST_CREDENTIAL_LOAD_TIMEOUT, worker)
             .await
@@ -799,13 +1360,352 @@ impl CredentialStore {
         expected_endpoint: Option<&str>,
     ) -> Result<Option<Secret>, AuthError> {
         validate_credential_name(name)?;
-        let _lock = self.lock_state_shared()?;
-        let index = self.load_index()?;
-        if index.find(name).is_none() {
-            return Ok(None);
+        loop {
+            let result = {
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                let Some(_) = index.find(name) else {
+                    return Ok(None);
+                };
+                let epoch = CredentialEpoch::new(index.revision);
+                self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                    .map(Some)
+            };
+            match result {
+                Err(error) if is_resolution_capacity_wait(&error) => {
+                    self.wait_for_resolution_capacity()?;
+                    continue;
+                }
+                result => return result,
+            }
         }
-        self.resolve_stored_from_index(&index, name, expected_endpoint)
-            .map(Some)
+    }
+
+    fn resolve_stored_cached(
+        &self,
+        index: &IndexState,
+        name: &str,
+        expected_endpoint: Option<&str>,
+        epoch: CredentialEpoch,
+    ) -> Result<Secret, AuthError> {
+        let record = index
+            .find(name)
+            .ok_or_else(|| AuthError::StoredCredentialNotRegistered {
+                name: name.to_owned(),
+            })?;
+        enforce_endpoint_binding(record, expected_endpoint)?;
+        if record.backend != CredentialBackend::Keyring {
+            return self.resolve_stored_from_index(index, name, expected_endpoint);
+        }
+
+        let key = StoredResolutionKey {
+            name: name.to_owned(),
+            endpoint: expected_endpoint.map(str::to_owned),
+            epoch,
+        };
+        let (coordinator, wake) = &*self.stored_resolution;
+        let attempt_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
+        let (flight, owner) = {
+            let mut state = match coordinator.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    drop(poisoned);
+                    if let Some(context) = self.diagnostic.as_ref() {
+                        context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                            store_id: context.store_id,
+                            coordinator_id: Some(context.coordinator_id),
+                            attempt_id,
+                            flight_id: None,
+                            read_id: None,
+                            route: context.route,
+                            endpoint: diagnostic_endpoint(expected_endpoint),
+                            outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                        });
+                    }
+                    return Err(AuthError::CredentialCoordinator {
+                        operation: "lock_poisoned",
+                    });
+                }
+            };
+            let now = std::time::Instant::now();
+            state.cache.entries.retain(|entry| entry.expires_at > now);
+            if let Some(position) = state.cache.entries.iter().position(|entry| {
+                entry.name == name && entry.endpoint == key.endpoint && entry.epoch == epoch
+            }) {
+                let entry = state
+                    .cache
+                    .entries
+                    .remove(position)
+                    .expect("cache position exists");
+                let secret = entry.secret.clone();
+                state.cache.entries.push_back(entry);
+                drop(state);
+                if let Some(context) = self.diagnostic.as_ref()
+                    && attempt_id != 0
+                {
+                    context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                    });
+                    context.emit(CredentialDiagnosticEvent::CacheHit {
+                        store_id: context.store_id,
+                        coordinator_id: context.coordinator_id,
+                        attempt_id,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::CacheHit,
+                    });
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: None,
+                        read_id: None,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::CacheHit,
+                    });
+                }
+                return Ok(secret);
+            }
+            if let Some(flight) = state.flights.get(&key) {
+                (Arc::clone(flight), false)
+            } else {
+                if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                    return Err(AuthError::CredentialCoordinator {
+                        operation: "capacity_wait",
+                    });
+                }
+                let flight = Arc::new(StoredResolutionFlight {
+                    flight_id: self.diagnostic.as_ref().map_or(0, |context| context.id()),
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    #[cfg(test)]
+                    followers: AtomicUsize::new(0),
+                });
+                state.flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        };
+
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::ResolutionAdmitted {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                attempt_id,
+                route: context.route,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+            });
+        }
+
+        if !owner {
+            if let Some(context) = self.diagnostic.as_ref() {
+                context.emit(CredentialDiagnosticEvent::FlightJoined {
+                    store_id: context.store_id,
+                    coordinator_id: context.coordinator_id,
+                    attempt_id,
+                    flight_id: flight.flight_id,
+                    route: context.route,
+                    endpoint: diagnostic_endpoint(expected_endpoint),
+                });
+            }
+            let publish_poison = || {
+                if let Some(context) = self.diagnostic.as_ref() {
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: Some(flight.flight_id),
+                        read_id: None,
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                    });
+                }
+                AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                }
+            };
+            let mut result = match flight.result.lock() {
+                Ok(result) => result,
+                Err(poisoned) => {
+                    drop(poisoned);
+                    return Err(publish_poison());
+                }
+            };
+            #[cfg(test)]
+            flight.followers.fetch_add(1, Ordering::SeqCst);
+            while result.is_none() {
+                result = match flight.ready.wait(result) {
+                    Ok(result) => result,
+                    Err(poisoned) => {
+                        drop(poisoned);
+                        return Err(publish_poison());
+                    }
+                };
+            }
+            let follower_result = result.as_ref().expect("flight result exists").clone();
+            drop(result);
+            if let Some(context) = self.diagnostic.as_ref() {
+                context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                    store_id: context.store_id,
+                    coordinator_id: Some(context.coordinator_id),
+                    attempt_id,
+                    flight_id: Some(flight.flight_id),
+                    read_id: None,
+                    route: context.route,
+                    endpoint: diagnostic_endpoint(expected_endpoint),
+                    outcome: diagnostic_outcome(&follower_result),
+                });
+            }
+            return follower_result.map_err(|failure| failure.into_auth_error(name));
+        }
+
+        let read_id = self.diagnostic.as_ref().map_or(0, |context| context.id());
+        let mut owner_guard = StoredResolutionOwnerGuard {
+            coordinator: Arc::clone(&self.stored_resolution),
+            key: key.clone(),
+            flight: Arc::clone(&flight),
+            failure: StoredResolutionFailure::Coordinator("owner_panic"),
+            completed: false,
+            diagnostic: self.diagnostic.clone(),
+            attempt_id,
+            endpoint: self
+                .diagnostic
+                .as_ref()
+                .map_or(CredentialDiagnosticEndpoint::Other, |_| {
+                    diagnostic_endpoint(expected_endpoint)
+                }),
+            read_id,
+        };
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::OwnerAdmitted {
+                store_id: context.store_id,
+                coordinator_id: context.coordinator_id,
+                attempt_id,
+                flight_id: flight.flight_id,
+                route: context.route,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+            });
+        }
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::BackendReadStarted {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                flight_id: Some(flight.flight_id),
+                read_id,
+                attempt_id,
+                route: context.route,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+            });
+        }
+        let outcome = self
+            .resolve_stored_from_index(index, name, expected_endpoint)
+            .map_err(StoredResolutionFailure::from_auth_error);
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::BackendReadReturned {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                flight_id: Some(flight.flight_id),
+                read_id,
+                attempt_id,
+                route: context.route,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+                outcome: diagnostic_outcome(&outcome),
+            });
+        }
+        let mut state = match coordinator.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                owner_guard.failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                return Err(AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                });
+            }
+        };
+        let mut result = match flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => {
+                let mut result = poisoned.into_inner();
+                let failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                *result = Some(Err(failure.clone()));
+                state.flights.remove(&key);
+                flight.ready.notify_all();
+                wake.notify_all();
+                owner_guard.completed = true;
+                drop(result);
+                drop(state);
+                if let Some(context) = self.diagnostic.as_ref() {
+                    context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                        store_id: context.store_id,
+                        coordinator_id: Some(context.coordinator_id),
+                        attempt_id,
+                        flight_id: Some(flight.flight_id),
+                        read_id: Some(read_id),
+                        route: context.route,
+                        endpoint: diagnostic_endpoint(expected_endpoint),
+                        outcome: CredentialDiagnosticOutcome::LockPoisoned,
+                    });
+                }
+                return Err(failure.into_auth_error(name));
+            }
+        };
+        if let Ok(secret) = &outcome {
+            state.cache.entries.push_back(StoredResolutionCacheEntry {
+                name: name.to_owned(),
+                endpoint: key.endpoint.clone(),
+                epoch,
+                expires_at: std::time::Instant::now() + STORED_RESOLUTION_CACHE_TTL,
+                secret: secret.clone(),
+            });
+            while state.cache.entries.len() > MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                state.cache.entries.pop_front();
+            }
+        }
+        state.flights.remove(&key);
+        *result = Some(outcome.clone());
+        flight.ready.notify_all();
+        wake.notify_all();
+        drop(result);
+        drop(state);
+        owner_guard.completed = true;
+        if let Some(context) = self.diagnostic.as_ref() {
+            context.emit(CredentialDiagnosticEvent::ResolutionFinished {
+                store_id: context.store_id,
+                coordinator_id: Some(context.coordinator_id),
+                attempt_id,
+                flight_id: Some(flight.flight_id),
+                read_id: Some(read_id),
+                route: context.route,
+                endpoint: diagnostic_endpoint(expected_endpoint),
+                outcome: diagnostic_outcome(&outcome),
+            });
+        }
+        outcome.map_err(|failure| failure.into_auth_error(name))
+    }
+
+    fn wait_for_resolution_capacity(&self) -> Result<(), AuthError> {
+        let (coordinator, wake) = &*self.stored_resolution;
+        let mut state = coordinator
+            .lock()
+            .map_err(|_| AuthError::CredentialCoordinator {
+                operation: "lock_poisoned",
+            })?;
+        while state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            #[cfg(test)]
+            state.capacity_waiters.fetch_add(1, Ordering::SeqCst);
+            state = wake
+                .wait(state)
+                .map_err(|_| AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                })?;
+            #[cfg(test)]
+            state.capacity_waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     fn resolve_stored_from_index(

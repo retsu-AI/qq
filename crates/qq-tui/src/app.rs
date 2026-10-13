@@ -92,8 +92,9 @@ pub enum TrustChoice {
     Session,
 }
 
-/// What a resolved trust choice unlocked: the catalog and credential state
-/// the client skipped at startup because the configuration would not load.
+/// What a resolved trust choice unlocked: catalog request metadata and
+/// credential state the client skipped at startup because configuration would
+/// not load. The usable model still comes from the server's Models update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustResolved {
     /// Paths now trusted, for the confirmation notice.
@@ -529,8 +530,8 @@ impl App {
     }
 
     /// The trust prompt's answer, resolved by the composition root. Applies
-    /// what the now-loadable configuration provides (the client default
-    /// model, the catalog, the credential remedies) and drops the prompt, so
+    /// credential remedies while retaining the
+    /// configured route only as request metadata, then drops the prompt, so
     /// the OB1/OB2 guidance takes over exactly as if the TUI had started
     /// with a trusted project.
     pub fn apply_trust_resolved(
@@ -541,9 +542,13 @@ impl App {
         self.trust_resolving = false;
         self.pending_trust.clear();
         self.unauthenticated_providers = resolved.unauthenticated_providers;
-        // Through the catalog path so the sort, per-session context windows,
-        // and an open picker are refreshed like a server catalog update.
-        self.apply_model_options(resolved.models, Some(resolved.model));
+        // Keep the configured route as request metadata only. The app's
+        // usable/default model remains empty until the server's Models update
+        // returns its authoritative selected value.
+        let requested_selection = resolved.model;
+        // Trust resolution is not a server catalog response. Keep rows empty
+        // until ClientUpdate::Models supplies authoritative options/selection.
+        self.apply_model_options(Vec::new(), None);
         self.set_info(match choice {
             TrustChoice::Persist => format!(
                 "trusted {} file{}",
@@ -557,7 +562,7 @@ impl App {
         // refresh the catalog the same way bootstrap does so provider
         // discovery replaces the root's static list.
         let mut effects = Effects::send_now(ClientRequest::Capabilities);
-        effects.push(Effect::Send(ClientRequest::Models(self.model.clone())));
+        effects.push(Effect::Send(ClientRequest::Models(requested_selection)));
         effects
     }
 

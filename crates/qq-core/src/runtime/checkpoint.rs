@@ -212,6 +212,33 @@ pub enum CheckpointOutcome {
     Unavailable,
 }
 
+/// How a reviewer outcome may spend the bounded model-repair allowance.
+/// Reviewers default to the historical strict policy; the built-in advisory
+/// final reviewer opts into the evidence-gap policy explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointRepairPolicy {
+    Strict,
+    AdvisoryFinalEvidenceGaps,
+}
+
+impl CheckpointRepairPolicy {
+    #[must_use]
+    pub const fn requests_correction(self, outcome: CheckpointOutcome) -> bool {
+        match self {
+            Self::Strict => !matches!(
+                outcome,
+                CheckpointOutcome::Supported | CheckpointOutcome::Unavailable
+            ),
+            Self::AdvisoryFinalEvidenceGaps => {
+                matches!(
+                    outcome,
+                    CheckpointOutcome::PartiallySupported | CheckpointOutcome::Contradicted
+                )
+            }
+        }
+    }
+}
+
 impl CheckpointOutcome {
     pub const fn allows_progress(self) -> bool {
         matches!(self, Self::Supported)
@@ -245,6 +272,11 @@ pub trait CheckpointReviewer: Send + Sync {
     /// Whether tool results require assessment before the next model turn.
     fn reviews_tools(&self) -> bool {
         true
+    }
+    /// Policy for spending a correction turn after this reviewer's typed
+    /// outcome. Custom reviewers retain the historical strict behavior.
+    fn repair_policy(&self) -> CheckpointRepairPolicy {
+        CheckpointRepairPolicy::Strict
     }
     /// Maximum estimated charge for one request. A hard cost allowance cannot
     /// admit a reviewer without a bound, even if previous calls were cheap.
@@ -289,7 +321,9 @@ pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
+    use super::{
+        CheckpointOutcome, CheckpointRepairPolicy, MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits,
+    };
 
     #[test]
     fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
@@ -304,5 +338,40 @@ mod tests {
         let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
         let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
         assert!(!checkpoint_text_fits(&payload));
+    }
+
+    #[test]
+    fn repair_policy_keeps_strict_gaps_and_advisory_red_outcomes_distinct() {
+        assert!(
+            CheckpointRepairPolicy::Strict
+                .requests_correction(CheckpointOutcome::InsufficientEvidence)
+        );
+        assert!(
+            CheckpointRepairPolicy::Strict
+                .requests_correction(CheckpointOutcome::PartiallySupported)
+        );
+        assert!(
+            CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Contradicted)
+        );
+        assert!(
+            !CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Unavailable)
+        );
+
+        assert!(
+            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::InsufficientEvidence)
+        );
+        assert!(
+            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::Unavailable)
+        );
+        assert!(
+            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::PartiallySupported)
+        );
+        assert!(
+            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+                .requests_correction(CheckpointOutcome::Contradicted)
+        );
     }
 }

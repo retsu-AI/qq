@@ -47,6 +47,20 @@ pub const MAX_PENDING_STEER_LINES: usize = 8;
 /// Byte budget for one concise tool-activity line in text format.
 const MAX_ACTIVITY_BYTES: usize = 160;
 
+fn checkpoint_notice_line(
+    phase: qq_protocol::CheckpointPhase,
+    correlation: &str,
+    outcome: qq_protocol::CheckpointOutcome,
+    confidence_basis_points: Option<u16>,
+    feedback: &str,
+) -> String {
+    let label = crate::output::checkpoint_label(outcome);
+    let confidence = confidence_basis_points
+        .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
+        .unwrap_or_default();
+    format!("[jev] {label} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}")
+}
+
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
     pub prompt: String,
@@ -932,18 +946,13 @@ async fn stream_run(
                         ..
                     } if ours => {
                         if text {
-                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
-                                "GREEN"
-                            } else {
-                                "RED"
-                            };
-                            let confidence = confidence_basis_points
-                                .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
-                                .unwrap_or_default();
-                            let _ = writeln!(
-                                stderr,
-                                "[jev] {color} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
-                            );
+                            let _ = writeln!(stderr, "{}", checkpoint_notice_line(
+                                *phase,
+                                correlation,
+                                *outcome,
+                                *confidence_basis_points,
+                                feedback,
+                            ));
                         }
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
@@ -3402,6 +3411,33 @@ mod tests {
         assert_eq!(source.len(), 40);
         assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(source.starts_with(display));
+    }
+
+    #[test]
+    fn checkpoint_notice_line_preserves_headless_typed_outcomes() {
+        let notice = checkpoint_notice_line(
+            qq_protocol::CheckpointPhase::FinalCandidate,
+            "final:gap",
+            qq_protocol::CheckpointOutcome::InsufficientEvidence,
+            None,
+            "no direct evidence",
+        );
+        assert_eq!(
+            notice,
+            "[jev] NEEDS EVIDENCE FinalCandidate final:gap outcome=InsufficientEvidence: no direct evidence"
+        );
+
+        let notice = checkpoint_notice_line(
+            qq_protocol::CheckpointPhase::FinalCandidate,
+            "final:red",
+            qq_protocol::CheckpointOutcome::Contradicted,
+            Some(9_900),
+            "contradictory result",
+        );
+        assert_eq!(
+            notice,
+            "[jev] RED FinalCandidate final:red outcome=Contradicted confidence=99.00%: contradictory result"
+        );
     }
 
     #[tokio::test]
