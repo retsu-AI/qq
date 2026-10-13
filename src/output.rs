@@ -248,7 +248,7 @@ mod tests {
 
         assert_eq!(output, b"answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] GREEN ToolResult tool:call-1"));
+        assert!(notices.contains("[jev] GREEN Supported ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
     }
 

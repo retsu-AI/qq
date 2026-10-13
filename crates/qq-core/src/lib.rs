@@ -3700,7 +3700,7 @@ impl plan::CompiledAgentPlan {
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(&mut messages).push(assistant);
                             let notice = format!(
-                                "JEV review requires correction ({}). Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
+                                "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
                                 verdict.outcome.label(), verdict.feedback
                             );
                             Arc::make_mut(&mut messages).push(Message::user(notice));
@@ -4511,7 +4511,7 @@ impl plan::CompiledAgentPlan {
                     // another redirect, instead of the run failing.
                     if !correction.is_empty() && context.repair() {
                         checkpoint_correction_notice = Some(format!(
-                            "JEV review requires correction. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
+                            "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                             correction.join("\n- ")
                         ));
                     }

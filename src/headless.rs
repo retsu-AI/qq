@@ -58,9 +58,7 @@ fn checkpoint_notice_line(
     let confidence = confidence_basis_points
         .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
         .unwrap_or_default();
-    format!(
-        "[jev] {label} {outcome:?} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
-    )
+    format!("[jev] {label} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}")
 }
 
 #[derive(Debug, Clone)]
@@ -3426,7 +3424,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            "[jev] NEEDS EVIDENCE InsufficientEvidence FinalCandidate final:gap outcome=InsufficientEvidence: no direct evidence"
+            "[jev] NEEDS EVIDENCE FinalCandidate final:gap outcome=InsufficientEvidence: no direct evidence"
         );
 
         let notice = checkpoint_notice_line(
@@ -3438,7 +3436,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            "[jev] RED Contradicted FinalCandidate final:red outcome=Contradicted confidence=99.00%: contradictory result"
+            "[jev] RED FinalCandidate final:red outcome=Contradicted confidence=99.00%: contradictory result"
         );
     }
 
