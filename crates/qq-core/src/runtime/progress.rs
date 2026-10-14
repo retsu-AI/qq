@@ -145,8 +145,8 @@ pub(crate) fn is_progress(
         &tools::network::NetworkPolicy::default(),
     ) {
         approval::ToolClass::Mutating | approval::ToolClass::External => !result.is_error,
-        approval::ToolClass::Shell { command, .. } => {
-            !approval::read_only_shell_command(&command)
+        approval::ToolClass::Shell { read_only, .. } => {
+            !read_only
                 && ["shell", "exec"]
                     .into_iter()
                     .any(|tool| tools::output::header_line(tool, &result.model_text).is_some())
