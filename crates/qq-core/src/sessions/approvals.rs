@@ -169,6 +169,10 @@ impl ToolGate for SessionToolGate {
                     // Register before publishing the request so a client
                     // response can never race past the waiting run.
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
+                    // Decided before publishing so the request says who is
+                    // asked first; see the comment on the review below.
+                    let consult =
+                        delegate.consults_reviewer(mode) && inner.approval_reviewer.is_some();
                     match inner
                         .store
                         .request_tool_approval(
@@ -179,6 +183,7 @@ impl ToolGate for SessionToolGate {
                                 edit: edit.clone(),
                                 question: None,
                                 fetch,
+                                delegated: consult,
                             },
                         )
                         .await
@@ -200,7 +205,6 @@ impl ToolGate for SessionToolGate {
                     // executes, Deny is final under Auto and Supervised, and
                     // Escalate (or a reviewer failure, which the reviewer must
                     // report as Escalate) reaches the human.
-                    let consult = delegate.consults_reviewer(mode);
                     let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
                         Some(reviewer) if consult => {
                             // Context is advisory: a missing brief must not
@@ -338,7 +342,7 @@ impl ToolGate for SessionToolGate {
                                         // not decide; a failed write changes
                                         // nothing about the hold.
                                         ReviewDecision::Escalate { reason } => {
-                                            let _ = inner
+                                            if let Err(error) = inner
                                                 .store
                                                 .escalate_tool_approval(
                                                     &claimed,
@@ -346,11 +350,18 @@ impl ToolGate for SessionToolGate {
                                                     Some(verdict.delegate),
                                                     truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
                                                 )
-                                                .await;
+                                                .await
+                                            {
+                                                inner.remove_approval(call.id);
+                                                return reviewed(
+                                                    approval_persistence_failure(error),
+                                                    review_spend,
+                                                );
+                                            }
                                             deadline = human_deadline(inner.approval_timeout);
                                         }
                                         ReviewDecision::Deny { reason } => {
-                                            let _ = inner
+                                            if let Err(error) = inner
                                                 .store
                                                 .escalate_tool_approval(
                                                     &claimed,
@@ -362,7 +373,14 @@ impl ToolGate for SessionToolGate {
                                                         truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
                                                     ),
                                                 )
-                                                .await;
+                                                .await
+                                            {
+                                                inner.remove_approval(call.id);
+                                                return reviewed(
+                                                    approval_persistence_failure(error),
+                                                    review_spend,
+                                                );
+                                            }
                                             deadline = human_deadline(inner.approval_timeout);
                                         }
                                     }
@@ -372,7 +390,7 @@ impl ToolGate for SessionToolGate {
                                 // asked, exactly as for an `Escalate`.
                                 () = tokio::time::sleep_until(delegate_deadline) => {
                                     review = None;
-                                    let _ = inner
+                                    if let Err(error) = inner
                                         .store
                                         .escalate_tool_approval(
                                             &claimed,
@@ -380,7 +398,11 @@ impl ToolGate for SessionToolGate {
                                             None,
                                             approval::DELEGATE_TIMED_OUT_REASON.to_owned(),
                                         )
-                                        .await;
+                                        .await
+                                    {
+                                        inner.remove_approval(call.id);
+                                        return approval_persistence_failure(error);
+                                    }
                                     deadline = human_deadline(inner.approval_timeout);
                                 }
                             }

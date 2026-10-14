@@ -494,6 +494,8 @@ pub(crate) struct ApprovalPreviews {
     pub(crate) edit: Option<EditPreview>,
     pub(crate) question: Option<QuestionPreview>,
     pub(crate) fetch: Option<FetchPreview>,
+    /// An approval delegate decides before any human is asked.
+    pub(crate) delegated: bool,
 }
 
 pub(super) fn request_tool_approval(
@@ -508,13 +510,18 @@ pub(super) fn request_tool_approval(
         edit,
         question,
         fetch,
+        delegated,
     } = previews;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
-        "UPDATE tool_calls SET state = 'awaiting_approval'
+        "UPDATE tool_calls SET state = 'awaiting_approval', approval_delegated = ?3
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
-        params![tool_call_id.to_string(), identity.run_id.to_string()],
+        params![
+            tool_call_id.to_string(),
+            identity.run_id.to_string(),
+            delegated
+        ],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
@@ -529,6 +536,7 @@ pub(super) fn request_tool_approval(
             edit,
             question: question.map(Box::new),
             fetch: fetch.map(Box::new),
+            delegated,
         },
     )?;
     transaction.commit()?;
@@ -749,6 +757,11 @@ pub(super) fn escalate_tool_approval(
     if !awaiting {
         return Ok(None);
     }
+    // A human is asked from here on; summaries project that.
+    transaction.execute(
+        "UPDATE tool_calls SET approval_delegated = 0 WHERE id = ?1",
+        [tool_call_id.to_string()],
+    )?;
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),

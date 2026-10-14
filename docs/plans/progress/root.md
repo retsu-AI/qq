@@ -533,3 +533,7 @@ AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existi
 AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
 
 AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
+
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.

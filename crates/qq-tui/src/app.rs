@@ -923,6 +923,9 @@ impl App {
             })
             .collect::<Vec<_>>();
         let snapshot_sequence = snapshot.cursor.sequence;
+        // Every body this snapshot installs replaces live state with a view
+        // as of its cursor; events after it that already reached the store
+        // are replayed below so a stale body never wins over them.
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
             self.workspace_path = snapshot.workspace.path;

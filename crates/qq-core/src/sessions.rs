@@ -19,14 +19,15 @@ use qq_protocol::{
     AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode,
     ApprovalResolution, AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome,
     CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FetchPreview, FinalOutput,
-    InputPart, MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection,
-    QuestionPreview, ReasoningEvent, ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId,
-    RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
-    SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
-    ShellVerdict, SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceGrantOutcome,
-    WorkspaceId, WorkspaceSnapshot, WorkspaceSummary, validate_input,
+    InputPart, MAX_PENDING_HOLDS, MessageId, MessageRole, MessageSnapshot, MessageState,
+    ModelPricing, ModelSelection, PendingHold, QuestionPreview, ReasoningEvent, ResolvedModel,
+    RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity,
+    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent,
+    SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin, StoreId,
+    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot,
+    ToolCallState, WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary,
+    validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};

@@ -75,6 +75,8 @@ fn summary(id: SessionId) -> SessionSummary {
         approval_delegate: None,
         correlation: qq_protocol::Correlation::default(),
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
         context_tokens: None,
         estimated_cost_usd_nanos: None,
         accounting: None,
@@ -398,6 +400,7 @@ fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         ),
         context(&[]),
@@ -456,6 +459,278 @@ fn an_escalation_lands_on_the_pending_holds_preview_and_nowhere_else() {
         context(&[]),
     );
     assert!(store[&session_id].approval_previews.is_empty());
+}
+
+#[test]
+fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wins() {
+    // ENG-1034: one state for a whole store. A hold the delegate is still
+    // deciding is work; it becomes a block when the delegate escalates, and
+    // a block in any session outranks work or idleness elsewhere.
+    let quiet = SessionId::from_bytes([3; 16]);
+    let busy = SessionId::from_bytes([5; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let held = ToolCallId::from_bytes([7; 16]);
+    let mut store = SessionStore::default();
+    assert_eq!(store.activity(), StoreActivity::Idle, "an empty store");
+    store.upsert_summary(summary(quiet), &[], 0);
+    store.upsert_summary(summary(busy), &[], 0);
+    store.warm_empty(busy);
+    assert_eq!(store.activity(), StoreActivity::Idle);
+
+    let running = SessionSummary {
+        status: SessionStatus::Running,
+        active_run_id: Some(run_id),
+        ..summary(busy)
+    };
+    store.upsert_summary(running.clone(), &[], 0);
+    assert_eq!(store.activity(), StoreActivity::Working);
+
+    let call = |state: ToolCallState| ToolCallSnapshot {
+        id: held,
+        session_id: busy,
+        run_id,
+        turn_ordinal: 0,
+        call_ordinal: 0,
+        provider_call_id: "call_0".to_owned(),
+        name: "shell".to_owned(),
+        arguments: String::new(),
+        state,
+        result: None,
+        is_error: false,
+        display: None,
+    };
+    let requested = |delegated| SessionEvent::ToolApprovalRequested {
+        tool_call: call(ToolCallState::AwaitingApproval),
+        shell: None,
+        edit: None,
+        question: None,
+        fetch: None,
+        delegated,
+    };
+    store.reduce_event(&envelope(1, busy, requested(true)), context(&[]));
+    assert_eq!(
+        store.activity(),
+        StoreActivity::Working,
+        "the delegate is deciding"
+    );
+
+    // A snapshot reload rebuilds live status from the summary's holds, which
+    // the server projects exactly; the body's tool calls do not decide it.
+    let hold = |delegated| qq_protocol::PendingHold {
+        tool_call_id: held,
+        delegated,
+    };
+    let mut snapshot = SessionSnapshot {
+        side_questions: Vec::new(),
+        summary: SessionSummary {
+            pending_holds: vec![hold(true)],
+            ..running.clone()
+        },
+        messages: Vec::new(),
+        runs: Vec::new(),
+        tool_calls: vec![call(ToolCallState::AwaitingApproval)],
+        has_older_tool_calls: false,
+        has_older_messages: false,
+    };
+    store.install_session_snapshot(snapshot.clone(), &[], 1);
+    assert_eq!(store.activity(), StoreActivity::Working);
+
+    store.reduce_event(
+        &envelope(
+            2,
+            busy,
+            SessionEvent::ToolApprovalEscalated {
+                tool_call_id: held,
+                delegate: Some(qq_protocol::DelegateIdentity::Reviewer),
+                reason: "unsure".to_owned(),
+            },
+        ),
+        context(&[]),
+    );
+    let blocked = StoreActivity::Blocked {
+        session_title: running.title.clone(),
+    };
+    assert_eq!(store.activity(), blocked, "escalated to the human");
+    snapshot.summary.pending_holds = vec![hold(false)];
+    store.install_session_snapshot(snapshot.clone(), &[], 2);
+    assert_eq!(store.activity(), blocked, "and still after a reload");
+
+    // Answered: work again, then idle once the run settles.
+    store.reduce_event(
+        &envelope(
+            3,
+            busy,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: call(ToolCallState::Requested),
+                resolution: qq_protocol::ApprovalResolution::ApprovedOnce,
+                delegate: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store.activity(), StoreActivity::Working);
+    store.upsert_summary(summary(busy), &[], 0);
+    assert_eq!(store.activity(), StoreActivity::Idle);
+
+    // A hold asked of the human directly blocks at once, even while another
+    // session is idle.
+    store.reduce_event(&envelope(4, busy, requested(false)), context(&[]));
+    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
+
+    // A client that attaches mid-hold knows who decides from the summary
+    // alone: a delegate's hold is work, a human's is a block.
+    let mut fresh = SessionStore::default();
+    snapshot.summary.pending_holds = vec![hold(true)];
+    fresh.install_session_snapshot(snapshot.clone(), &[], 5);
+    assert_eq!(fresh.activity(), StoreActivity::Working);
+    snapshot.summary.pending_holds = vec![hold(false)];
+    fresh.install_session_snapshot(snapshot, &[], 6);
+    assert!(matches!(fresh.activity(), StoreActivity::Blocked { .. }));
+}
+
+#[test]
+fn store_activity_counts_sessions_whose_bodies_were_never_loaded() {
+    // Regression (PR #289 review): a session past the prewarmed bodies is
+    // summary-only. Its pending human hold and its running side question
+    // must still reach the aggregate, or herdr shows idle while QQ waits.
+    let cold = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let held = ToolCallId::from_bytes([7; 16]);
+    let side = RunId::from_bytes([8; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(
+        SessionSummary {
+            status: SessionStatus::Running,
+            active_run_id: Some(run_id),
+            pending_holds: vec![qq_protocol::PendingHold {
+                tool_call_id: held,
+                delegated: false,
+            }],
+            ..summary(cold)
+        },
+        &[],
+        0,
+    );
+    assert!(!store.get(&cold).unwrap().is_warm());
+    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
+    // Settled through the events every session reduces, warm or cold.
+    store.reduce_event(
+        &envelope(
+            1,
+            cold,
+            SessionEvent::ToolApprovalResolved {
+                tool_call: ToolCallSnapshot {
+                    id: held,
+                    session_id: cold,
+                    run_id,
+                    turn_ordinal: 0,
+                    call_ordinal: 0,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: String::new(),
+                    state: ToolCallState::Denied,
+                    result: None,
+                    is_error: true,
+                    display: None,
+                },
+                resolution: qq_protocol::ApprovalResolution::Denied,
+                delegate: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(store.activity(), StoreActivity::Working);
+
+    // An idle session answering a side question is working, and idle again
+    // once the question settles; the body never loads.
+    store.upsert_summary(
+        SessionSummary {
+            running_side_question: Some(side),
+            ..summary(cold)
+        },
+        &[],
+        0,
+    );
+    assert_eq!(store.activity(), StoreActivity::Working);
+    let update = |state| SessionEvent::SideQuestionUpdated {
+        side_question: Box::new(qq_protocol::SideQuestionSnapshot {
+            id: side,
+            thread_id: side,
+            session_id: cold,
+            question: "why?".to_owned(),
+            answer: String::new(),
+            state,
+            usage: None,
+            estimated_cost_usd_nanos: None,
+            model_turns: 0,
+            created_at_ms: 1,
+            finished_at_ms: None,
+        }),
+    };
+    store.reduce_event(
+        &envelope(2, cold, update(qq_protocol::SideQuestionState::Completed)),
+        context(&[]),
+    );
+    assert_eq!(store.activity(), StoreActivity::Idle);
+    store.reduce_event(
+        &envelope(3, cold, update(qq_protocol::SideQuestionState::Running)),
+        context(&[]),
+    );
+    assert_eq!(store.activity(), StoreActivity::Working);
+    assert!(!store.get(&cold).unwrap().is_warm());
+}
+
+#[test]
+fn a_child_resolves_to_its_root_and_an_unknown_parent_resolves_to_none() {
+    let root = SessionId::from_bytes([3; 16]);
+    let child = SessionId::from_bytes([5; 16]);
+    let grandchild = SessionId::from_bytes([6; 16]);
+    let orphan = SessionId::from_bytes([9; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(summary(root), &[], 0);
+    for (id, parent) in [
+        (child, root),
+        (grandchild, child),
+        (orphan, SessionId::from_bytes([1; 16])),
+    ] {
+        store.upsert_summary(
+            SessionSummary {
+                parent_id: Some(parent),
+                ..summary(id)
+            },
+            &[],
+            0,
+        );
+    }
+    assert_eq!(store.root_of(root), Some(root));
+    assert_eq!(store.root_of(grandchild), Some(root));
+    assert_eq!(store.root_of(orphan), None, "never a child id");
+    assert_eq!(store.root_of(SessionId::from_bytes([2; 16])), None);
+}
+
+#[test]
+fn store_activity_counts_a_child_whose_parent_is_not_loaded() {
+    // Regression (PR #289 review): the snapshot's bounded session list is
+    // chosen by recency, not ancestry, so a child can arrive without its
+    // parent. Tree order starts from loaded roots and would skip it.
+    let orphan = SessionId::from_bytes([9; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(
+        SessionSummary {
+            parent_id: Some(SessionId::from_bytes([1; 16])),
+            status: SessionStatus::Running,
+            active_run_id: Some(RunId::from_bytes([4; 16])),
+            pending_holds: vec![qq_protocol::PendingHold {
+                tool_call_id: ToolCallId::from_bytes([7; 16]),
+                delegated: false,
+            }],
+            ..summary(orphan)
+        },
+        &[],
+        0,
+    );
+    assert!(store.thread_order().is_empty());
+    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
 }
 
 #[test]
@@ -1054,6 +1329,10 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
     let mut running = summary(session_id);
     running.status = SessionStatus::Running;
     running.active_run_id = Some(prompt);
+    running.pending_holds = vec![qq_protocol::PendingHold {
+        tool_call_id: ToolCallId::from_bytes([7; 16]),
+        delegated: true,
+    }];
     let mut live = SessionStore::default();
     let mut replay = SessionStore::default();
     for store in [&mut live, &mut replay] {
@@ -1130,6 +1409,7 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
         );
         assert_eq!(view.live.active_tool.as_deref(), Some("shell"));
         assert_eq!(view.live.awaiting_approval.len(), 1);
+        assert_eq!(view.live.with_delegate.len(), 1);
         assert_eq!(view.unread, 0);
         assert!(!view.finished_unread);
         assert!(!view.runs.contains_key(&prompt));
@@ -1153,6 +1433,10 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
     let mut running = summary(session_id);
     running.status = SessionStatus::Running;
     running.active_run_id = Some(prompt);
+    running.pending_holds = vec![qq_protocol::PendingHold {
+        tool_call_id: ToolCallId::from_bytes([7; 16]),
+        delegated: true,
+    }];
     store.upsert_summary(running.clone(), &[], 0);
     store.warm_empty(session_id);
     store.get_mut(&session_id).unwrap().live.active_tool = Some("shell".to_owned());
@@ -1190,6 +1474,7 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
         Some("shell")
     );
     assert_eq!(store[&session_id].live.awaiting_approval.len(), 1);
+    assert_eq!(store[&session_id].live.with_delegate.len(), 1);
 
     // The prompt run's own pause still notifies and clears live state.
     let mut idle = summary(session_id);
@@ -1241,6 +1526,10 @@ fn cancelling_a_queued_prompt_leaves_the_active_runs_live_state() {
     let mut running = summary(session_id);
     running.status = SessionStatus::Running;
     running.active_run_id = Some(active);
+    running.pending_holds = vec![qq_protocol::PendingHold {
+        tool_call_id: ToolCallId::from_bytes([7; 16]),
+        delegated: false,
+    }];
     store.upsert_summary(running.clone(), &[], 0);
     store.warm_empty(session_id);
     store
