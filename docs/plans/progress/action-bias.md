@@ -454,3 +454,19 @@ newest last.
 - Environment inspection runs only for read candidates and does not alter
   approval input. The zero-sized ignored-element vector does not allocate
   element storage. Parsing overhead still needs matched measurement.
+### 2026-10-14 — failed discovery starts and environment-aware reads
+
+- The repeated-root gate counts every matching start, including failed
+  attempts, while completed pre-edit coverage stays independent. A two-root
+  failed/retried fixture corrects 2 starts/0 repeats to 3 starts/1 repeat;
+  fixed-window baseline remains 108 roots, one scope/start, zero repeats.
+- Qualification derives historical root role from persisted depth; a
+  read-only check finds zero orphaned child runs in the fixed baseline.
+- AB1's narrow sed substitutions/trailing semicolons are reads; explicit
+  requested process environments disqualify reads without changing authority.
+  AB6 must preserve that status. Performance and deployed observation remain open.
+
+
+- Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
+  review approves. failed-discovery-starts.json records the executable SQL
+  fixture and live fixed-window recount; all acceptance gates remain explicit.

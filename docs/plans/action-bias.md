@@ -149,11 +149,17 @@ The rule:
    - JJ commands remain work: even ignoring working-copy snapshots can merge
      concurrent operation heads, and disabling integration still creates
      operations. Diff-producing commands can also invoke configured formatters.
-5. Additions:
-   - `sed` when `-n` is present, no flag contains `i` or is
+5. A valid trailing semicolon retains the read verdict; incomplete pipelines
+   and conjunctions remain work. Any explicit nonempty requested shell/exec
+   environment is work: process initialization and helpers may change behavior.
+   Malformed or duplicate environment metadata also disqualifies reads without
+   altering the command/cwd used for approval.
+6. Additions:
+   - `sed` print and pattern-space substitution scripts when `-n` is present, no flag contains `i` or is
      `--in-place`, no file-supplied program (`-f`/`--file`, joined or
      abbreviated forms), and every literal script has no `w`, `W` or `e`
-     command or substitution `w`/`e` flag;
+     command or substitution `w`/`e` flag. Parse field delimiters/escapes before
+     separators, so literal semicolons inside patterns/replacements are data;
    - `nl`, `cut`;
    - `sort` without `-o` (including attached `-oFILE`), `--output`,
      `--compress-program` or accepted abbreviations such as `--o=FILE` and
@@ -456,7 +462,8 @@ non-spawning root mean wall time must not rise. Any miss or inadequate
 sample becomes an open slice or an explicit decision; do not call it a pass.
 The instruction gate counts distinct search roots per qualifying run and
 permits at most one new names-search discovery per root; cursor pages are continuation,
-not a repeated discovery. Ordinary single-root runs still
+not a repeated discovery. Failed, denied and interrupted matching starts still
+count toward repetition; completed pre-edit result/coverage is a separate gate. Ordinary single-root runs still
 allow one; multi-root runs must cover every target scope. Record per-run
 roots/discovery starts, physical calls and every repeated root; an average cannot hide repeated
 probes. Exclude only completed edit_file calls whose dry_run is JSON boolean
