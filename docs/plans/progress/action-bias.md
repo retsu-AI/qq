@@ -6,8 +6,8 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; performance qualification open |
+| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -386,3 +386,12 @@ newest last.
   Integrated parent docs only; production source remains qualified.
 - Matched performance qualification remains open; prior candidate binary
   predates the helper fix and cannot qualify this head.
+
+### 2026-10-14 — AB2 subset correction qualification
+
+- Independent source review approved conditional conventions and captured
+  subsets; seven focused AB2 tests and 59 prompt tests pass. Workspace gates
+  pass: 2,284 tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0.
+  Logs: `target/qq-perf/ab2-2026-10-14/subset-final-gate-{0,1,2,3}.log`.
+- Fixed prefix 5,299 bytes; builtin schema unchanged. Matched plan compilation
+  performance remains unqualified; draft source review continues.
