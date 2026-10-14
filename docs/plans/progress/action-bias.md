@@ -761,3 +761,9 @@ newest last.
   clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
   logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
   supersedes earlier shared-cache qualification uncertainty. Performance open.
+
+- Live wiring regression fails with the original generic name and passes
+  with actual search identity (live-wiring-red.log/green.log). All 2,310
+  fresh workspace tests pass, including mid-enumeration cancellation and
+  stored replay. Clippy flags the new fixture's explicit drop before await;
+  a lexical scope now ends the capture lock. Full checks are rerun before push.

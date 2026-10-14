@@ -4071,19 +4071,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(recorded.len(), 1);
-        let captured = requests.lock().unwrap();
-        let results = captured[1].messages()[2].content();
-        let ContentBlock::ToolResult { content, .. } = &results[3] else {
-            panic!("search result");
+        let mut page = {
+            let captured = requests.lock().unwrap();
+            let results = captured[1].messages()[2].content();
+            let ContentBlock::ToolResult { content, .. } = &results[3] else {
+                panic!("search result");
+            };
+            assert_eq!(
+                content, &recorded[0],
+                "live projection must retain every page row and its cursor"
+            );
+            assert!(!content.contains("turn budget reached"));
+            assert!(content.len() > 4 * 1024);
+            content.clone()
         };
-        assert_eq!(
-            content, &recorded[0],
-            "live projection must retain every page row and its cursor"
-        );
-        assert!(!content.contains("turn budget reached"));
-        assert!(content.len() > 4 * 1024);
-        let mut page = content.clone();
-        drop(captured);
         let workspace = workspace::Workspace::open(directory.path()).unwrap();
         let mut found = std::collections::BTreeSet::new();
         for _ in 0..10 {
