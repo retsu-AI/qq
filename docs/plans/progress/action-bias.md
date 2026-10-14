@@ -470,3 +470,10 @@ newest last.
 - Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
   review approves. failed-discovery-starts.json records the executable SQL
   fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Immutable integrated source 8f9c4253 passes 2,285 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
+  Thirteen focused classifier fixtures pass in the workspace run; independent
+  source reviews approve. Matched hot-path performance remains open.
