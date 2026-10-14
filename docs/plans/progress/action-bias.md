@@ -899,3 +899,18 @@ newest last.
   behavior. The child-compaction fixture now grants two million tokens so
   both scripted 48-turn children finish under the longer prompt; exact
   inherited spend assertions remain intact. Full workspace gates follow.
+
+### 2026-10-14 — AB2 strict-cap workspace qualification
+
+- Immutable source `91c05c81d1b2d5e4c78eddc36203fea937ec69cf`: fresh
+  workspace qualification passes 2,371 tests, zero failures, 14 ignored
+  across 38 report blocks; formatting, Clippy/all targets/all features with
+  warnings denied, and workspace build all exit zero.
+- Evidence: `target/qq-perf/ab2-2026-10-14/strict-cap-workspace-{0..4}.log`
+  and `strict-cap-workspace-receipt.json`; source stayed clean and unchanged
+  throughout qualification. Independent admission and projection reviews
+  approve. Current descriptor 14/prompt 20 golden is `fde8f5629db25add...`;
+  historical descriptor 13/prompt 20 remains `61a6c7e80a481d54...`.
+- This publication resolves the actual batched-search output overflow and
+  integrates current main/AB1. Hosted checks, fresh Codex review, and named
+  performance gates remain open; this receipt does not waive them.
