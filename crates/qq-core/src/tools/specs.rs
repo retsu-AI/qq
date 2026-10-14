@@ -116,14 +116,14 @@ impl BuiltInTool {
         match self {
             Self::ReadFile => ToolSpec::new(
                 "read_file",
-                "Read a workspace file by line range(s), or get its outline or info. Use instead of cat, head, tail, or sed -n. The header carries the content hash; pass if_changed_since to skip unchanged content.",
+                "Read a workspace file by line range(s), or get its outline or info. Use instead of cat, head, tail, or sed -n. Prefer one larger read over many small slices; omit limit to fill the byte budget. The header carries the content hash; pass if_changed_since to skip unchanged content.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
                         "ranges": { "type": "array", "maxItems": 8, "items": { "type": "string", "pattern": "^[0-9]+(-[0-9]*)?$" } },
                         "offset": { "type": "integer", "minimum": 1 },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "default": 200 },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LINES },
                         "mode": { "type": "string", "enum": ["lines", "outline", "info"], "default": "lines" },
                         "if_changed_since": { "type": "string", "pattern": "^h:[0-9a-f]{12}$" }
                     },

@@ -215,6 +215,7 @@ pub(super) fn read_file(
                     short,
                     total_lines,
                     &ranges,
+                    arguments.ranges.is_empty(),
                     offset_ignored,
                     cancelled,
                 )
@@ -244,21 +245,23 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
     let mut ranges = Vec::with_capacity(arguments.ranges.len().max(1));
     if arguments.ranges.is_empty() {
         let offset = arguments.offset.unwrap_or(1);
-        let limit = arguments.limit.unwrap_or(200);
         if offset == 0 || offset > MAX_READ_OFFSET {
             return Err(format!(
                 "invalid_offset: offset must be between 1 and {MAX_READ_OFFSET}"
             ));
         }
-        if limit == 0 || limit > MAX_READ_LINES {
-            return Err(format!(
-                "invalid_limit: limit must be between 1 and {MAX_READ_LINES}"
-            ));
-        }
-        ranges.push(Range {
-            start: offset,
-            end: offset.saturating_add(limit - 1),
-        });
+        let end = match arguments.limit {
+            Some(limit) if (1..=MAX_READ_LINES).contains(&limit) => {
+                offset.saturating_add(limit - 1)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "invalid_limit: limit must be between 1 and {MAX_READ_LINES}"
+                ));
+            }
+            None => usize::MAX,
+        };
+        ranges.push(Range { start: offset, end });
         return Ok(ranges);
     }
     for text in &arguments.ranges {
@@ -358,6 +361,7 @@ fn lines(
     short: &str,
     total_lines: usize,
     ranges: &[Range],
+    continue_to_eof: bool,
     offset_ignored: bool,
     cancelled: &ToolCancellation,
 ) -> ReadSideOutput {
@@ -398,6 +402,10 @@ fn lines(
             .saturating_add(total_lines.saturating_mul(width + 1))
             .min(body_budget),
     );
+    // Keep the header and a possible continuation marker inside the bound.
+    let body_line_budget = READ_BOUNDS.max_lines.saturating_sub(2);
+    let mut body_lines = 0_usize;
+    let mut line_stopped = false;
     let mut body_escaped = 0_usize;
     let mut shown = Vec::with_capacity(ranges.len());
     let mut clipped_lines = 0_usize;
@@ -420,6 +428,11 @@ fn lines(
             if number < range.start {
                 continue;
             }
+            if body_lines >= body_line_budget {
+                stopped = true;
+                line_stopped = true;
+                break;
+            }
             number_buffer.clear();
             let _ = write!(number_buffer, "{number:>width$}\t");
             let before = body.len();
@@ -441,6 +454,7 @@ fn lines(
                 break;
             }
             body_escaped += row_cost;
+            body_lines += 1;
             clipped_lines += usize::from(clipped);
             first_shown.get_or_insert(number);
             last_shown = number;
@@ -452,8 +466,14 @@ fn lines(
             break 'ranges;
         }
         if index + 1 < ranges.len() && current.is_some() {
+            if body_lines >= body_line_budget || body_escaped + 3 > body_budget {
+                stopped = true;
+                line_stopped = body_lines >= body_line_budget;
+                break 'ranges;
+            }
             body.push_str("--\n");
             body_escaped += 3;
+            body_lines += 1;
         }
     }
     let mut window = String::with_capacity(32);
@@ -477,7 +497,7 @@ fn lines(
         header = header.field("clipped", clipped_lines);
     }
     if stopped {
-        header = header.field("truncated", "bytes");
+        header = header.field("truncated", if line_stopped { "lines" } else { "bytes" });
     }
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
@@ -488,12 +508,26 @@ fn lines(
     }
     let mut out = header.into_line();
     out.push_str(&body);
-    if stopped {
+    if stopped || (continue_to_eof && shown.last().is_some_and(|(_, last)| *last < total_lines)) {
         let next = shown.last().map_or(0, |(_, last)| last + 1);
-        let _ = writeln!(
-            out,
-            "{MARKER_PREFIX}output limit; continue from offset={next}]…"
-        );
+        if loaded.hash.is_none() {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}more lines (count unknown; {} MiB scan cap); continue from offset={next}]…",
+                MAX_READ_SCAN_BYTES / (1024 * 1024)
+            );
+        } else if stopped {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}output limit; continue from offset={next}]…"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}{} more lines; continue from offset={next}]…",
+                total_lines - next + 1
+            );
+        }
     } else if loaded.hash.is_none()
         && ranges
             .iter()

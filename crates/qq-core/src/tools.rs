@@ -685,7 +685,10 @@ mod tests {
         let hash = content_hash(b"one\ntwo\nthree\n");
         assert_eq!(
             read.model_text,
-            format!("read b.txt L2/3 h:{}\n2\ttwo\n", &hash[..12])
+            format!(
+                "read b.txt L2/3 h:{}\n2\ttwo\n…[qq: 1 more lines; continue from offset=3]…\n",
+                &hash[..12]
+            )
         );
         let update = read.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "b.txt");
@@ -2217,7 +2220,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85"
+            "d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f"
         );
     }
 

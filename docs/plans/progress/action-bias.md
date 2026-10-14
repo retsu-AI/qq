@@ -227,3 +227,15 @@ newest last.
 - Scan-cap exact/unknown-count regression fails before its marker fix.
   Added an actual six-parallel-read runtime fixture that tracks only visible
   rows and recovers missing offsets; baseline runtime execution is next.
+
+### 2026-10-14 — AB3 implementation review
+
+- Five focused regressions pass. Actual parallel runtime recovers all 6,000
+  lines: baseline 30 calls / 0 cuts → candidate 15 calls / 4 cuts; cuts buy
+  fewer total calls, including recovery. Projection diagnostic 30/0 → 12/3.
+- No-limit reads use EOF windows bounded by bytes and rendered lines, reserve
+  header/marker rows, and emit explicit-limit continuation. Scan-capped reads
+  report an unknown count without reading beyond 4 MiB. Ranges retain intervals.
+- Independent code/spec review approved. Schema hash changes to
+  `d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f`.
+  Workspace and final benchmark gates remain open; no implementation pushed.

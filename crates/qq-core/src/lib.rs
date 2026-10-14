@@ -9788,7 +9788,7 @@ mod tests {
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85"
+            "d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f"
         );
         let spawn = specs.last().unwrap();
         assert!(
