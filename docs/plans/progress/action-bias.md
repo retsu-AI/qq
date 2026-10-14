@@ -1270,3 +1270,14 @@ newest last.
   future-schema guards remain qualified. Logs: fresh-search-read-authority-
   integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
   Native Windows upstream gates pass. No user store migrated; performance open.
+
+
+- Fresh immutable complete-stack source 10d52022 passes 2,350 workspace
+  tests, zero failures, 14 ignored; fmt, all-target/all-feature Clippy and
+  build exit 0 after clearing every workspace package debug artifact.
+  Source remains clean/unchanged. Thirteen AB6.1 fixtures retain exact
+  execution parser/environment status, exporter identity and depth-zero role.
+  Logs: fresh-final-stack-integrated-{0,1,2,3,4}.log and source receipt.
+  This fresh receipt supersedes earlier cache uncertainty. Final pinned
+  baseline export/recount, matched performance, final hosted review and the
+  deployed seven-day candidate cohort remain open. No paid calls or deployment.
