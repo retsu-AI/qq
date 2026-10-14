@@ -395,3 +395,12 @@ newest last.
 - Independent eighth plan review approves; docs truth 23 passed. Source
   qualification remains attached to the respective slice receipts; no
   performance or deployed observation gate is waived.
+
+### 2026-10-14 — lazy fetch, operation merge and timestamp regressions
+
+- Test-first hosted regressions reproduce Git history lazy fetching, JJ
+  operation reconciliation and file's explicit timestamp restoration as false
+  reads. The same fixture requires Unix sed's literal last-line address.
+- Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
+  confirms the side effects. Constrain canonical Git reads, classify JJ as
+  work, and exclude timestamp-restoring file modes; approval unchanged.

@@ -1188,6 +1188,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ab1_lazy_fetch_operation_merge_and_timestamp_restoration_are_work() {
+        for command in [
+            "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path",
+            "jj --ignore-working-copy --no-pager status",
+            "file -p sample",
+            "file --preserve-date sample",
+            "file --pre sample",
+            "file -bp sample",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert_eq!(
+            super::read_only_shell_command("sed -n '$p' f"),
+            !cfg!(windows)
+        );
+        assert!(super::read_only_shell_command(
+            "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path"
+        ));
+    }
+
     #[cfg(feature = "tool-fetch")]
     use std::sync::Arc;
 
