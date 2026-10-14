@@ -743,10 +743,6 @@ mod tests {
         );
         assert!(loaded.path.len() > READ_BOUNDS.max_bytes);
         let bounded = output.with_test_notes(&["cwd_ignored"]);
-        assert!(end > READ_BOUNDS.max_bytes);
-        // This raw header requires the dispatch convention's separate note row.
-        output.text.insert_str(end, "\nnote=cwd_ignored");
-        let bounded = super::super::ToolOutput::bounded(output.text, &output.bounds, false);
         assert!(
             bounded.spill.is_none(),
             "the contiguous window must survive the extra row"
