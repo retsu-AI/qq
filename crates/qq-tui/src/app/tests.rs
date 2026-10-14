@@ -3156,51 +3156,56 @@ fn delayed_background_receipt_replay_does_not_submit_another_draft() {
 
 #[test]
 fn snapshot_headers_cannot_downgrade_a_newer_retained_body() {
-    let (mut app, first, other) = two_session_app();
-    app.last_sequence = 101;
-    let run = id(0x78, qq_protocol::RunId::from_bytes);
-    let mut newer = app.sessions[&other].summary.clone();
-    newer.status = qq_protocol::SessionStatus::Running;
-    newer.active_run_id = Some(run);
-    newer.estimated_cost_usd_nanos = Some(250);
-    let mut latest = snapshot();
-    latest.cursor = fixtures::cursor(105);
-    latest.focused = None;
-    latest.sessions = vec![newer.clone()];
-    latest.included = vec![body_for(&newer, "newer body")];
-    app.apply_snapshot(latest);
-    let mut older = newer.clone();
-    older.status = qq_protocol::SessionStatus::Idle;
-    older.active_run_id = None;
-    older.estimated_cost_usd_nanos = Some(100);
-    let mut stale = snapshot();
-    stale.cursor = fixtures::cursor(103);
-    stale.focused = None;
-    stale.sessions = vec![older.clone()];
-    stale.included = vec![body_for(&older, "older body")];
-    app.apply_snapshot(stale);
-    assert_eq!(app.sessions[&other].summary.status, newer.status);
-    assert_eq!(
-        app.sessions[&other].summary.active_run_id,
-        newer.active_run_id
-    );
-    assert_eq!(
-        app.sessions[&other].summary.estimated_cost_usd_nanos,
-        Some(250)
-    );
-    for sequence in 102..=105 {
-        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
-            sequence,
-            other,
-            SessionEvent::SessionUpdated {
-                session: Box::new(older.clone()),
-            },
-        )));
+    for evict in [false, true] {
+        let (mut app, first, other) = two_session_app();
+        app.last_sequence = 101;
+        let run = id(0x78, qq_protocol::RunId::from_bytes);
+        let mut newer = app.sessions[&other].summary.clone();
+        newer.status = qq_protocol::SessionStatus::Running;
+        newer.active_run_id = Some(run);
+        newer.estimated_cost_usd_nanos = Some(250);
+        let mut latest = snapshot();
+        latest.cursor = fixtures::cursor(105);
+        latest.focused = None;
+        latest.sessions = vec![newer.clone()];
+        latest.included = vec![body_for(&newer, "newer body")];
+        app.apply_snapshot(latest);
+        if evict {
+            app.sessions.get_mut(&other).unwrap().evict_body();
+        }
+        let mut older = newer.clone();
+        older.status = qq_protocol::SessionStatus::Idle;
+        older.active_run_id = None;
+        older.estimated_cost_usd_nanos = Some(100);
+        let mut stale = snapshot();
+        stale.cursor = fixtures::cursor(103);
+        stale.focused = None;
+        stale.sessions = vec![older.clone()];
+        stale.included = vec![body_for(&older, "older body")];
+        app.apply_snapshot(stale);
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(
+            app.sessions[&other].summary.active_run_id,
+            newer.active_run_id
+        );
+        assert_eq!(
+            app.sessions[&other].summary.estimated_cost_usd_nanos,
+            Some(250)
+        );
+        for sequence in 102..=105 {
+            app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+                sequence,
+                other,
+                SessionEvent::SessionUpdated {
+                    session: Box::new(older.clone()),
+                },
+            )));
+        }
+        assert_eq!(app.last_sequence, 105);
+        assert_eq!(app.focused(), Some(first));
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(app.sessions[&other].summary.active_run_id, Some(run));
     }
-    assert_eq!(app.last_sequence, 105);
-    assert_eq!(app.focused(), Some(first));
-    assert_eq!(app.sessions[&other].summary.status, newer.status);
-    assert_eq!(app.sessions[&other].summary.active_run_id, Some(run));
 }
 
 #[test]
