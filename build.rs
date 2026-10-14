@@ -82,9 +82,10 @@ fn from_git() -> Option<(String, String, String)> {
             && output.status.success()
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if root.join(&path).is_file() {
-                println!("cargo:rerun-if-changed={path}");
-            } else if let Ok(output) = Command::new("git")
+            // A packed branch update creates this loose ref; watch it even
+            // before it exists, as well as packed-refs for repacks.
+            println!("cargo:rerun-if-changed={path}");
+            if let Ok(output) = Command::new("git")
                 .args(["rev-parse", "--git-path", "packed-refs"])
                 .current_dir(root)
                 .output()

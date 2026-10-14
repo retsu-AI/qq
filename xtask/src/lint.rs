@@ -186,7 +186,20 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                 && line
                     .split_once('=')
                     .and_then(|(_, value)| value.split_once(']'))
-                    .is_some_and(|(value, _)| value.trim().trim_matches('"').trim().is_empty());
+                    .is_some_and(|(value, _)| {
+                        let value = value.trim();
+                        let decoded = if value.starts_with('r') {
+                            value.find('"').and_then(|start| {
+                                value
+                                    .rfind('"')
+                                    .filter(|end| *end > start)
+                                    .map(|end| value[start + 1..end].to_owned())
+                            })
+                        } else {
+                            serde_json::from_str::<String>(value).ok()
+                        };
+                        decoded.is_none_or(|reason| reason.trim().is_empty())
+                    });
             if code.starts_with("#[ignore]") || ignore_reason_empty {
                 findings.push(Finding {
                     rule: Rule::IgnoreNeedsReason,
