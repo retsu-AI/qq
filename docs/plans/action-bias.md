@@ -111,7 +111,7 @@ The rule:
 4. Every remaining `|`, `;`, `&&` segment must start with a read prefix.
    The current list is kept with these narrowings, which close shapes that
    pass today and write:
-   - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-fprint*`, `-fls`;
+   - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*`, `-fls` and execution-action abbreviations;
    - `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, or their long aliases
      `--delete`, `--move`, `--copy`, `--force`; creation/reset operands
      also count as work (only listing/filter operands are reads);
@@ -129,6 +129,10 @@ The rule:
      is a read;
    - `rg` rejects `--pre`, hostname helpers (`--hostname-bin`) and compressed
      search (`-z`, short clusters containing `z`, `--search-zip`);
+   - `fd` excludes `-x`/`-X` (including short clusters), `--exec` and
+     `--exec-batch`; `tree` excludes `-o` (including attached operands) and
+     output-option spellings; `file` excludes `-C`/`--compile` and accepted
+     long-option abbreviations;
    - JJ reads use only canonical `jj --ignore-working-copy --no-pager status`
      (global switches may swap order); bare commands may snapshot the working
      copy and diff-producing commands may execute configured formatters.
@@ -155,6 +159,7 @@ The rule:
 | `cd x && grep foo f > out` | no |
 | `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
 | `sed -n 's/.*/touch generated/e' input.txt`, `sed -n 's/x/y/w generated.txt' input.txt`, `sort --o=written.txt input.txt` | no |
+| `find . -okdir touch written.txt`, `fd --max-depth 1 -x touch written.txt`, `fd -X touch written.txt`, `tree -o written.txt .`, `file -C -m magic` | no |
 | `find . -fls written.txt`, `sort -S1K --batch-size=2 --compress-program=./mutating-compressor input.txt` | no |
 | `sed -n -f write.sed input.txt`, `sed -n --file=write.sed input.txt` | no |
 | `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |

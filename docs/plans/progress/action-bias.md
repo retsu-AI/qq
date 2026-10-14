@@ -182,3 +182,21 @@ newest last.
 - Independent review approved all five plan corrections. Docs truth 23
   passed; exact malformed-preview fixture and baseline recount passed.
   Production parent remains unchanged from its qualified source.
+
+### 2026-10-14 — sixth hosted plan review corrections
+
+- Explicit existing classifier exclusions now cover find okdir, fd exec/
+  exec-batch, tree output and file compile modes. No runtime verdicts
+  changed for these cases. Preview exclusion applies only to edit_file;
+  write_file dry_run is a schema failure. Corrected205/1,222 baseline is
+  published beside the obsolete211/1,230 proxy.
+- Successful discovery starts must precede actual edits in a model-visible
+  earlier turn. Same-turn/failed/later starts cannot prove coverage; later
+  new targets require separate ordered coverage evidence. Exact-query
+  fixtures pass: five failures/six nonpreview calls; one eligible discovery
+  of four starts. Fixed historical early scope:108roots,18distinct roots,
+  25starts,7repeated roots,5affected runs,max5. Coverage remains unqualified.
+- Independent final review approved; docs truth/fmt/diff checks next.
+  Evidence `target/qq-perf/ab-plan-2026-10-14/typed-preview-preedit.json`.
+- Docs truth23passed; fmt/diff checks pass. Production parent unchanged
+  from qualified source; sixth-review corrections ready for hosted review.

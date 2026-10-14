@@ -299,7 +299,7 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
      t.turn_ordinal * 100000 + t.call_ordinal k
      FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0),
    f AS (SELECT run_id, min(k) fe FROM t WHERE name IN ('edit_file','write_file')
-     AND state = 'completed' AND coalesce(CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json, '\$.dry_run') END, '') <> 'true' GROUP BY 1),
+     AND state = 'completed' AND (name <> 'edit_file' OR coalesce(CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json, '\$.dry_run') END, '') <> 'true') GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe
      AND t.name IN ('read_file','search','tree')) n FROM f)
    SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
@@ -314,7 +314,7 @@ q "WITH rr AS ($RR) SELECT sum(t.state = 'failed'),
      sum(t.state = 'denied'), sum(t.state = 'interrupted')
    FROM tool_calls t JOIN rr ON rr.id = t.run_id
    WHERE rr.child = 0 AND t.name IN ('edit_file','write_file')
-     AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true';"
+     AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true');"
 
 # Root completion by the fixed cutoff: completed, all started roots,
 # completed share, not terminal by cutoff (including later completions).
@@ -332,13 +332,17 @@ q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
-       AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true'
+       AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
      UNION ALL
      SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id
      WHERE rr.child = 0 AND t.name = 'write_file' AND t.state = 'completed'),
-   qualifying AS (SELECT DISTINCT run_id FROM paths
-     WHERE instr(path, '/') > 0 AND path NOT GLOB './*' AND path NOT GLOB '/*'),
+   qualifying AS (SELECT p.run_id, min(t.turn_ordinal) first_edit_turn
+     FROM paths p JOIN tool_calls t ON t.run_id = p.run_id
+     WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
+       AND t.name IN ('edit_file','write_file') AND t.state = 'completed'
+       AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
+     GROUP BY p.run_id),
    counts AS (SELECT q.run_id, (SELECT count(*) FROM tool_calls t
      WHERE t.run_id = q.run_id AND t.name = 'search'
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
@@ -374,23 +378,30 @@ explicit decision. Unequal windows and uncontrolled task mix do not prove
 causality. The old global probe count (271) is a separate context metric,
 not this per-root names-search gate.
 
-Supplemental baseline re-run on 2026-10-14, same historical window,
-read-only schema 44: root edit calls 211 failed / 1,230 executed terminal
-calls (17.1545%), 0 denied, 0 interrupted; roots 190 completed / 254
-started (74.8031%), 0 unfinished; instruction searches 44 attempts across
-108 roots editing below root, maximum 13 in one root, 9 roots exceeding
-one, 0 paths requiring normalization. Root-only edit counts differ from
-the original all-run `edit_file` figures because this metric includes
-`write_file` and excludes children. These are supplemental measurements,
-not rewritten original evidence.
+The earlier supplemental 211/1,230 edit-failure figure (17.1545%) used
+obsolete preview handling and must not be a comparison baseline. The
+corrected fixed-window query, read-only schema 45 on 2026-10-14, reports
+205 failed / 1,222 executed terminal calls (16.7758%), 0 denied and 0
+interrupted. Only actual `edit_file` boolean-true previews are excluded;
+`write_file` has no preview mode, so its unknown dry_run field remains a
+schema failure. Roots: 190/254 completed by cutoff (74.8031%), 0 unfinished
+at cutoff. Historical instruction diagnostics: 44 attempts across 108
+below-root editing roots, maximum 13, 9 over one. These raw counts do not
+prove successful pre-edit discovery or normalized scope coverage. Corrected
+scope qualification below is separate from those historical diagnostics.
 
 
 For the scope exception, use the same terminal editing cohort and count
 instruction-name searches by `(run_id, normalized path)` (absent path is
 `.`). Record each run's distinct roots and count of roots searched more
 than once. A multi-root exception is valid only when the searches cover
-every edited target and its instruction ancestors. Coverage is reviewed
-separately; fewer searches cannot prove compliance. Keep the original
+every edited target and its instruction ancestors. Only successful discovery
+results available to the model before the first actual edit qualify; same-turn
+parallel search/edit calls do not prove the model had instruction evidence.
+The query conservatively counts starts in earlier turns. Later-discovered new
+targets require separate per-target ordering evidence rather than automatic
+qualification. Coverage is reviewed separately, including completed cursor
+pages and applicable instruction reads before each affected target's edit; fewer searches cannot prove compliance. Keep the original
 per-run-over-one diagnostic alongside scope counts rather than relabelling
 all such runs as passing.
 
@@ -400,16 +411,21 @@ q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
-       AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true'
+       AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
      UNION ALL
      SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id
      WHERE rr.child = 0 AND t.name = 'write_file' AND t.state = 'completed'),
-   qualifying AS (SELECT DISTINCT run_id FROM paths
-     WHERE instr(path, '/') > 0 AND path NOT GLOB './*' AND path NOT GLOB '/*'),
+   qualifying AS (SELECT p.run_id, min(t.turn_ordinal) first_edit_turn
+     FROM paths p JOIN tool_calls t ON t.run_id = p.run_id
+     WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
+       AND t.name IN ('edit_file','write_file') AND t.state = 'completed'
+       AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
+     GROUP BY p.run_id),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
-     WHERE t.name = 'search' AND json_extract(t.arguments_json, '\$.mode') = 'names'
+     WHERE t.name = 'search' AND t.state = 'completed' AND t.turn_ordinal < q.first_edit_turn
+       AND json_extract(t.arguments_json, '\$.mode') = 'names'
        AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
        AND (instr(json_extract(t.arguments_json, '\$.query'), 'AGENTS') > 0
          OR instr(json_extract(t.arguments_json, '\$.query'), 'CLAUDE') > 0)
