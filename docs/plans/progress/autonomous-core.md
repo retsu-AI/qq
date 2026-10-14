@@ -1423,4 +1423,6 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 
 - Expanded owner matrix3 tests passes; client38 tests and TUI363 unit+6 integration pass (`ac3-main46-coherent-*`). Initial client35pass/3fail reveals older fixtures manually set holds while their event summaries falsely say no holds; update those summaries to main's authoritative pending_holds and assert delegated holds retained through internal completion. Production reducer unchanged by fixture correction. Initial failed log retained. Full workspace/fmt/Clippy/build follows before push.
 
+- Integrated workspace checks caught the old schema45 doctor example, then its missing sample header after removal. The example now uses explicit build placeholders and current protocol32/descriptor13/schema46. All23 documentation truth tests pass (`ac3-main46-doctor-docs-truth-shared.log`); full workspace gates rerun with the unchanged serial test settings before publication. Earlier failed logs remain diagnostic evidence.
+
 - First integrated workspace attempt stops at root docs-truth:266 passed/1failed/2ignored, because troubleshooting's hard-coded old build/schema45 header contradicts current46. Replace that stale header with `qq version` guidance; retain the readiness-check excerpt and original failed log. No production behavior changed; full workspace rerun follows.
