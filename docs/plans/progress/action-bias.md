@@ -767,3 +767,13 @@ newest last.
   fresh workspace tests pass, including mid-enumeration cancellation and
   stored replay. Clippy flags the new fixture's explicit drop before await;
   a lexical scope now ends the capture lock. Full checks are rerun before push.
+
+
+- Fresh immutable AB2 source 03686601 passes 2,310 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after explicitly cleaning every workspace package's debug artifacts.
+  Twenty-three AB2 fixtures cover live direct complete-page continuation,
+  stored replay and cancellation after entry two. Independent final source
+  review approves. Logs: fresh-complete-page-final-{0,1,2,3,4}.log; receipt
+  fresh-complete-page-final-receipt.json under AB2 target/qq-perf. This fresh
+  source-specific receipt supersedes earlier cache uncertainty. Performance open.
