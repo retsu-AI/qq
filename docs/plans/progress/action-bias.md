@@ -662,3 +662,10 @@ newest last.
 - Independent eighth plan review approves; docs truth 23 passed. Source
   qualification remains attached to the respective slice receipts; no
   performance or deployed observation gate is waived.
+
+- Integrated immutable source e1e56e7a passes all workspace checks: 2,295
+  tests, zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/ignored-files-empty-dirs-gate-{0,1,2,3}.log.
+  Fifteen focused AB2 fixtures pass; independent final review approves the
+  depth/empty-directory continuation fix, instruction file-ignore handling
+  and write-only contract. Matched performance and hosted review remain open.
