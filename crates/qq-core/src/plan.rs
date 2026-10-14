@@ -1725,7 +1725,7 @@ mod tests {
         // changing the encoding (descriptor 14 and prompt 22: read-only child authority, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
+            "a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v14\0".len()..]).unwrap();

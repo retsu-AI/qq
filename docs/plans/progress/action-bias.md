@@ -1267,3 +1267,10 @@ newest last.
   retained byte-window/masking/repair reservations and live/replay bounds.
 - PR remains nondraft. Fresh hosted/Codex review and performance gates
   remain open; this local receipt does not qualify those gates.
+
+- Focused canonical-encoding check identified the descriptor 14/prompt 22
+  digest `a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d`;
+  the inherited prompt-20 golden was replaced. Descriptor 13 prompt 20–22
+  historical fixtures stay unchanged. Independent integration review approves
+  immutable image-manifest propagation and frozen child authority; full gates
+  now run against the corrected immutable source.
