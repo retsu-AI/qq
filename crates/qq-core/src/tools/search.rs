@@ -1084,3 +1084,100 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
     };
     result.map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ab2_depth_excluded_siblings_advance_the_scan_frontier() {
+        let directory = tempfile::tempdir().unwrap();
+        let deep = vec!["a"; MAX_WALK_DEPTH].join("/");
+        std::fs::create_dir_all(directory.path().join(&deep)).unwrap();
+        for index in 0..12 {
+            let child = directory.path().join(&deep).join(format!("d{index:02}"));
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("AGENTS.md"), "excluded\n").unwrap();
+        }
+        std::fs::create_dir(directory.path().join("z")).unwrap();
+        std::fs::write(directory.path().join("z/AGENTS.md"), "reachable\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let cancelled = ToolCancellation::new(crate::RunCancellation::new());
+        let matcher = Matcher::Names(build_regex(r"(^|/)AGENTS\.md$", false).unwrap());
+        let filter = PathFilter::new(&[], &[]).unwrap();
+        let mut cursor = None::<Cursor>;
+        let mut found = Vec::new();
+        let mut completed = false;
+        let mut pages = 0;
+        for _ in 0..4 {
+            pages += 1;
+            let mut walker = Walker {
+                workspace: &workspace,
+                cancelled: &cancelled,
+                matcher: &matcher,
+                filter: &filter,
+                stack: IgnoreStack::open(&workspace, ".", false),
+                budget: ScanBudget::new(
+                    70,
+                    MAX_SCAN_BYTES,
+                    Instant::now() + std::time::Duration::from_secs(60),
+                ),
+                cursor: cursor.as_ref(),
+                limit: 100,
+                max_per_file: 10,
+                context: 0,
+                count_only: false,
+                body: String::new(),
+                body_escaped: 0,
+                body_budget: SEARCH_BOUNDS
+                    .max_bytes
+                    .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES),
+                shown: 0,
+                total: 0,
+                files_with_matches: 0,
+                scanned_files: 0,
+                last_emitted: None,
+                last_scanned: None,
+                stop: None,
+                depth_skipped: 0,
+                buffer: Vec::new(),
+                scratch: String::new(),
+            };
+            run(&mut walker, ".").unwrap();
+            assert!(walker.budget.entries <= 70);
+            found.extend(walker.body.lines().map(str::to_owned));
+            let next = match walker.stop {
+                None => None,
+                Some(Stop::Scan(StopReason::Entries)) => {
+                    assert!(walker.depth_skipped > 0);
+                    let next = Cursor {
+                        path: walker
+                            .last_scanned
+                            .clone()
+                            .expect("depth exclusions must advance the frontier"),
+                        line: u32::MAX,
+                    };
+                    assert!(next.path.ends_with('/'));
+                    if let Some(previous) = &cursor {
+                        assert!(next.path.as_bytes() > previous.path.as_bytes());
+                    }
+                    let encoded = next.encode();
+                    assert_eq!(Cursor::decode(&encoded), Some(next.clone()));
+                    Some(Cursor::decode(&encoded).unwrap())
+                }
+                other => panic!("unexpected stop: {other:?}"),
+            };
+            drop(walker);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => {
+                    completed = true;
+                    break;
+                }
+            }
+        }
+        assert!(completed, "continuation must finish within four pages");
+        assert_eq!(pages, 3);
+        assert_eq!(found, ["z/AGENTS.md"]);
+    }
+}

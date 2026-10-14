@@ -943,3 +943,11 @@ newest last.
   now removes only that previously counted request from slice accounting;
   existing rejected/denied-call semantics remain unchanged. Focused check
   follows; replay/frontier fixes and full qualification remain open.
+
+### 2026-10-14 — AB2 depth-exclusion continuation regression
+
+- Added deterministic actual-walker fixture: 64 ancestors, twelve policy-
+  excluded subtrees, later `z/AGENTS.md`, and a 70-entry scan limit. It
+  requires advancing encoded cursors, at most four pages and one match.
+- Uses the same bounded walker without injecting production configuration;
+  test-first reproduction precedes terminal-subtree cursor correction.
