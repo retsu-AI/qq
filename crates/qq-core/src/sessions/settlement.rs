@@ -95,6 +95,7 @@ pub(super) fn complete_run(
         return Ok(Vec::new());
     }
     let mut events = Vec::new();
+    settle_abandoned_owned_summary(&transaction, store_id, claimed, &mut events)?;
     supersede_pending_steering(
         &transaction,
         store_id,
@@ -121,6 +122,57 @@ pub(super) fn complete_run(
     )?;
     transaction.commit()?;
     Ok(events)
+}
+
+/// Teardown has dropped the summary future, whose asynchronous drop cleanup
+/// may still be queued. Commit that receipt before exposing its owner's finish.
+fn settle_abandoned_owned_summary(
+    transaction: &Connection,
+    store_id: StoreId,
+    prompt: &ClaimedRun,
+    events: &mut Vec<SessionEventEnvelope>,
+) -> Result<Option<RunId>, SessionRuntimeError> {
+    if prompt.identity.kind != RunKind::Prompt {
+        return Ok(None);
+    }
+    let mut statement = transaction.prepare_cached(
+        "SELECT step.id, step.command_id FROM runs step JOIN runs owner
+            ON owner.id = step.auto_compaction_for_run_id
+         WHERE owner.id = ?1 AND owner.session_id = ?2 AND owner.kind = 'prompt'
+            AND owner.status = 'running' AND owner.outcome_json IS NULL
+            AND step.session_id = owner.session_id AND step.kind = 'compaction'
+            AND step.status = 'running' AND step.outcome_json IS NULL
+         LIMIT 2",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                prompt.identity.run_id.to_string(),
+                prompt.identity.session_id.to_string()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if rows.len() > 1 {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    let Some((run_id, command_id)) = rows.first() else {
+        return Ok(None);
+    };
+    let mut summary = prompt.clone();
+    summary.identity.run_id = parse_id(run_id)?;
+    summary.identity.command_id = parse_id(command_id)?;
+    summary.identity.kind = RunKind::Compaction;
+    events.push(expect_settled(settle_run(
+        transaction,
+        store_id,
+        &summary,
+        RunOutcome::Cancelled,
+        None,
+        SettlementCause::Recovery,
+    )?)?);
+    Ok(Some(summary.identity.run_id))
 }
 
 /// Who is settling a started run. The executor that owns the run knows the
@@ -243,14 +295,42 @@ pub(super) fn settle_run(
         [claimed.identity.session_id.to_string()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
     )?;
-    let (next_cost, next_cost_known) = if saw_turn {
-        match cost.and_then(|cost| current_cost.checked_add(cost)) {
+    // Recovery has no executor accumulator. Owned summaries durably record
+    // their aggregate before settlement, including unknown pending requests.
+    let (session_cost, session_saw_turn) = if cause == SettlementCause::Recovery {
+        transaction
+            .query_row(
+                "SELECT estimated_cost_usd_nanos,
+                    usage_json IS NULL OR EXISTS(SELECT 1 FROM model_turns WHERE run_id = runs.id)
+                 FROM runs WHERE id = ?1 AND kind = 'compaction'
+                    AND auto_compaction_for_run_id IS NOT NULL",
+                [claimed.identity.run_id.to_string()],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?
+            .unwrap_or((cost, saw_turn))
+    } else {
+        (cost, saw_turn)
+    };
+    let (next_cost, next_cost_known) = if session_saw_turn {
+        match session_cost.and_then(|cost| current_cost.checked_add(cost)) {
             Some(cost) if current_cost_known => (cost, true),
             _ => (current_cost, false),
         }
     } else {
         (current_cost, current_cost_known)
     };
+    // Internal in-run compaction owns spend but never owns the prompt's
+    // active slot. Charge the session under the same exact-once settlement
+    // guard independently of releasing that slot.
+    transaction.execute(
+        "UPDATE sessions SET estimated_cost_usd_nanos = ?2, cost_known = ?3 WHERE id = ?1",
+        params![
+            claimed.identity.session_id.to_string(),
+            next_cost,
+            next_cost_known
+        ],
+    )?;
     // Terminal accounting owns the final per-turn figure only when a model
     // turn completed. No completed turn preserves an earlier committed value;
     // an unmeasured completed turn explicitly clears it. Recovery never held
@@ -290,15 +370,13 @@ pub(super) fn settle_run(
         "UPDATE sessions
              SET active_run_id = NULL,
                   status = CASE WHEN queued_prompts > 0 THEN 'queued' ELSE 'idle' END,
-                  estimated_cost_usd_nanos = ?4,
-                  cost_known = ?5,
                   context_tokens = CASE
-                      WHEN ?6 AND ?7 AND model IS ?9
-                      THEN ?8
+                      WHEN ?4 AND ?5 AND model IS ?7
+                      THEN ?6
                       ELSE context_tokens
                   END,
                   pending_context_overflow_basis_json = COALESCE(
-                      ?10, pending_context_overflow_basis_json
+                      ?8, pending_context_overflow_basis_json
                   ),
                   updated_at_ms = ?2
              WHERE id = ?1 AND active_run_id = ?3",
@@ -306,8 +384,6 @@ pub(super) fn settle_run(
             claimed.identity.session_id.to_string(),
             now,
             claimed.identity.run_id.to_string(),
-            next_cost,
-            next_cost_known,
             claimed.identity.kind == RunKind::Prompt,
             saw_turn,
             reported_context_tokens,
@@ -596,6 +672,11 @@ pub(super) fn settle_panicked_execution(
     // new terminal event: a concurrent cancel may already have settled the
     // original while its task still owns the in-memory registration.
     let mut run_ids = vec![original.identity.run_id];
+    if let Some(summary) =
+        settle_abandoned_owned_summary(&transaction, store_id, original, &mut events)?
+    {
+        run_ids.push(summary);
+    }
     if let Some(active_run) = active_run {
         let active = transaction
             .query_row(

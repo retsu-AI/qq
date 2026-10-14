@@ -5995,3 +5995,161 @@ async fn compacting_after_a_slice_report_replays_the_live_context() {
         harness.session_id,
     );
 }
+
+#[tokio::test]
+async fn snapshot_run_tail_retains_the_foreground_receipt_after_many_owned_compactions() {
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    let session_id = prompt.identity.session_id;
+    let run_id = prompt.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            for index in 0..258 {
+                let internal = RunId::generate().unwrap().to_string();
+                connection.execute(
+                    "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                 assistant_message_id, status, kind, created_at_ms, auto_compaction_for_run_id)
+                 VALUES (?1, ?2, ?1, ?1, ?1, 'completed', 'compaction', ?3, ?4)",
+                    params![
+                        internal,
+                        session_id.to_string(),
+                        i64::MAX - 258 + index,
+                        run_id.to_string()
+                    ],
+                )?;
+            }
+            for finished in [false, true] {
+                if finished {
+                    connection.execute(
+                        "UPDATE runs SET status = 'cancelled', outcome_json = ?2,
+                     estimated_cost_usd_nanos = 1234567, finished_at_ms = 1 WHERE id = ?1",
+                        params![
+                            run_id.to_string(),
+                            serde_json::to_string(&RunOutcome::Cancelled).unwrap()
+                        ],
+                    )?;
+                    connection.execute(
+                        "UPDATE sessions SET active_run_id = NULL WHERE id = ?1",
+                        [session_id.to_string()],
+                    )?;
+                }
+                for limit in [1, 2, 256] {
+                    let mut budget = snapshots::SnapshotBudget::new(16 * 1024 * 1024);
+                    let body = snapshots::load_session_snapshot(
+                        connection,
+                        session_id,
+                        limit,
+                        &mut budget,
+                    )?;
+                    assert_eq!(
+                        body.runs.len(),
+                        usize::from(limit),
+                        "the run tail stays bounded"
+                    );
+                    let receipt = body
+                        .runs
+                        .iter()
+                        .find(|run| run.id == run_id)
+                        .expect("foreground receipt survives newer internal steps");
+                    if finished {
+                        assert_eq!(receipt.outcome, Some(RunOutcome::Cancelled));
+                        assert_eq!(receipt.estimated_cost_usd_nanos, Some(1234567));
+                    } else {
+                        assert_eq!(receipt.status, RunStatus::Running);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_messages() {
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    let session_id = prompt.identity.session_id;
+    let owner = prompt.identity.run_id;
+    store.call(Priority::Control,move |connection| {
+        for index in 0..258 {
+            let id = RunId::generate().unwrap().to_string();
+            connection.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,kind,created_at_ms,auto_compaction_for_run_id)
+                VALUES (?1,?2,?1,?1,?1,'completed','compaction',?3,?4)",
+                params![id,session_id.to_string(),i64::MAX-258+index,owner.to_string()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    store
+        .finish_run(
+            &prompt,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET estimated_cost_usd_nanos = 7654321 WHERE id = ?1",
+                [owner.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let queued = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("queued later")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id: later, .. } = queued.receipt.outcome else {
+        panic!("queued")
+    };
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: later },
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, move |connection| {
+            for limit in [256, 2, 1] {
+                for bytes in [16 * 1024 * 1024, 1024] {
+                    let mut budget = snapshots::SnapshotBudget::new(bytes);
+                    let body = snapshots::load_session_snapshot(
+                        connection,
+                        session_id,
+                        limit,
+                        &mut budget,
+                    )?;
+                    assert!(body.runs.len() <= usize::from(limit));
+                    for message in &body.messages {
+                        assert!(
+                            body.runs.iter().any(|run| run.id == message.run_id),
+                            "every displayed message has its receipt: limit={limit},bytes={bytes}"
+                        );
+                    }
+                    if limit == 256 && bytes > 1024 {
+                        assert!(body.messages.iter().any(|message| message.run_id == owner));
+                        let receipt = body.runs.iter().find(|run| run.id == owner).unwrap();
+                        assert_eq!(receipt.outcome, Some(RunOutcome::Completed));
+                        assert_eq!(receipt.estimated_cost_usd_nanos, Some(7654321));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}

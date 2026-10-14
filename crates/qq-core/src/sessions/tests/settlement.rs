@@ -2732,6 +2732,9 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
         )
         .unwrap();
     connection
+        .execute("DROP INDEX runs_owned_compaction", [])
+        .unwrap();
+    connection
         .execute(
             "ALTER TABLE runs DROP COLUMN auto_compaction_for_run_id",
             [],

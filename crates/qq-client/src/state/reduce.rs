@@ -105,6 +105,42 @@ pub enum StateEffect {
 pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
+    /// Rebuild a replaced body from retained events already observed live.
+    /// Keep local unread state and drafts; preserve receipt refresh and deletion effects.
+    pub fn replay_event(
+        &mut self,
+        envelope: &SessionEventEnvelope,
+        context: ReduceContext<'_>,
+    ) -> StateEffects {
+        let local = self.get_mut(&envelope.session_id).map(|view| {
+            (
+                view.unread,
+                view.finished_unread,
+                std::mem::take(&mut view.drafts),
+            )
+        });
+        let effects = self.reduce_event(envelope, context);
+        if let Some((unread, finished_unread, drafts)) = local
+            && let Some(view) = self.get_mut(&envelope.session_id)
+        {
+            view.unread = unread;
+            view.finished_unread = finished_unread;
+            view.drafts = drafts;
+        }
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                effect @ (StateEffect::RequestSnapshot(_)
+                | StateEffect::Refocus(_)
+                | StateEffect::SessionRemoved { .. }) => Some(effect),
+                StateEffect::Notice { .. }
+                | StateEffect::Attention(_)
+                | StateEffect::AdoptCreated(_)
+                | StateEffect::SubmitDraft { .. } => None,
+            })
+            .collect()
+    }
+
     /// Apply one durable event. The caller has already deduplicated by cursor
     /// and checked the workspace.
     pub fn reduce_event(
@@ -173,14 +209,11 @@ impl SessionStore {
             } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if let Some(view) = self.get_mut(&session_id) {
-                    let cost_before = view
-                        .summary
-                        .accounting
-                        .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                        .unwrap_or(view.summary.estimated_cost_usd_nanos);
                     let stats = view.runs.entry(*run_id).or_default();
                     stats.started_at_ms = Some(envelope.occurred_at_ms);
-                    stats.cost_usd_nanos = cost_before;
+                    stats.owned_step = session
+                        .active_run_id
+                        .is_some_and(|active| active != *run_id);
                     stats.plan = plan.as_deref().map(plan_label);
                     if let Some(messages) = view.messages.as_mut() {
                         for message in messages.iter_mut().filter(|message| {
@@ -630,11 +663,13 @@ impl SessionStore {
                     if let Some(route) = &model.model {
                         stats.resolved_route = Some(route.clone());
                     }
-                    stats.turns = stats.turns.max(*turn_ordinal);
-                    if let Some(cost) = estimated_cost_usd_nanos {
+                    if *turn_ordinal > stats.turns
+                        && let Some(cost) = estimated_cost_usd_nanos
+                    {
                         stats.live_cost_usd_nanos =
                             Some(stats.live_cost_usd_nanos.unwrap_or(0).saturating_add(*cost));
                     }
+                    stats.turns = stats.turns.max(*turn_ordinal);
                 }
             }
             // The run-level context audit is not session state: old persisted
@@ -654,12 +689,33 @@ impl SessionStore {
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
-                let cost_before = self
-                    .get(&session_id)
-                    .and_then(|view| view.runs.get(run_id))
-                    .and_then(|stats| stats.cost_usd_nanos);
+                // A run that finishes while another run holds the session is
+                // bookkeeping, not the end of the visible work: an in-run
+                // compaction step (its prompt run keeps the slot; a retried
+                // summarizer outage reports through the prompt run's
+                // `run_turn_retrying` and final outcome instead), or a queued
+                // prompt cancelled or interrupted behind the active run. No
+                // attention, unread count or notice, and the active run's
+                // live tool and approval state stay.
+                let owned_step = session
+                    .active_run_id
+                    .is_some_and(|active| active != *run_id)
+                    || self
+                        .get(&session_id)
+                        .and_then(|view| view.runs.get(run_id))
+                        .is_some_and(|stats| stats.owned_step);
+                let owned_step = owned_step
+                    || self.get(&session_id).is_some_and(|view| {
+                        // Cancelling the last queued prompt has no RunStarted;
+                        // its queue transition still releases the idle slot.
+                        let finished_queued = view.summary.queued_prompts > session.queued_prompts;
+                        !finished_queued
+                            && view
+                                .foreground_run_id
+                                .is_some_and(|foreground| foreground != *run_id)
+                    });
                 self.upsert_summary((**session).clone(), context.models, 0);
-                if !context.attentive {
+                if !context.attentive && !owned_step {
                     effects.push(StateEffect::Attention(Attention::RunFinished {
                         session_title: session.title.clone(),
                     }));
@@ -667,30 +723,27 @@ impl SessionStore {
                 let Some(view) = self.get_mut(&session_id) else {
                     return effects;
                 };
-                if !shown {
+                if !shown && !owned_step {
                     view.finished_unread = true;
                     view.unread += 1;
                 }
-                let cost_after = session
-                    .accounting
-                    .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                    .unwrap_or(session.estimated_cost_usd_nanos);
                 let stats = view.runs.entry(*run_id).or_default();
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
                 stats.usage = *usage;
-                stats.cost_usd_nanos = match (cost_before, cost_after) {
-                    (Some(before), Some(after)) => Some(after.saturating_sub(before)),
-                    _ => None,
-                };
+                // A session delta includes owned summaries and concurrent
+                // routing/review spend. Only the run snapshot is authoritative.
+                stats.cost_usd_nanos = None;
                 // An in-run compaction run finishes while its prompt run
                 // still holds the session; that run's activity stays.
                 if view.activity.is_some_and(|(active, _)| active == *run_id) {
                     view.activity = None;
                 }
-                view.live.active_tool = None;
-                view.live.awaiting_approval.clear();
-                view.live.with_delegate.clear();
+                if !owned_step {
+                    view.live.active_tool = None;
+                    view.live.awaiting_approval.clear();
+                    view.live.with_delegate.clear();
+                }
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {
                     reasoning.streaming = false;
                 }
@@ -700,7 +753,9 @@ impl SessionStore {
                     let retained: HashSet<_> =
                         messages.iter().map(|message| message.run_id).collect();
                     view.reasoning.retain(|run, _| retained.contains(run));
-                    view.runs.retain(|run, _| retained.contains(run));
+                    view.runs.retain(|run, stats| {
+                        retained.contains(run) || (stats.owned_step && stats.outcome.is_none())
+                    });
                     let state = match outcome {
                         RunOutcome::Completed => MessageState::Complete,
                         RunOutcome::Cancelled => MessageState::Cancelled,
@@ -729,7 +784,20 @@ impl SessionStore {
                         }
                     }
                 }
-                // One draft per run so each becomes its own run in order.
+                if owned_step {
+                    return effects;
+                }
+                if (shown || view.is_warm())
+                    && let Some(workspace_id) = context.workspace_id
+                {
+                    let mut request = body_request(workspace_id, session_id);
+                    if !shown {
+                        request.focused_session_id = None;
+                        request.include_sessions.push(session_id);
+                    }
+                    effects.push(StateEffect::RequestSnapshot(request));
+                }
+                // One draft per foreground run, in order.
                 if session.active_run_id.is_none()
                     && session.queued_prompts == 0
                     && let Some(text) = view.drafts.pop_front()

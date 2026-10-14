@@ -188,7 +188,25 @@ xtask/
   attention, refocus, snapshot request, draft submission, session removed)
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
-  the network, the clock, or rendering state. Surfaces supply a
+  the network, the clock, or rendering state.
+  Views retain the observed foreground run identity across idle summaries,
+  keeping late identified internal completions out of attention and draft
+  handoff. Body snapshots preserve observed timing and priced-turn ordinals;
+  replay charges each ordinal once. Cancelling the last queued prompt releases
+  an idle draft even when that prompt never started. Terminal run cost comes
+  from the run snapshot, not the session total that also includes compaction
+  spend. Snapshot admission reserves metadata for the active run and every
+  displayed message's run, charging each new receipt with its first message.
+  Bounded newer internal rows fill remaining slots; an empty body may load the
+  last visible terminal receipt. Row or byte pressure drops older messages with
+  their unadmitted receipts rather than displaying an answer without its cost. Focused completion requests a body refresh; warm background completion
+  requests an included body without changing focus. Included-body refreshes
+  replay newer retained events just as focused refreshes do, preserving unread
+  badges and drafts without repeating notices, attention or draft submission.
+  Replayed deletions apply removal cleanup, refocus and any needed replacement body fetch. If replay warms a previously
+  cold body, it requests one fresh terminal receipt for missing run pricing. Late responses do not
+  replace a body or its summary already loaded through a newer cursor. Terminal cost
+  remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
   pins the projection of every `event_*` wire fixture, natively and on
@@ -877,12 +895,31 @@ One durable run follows a guarded loop:
    cannot shift replay off the live splice (ENG-991). In-run steps do not
    draw on `MAX_COMPACTION_STEPS`, which bounds one between-run fold; each
    must still shrink the context and is charged to the caller's token and
-   cost limits like any turn. Empty-output cap raises
+   cost limits like any turn. Each summarizer subrequest checks the current
+   caller remainder and original deadline before sending. Completed and
+   usage-bearing truncated subturns persist their actual assistant/replay
+   data and individual usage/cost before another request. Summarizer tool
+   calls remain evidence and never execute. An admitted request marks the
+   internal run's aggregate spend unknown until its receipt commits; a
+   later fault, cancellation or restart retains the measured prefix rows
+   without claiming that prefix is the whole attempt. Internal settlement
+   charges session cost once without releasing the prompt's active slot;
+   child-spend receipts include compactions belonging to the exact owned
+   runs without counting them as children. Terminal internal runs refuse
+   later request-start and model-turn writes. Empty-output cap raises
    (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
-   completed turn restores the allowance. A rejected or stalled
-   summarizer settles its run failed/cancelled, writes no marker, and the
-   prompt run fails closed with the reason — the overflowing request is
-   never sent. Cancelling the prompt run cascades to its in-run compaction.
+   completed turn restores the allowance. The summarizer is under the same
+   turn recovery as a model turn (ADR-0048 § 2): a transient provider fault
+   settles that compaction run failed and the loop re-issues the step after
+   the `TurnRecoveryPolicy` backoff (`run_turn_retrying`); once
+   `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
+   earlier turn durable. Token or cost caps stop with `budget_exhausted`
+   when a failed attempt's spend is unknown; retry does not renew the
+   allowance or deadline. A rejected summary settles its internal run failed,
+   writes no marker, and fails the prompt with the reason; the overflowing
+   work request is never sent. A pending summary stops with the caller's
+   cancellation or original deadline, yielding Cancelled or BudgetExhausted
+   respectively. Cancelling the prompt cascades to its in-run compaction.
    Direct `qq ask` runs have no compactor and fail as before. The prompt
    run reports `RunActivity::Compacting` before it asks and
    `WaitingForProvider` at its next turn; every compaction run, between-run
@@ -1337,6 +1374,14 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 `run_finished.final_output` and `RunSnapshot.final_output`. No verdict is
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
+
+After cancellation, deadline teardown or panic, a started prompt's terminal
+transaction settles its abandoned in-run summary first. This preserves the
+summary's durable measured prefix and unknown pending-send aggregate, and
+makes the owned child receipt readable when the prompt's terminal event arrives.
+Delayed drop cleanup observes the terminal row and adds no event or charge. The
+visible session last outcome excludes owned compaction steps, so their newer
+row or equal timestamp cannot hide the owning prompt's terminal reason.
 
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal

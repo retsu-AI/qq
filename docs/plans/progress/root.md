@@ -515,3 +515,27 @@ User-authorized docs-only slice owns autonomous-core plan/ledger, retirement of 
 ### 2026-10-13 — Full autonomous-core implementation stack
 
 User authorizes completing the entire autonomous-core plan as stacked PRs, including its referenced goal slices and review repairs until Codex bot approval on each opening description. Isolated `.worktrees/autonomous-core-stack` begins on consolidation #291 (`ee8bffa5`); this intentionally uses the reviewed parent branch rather than claiming it merged. AC17/ENG-872 starts first; source, safety caps and shipped fast-path behavior remain explicit gates. AC3 in `.worktrees/ac3` remains separately owned; coordinate its reviewed branch before dependent run-loop changes. Root/shared protocol, schema, CI and design changes belong to the respective documented stack slices, with reservations recorded before editing. Full goal retains resource/performance, live AP5/G5/Goal7 evidence and final design/doc collapse; no qualification is waived by source completion.
+
+### 2026-10-13 — AC3 dependent integration and spend repair ownership
+
+The full-stack executor owns `fix/eng-1029-ac3-durable-summary-spend` in `.worktrees/autonomous-core-stack`, based on qualified AC17 #294 (`10ad59a9`). Read-only audit of AC3 #279 (`455d3181`) approves adopting its three commits as inputs for repair, not submitting unchanged. No AC3 writing agent is live in this thread; its original worktree stays untouched and its draft remains open until replacement is qualified. Integration preserves newer consolidation/AC17 ledger receipts.
+
+Scope includes `lib.rs`, `runtime/{compaction,run_loop,budget}.rs`, `sessions/{in_run_compaction,store,streaming,compaction,settlement}.rs` as needed, deterministic soak/accounting/replay tests, architecture/protocol design amendments and autonomous-core ledger. Known usage from completed summarizer subturns must be durable before the next request; unknown aggregate usage remains unknown. Prompt caller token/cost remainder must constrain both successful compaction and failed retries without double-counting session spend. Deadline, cancellation, unchanged request retries and persisted replay need qualification. Existing model-turn rows provide the initial persistence seam; no protocol/schema/ADR number bump reserved absent a demonstrated need. Capture `turn_overhead` baseline before source changes.
+
+- AC3 accounting scope extends to `sessions/deliveries.rs` and focused delegation/spend tests: owned prompt spend must include internal compactions exactly once so a parent cannot regrant a child’s spent token/cost allowance. This is a concrete safety finding from independent prototype review, not a new public boundary.
+
+### 2026-10-13 — AC3 owned compaction lookup schema reservation
+
+AC3 reserves session-store schema 44 → 45 for a non-unique partial `runs_owned_compaction` index on `auto_compaction_for_run_id`, restricted to internal compaction owners. The new exact child-spend receipt needs this lookup; test-first query-plan evidence currently shows `SCAN runs`, which scales with stored history. Own `sessions/store/schema.rs`, migration/receipt tests, protocol schema-history and guide version amendments. No new columns, wire or descriptor change. Upgrade/reopen/data-preservation and index-use evidence are required before push.
+
+### 2026-10-13 — AC3 shared client regression ownership
+
+AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existing ModelTurnCompleted/RunFinished projection: internal measured summarizer turns must remain scoped to their run, serialized replay must match live application, and internal failure must preserve the prompt's activity/approval state. No client wire or production seam change is authorized absent a concrete failing regression.
+
+AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
+
+AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
+
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.

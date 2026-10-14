@@ -1356,9 +1356,64 @@ impl Store {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            persist_model_turn(connection, store_id, &claimed, &turn)
+            persist_model_turn(connection, store_id, &claimed, &turn, true)
         })
         .await
+    }
+
+    /// Internal summaries never join the prompt transcript. Their own text
+    /// is bounded by the summarizer, not the prompt's context reservation.
+    pub(super) async fn persist_in_run_summary_turn(
+        &self,
+        claimed: &ClaimedRun,
+        turn: ModelTurnCommit,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            if claimed.identity.kind != RunKind::Compaction {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            // The worker executes this check and persistence without another
+            // job interleaving. A dropped executor cannot append after settlement.
+            let running = connection
+                .query_row(
+                    "SELECT status = 'running' AND outcome_json IS NULL
+                     AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL
+                     FROM runs WHERE id = ?1 AND session_id = ?2",
+                    params![
+                        claimed.identity.run_id.to_string(),
+                        claimed.identity.session_id.to_string()
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !running {
+                return Err(SessionRuntimeError::Unavailable);
+            }
+            persist_model_turn(connection, store_id, &claimed, &turn, false)
+        })
+        .await
+    }
+
+    /// A send has not completed yet: any earlier exact usage is only a
+    /// prefix. Keep its turn rows, but mark aggregate spend unknown before
+    /// the provider is called so cancellation/recovery cannot claim zero.
+    pub(super) async fn start_in_run_summary_request(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<(), SessionRuntimeError> {
+        let run_id = claimed.identity.run_id.to_string();
+        self.call(Priority::Output, move |connection| {
+            let updated = connection.execute(
+                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL
+                 WHERE id = ?1 AND status = 'running' AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL",
+                [run_id],
+            )?;
+            if updated != 1 { return Err(SessionRuntimeError::Unavailable); }
+            Ok(())
+        }).await
     }
 
     /// Moves the session's prune watermark to `through_turn` of the claimed
@@ -1916,7 +1971,37 @@ impl Store {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_run(connection, store_id, &claimed, outcome, None)
+            let (usage_json, estimated_cost_usd_nanos, context_tokens, has_turns): (
+                Option<String>,
+                Option<u64>,
+                Option<u64>,
+                bool,
+            ) = connection.query_row(
+                "SELECT usage_json, estimated_cost_usd_nanos, context_tokens,
+                 EXISTS(SELECT 1 FROM model_turns WHERE run_id = runs.id) FROM runs WHERE id = ?1",
+                [claimed.identity.run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let saw_turn = usage_json.is_none() || has_turns;
+            let usage = usage_json
+                .map(|json| serde_json::from_str(&json))
+                .transpose()?;
+            let accounting = RunAccounting {
+                usage,
+                estimated_cost_usd_nanos,
+                context_tokens,
+                saw_turn,
+                request_basis: context_occupancy_basis(
+                    qq_protocol::ContentHash::from_bytes([0; 32]),
+                    crate::runtime::PreparedStaticPrefix::new(
+                        qq_protocol::ContentHash::from_bytes([0; 32]),
+                        None,
+                    ),
+                    0,
+                ),
+                final_output: None,
+            };
+            complete_run(connection, store_id, &claimed, outcome, Some(accounting))
         })
         .await
     }

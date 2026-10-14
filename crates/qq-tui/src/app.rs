@@ -864,7 +864,7 @@ impl App {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) -> Effects {
+    fn apply_snapshot(&mut self, mut snapshot: WorkspaceSnapshot) -> Effects {
         let initial = self.workspace_id.is_none();
         if self
             .workspace_id
@@ -873,7 +873,28 @@ impl App {
             self.set_warning("server returned a snapshot for another workspace".to_owned());
             return Effects::redraw(Redraw::Scheduled);
         }
+        // A replaced body already loaded through a newer cursor needs no
+        // replay from this older response; keep its authoritative receipt.
+        let body_is_current = |body: &qq_protocol::SessionSnapshot| {
+            self.sessions
+                .get(&body.summary.id)
+                .is_none_or(|view| view.loaded_through <= snapshot.cursor.sequence)
+        };
+        snapshot.included.retain(body_is_current);
+        if snapshot
+            .focused
+            .as_ref()
+            .is_some_and(|body| !body_is_current(body))
+        {
+            snapshot.focused = None;
+        }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
+        let installed_sessions: Vec<_> = snapshot
+            .included
+            .iter()
+            .map(|body| body.summary.id)
+            .chain(snapshot_focus)
+            .collect();
         // A late snapshot for a session no longer shown is stale navigation
         // output; installing it would yank focus back.
         if !initial
@@ -892,22 +913,32 @@ impl App {
             return Effects::redraw(Redraw::Scheduled);
         }
 
+        let mut rewarmed_sessions = installed_sessions
+            .iter()
+            .copied()
+            .filter(|session| {
+                self.sessions
+                    .get(session)
+                    .is_none_or(|view| !view.is_warm())
+            })
+            .collect::<Vec<_>>();
         let snapshot_sequence = snapshot.cursor.sequence;
         // Every body this snapshot installs replaces live state with a view
         // as of its cursor; events after it that already reached the store
         // are replayed below so a stale body never wins over them.
-        let installed: std::collections::HashSet<SessionId> = snapshot
-            .included
-            .iter()
-            .chain(snapshot.focused.as_ref())
-            .map(|body| body.summary.id)
-            .collect();
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
             self.workspace_path = snapshot.workspace.path;
         }
         if initial || snapshot_sequence >= self.last_sequence {
             for summary in snapshot.sessions {
+                if self
+                    .sessions
+                    .get(&summary.id)
+                    .is_some_and(|view| view.loaded_through > snapshot_sequence)
+                {
+                    continue;
+                }
                 self.sessions
                     .upsert_summary(summary, &self.models, snapshot_sequence);
             }
@@ -945,13 +976,46 @@ impl App {
             .recent_events
             .iter()
             .filter(|event| {
-                event.cursor.sequence > snapshot_sequence && installed.contains(&event.session_id)
+                event.cursor.sequence > snapshot_sequence
+                    && installed_sessions.contains(&event.session_id)
             })
             .cloned()
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            effects.extend(self.reduce_event(&event));
+            let replayed = self.sessions.replay_event(
+                &event,
+                ReduceContext {
+                    focused: self.view().transcript(),
+                    attentive: self.terminal_focused,
+                    workspace_id: self.workspace_id,
+                    capabilities: self.capabilities.as_ref(),
+                    models: &self.models,
+                    caused_by_me: false,
+                },
+            );
+            for effect in replayed {
+                match effect {
+                    StateEffect::RequestSnapshot(request) => {
+                        if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        } else if let Some(index) = rewarmed_sessions
+                            .iter()
+                            .position(|session| *session == event.session_id)
+                        {
+                            // One latest body fetch covers all retained terminal events.
+                            rewarmed_sessions.swap_remove(index);
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        }
+                    }
+                    structural => {
+                        effects.extend(self.apply_state_effects(std::iter::once(structural)))
+                    }
+                }
+            }
+            if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                self.refresh_session_picker();
+            }
         }
         effects
     }
@@ -977,6 +1041,36 @@ impl App {
                 caused_by_me,
             },
         );
+        let effects = self.apply_state_effects(reduced);
+        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
+            && side_question.state != SideQuestionState::Running
+            && self
+                .acknowledged_side_questions
+                .get(&side_question.session_id)
+                == Some(&side_question.id)
+        {
+            self.acknowledged_side_questions
+                .remove(&side_question.session_id);
+        }
+        // Summaries and deletions reshape the tree the picker lists.
+        if matches!(
+            envelope.event,
+            SessionEvent::SessionCreated { .. }
+                | SessionEvent::SessionUpdated { .. }
+                | SessionEvent::SessionDeleted { .. }
+                | SessionEvent::PromptQueued { .. }
+                | SessionEvent::RunStarted { .. }
+                | SessionEvent::CancellationRequested { .. }
+                | SessionEvent::SessionCompacted { .. }
+                | SessionEvent::SessionCompactionRolledBack { .. }
+                | SessionEvent::RunFinished { .. }
+        ) {
+            self.refresh_session_picker();
+        }
+        effects
+    }
+
+    fn apply_state_effects(&mut self, reduced: impl IntoIterator<Item = StateEffect>) -> Effects {
         let mut effects = Effects::none();
         for effect in reduced {
             match effect {
@@ -1020,31 +1114,6 @@ impl App {
                     }
                 }
             }
-        }
-        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
-            && side_question.state != SideQuestionState::Running
-            && self
-                .acknowledged_side_questions
-                .get(&side_question.session_id)
-                == Some(&side_question.id)
-        {
-            self.acknowledged_side_questions
-                .remove(&side_question.session_id);
-        }
-        // Summaries and deletions reshape the tree the picker lists.
-        if matches!(
-            envelope.event,
-            SessionEvent::SessionCreated { .. }
-                | SessionEvent::SessionUpdated { .. }
-                | SessionEvent::SessionDeleted { .. }
-                | SessionEvent::PromptQueued { .. }
-                | SessionEvent::RunStarted { .. }
-                | SessionEvent::CancellationRequested { .. }
-                | SessionEvent::SessionCompacted { .. }
-                | SessionEvent::SessionCompactionRolledBack { .. }
-                | SessionEvent::RunFinished { .. }
-        ) {
-            self.refresh_session_picker();
         }
         effects
     }

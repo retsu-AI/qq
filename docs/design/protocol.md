@@ -261,6 +261,11 @@ Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 Schema 45 adds `tool_calls.approval_delegated`, behind
 `SessionSummary.pending_holds`; holds written before it read as waiting for
 a human.
+Schema 46 adds the non-unique partial `runs_owned_compaction` index for
+exact owner-run accounting of internal compaction attempts. Completed, failed
+and cancelled attempts enter their owner's child-spend receipt; manual and
+unrelated compactions do not. Unknown usage or cost remains unknown. Internal
+attempts do not consume the child-count or depth allowance. No wire shape changes.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -1485,7 +1490,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `steering_superseded` | `run_id`, `message_id` | Run finished before the steering applied |
 | `run_interrupted` | `run_id`, `turn_ordinal` | An interrupting steer aborted the turn in flight |
 | `run_output_truncated` | `run_id`, `turn_ordinal`, `continuation` | The provider cut the turn at its output token limit; the partial turn is committed and the run resumes on the next turn |
-| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes |
+| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes. The in-run compaction step before a turn is retried the same way with its own count: nothing is committed, the same summarizer request is re-sent, and `message` names the summarizer |
 | `run_audit_started` | `run_id`, `audit_session_id` | A read-only audit child is checking the run's candidate final answer |
 | `run_audit_completed` | `run_id`, `audit` | The audit settled (`pass`, `revised`, or `unavailable`); on `revised` the run continues once with the findings |
 | `assistant_message_started` | `message` | A model turn's message begins streaming |
