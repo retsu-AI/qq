@@ -1442,3 +1442,9 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Recorder unrelated timeout investigation finds unchanged runtime source, no feature difference, high I/O PSI. The representative existing progress case passes serially24.26s with its unchanged30s timeout (`ci-fixture-progress-serial.log`). Preserve failed parallel logs; serial full workspace qualification follows, no timeout extension or load exemption.
 
 - Final typed replay-refresh source qualifies:2,289 passed/0 failed/14 ignored (one nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, build. Serial workspace run keeps all original timeouts; the previously failing progress cases pass. Client34/TUI352 unit+6 integration pass. Independent final replay-refresh review Approve; raw `ac3-rewarmed-final-{fmt,tests,clippy,build}.log`. Publish and request fresh opening review; comparable measurements and full-plan gates remain open.
+
+### 2026-10-13 — Common compiled fixture final qualification
+
+- Recorder source e29046dd and AC3 parent eff40ce1 integrated at9b5bf0bb: serial workspace2,289 passed/0 failed/14 ignored (one nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, build. All16 recorder and4 source-fixture tests plus focused actionlint pass. Original runtime timeouts unchanged.
+- Raw `ci-common-fixture-serial-{fixture-tests,recorder-tests,actionlint,fmt,tests,clippy,build}.log` under root `target/qq-perf/ac3-stack-2026-10-13/`. Compiled source closure and embedded digest verified against actual optimized artifact; independent fixture review Approve. Prior differing-fixture recordings remain confounded diagnostics, not runtime qualification.
+- Publish verified fixture repair and request fresh Codex opening review. A new common-fixture controlled recording and all broader autonomous-core gates remain pending.
