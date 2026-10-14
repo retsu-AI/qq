@@ -23,7 +23,17 @@ async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
         Ok(())
     }).await.unwrap();
     let header = "search . mode=names next=YWJjADA\n";
-    let page = format!("{header}{}", "x".repeat(12_000 - header.len()));
+    let body_bytes = 12_000 - header.len();
+    let mut page = header.to_owned();
+    for index in 0..body_bytes / 200 {
+        page.push_str(&format!("{index:03}{}\n", "x".repeat(196)));
+    }
+    let tail = body_bytes % 200;
+    if tail > 0 {
+        page.push_str(&"x".repeat(tail - 1));
+        page.push('\n');
+    }
+    assert_eq!(page.len(), 12_000);
     let calls = (0..16_u8)
         .map(|index| RuntimeToolCall {
             id: ToolCallId::from_bytes([index + 1; 16]),

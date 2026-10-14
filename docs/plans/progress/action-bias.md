@@ -969,3 +969,9 @@ newest last.
   original-main generic-floor projector for recorded descriptor 13/14
   prompt versions through 19. Newer ambiguous identities still require the
   explicit projection-evidence repair before this wave can be published.
+
+- The first restoration run retained the eighth page but exposed a fixture
+  assumption: one 12KiB row takes the legacy long-line truncation path,
+  rather than the expected recall-marker path. The fixture now uses complete
+  <=200-byte rows at the same exact 12,000-byte page size. Production legacy
+  behavior remains the preserved original-main implementation.
