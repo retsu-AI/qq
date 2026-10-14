@@ -422,12 +422,35 @@ fn inline_test_lines(text: &str) -> Vec<bool> {
             }
             continue;
         }
-        if code.starts_with("#[cfg(")
-            && code
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|word| word == "test")
-            && !code.contains("not(test)")
-        {
+        let cfg = code
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        // Only predicates that require `test` may exempt production code.
+        // Be conservative for nested/unknown predicates, especially any(test, …).
+        let test_only = cfg == "#[cfg(test)]"
+            || cfg
+                .strip_prefix("#[cfg(all(")
+                .and_then(|rest| rest.strip_suffix("))]"))
+                .is_some_and(|rest| {
+                    let mut depth = 0usize;
+                    let mut start = 0usize;
+                    for (index, byte) in rest.bytes().enumerate() {
+                        match byte {
+                            b'(' => depth += 1,
+                            b')' => depth = depth.saturating_sub(1),
+                            b',' if depth == 0 => {
+                                if &rest[start..index] == "test" {
+                                    return true;
+                                }
+                                start = index + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    &rest[start..] == "test"
+                });
+        if test_only {
             cfg_test = true;
             marks.push(false);
             continue;
@@ -563,6 +586,27 @@ mod tests {
 
     #[test]
     fn compound_cfg_tests_and_channel_constructors_are_recognized() {
+        for cfg in [
+            "any(test, feature = \"native\")",
+            "all(any(test, feature = \"native\"), unix)",
+            "not(test)",
+        ] {
+            let source = format!(
+                "#[cfg({cfg})]\nmod native {{\nfn run() {{ mpsc::unbounded_channel(); }}\n}}\n"
+            );
+            assert!(
+                rules(
+                    &[Source {
+                        path: "src/native.rs",
+                        text: Some(&source)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::UnboundedChannel),
+                "{cfg}"
+            );
+        }
         let text = "fn a() { crossbeam_channel::unbounded(); }\nfn b() { std::sync::mpsc::channel(); }\n#[cfg(all(test, feature = \"native\"))]\nmod tests {\nfn t() { tokio::time::sleep(d); }\n}\n";
         let (findings, count) = evaluate(
             &[Source {
