@@ -755,3 +755,6 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - AB6 additionally owns sessions/runtime.rs for preserving configured producer
   identity through the public LoadedRuntime embedding compiler. No schema or
   public wire change; exact producer Arc is retained.
+
+- AB6 owns the tools/design cwd-contract amendment alongside shared Launch
+  root-underflow validation and the export/recount aggregate-byte budget repair.

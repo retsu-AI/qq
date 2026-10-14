@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -405,6 +405,13 @@ fn write_line(
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(ActionBiasError::Unqualified(Validation::RecordBound));
     }
+    if out
+        .stream_position()?
+        .checked_add(bytes.len() as u64)
+        .is_none_or(|total| total > MAX_EXPORT_BYTES)
+    {
+        return Err(ActionBiasError::Unqualified(Validation::AggregateBound));
+    }
     out.write_all(&bytes)?;
     digest.update(&bytes);
     Ok(())
@@ -549,7 +556,12 @@ fn recount(
     input: &Path,
     producer: Option<&ProcessProducerPin>,
 ) -> Result<Recount, ActionBiasError> {
-    let mut reader = BufReader::new(File::open(input)?);
+    let input = File::open(input)?;
+    if input.metadata()?.len() > MAX_EXPORT_BYTES {
+        return Err(ActionBiasError::Unqualified(Validation::AggregateBound));
+    }
+    let mut reader = BufReader::new(input);
+    let mut read_bytes = 0_u64;
     let mut bytes = Vec::new();
     let mut header = None;
     let mut digest = Sha256::new();
@@ -581,6 +593,10 @@ fn recount(
         if count > MAX_RECORD_BYTES {
             return Err(ActionBiasError::Unqualified(Validation::RecordBound));
         }
+        read_bytes = match read_bytes.checked_add(count as u64) {
+            Some(total) if total <= MAX_EXPORT_BYTES => total,
+            _ => return Err(ActionBiasError::Unqualified(Validation::AggregateBound)),
+        };
         if bytes.last() != Some(&b'\n') {
             return Err(ActionBiasError::Unqualified(Validation::Newline));
         }
@@ -1263,6 +1279,13 @@ mod tests {
             ),
             (17, 0, 17)
         );
+        for cwd in [".", "sub", "sub/..", "./sub/../"] {
+            let arguments = serde_json::json!({"command":"pwd","cwd":cwd}).to_string();
+            assert!(matches!(
+                command_input("shell", Some(&arguments)),
+                CommandInput::Command { .. }
+            ));
+        }
     }
 
     #[test]

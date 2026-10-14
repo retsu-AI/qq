@@ -144,6 +144,17 @@ impl Launch<'_> {
         }) {
             return Err(InvalidLaunch::Cwd);
         }
+        if let Some(cwd) = cwd {
+            let mut depth = 0_usize;
+            for component in std::path::Path::new(cwd).components() {
+                match component {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if depth > 0 => depth -= 1,
+                    _ => return Err(InvalidLaunch::Cwd),
+                }
+            }
+        }
         Ok(())
     }
 

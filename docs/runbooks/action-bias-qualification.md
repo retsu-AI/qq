@@ -74,7 +74,10 @@ Producer identity is shared across plans and children; executable hashing occurs
 once on bounded process-preparation workers. Cancelled or expired capture can
 retry. Unknown or dirty source cannot satisfy a clean deployed producer pin.
 
-Each line is bounded to 4 MiB and cohorts to one million calls. Before copying
+Each line is bounded to 4 MiB, cohorts to one million calls, and the complete
+export to 512 MiB including header/footer. Exceeding any bound leaves the cohort
+unqualified and publishes no partial export. Recount enforces the same total
+byte budget, including when an input grows while being read. Before copying
 SQLite values, export bounds arguments/descriptor JSON to 256 KiB each and
 receipt/plan identity JSON to 16 KiB each. Oversized fields remain explicit
 coverage gaps on retained calls. Recount rechecks these bounds, lexical command
@@ -84,7 +87,9 @@ unsupported schemas or altered identities fail qualification.
 
 `lexical_read_share` measures validated shell command shape over shell calls;
 it is null when the cohort has no shell calls. Empty cohorts are unqualified.
-Invalid timeout/cwd/env/command envelopes count as malformed, and explicitly
+Cwd paths that traverse above the lexical workspace root are rejected by both
+execution and the parser; filesystem and symlink containment remain checked at
+process preparation. Invalid timeout/cwd/env/command envelopes count as malformed, and explicitly
 requested environments remain nonreads. Exec calls are counted separately.
 `verified_read_calls` and `qualified_recorded_work_calls` require complete V2
 proof and the independent producer pin. `execution_evidence_counts` explains
