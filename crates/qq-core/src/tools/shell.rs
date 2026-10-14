@@ -57,7 +57,7 @@ pub(super) struct ShellArgs {
     /// Environment variable names to pass through from the server's
     /// environment. The child otherwise starts from [`BASE_ENV`] only.
     #[serde(default)]
-    env: Vec<String>,
+    pub(super) env: Vec<String>,
 }
 
 /// `exec`: one program with an argument list and no shell between the model

@@ -23,9 +23,9 @@ pub mod bench_support {
         super::read_only_shell_command(command)
     }
 
-    /// The runtime's typed shell envelope parser, including duplicate-field checks.
+    /// Exact execution command and whether a process environment was requested.
     #[must_use]
-    pub fn parsed_shell_command(arguments: &str) -> Option<String> {
+    pub fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
         crate::tools::parsed_shell_command(arguments)
     }
 

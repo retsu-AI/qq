@@ -114,8 +114,13 @@ struct Header {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum CommandInput {
-    Command { text: String },
-    ClassifierRejected { command_bytes: u64 },
+    Command {
+        text: String,
+        has_requested_env: bool,
+    },
+    ClassifierRejected {
+        command_bytes: u64,
+    },
     Malformed,
 }
 
@@ -144,6 +149,7 @@ struct Recount {
     read_calls: u64,
     classifier_rejected: u64,
     malformed_commands: u64,
+    environment_disqualified: u64,
     read_share: f64,
 }
 
@@ -366,12 +372,15 @@ fn export(
         } else {
             let arguments: String = row.get(5)?;
             match qq_core::classify_bench::parsed_shell_command(&arguments) {
-                Some(text) if text.len() > MAX_READ_COMMAND_BYTES => {
+                Some((text, _)) if text.len() > MAX_READ_COMMAND_BYTES => {
                     CommandInput::ClassifierRejected {
                         command_bytes: text.len() as u64,
                     }
                 }
-                Some(text) => CommandInput::Command { text },
+                Some((text, has_requested_env)) => CommandInput::Command {
+                    text,
+                    has_requested_env,
+                },
                 None => CommandInput::Malformed,
             }
         };
@@ -411,6 +420,7 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
     let mut reads = 0;
     let mut rejected = 0;
     let mut malformed = 0;
+    let mut environment_disqualified = 0;
     let mut last = None;
     loop {
         bytes.clear();
@@ -453,11 +463,15 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                 last = Some(id);
                 total += 1;
                 match command {
-                    CommandInput::Command { text } => {
+                    CommandInput::Command {
+                        text,
+                        has_requested_env,
+                    } => {
                         if text.len() > MAX_READ_COMMAND_BYTES {
                             return Err(ActionBiasError::Unqualified(Validation::CommandBound));
                         }
-                        reads += u64::from(read_only_shell_command(&text));
+                        environment_disqualified += u64::from(has_requested_env);
+                        reads += u64::from(!has_requested_env && read_only_shell_command(&text));
                     }
                     CommandInput::ClassifierRejected { command_bytes } => {
                         if command_bytes <= MAX_READ_COMMAND_BYTES as u64 {
@@ -492,6 +506,7 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                     read_calls: reads,
                     classifier_rejected: rejected,
                     malformed_commands: malformed,
+                    environment_disqualified,
                     read_share: reads as f64 / total as f64,
                 });
             }
@@ -855,7 +870,7 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert_eq!(recount(&test_identity(), &path).unwrap().read_calls, 1);
+        assert_eq!(recount(&test_identity(), &path).unwrap().read_calls, 0);
         let original = fs::read_to_string(&path).unwrap();
         for field in [
             "source_commit",
@@ -864,6 +879,7 @@ mod tests {
             "classifier_platform",
             "classifier_arch",
             "missing",
+            "missing_env",
             "format",
         ] {
             let mut lines = original
@@ -873,6 +889,12 @@ mod tests {
             match field {
                 "missing" => {
                     lines[0].as_object_mut().unwrap().remove("exporter");
+                }
+                "missing_env" => {
+                    lines[1]["command"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("has_requested_env");
                 }
                 "format" => lines[0]["format"] = 1.into(),
                 _ => lines[0]["exporter"][field] = "other-build".into(),
@@ -890,7 +912,7 @@ mod tests {
             fs::write(&bad, bytes).unwrap();
             let error = recount(&test_identity(), &bad).unwrap_err();
             match field {
-                "missing" => assert!(matches!(error, ActionBiasError::Json(_))),
+                "missing" | "missing_env" => assert!(matches!(error, ActionBiasError::Json(_))),
                 "format" => assert!(matches!(
                     error,
                     ActionBiasError::Unqualified(Validation::Metadata)
@@ -937,6 +959,7 @@ mod tests {
             ),
             (4, 2, 0)
         );
+        assert_eq!(result.environment_disqualified, 2);
     }
 
     #[test]

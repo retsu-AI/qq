@@ -635,3 +635,8 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   crates/qq-core/src/tools.rs, reusing the exact shell execution type without
   changing dispatch or approval authority. Export format 2 binds the producing
   binary and persisted depth-zero root role. Root is the sole writer.
+
+
+- 2026-10-14 AB6's exact parser bridge reads the existing private shell env
+  field through parent-module visibility, exporting only a requested-env
+  boolean. No dispatch or policy behavior is changed.

@@ -892,3 +892,11 @@ newest last.
 - Read-only schema-45 fixed-window check finds zero orphaned child runs;
   the historical counts are not changed by this specific cohort correction.
   Full integrated gates, final pinned export/recount and observation remain open.
+
+
+- AB6 retains the exact parser's requested-env flag as a required field;
+  omitted/empty lists remain reads and nonempty lists count as nonreads.
+  Environment values/names are not exported. A missing-flag record is rejected
+  even with a recomputed valid footer. Thirteen focused fixtures pass;
+  independent source review approves. environment-red.log/green.log.
+- Final upstream integration and workspace/release qualification remain open.

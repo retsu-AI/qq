@@ -15,7 +15,10 @@ deleting its parent cannot change the cohort. Every shell-call state in the coho
 Missing command, unknown or duplicate fields and invalid typed shell envelopes
 (including cwd, timeout_seconds and env) are checked with the exact execution
 argument type and count as malformed.
-Malformed command input and commands provably rejected by the classifier's own
+Typed commands retain a required has_requested_env flag; any explicit nonempty
+process environment counts as nonread, matching runtime progress classification.
+The receipt counts these separately from malformed input. Environment names and
+values are not exported. Malformed command input and commands provably rejected by the classifier's own
 byte ceiling count as nonreads. An oversized argument envelope that prevents
 inspection leaves the export unqualified rather than manufacturing a nonread.
 
