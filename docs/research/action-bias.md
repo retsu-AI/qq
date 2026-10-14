@@ -237,8 +237,8 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.turn_ordinal * 10
      FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0),
    f AS (SELECT run_id, min(k) fe FROM t WHERE name IN ('edit_file','write_file') AND state = 'completed' GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe AND t.name IN ('read_file','search','tree')) n FROM f)
-   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
-          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) * 9 / 10 FROM c)) FROM c;"
+   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) - 1) / 2) FROM c)),
+          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) * 9 - 1) / 10) FROM c)) FROM c;"
 
 # Root shell reading: calls, cd-prefixed, read program after an optional leading `cd DIR &&` / `cd DIR;`, of those cd-prefixed
 q "WITH rr AS ($RR), c AS (SELECT json_extract(t.arguments_json, '\$.command') cmd FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0 AND t.name = 'shell'),
@@ -293,7 +293,8 @@ RR_STARTS="SELECT r.id, s.depth <> 0 child, r.status FROM runs r JOIN sessions s
       AND r.started_at_ms < strftime('%s','$end') * 1000"
 RR="$RR_STARTS AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000"
 
-# Qualification reads before first actual edit (root): runs, median, p90.
+# Qualification reads before first actual edit (root): runs, nearest-rank median, p90.
+# A zero cohort returns NULL statistics and is unqualified.
 # The historical query above included previews; use this corrected query
 # for both baseline and candidate qualification.
 q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
@@ -303,8 +304,8 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
      AND state = 'completed' AND (name <> 'edit_file' OR coalesce(CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json, '\$.dry_run') END, '') <> 'true') GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe
      AND t.name IN ('read_file','search','tree')) n FROM f)
-   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
-          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) * 9 / 10 FROM c)) FROM c;"
+   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) - 1) / 2) FROM c)),
+          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) * 9 - 1) / 10) FROM c)) FROM c;"
 
 # Root edit calls: failed, executed terminal calls, failure share.
 # Denied/interrupted calls are reported separately and excluded from this
@@ -442,10 +443,13 @@ q "WITH rr AS ($RR), paths AS (
    SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots) FROM per_run;"
 ```
 
-Paths with `./`, doubled separators or symlink aliases require canonical
-normalization against the run workspace before qualification. The query
-normalizes absent paths and trailing slashes only; record unresolved
-normalization as unqualified, never as a distinct-root allowance.
+Paths with `./` or doubled separators require lexical normalization before
+qualification. Resolve symlink aliases only from
+immutable call-time evidence identifying the resolved discovery root. Current
+filesystem state cannot establish historical identity: missing, retargeted,
+masked or ambiguous evidence leaves qualification unqualified. The query
+normalizes absent paths and trailing slashes only; unresolved identity never
+becomes a distinct-root allowance.
 
 Workspace-root discovery covers nonignored ancestors for every target.
 Ignored targets also require discovery from their highest ignored ancestor
@@ -513,3 +517,9 @@ completed-only query incorrectly returned two starts and zero repeats.
 Qualification uses persisted session depth for historical root/child role;
 there are no orphaned child runs in this fixed baseline window. Evidence:
 target/qq-perf/ab-plan-2026-10-14/failed-discovery-starts.json.
+
+The AB6 shell statistic is `lexical_read_share`: exact pinned command-shape
+recognition. It does not establish actual nonmutation. Historical records lack
+inherited PATH/TMPDIR and executable identity; a replaced `grep` or sort spill
+inside inherited TMPDIR can write despite a recognized lexical shape. Keep
+actual-effect qualification unavailable without immutable execution evidence.
