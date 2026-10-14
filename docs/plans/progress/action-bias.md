@@ -40,3 +40,20 @@ newest last.
   - AB3 measures the turn budget;
   - AB4 filters with a bool and declares no per-mode clause;
   - research totals reconciled to the prompt-run window.
+
+
+### 2026-10-14 — #295 Codex review corrections
+
+- Verified all eight unresolved findings against current implementation:
+  unattended questions are denied; names search needs explicit ignored
+  roots; default reads have a 4,000-line output bound distinct from the
+  explicit 2,000-line limit; eval compare rejects prompt-version changes.
+- Plan preserves analysis-only scope, rejects long branch mutation aliases,
+  specifies open-ended default reads and one authority-neutral root notice.
+  Direct runs omit `ask_user`. Paired paid evaluation now explicitly needs
+  an accepted comparator slice and ENG-809 authorization before dispatch.
+- Added and executed three missing historical-window qualification queries
+  read-only (schema 44): root edits 211/1,230 failed; roots 190/254 completed;
+  108 below-root editing runs, 44 instruction searches, 9 runs over one.
+  Defined denominators, zero regression tolerance, window boundaries and
+  unqualified cases. AB6 remains pending seven days after AB1–AB4 merge.

@@ -269,3 +269,86 @@ q "SELECT t.name, t.state, count(*) FROM tool_calls t
        OR (t.name = 'search' AND (json_extract(t.arguments_json, '\$.query') LIKE '%AGENTS.md%' OR json_extract(t.arguments_json, '\$.query') LIKE '%CLAUDE.md%')))
    GROUP BY 1, 2;"
 ```
+
+
+### Supplemental qualification queries (AB6)
+
+These metrics were missing from the original snapshot. Use explicit UTC
+`start` and `end` dates, not a rolling relative date. The historical window
+is `[2026-09-13, 2026-10-13)`; the candidate window is seven full days after
+all AB1–AB4 merge commits. Keep the store open read-only and record its
+schema. The following redefines `RR` for **all** queries above as well.
+
+```sh
+start="2026-09-13"
+end="2026-10-13"
+RR="SELECT r.id, s.parent_id IS NOT NULL child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
+    WHERE r.kind = 'prompt' AND r.started_at_ms >= strftime('%s','$start') * 1000
+      AND r.started_at_ms < strftime('%s','$end') * 1000"
+
+# Root edit calls: failed, executed terminal calls, failure share.
+# Denied/interrupted calls are reported separately and excluded from this
+# execution-failure denominator. Count both built-in edit forms.
+q "WITH rr AS ($RR) SELECT sum(t.state = 'failed'),
+     sum(t.state IN ('completed','failed')),
+     1.0 * sum(t.state = 'failed') / nullif(sum(t.state IN ('completed','failed')), 0),
+     sum(t.state = 'denied'), sum(t.state = 'interrupted')
+   FROM tool_calls t JOIN rr ON rr.id = t.run_id
+   WHERE rr.child = 0 AND t.name IN ('edit_file','write_file');"
+
+# Root completion: completed, all started roots, completed share.
+# Also expose unfinished runs; do not silently drop ongoing/queued roots.
+q "WITH rr AS ($RR) SELECT sum(rr.status = 'completed'), count(*),
+     1.0 * sum(rr.status = 'completed') / nullif(count(*), 0),
+     sum(r.finished_at_ms IS NULL)
+   FROM rr JOIN runs r ON r.id = rr.id WHERE rr.child = 0;"
+
+# Instruction names searches per root that successfully edits below root.
+# edit_file uses edits[].path; write_file uses path. Paths are normalized
+# workspace-relative paths; absolute/./ forms are exposed separately below.
+# Count attempts, including failed/denied calls. Match both legacy separate
+# names and the new grouped regex `(AGENTS|CLAUDE)\.md$`.
+q "WITH rr AS ($RR), paths AS (
+     SELECT t.run_id, json_extract(e.value, '\$.path') path
+     FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
+     WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
+     UNION ALL
+     SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
+     FROM tool_calls t JOIN rr ON rr.id = t.run_id
+     WHERE rr.child = 0 AND t.name = 'write_file' AND t.state = 'completed'),
+   qualifying AS (SELECT DISTINCT run_id FROM paths
+     WHERE instr(path, '/') > 0 AND path NOT GLOB './*' AND path NOT GLOB '/*'),
+   counts AS (SELECT q.run_id, (SELECT count(*) FROM tool_calls t
+     WHERE t.run_id = q.run_id AND t.name = 'search'
+       AND json_extract(t.arguments_json, '\$.mode') = 'names'
+       AND (instr(json_extract(t.arguments_json, '\$.query'), 'AGENTS') > 0
+         OR instr(json_extract(t.arguments_json, '\$.query'), 'CLAUDE') > 0)) n FROM qualifying q)
+   SELECT count(*), coalesce(sum(n),0), coalesce(max(n),0), coalesce(sum(n > 1),0),
+     (SELECT count(*) FROM paths WHERE path GLOB './*' OR path GLOB '/*') FROM counts;"
+```
+
+Instruction columns: qualifying roots, names-search attempts, maximum per
+root, roots exceeding one, paths requiring normalization. If the last
+column is nonzero, normalize those paths against each run's persisted
+workspace before qualification; this query alone is insufficient. Zero
+searches may mean instructions were already supplied; this count cannot
+prove instruction compliance or that the search covered the edit path.
+Inspect that coverage separately without publishing session content.
+
+All no-regression tolerances are zero (observational): failed edit share
+and non-spawning root mean wall time do not rise, completed share does not
+fall. Record numerator, denominator and unfinished runs. A missing or zero
+denominator is unqualified; any miss remains open pending a slice or an
+explicit decision. Unequal windows and uncontrolled task mix do not prove
+causality. The old global probe count (271) is a separate context metric,
+not this per-root names-search gate.
+
+Supplemental baseline re-run on 2026-10-14, same historical window,
+read-only schema 44: root edit calls 211 failed / 1,230 executed terminal
+calls (17.1545%), 0 denied, 0 interrupted; roots 190 completed / 254
+started (74.8031%), 0 unfinished; instruction searches 44 attempts across
+108 roots editing below root, maximum 13 in one root, 9 roots exceeding
+one, 0 paths requiring normalization. Root-only edit counts differ from
+the original all-run `edit_file` figures because this metric includes
+`write_file` and excludes children. These are supplemental measurements,
+not rewritten original evidence.
