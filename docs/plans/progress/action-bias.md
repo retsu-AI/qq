@@ -840,3 +840,10 @@ newest last.
   production turn floor uses the same constant; reviewer-count test export
   remains test-only. Prior focused tests were green; the failed full run is
   retained and nothing from this AB2 wave has been pushed. Rerun all gates.
+
+- The next fresh AB2 run caught an existing pruning fixture whose 4KiB
+  "overlong" search header now fits the intentional 12KiB bound. Preserve
+  the non-header/lookalike invariant with a line beyond the global output
+  ceiling; the new real long-cursor idempotency regression covers headers
+  inside the accepted search bound. All other 994 core tests passed; rerun
+  the corrected fixture and full workspace gates before any push.
