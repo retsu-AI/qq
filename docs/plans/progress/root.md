@@ -612,3 +612,7 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 - 2026-10-14 AB4 qualification owns a narrow inherited fixture repair in
   sessions/tests/nonblocking.rs: separate child gates remove shared-semaphore
   arrival-order assumptions. No production session behavior is changed.
+- 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
+  for the native Unicode-path contiguous-window regression. The existing job
+  selected teardown tests only. A test-only read/output hook exercises the
+  actual dispatch mask/bound pipeline using valid Windows metadata on Linux.

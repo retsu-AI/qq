@@ -843,6 +843,61 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn ab3_native_unicode_header_preserves_repaired_read_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for index in 0..110 {
+            let name = if index == 0 {
+                format!("SECRET={}", "界".repeat(100))
+            } else {
+                "界".repeat(100)
+            };
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", "\n".repeat(5_000)).unwrap();
+        drop(dir);
+        let path = format!("{}/f.txt", components.join("/"));
+        assert!(path.len() > read::READ_BOUNDS.max_bytes);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let mut offset = 1;
+        while offset <= 5_000 {
+            let args = serde_json::json!({"path":path,"offset":offset,"cwd":"."}).to_string();
+            let result = run_tool(&workspace, &state, "read_file", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result.spill.is_none(),
+                "native read must preserve its contiguous window"
+            );
+            let rows = result
+                .model_text
+                .lines()
+                .filter_map(|line| {
+                    line.split_once('\t')
+                        .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+                })
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty());
+            assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+            offset += rows.len();
+            if offset <= 5_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+            }
+        }
+        assert_eq!(offset, 5_001);
+    }
+
     #[test]
     fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
         let directory = tempfile::tempdir().unwrap();

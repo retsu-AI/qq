@@ -299,6 +299,11 @@ pub(super) struct ReadSideOutput {
 }
 
 impl ReadSideOutput {
+    #[cfg(test)]
+    pub(super) fn with_test_notes(self, notes: &[&str]) -> ToolOutput {
+        with_argument_notes(self, notes)
+    }
+
     pub(super) fn success(text: String) -> Self {
         Self::with_bounds(text, &Bounds::DEFAULT, false)
     }

@@ -420,8 +420,12 @@ fn lines(
         .field("note", "offset_ignored")
         .into_line();
     // Keep ordinary-path windows stable; long headers reserve their full weight.
-    let header_bytes = (masked_escaped_len(&header_bound) + notes.argument_note_bytes).max(256);
-    let header_lines = header_bound.lines().count();
+    // Dispatch chooses note placement before masking, so a large raw header
+    // can require an extra row even when its masked rendering is short.
+    let note_row = usize::from(notes.argument_note_bytes > 0);
+    let header_bytes =
+        (masked_escaped_len(&header_bound) + notes.argument_note_bytes + note_row).max(256);
+    let header_lines = header_bound.lines().count() + note_row;
     if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
         || header_lines + 1 >= READ_BOUNDS.max_lines
     {
@@ -701,5 +705,66 @@ fn image_mime(path: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {
+        // Valid Windows component/UTF-16 lengths can exceed the UTF-8 line cap.
+        let path = format!(
+            "SECRET={}/f.txt",
+            std::iter::repeat_n("界".repeat(100), 110)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = vec![b'\n'; 5_000];
+        let hash = content_hash(&bytes);
+        let loaded = Loaded {
+            path,
+            size: bytes.len() as u64,
+            bytes,
+            hash: Some(hash.clone()),
+            perms: "rw".to_owned(),
+        };
+        let output = lines(
+            &loaded,
+            &hash[..SHORT_HASH_LEN],
+            5_000,
+            &[Range {
+                start: 1,
+                end: 5_000,
+            }],
+            true,
+            HeaderNotes {
+                offset_ignored: false,
+                argument_note_bytes: " note=cwd_ignored".len(),
+            },
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        );
+        assert!(loaded.path.len() > READ_BOUNDS.max_bytes);
+        let bounded = output.with_test_notes(&["cwd_ignored"]);
+        assert!(
+            bounded.spill.is_none(),
+            "the contiguous window must survive the extra row"
+        );
+        let rows = bounded
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+            })
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty());
+        assert_eq!(rows, (1..=rows.len()).collect::<Vec<_>>());
+        assert!(
+            bounded
+                .model_text
+                .contains(&format!("continue from offset={}", rows.len() + 1))
+        );
     }
 }
