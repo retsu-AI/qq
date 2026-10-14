@@ -641,3 +641,10 @@ newest last.
   The repair-note fixture now requires a complete decodable header and no
   spill while preserving baseline content/cursor. Prior green receipts remain
   historical; fresh integrated gates follow this correction.
+
+
+- Immutable integrated source d0274113 passes 2,301 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/long-cursor-final-gate-{0,1,2,3}.log.
+  Nineteen focused AB2 fixtures pass; independent source and schema review
+  approves. Matched performance and final hosted review remain open.
