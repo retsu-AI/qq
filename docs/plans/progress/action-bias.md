@@ -404,3 +404,7 @@ newest last.
 - Latest helper source workspace gates pass: 2,277 tests, 0 failed,
   14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
   logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
+- Integrated description/range correction workspace gates pass: 2,284
+  tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0. Logs
+  `target/qq-perf/ab2-2026-10-14/description-final-gate-{0,1,2,3}.log`.
+  Source and full builtin schema are independently reviewed; performance open.
