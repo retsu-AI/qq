@@ -2770,7 +2770,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
         .into_requests();
     assert!(matches!(
         requests.as_slice(),
-        [ClientRequest::Command(CommandRequest {
+        [ClientRequest::Snapshot(_), ClientRequest::Command(CommandRequest {
             command: SessionCommand::SubmitPrompt { input, .. },
             ..
         })] if input.as_slice() == [qq_protocol::InputPart::text("follow up")]
@@ -3027,6 +3027,203 @@ fn two_session_app() -> (App, SessionId, SessionId) {
 }
 
 #[test]
+fn background_terminal_receipt_refresh_keeps_focus_and_replays_newer_events() {
+    let (mut app, first, other) = two_session_app();
+    let run = id(0x75, qq_protocol::RunId::from_bytes);
+    let mut idle = app.sessions[&other].summary.clone();
+    idle.status = qq_protocol::SessionStatus::Idle;
+    idle.active_run_id = None;
+    let effects = app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        other,
+        SessionEvent::RunFinished {
+            session: Box::new(idle.clone()),
+            run_id: run,
+            outcome: qq_protocol::RunOutcome::Completed,
+            usage: None,
+            context_tokens: None,
+            final_output: None,
+        },
+    )));
+    assert!(
+        effects
+            .requests()
+            .any(|request| matches!(request, ClientRequest::Snapshot(request)
+        if request.focused_session_id.is_none() && request.include_sessions == [other]))
+    );
+    assert_eq!(app.sessions[&other].unread, 1);
+    assert!(app.sessions[&other].finished_unread);
+    let mut newer = idle.clone();
+    newer.title = "newer title".to_owned();
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        other,
+        SessionEvent::SessionUpdated {
+            session: Box::new(newer),
+        },
+    )));
+    let mut body = body_for(&idle, "other body");
+    body.runs.push(
+        serde_json::from_value(serde_json::json!({
+            "id":run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+            "estimated_cost_usd_nanos":150,"correlation":{}
+        }))
+        .unwrap(),
+    );
+    let mut response = snapshot();
+    response.cursor = fixtures::cursor(2);
+    response.focused = None;
+    response.included = vec![body];
+    app.apply_snapshot(response);
+    assert_eq!(app.focused(), Some(first));
+    assert_eq!(app.sessions[&other].unread, 1);
+    assert!(app.sessions[&other].finished_unread);
+    assert_eq!(app.sessions[&other].summary.title, "newer title");
+    assert_eq!(app.sessions[&other].runs[&run].cost_usd_nanos, Some(150));
+    assert!(app.focus_session(other).requests().next().is_none());
+}
+
+#[test]
+fn delayed_background_receipt_replay_does_not_submit_another_draft() {
+    for evict in [false, true] {
+        let (mut app, first, other) = two_session_app();
+        app.sessions
+            .get_mut(&other)
+            .unwrap()
+            .drafts
+            .extend(["first", "second", "third"].map(str::to_owned));
+        let first_run = id(0x75, qq_protocol::RunId::from_bytes);
+        let second_run = id(0x76, qq_protocol::RunId::from_bytes);
+        let idle = app.sessions[&other].summary.clone();
+        let finish = |sequence, run_id| {
+            fixtures::envelope(
+                sequence,
+                other,
+                SessionEvent::RunFinished {
+                    session: Box::new(idle.clone()),
+                    run_id,
+                    outcome: qq_protocol::RunOutcome::Completed,
+                    usage: None,
+                    context_tokens: None,
+                    final_output: None,
+                },
+            )
+        };
+        app.apply_client_update(ClientUpdate::Event(finish(2, first_run)));
+        assert_eq!(app.sessions[&other].drafts, ["second", "third"]);
+        let mut response = snapshot();
+        response.cursor = fixtures::cursor(2);
+        response.focused = None;
+        response.included = vec![body_for(&idle, "other body")];
+        if evict {
+            app.sessions.get_mut(&other).unwrap().evict_body();
+        }
+        let mut running = idle.clone();
+        running.status = qq_protocol::SessionStatus::Running;
+        running.active_run_id = Some(second_run);
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            3,
+            other,
+            SessionEvent::RunStarted {
+                session: Box::new(running),
+                run_id: second_run,
+                plan: None,
+            },
+        )));
+        app.apply_client_update(ClientUpdate::Event(finish(4, second_run)));
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+        let unread = app.sessions[&other].unread;
+        let effects = app.apply_snapshot(response.clone());
+        assert_eq!(app.focused(), Some(first));
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+        assert_eq!(app.sessions[&other].unread, unread);
+        let requests = effects.requests().collect::<Vec<_>>();
+        assert_eq!(requests.len(), usize::from(evict));
+        if evict {
+            assert!(matches!(requests[0], ClientRequest::Snapshot(request)
+                if request.focused_session_id.is_none() && request.include_sessions == [other]));
+        }
+        let mut latest_body = body_for(&idle, "other body");
+        latest_body.runs.push(
+            serde_json::from_value(serde_json::json!({
+                "id":second_run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+                "estimated_cost_usd_nanos":250,"correlation":{}
+            }))
+            .unwrap(),
+        );
+        let mut latest = snapshot();
+        latest.cursor = fixtures::cursor(4);
+        latest.focused = None;
+        latest.included = vec![latest_body];
+        app.apply_snapshot(latest);
+        assert_eq!(
+            app.sessions[&other].runs[&second_run].cost_usd_nanos,
+            Some(250)
+        );
+        app.apply_snapshot(response);
+        assert_eq!(
+            app.sessions[&other].runs[&second_run].cost_usd_nanos,
+            Some(250)
+        );
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+    }
+}
+
+#[test]
+fn snapshot_headers_cannot_downgrade_a_newer_retained_body() {
+    for evict in [false, true] {
+        let (mut app, first, other) = two_session_app();
+        app.last_sequence = 101;
+        let run = id(0x78, qq_protocol::RunId::from_bytes);
+        let mut newer = app.sessions[&other].summary.clone();
+        newer.status = qq_protocol::SessionStatus::Running;
+        newer.active_run_id = Some(run);
+        newer.estimated_cost_usd_nanos = Some(250);
+        let mut latest = snapshot();
+        latest.cursor = fixtures::cursor(105);
+        latest.focused = None;
+        latest.sessions = vec![newer.clone()];
+        latest.included = vec![body_for(&newer, "newer body")];
+        app.apply_snapshot(latest);
+        if evict {
+            app.sessions.get_mut(&other).unwrap().evict_body();
+        }
+        let mut older = newer.clone();
+        older.status = qq_protocol::SessionStatus::Idle;
+        older.active_run_id = None;
+        older.estimated_cost_usd_nanos = Some(100);
+        let mut stale = snapshot();
+        stale.cursor = fixtures::cursor(103);
+        stale.focused = None;
+        stale.sessions = vec![older.clone()];
+        stale.included = vec![body_for(&older, "older body")];
+        app.apply_snapshot(stale);
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(
+            app.sessions[&other].summary.active_run_id,
+            newer.active_run_id
+        );
+        assert_eq!(
+            app.sessions[&other].summary.estimated_cost_usd_nanos,
+            Some(250)
+        );
+        for sequence in 102..=105 {
+            app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+                sequence,
+                other,
+                SessionEvent::SessionUpdated {
+                    session: Box::new(older.clone()),
+                },
+            )));
+        }
+        assert_eq!(app.last_sequence, 105);
+        assert_eq!(app.focused(), Some(first));
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(app.sessions[&other].summary.active_run_id, Some(run));
+    }
+}
+
+#[test]
 fn the_shown_session_is_pinned_warm_while_others_evict() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
@@ -3160,6 +3357,35 @@ fn deleting_the_shown_session_moves_to_its_neighbour() {
     assert_eq!(app.focused(), Some(other));
     // The replacement is warm, so nothing is fetched.
     assert!(effects.requests().next().is_none());
+}
+
+#[test]
+fn late_snapshot_replay_keeps_the_only_deleted_session_unfocused() {
+    for side_view in [false, true] {
+        let mut app = App::new(TuiOptions::default());
+        let initial = snapshot();
+        let deleted = initial.sessions[0].id;
+        let late = initial.clone();
+        app.apply_snapshot(initial);
+        if side_view {
+            app.execute(Command::ShowSideQuestions);
+        }
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            deleted,
+            SessionEvent::SessionDeleted {
+                session_id: deleted,
+            },
+        )));
+        assert_eq!(app.view(), View::Transcript(None));
+        app.apply_snapshot(late);
+        assert!(app.sessions.is_empty());
+        assert_eq!(
+            app.view(),
+            View::Transcript(None),
+            "replayed deletion clears surface focus"
+        );
+    }
 }
 
 #[test]

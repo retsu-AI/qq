@@ -380,6 +380,11 @@ reports change it (`qq-client` `state::reduce`):
   internal compaction run it starts reports `compacting` as well. That
   report, and the compaction run's own finish, leave the prompt run's
   activity as it is, because the prompt run still holds the session.
+  The reducer remembers a step observed outside the active slot, from its
+  start event or a running snapshot. Its finish remains bookkeeping if
+  cancellation/recovery settles the prompt first: only the prompt raises
+  completion attention or unread state. Unfinished step stats survive the
+  prompt's transcript cleanup and expire when the step settles.
 - On the rail, a running session shows the first of: an approval wait, the
   running tool's verb, the streamed text tail, then the activity. The one
   exception is `compacting context`, which wins over the tail. The text a
@@ -388,4 +393,3 @@ reports change it (`qq-client` `state::reduce`):
 - A compaction produces no transcript row of its own. The summary replaces
   history in the model's context, not on screen; the run's earlier turns
   stay rendered as they were.
-

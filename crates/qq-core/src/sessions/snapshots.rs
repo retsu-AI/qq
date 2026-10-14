@@ -161,39 +161,93 @@ pub(super) fn load_session_snapshot(
     drop(statement);
     let mut has_older_messages = message_ids.len() > usize::from(message_limit);
     message_ids.truncate(usize::from(message_limit));
-    // Ids arrive newest-first; rows are admitted in that order so a budget
-    // cut drops the oldest, then the kept rows are put back in reading order.
+    // A displayed message and its authoritative run receipt are admitted together.
+    // Reserve active-run metadata first; bounded bodies never contain orphan messages.
+    let mut wanted_receipts = Vec::with_capacity(message_ids.len());
+    if message_limit > 0
+        && let Some(active) = summary.active_run_id
+        && budget.admit(0)
+    {
+        wanted_receipts.push(active);
+    }
     let mut messages = Vec::with_capacity(message_ids.len());
     for id in message_ids {
         let message = load_message(transaction, parse_id(&id)?)?;
-        if !budget.admit(escaped_len(&message.output).saturating_add(escaped_len(&message.refusal)))
-        {
+        let needs_receipt = !wanted_receipts.contains(&message.run_id);
+        if needs_receipt && wanted_receipts.len() == usize::from(message_limit) {
             has_older_messages = true;
             break;
+        }
+        let text_bytes = escaped_len(&message.output).saturating_add(escaped_len(&message.refusal));
+        let reserved_bytes = if needs_receipt {
+            text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES)
+        } else {
+            text_bytes
+        };
+        if !budget.admit(reserved_bytes) {
+            has_older_messages = true;
+            break;
+        }
+        if needs_receipt {
+            wanted_receipts.push(message.run_id);
         }
         messages.push(message);
     }
     messages.reverse();
+    if wanted_receipts.is_empty() && message_limit > 0 {
+        // Standalone compaction can have no transcript messages at all.
+        let terminal = transaction
+            .query_row(
+                "SELECT id FROM runs WHERE session_id = ?1 AND outcome_json IS NOT NULL
+                 AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
+             ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1",
+                [session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(terminal) = terminal
+            && budget.admit(0)
+        {
+            wanted_receipts.push(parse_id(&terminal)?);
+        }
+    }
+    let remaining_runs = usize::from(message_limit).saturating_sub(wanted_receipts.len());
     let mut statement = transaction.prepare(
-        "SELECT id FROM runs WHERE session_id = ?1
-             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?2",
+        "WITH pinned AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id IN (SELECT value FROM json_each(?2))
+         ), recent AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id NOT IN (SELECT id FROM pinned)
+             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3
+         )
+         SELECT id, precharged FROM (
+             SELECT id, created_at_ms, creation_order, 1 AS precharged FROM pinned
+             UNION ALL
+             SELECT id, created_at_ms, creation_order, 0 AS precharged FROM recent
+         ) ORDER BY created_at_ms DESC, creation_order DESC",
     )?;
-    let mut run_ids = statement
-        .query_map(params![session_id.to_string(), message_limit], |row| {
-            row.get::<_, String>(0)
-        })?
+    let run_ids = statement
+        .query_map(
+            params![
+                session_id.to_string(),
+                serde_json::to_string(&wanted_receipts)?,
+                remaining_runs
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    // Run rows are small and fixed-shape; they are charged at the row
-    // overhead only so a session's run list is never cut by its transcript.
-    run_ids.reverse();
-    let mut runs = Vec::with_capacity(run_ids.len());
-    for id in run_ids {
-        if !budget.admit(0) {
-            break;
-        }
-        runs.push(load_run(transaction, parse_id(&id)?)?);
+    if run_ids.iter().filter(|(_, precharged)| *precharged).count() != wanted_receipts.len() {
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
+    let mut runs = Vec::with_capacity(run_ids.len());
+    for (id, precharged) in run_ids {
+        if precharged || budget.admit(0) {
+            runs.push(load_run(transaction, parse_id(&id)?)?);
+        }
+    }
+    runs.reverse();
     let mut statement = transaction.prepare(
         "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
@@ -479,6 +533,7 @@ pub(super) fn load_session_summary_with_accounting(
                      s.queued_prompts, s.model, s.context_tokens, s.updated_at_ms,
                      (SELECT outcome_json FROM runs
                       WHERE session_id = s.id AND outcome_json IS NOT NULL
+                        AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,

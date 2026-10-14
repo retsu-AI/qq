@@ -143,9 +143,9 @@ impl BudgetMeter {
             .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     }
 
-    /// Charges sub-agent spend that the parent run is accountable for. Tokens
-    /// roll up under the parent's token bounds exactly like its own turns;
-    /// an unknown child cost or usage makes the parent's aggregate unknown.
+    /// Charges owned child, reviewer or compaction spend without counting it
+    /// as a prompt model turn. Tokens and cost consume the caller allowance;
+    /// unknown owned spend makes the corresponding aggregate unknown.
     pub(crate) fn charge_child(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
         self.cost_usd_nanos = match (self.cost_usd_nanos, cost_usd_nanos) {
             (Some(total), Some(cost)) => total.checked_add(cost),

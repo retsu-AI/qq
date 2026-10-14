@@ -218,7 +218,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 |row| row.get::<_, String>(0)
             )
             .unwrap(),
-        "46"
+        "47"
     );
 }
 
@@ -260,6 +260,6 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
     drop(connection);
     assert!(
         open_database(&path).is_err(),
-        "schema46 without receipts must not be reinterpreted"
+        "schema47 without receipts must not be reinterpreted"
     );
 }

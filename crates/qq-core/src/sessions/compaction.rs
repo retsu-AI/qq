@@ -667,10 +667,10 @@ pub(super) fn start_in_run_compaction(
                  id, session_id, command_id, user_message_id, assistant_message_id,
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
-                 created_at_ms, started_at_ms, activity
+                 created_at_ms, started_at_ms, activity, usage_json, estimated_cost_usd_nanos
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8,
-                 'compacting'
+                 'compacting', ?9, 0
              )",
         params![
             run_id.to_string(),
@@ -681,6 +681,7 @@ pub(super) fn start_in_run_compaction(
             prompt_run.identity.run_id.to_string(),
             resolved_model_json,
             now,
+            serde_json::to_string(&TokenUsage::default())?,
         ],
     )?;
     let summary = load_session_summary(&transaction, prompt_run.identity.session_id)?;
