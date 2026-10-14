@@ -1975,6 +1975,30 @@ mod tests {
     }
 
     #[test]
+    fn ab1_existing_server_cannot_silently_ignore_read_approvals() {
+        assert!(
+            reject_read_approvals_for_existing_server(&qq_core::ApprovedReadImages::default())
+                .is_ok()
+        );
+        let images = qq_core::ApprovedReadImages::new(vec![
+            format!("grep:{}", "01".repeat(32)).parse().unwrap(),
+        ])
+        .unwrap();
+        assert!(
+            reject_read_approvals_for_existing_server(&images)
+                .unwrap_err()
+                .to_string()
+                .contains("existing server")
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let overrides = CliOverrides {
+            approved_read_images: images,
+            ..CliOverrides::default()
+        };
+        assert!(InteractiveEnvironment::open(&overrides, Some(fixture.path().to_owned())).is_err());
+    }
+
+    #[test]
     fn auth_login_rejects_a_provider_it_cannot_bind_and_lists_the_accepted_ones() {
         let error = auth_command(cli::AuthCommand::Login(cli::LoginArgs {
             provider: "opnai".to_owned(),

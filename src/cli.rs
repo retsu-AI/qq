@@ -524,6 +524,45 @@ mod tests {
     }
 
     #[test]
+    fn ab1_read_approval_flag_parses_for_every_execution_surface() {
+        let value = format!("grep:{}", "01".repeat(32));
+        for command in [
+            Vec::new(),
+            vec!["ask", "task"],
+            vec!["run", "task"],
+            vec!["serve"],
+        ] {
+            let args = [
+                vec!["qq", "--approve-self-contained-read-image", value.as_str()],
+                command,
+            ]
+            .concat();
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert_eq!(parsed.approved_read_images.len(), 1);
+            assert_eq!(
+                parsed.approved_read_images[0].family,
+                qq_core::ReadImageFamily::Grep
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "qq",
+                "--approve-self-contained-read-image",
+                "grep:bad",
+                "ask",
+                "task"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["qq", "ask", "task"])
+                .unwrap()
+                .approved_read_images
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn every_subcommand_and_long_flag_is_documented_in_the_guide() {
         let surface = cli_surface();
         assert!(

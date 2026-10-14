@@ -287,6 +287,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ab1_read_image_approvals_are_explicit_closed_and_bounded() {
+        let hash = "01".repeat(32);
+        let approval: ApprovedReadImage = format!("grep:{hash}").parse().unwrap();
+        assert_eq!(approval.family, ReadImageFamily::Grep);
+        assert_eq!(approval.contract, ReadImageContract::SelfContainedReadV1);
+        assert!(ApprovedReadImages::default().is_empty());
+        assert!(matches!(
+            ApprovedReadImages::new(vec![approval.clone(); 2]),
+            Err(ReadImageApprovalError::DuplicateFamily { .. })
+        ));
+        assert!(matches!(
+            ApprovedReadImages::new(vec![approval; 11]),
+            Err(ReadImageApprovalError::TooManyImages)
+        ));
+        for value in [
+            format!("sed:{hash}"),
+            "grep:no-hash".to_owned(),
+            format!("grep:{}", "AB".repeat(32)),
+            "grep".to_owned(),
+        ] {
+            assert!(value.parse::<ApprovedReadImage>().is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn env_names_are_validated_and_base_names_always_pass() {
         for ok in ["PATH", "_X", "CARGO_HOME", "a1"] {
             assert!(valid_env_name(ok), "{ok}");

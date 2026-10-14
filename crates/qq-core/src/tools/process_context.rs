@@ -127,7 +127,7 @@ pub(super) enum OwnedLaunch {
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
 pub(super) struct PreparedLaunch {
-    pub(super) command: tokio::process::Command,
+    command: tokio::process::Command,
     receipt: ExecutionContextReceipt,
     #[cfg(target_os = "linux")]
     _cwd: cap_std::fs::Dir,
@@ -136,10 +136,29 @@ pub(super) struct PreparedLaunch {
 }
 
 impl PreparedLaunch {
-    pub(super) fn started(&self, pid: u32) -> ExecutionContextReceipt {
-        let mut receipt = self.receipt.clone();
-        receipt.pid = pid;
-        receipt
+    /// Only stream/process supervision settings may change after verification.
+    pub(super) fn spawn(
+        &mut self,
+        piped_stdin: bool,
+    ) -> std::io::Result<(tokio::process::Child, Option<ExecutionContextReceipt>)> {
+        self.command
+            .stdin(if piped_stdin {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        self.command.process_group(0);
+        let child = self.command.spawn()?;
+        let receipt = child.id().map(|pid| {
+            let mut receipt = self.receipt.clone();
+            receipt.pid = pid;
+            receipt
+        });
+        Ok((child, receipt))
     }
 }
 
@@ -542,6 +561,29 @@ fn static_native_elf(bytes: &[u8]) -> bool {
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn test_read_image(code: u8) -> Vec<u8> {
+    let mut image = vec![0_u8; 132];
+    image[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    image[16..18].copy_from_slice(&2_u16.to_le_bytes());
+    image[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    image[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    image[24..32].copy_from_slice(&0x400078_u64.to_le_bytes());
+    image[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    image[52..54].copy_from_slice(&64_u16.to_le_bytes());
+    image[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    image[56..58].copy_from_slice(&1_u16.to_le_bytes());
+    image[64..68].copy_from_slice(&1_u32.to_le_bytes());
+    image[68..72].copy_from_slice(&5_u32.to_le_bytes());
+    image[80..88].copy_from_slice(&0x400000_u64.to_le_bytes());
+    image[88..96].copy_from_slice(&0x400000_u64.to_le_bytes());
+    image[96..104].copy_from_slice(&132_u64.to_le_bytes());
+    image[104..112].copy_from_slice(&132_u64.to_le_bytes());
+    image[112..120].copy_from_slice(&4096_u64.to_le_bytes());
+    image[120..].copy_from_slice(&[0xb8, 60, 0, 0, 0, 0xbf, code, 0, 0, 0, 0x0f, 0x05]);
+    image
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use crate::{
@@ -549,28 +591,6 @@ mod tests {
         runtime::{ApprovedReadImage, ReadImageContract, ShellPolicy},
     };
     use std::os::unix::fs::PermissionsExt as _;
-
-    fn exit_image(code: u8) -> Vec<u8> {
-        let mut image = vec![0_u8; 132];
-        image[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
-        image[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        image[18..20].copy_from_slice(&62_u16.to_le_bytes());
-        image[20..24].copy_from_slice(&1_u32.to_le_bytes());
-        image[24..32].copy_from_slice(&0x400078_u64.to_le_bytes());
-        image[32..40].copy_from_slice(&64_u64.to_le_bytes());
-        image[52..54].copy_from_slice(&64_u16.to_le_bytes());
-        image[54..56].copy_from_slice(&56_u16.to_le_bytes());
-        image[56..58].copy_from_slice(&1_u16.to_le_bytes());
-        image[64..68].copy_from_slice(&1_u32.to_le_bytes());
-        image[68..72].copy_from_slice(&5_u32.to_le_bytes());
-        image[80..88].copy_from_slice(&0x400000_u64.to_le_bytes());
-        image[88..96].copy_from_slice(&0x400000_u64.to_le_bytes());
-        image[96..104].copy_from_slice(&132_u64.to_le_bytes());
-        image[104..112].copy_from_slice(&132_u64.to_le_bytes());
-        image[112..120].copy_from_slice(&4096_u64.to_le_bytes());
-        image[120..].copy_from_slice(&[0xb8, 60, 0, 0, 0, 0xbf, code, 0, 0, 0, 0x0f, 0x05]);
-        image
-    }
 
     #[test]
     fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
@@ -585,7 +605,7 @@ mod tests {
         let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let program = root.join("grep");
-        let image = exit_image(0);
+        let image = test_read_image(0);
         std::fs::write(&program, &image).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let hash = ContentHash::from_bytes(Sha256::digest(&image).into());
@@ -600,6 +620,36 @@ mod tests {
         let arguments = serde_json::json!({"program":program,"args":["x","f"]}).to_string();
         let workspace = Workspace::open(&root).unwrap();
         let cancelled = ToolCancellation::new(RunCancellation::new());
+        let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
+        requested.env.push("PATH".to_owned());
+        let unsupported = prepare(
+            workspace.clone(),
+            OwnedLaunch::Exec(requested),
+            approved.clone(),
+            &cancelled,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            unsupported.receipt.verdict,
+            ExecutionVerdict::Work {
+                reason: UnverifiedReason::RequestedEnvironment
+            }
+        );
+        let unapproved = prepare(
+            workspace.clone(),
+            OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
+            Arc::default(),
+            &cancelled,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            unapproved.receipt.verdict,
+            ExecutionVerdict::Work {
+                reason: UnverifiedReason::UnapprovedProgram
+            }
+        );
         let mut prepared = prepare(
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
@@ -612,6 +662,40 @@ mod tests {
             prepared.receipt.verdict,
             ExecutionVerdict::VerifiedRead { .. }
         ));
+        std::fs::create_dir(root.join("work")).unwrap();
+        let mut cwd_bound = prepare(
+            workspace.clone(),
+            OwnedLaunch::Shell(
+                serde_json::from_value(
+                    serde_json::json!({"command":"printf old > cwd.txt", "cwd":"work"}),
+                )
+                .unwrap(),
+            ),
+            Arc::default(),
+            &cancelled,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        std::fs::rename(root.join("work"), root.join("old-work")).unwrap();
+        std::fs::create_dir(root.join("work")).unwrap();
+        let cwd_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(
+            cwd_runtime
+                .block_on(async {
+                    let (mut child, _) = cwd_bound.spawn(false)?;
+                    child.wait().await
+                })
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read(root.join("old-work/cwd.txt")).unwrap(),
+            b"old"
+        );
+        assert!(!root.join("work/cwd.txt").exists());
         let old_cwd = prepared.receipt.cwd;
         assert!(matches!(old_cwd, CwdIdentity::HeldDirectory { .. }));
         // Replace the selected pathname after preparation. Execution still uses
@@ -623,7 +707,10 @@ mod tests {
             .unwrap();
         assert!(
             runtime
-                .block_on(async { prepared.command.status().await })
+                .block_on(async {
+                    let (mut child, _) = prepared.spawn(false)?;
+                    child.wait().await
+                })
                 .unwrap()
                 .success()
         );
@@ -644,6 +731,30 @@ mod tests {
         assert!(
             result.execution_context.as_ref().unwrap().is_work(),
             "changed source is never a cached approved image"
+        );
+        let script = std::fs::read(&program).unwrap();
+        let script_approval = Arc::new(
+            ApprovedReadImages::new(vec![ApprovedReadImage {
+                family: ReadImageFamily::Grep,
+                sha256: ContentHash::from_bytes(Sha256::digest(&script).into()),
+                contract: ReadImageContract::SelfContainedReadV1,
+            }])
+            .unwrap(),
+        );
+        let script_bound = prepare(
+            workspace.clone(),
+            OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
+            script_approval,
+            &cancelled,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            script_bound.receipt.verdict,
+            ExecutionVerdict::Work {
+                reason: UnverifiedReason::Image
+            },
+            "matching script hash cannot qualify a native launch"
         );
         std::fs::write(&program, &image).unwrap();
         let result = runtime.block_on(super::super::dispatch::execute_with_images(

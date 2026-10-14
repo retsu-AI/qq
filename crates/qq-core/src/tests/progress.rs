@@ -1035,3 +1035,87 @@ async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
         "the executed test restarts the count"
     );
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn ab1_verified_exec_reads_report_on_request_sixty_five() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    if std::env::var_os("QQ_CONTEXT_STALL_WORKER").is_none() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let image = crate::tools::process_context::test_read_image(0);
+        std::fs::write(root.join("grep"), image).unwrap();
+        std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+                "--nocapture",
+            ])
+            .env("QQ_CONTEXT_STALL_WORKER", "1")
+            .env("QQ_CONTEXT_STALL_ROOT", &root)
+            .env("PATH", &root)
+            .env("LANG", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_STALL_ROOT").unwrap());
+    let hash = qq_protocol::ContentHash::from_bytes(
+        sha2::Sha256::digest(crate::tools::process_context::test_read_image(0)).into(),
+    );
+    let images = crate::ApprovedReadImages::new(vec![crate::ApprovedReadImage {
+        family: crate::ReadImageFamily::Grep,
+        sha256: hash,
+        contract: crate::ReadImageContract::SelfContainedReadV1,
+    }])
+    .unwrap();
+    let mut provider = Scripted::new(vec![("exec", r#"{"program":"grep","args":["x","f"]}"#); 64]);
+    provider.calls_per_turn = 1;
+    let requests = provider.requests.clone();
+    let runtime = Runtime::new(provider, "gpt-test", 256)
+        .unwrap()
+        .with_approved_read_images(images);
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = tokio.block_on(async {
+        runtime
+            .run_loop_with_spawner(
+                vec![Message::user("work")],
+                root,
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::default(),
+                RunCapabilities::user(None),
+            )
+            .collect::<Vec<_>>()
+            .await
+    });
+    let requests = requests.lock().unwrap();
+    assert_eq!(last_notice(&requests[64]), Some(STALL_REPORT_NOTICE));
+    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
+    let receipts = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolCallFinished {
+                execution_context, ..
+            } => execution_context.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 64);
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.valid() && !receipt.is_work())
+    );
+}

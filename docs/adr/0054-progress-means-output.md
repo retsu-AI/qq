@@ -79,15 +79,13 @@ without producing anything.
    - a *report* (decision 2) that contains text;
    - a goal checklist change, once ADR-0049's `update_goal` exists.
 
-   Shell read classification treats one leading unquoted `cd DIR &&` or
-   `cd DIR;` as transparent. Recognized print-only `sed -n`, `nl`, `cut`,
-   `uniq` stdout and `git -C DIR` reads remain lexical reads. All `sort`
-   calls count as Work because inherited `TMPDIR` can place spill files in the
-   workspace. Known
-   write/execute options, substitutions, redirections and unknown shell
-   syntax count as work. Classification is bounded to 16 KiB and 128 words
-   per segment. It is used only by progress and audit, never as an approval
-   grant; permission decisions remain independent.
+   ADR-0060 supersedes lexical shell-read accounting: executed processes
+   count as Work unless the executor verifies a launch bound to an explicitly
+   host-approved self-contained read image. Failed Work also triggers heuristic
+   audits. The bounded command recognizer remains a lexical diagnostic, never
+   an approval grant. Historical command strings cannot verify execution
+   effects. All `sort` forms remain lexical Work because inherited TMPDIR can
+   place spill files in the workspace.
 
    Reads, searches, listings, history searches, spill reads and fetches are
    never progress, whether or not they are novel. Every run keeps

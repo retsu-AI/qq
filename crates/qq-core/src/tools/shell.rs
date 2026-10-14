@@ -233,9 +233,6 @@ pub(super) async fn run_shell(
     }
     let env_names = launch.env();
     for name in env_names {
-        if !crate::runtime::valid_env_name(name) {
-            return ToolOutput::error(format!("invalid_env: {name:?} is not a variable name"));
-        }
         if !policy.permits_env(name) {
             return ToolOutput::error(format!(
                 "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
@@ -258,11 +255,6 @@ pub(super) async fn run_shell(
     let timeout_seconds = launch
         .timeout_seconds()
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-    if timeout_seconds == 0 || timeout_seconds > MAX_SHELL_TIMEOUT_SECS {
-        return ToolOutput::error(format!(
-            "timeout_seconds must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"
-        ));
-    }
     let preparation_deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
     let permit = tokio::select! {
@@ -303,25 +295,10 @@ pub(super) async fn run_shell(
         Launch::Exec(arguments) => arguments.stdin.clone(),
         Launch::Shell(_) => None,
     };
-    let command = &mut prepared.command;
-    command
-        .stdin(if stdin_text.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            return ToolOutput::error(format!("could not start the command: {error}"));
-        }
+    let (mut child, receipt) = match prepared.spawn(stdin_text.is_some()) {
+        Ok(started) => started,
+        Err(error) => return ToolOutput::error(format!("could not start the command: {error}")),
     };
-    let receipt = child.id().map(|pid| prepared.started(pid));
     *process_pending = true;
     // The child leads its own process group (pgid == pid); the guard kills the
     // entire group on every abnormal exit path — timeout, cancellation, and

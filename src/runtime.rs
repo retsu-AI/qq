@@ -8037,6 +8037,39 @@ mod tests {
     }
 
     #[test]
+    fn ab1_factory_clones_profiles_and_cache_keep_host_read_approvals() {
+        let fixture = RuntimeFixture::new();
+        let request = fixture.request(r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test")})}, profiles: {"worker": Profile(model: Some("custom/test"))})"#);
+        let manifest = qq_core::ApprovedReadImages::new(vec![
+            format!("grep:{}", "01".repeat(32)).parse().unwrap(),
+        ])
+        .unwrap();
+        let factory = RuntimeFactory::new_with_read_images(
+            ConfigLoader::new(ConfigPaths::new(
+                fixture.path("global"),
+                fixture.path("data"),
+                fixture.path("managed"),
+            )),
+            CredentialStore::with_paths(CredentialPaths::new(fixture.path("data"))),
+            manifest,
+        )
+        .unwrap();
+        let first = factory.plan_for(&request).unwrap();
+        let cached = factory.clone().plan_for(&request).unwrap();
+        assert!(Arc::ptr_eq(&first, &cached));
+        let identity = first.descriptor().approved_read_images;
+        assert!(identity.is_some());
+        let worker = factory
+            .clone()
+            .plan_for_profile(&request, &AgentProfileId::new("worker").unwrap())
+            .unwrap();
+        assert_eq!(worker.descriptor().approved_read_images, identity);
+        let ordinary = fixture.factory().plan_for(&request).unwrap();
+        assert!(ordinary.descriptor().approved_read_images.is_none());
+        assert_ne!(ordinary.digest(), first.digest());
+    }
+
+    #[test]
     fn source_changes_during_plan_admission_do_not_certify_stale_configuration() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();

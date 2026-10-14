@@ -591,3 +591,9 @@ newest last.
 
 - Inherited-PATH executable spoof reproduced red and now passes with execution-derived Work accounting. Prepared launch captures environment once, holds cwd, binds explicitly approved self-contained static Linux exec images with sealed bytes, and produces typed atomic store receipts. CLI approvals propagate through immutable factories; existing-server attachment rejects nonempty flags.
 - Local source remains unqualified: focused tests identified a store-fixture table typo (fixed), broader tests exposed old heuristic assumptions and partial-migration fixtures (fixed); descriptor golden awaits refresh. No new source pushed. Integrating newly merged main #295/#296/#297 and preserving its schema46 before the next qualification.
+
+### 2026-10-14 — current-main integration and focused context evidence
+
+- Local merge `24653324` includes main `f87d5d9d` (#295/#296/#297). Resolved schema conflict by preserving AC3's46 and appending receipt47; AB5 must move its notice to48. GitHub still has the older head until qualified source is pushed.
+- Focused AB1 run:25 tests pass,0 fail; CLI/factory run:3 pass,0 fail. Real static-image worker proves64 verified exec calls reach the stall report, replacement image/cwd paths cannot replace held inputs, and failed writes trigger audits. Receipt rollback/bounds/reopen and historical NULL fixtures pass.
+- Independent read-only reviews approved host flag propagation and receipt transaction/migration wiring; executable review found and fixed unreadable-PATH skipping and unbounded sealed readback. Full workspace checks and matched performance remain open. Logs `/tmp/qq-context-{focused,root-tests}.log` (will copy into task-owned evidence before qualification).
