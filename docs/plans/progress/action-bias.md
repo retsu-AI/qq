@@ -322,3 +322,14 @@ newest last.
   requests pass; prompt tests 59 passed. Historical v14 prompt digest remains
   unchanged after reversing only the reviewed v20 changes. Prefix fixture
   5,299 bytes; schema unchanged. Single-tool matrix and final gates next.
+
+### 2026-10-14 — AB1 hosted source review regressions
+
+- #301 raised ripgrep hostname helpers, Git external diff/textconv helpers,
+  and Cargo lockfile-generating queries. Added exact verdict regressions
+  before changing the recognizer; independent investigation requested.
+- Independent review caught Git disabling flags used as path/value operands
+  and default blame textconv. Require canonical leading disable switches,
+  suppress signature helpers for log/show, and test separators/overrides.
+  Cargo's lock guard is a leading switch, with config overrides rejected.
+  All five focused regressions pass; final independent re-review requested.
