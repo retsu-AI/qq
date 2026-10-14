@@ -82,6 +82,7 @@ may append a **request** row; only root changes a request's status.
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
 | 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
+| 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -153,7 +154,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0059. Reserve here before opening a PR that adds an ADR.
+Next free number: 0060. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -181,6 +182,7 @@ Next free number: 0059. Reserve here before opening a PR that adds an ADR.
 | 2026-10-04 | autonomous-core AP4.2 (ENG-1005) | `docs/design/architecture.md` § sub-agents (`wait_agents`, `cancel_agent`, interim reports); `docs/design/protocol.md` and `tools.md`; guide `troubleshooting.md` / `providers.md` version mentions | `DESCRIPTOR_VERSION` 12 → 13; store schema 41 → 42 (`child_reports`); prompt 16 → 17; no protocol change | Done in the AP4.2 PR |
 | 2026-10-05 | compaction CX4 (ENG-997) | `crates/qq-protocol` `PROTOCOL_VERSION` 30 → 31 (`RunActivity::Compacting`); `docs/design/protocol.md` version history; `docs/design/architecture.md` run loop step 3; guide `troubleshooting.md` / `providers.md` protocol mentions; Harbor trace fixtures | Clients must show that a run is compacting (compaction plan Goal 4); takes AC14's in-run compaction-activity item | Done in the CX4 PR |
 | 2026-10-05 | compaction CX3 (ENG-996) | `crates/qq-core` store schema 42 → 43 (`sessions.prune_through_ordinal`, `prune_through_turn`); `docs/design/protocol.md` store schema history; `docs/design/architecture.md` summarizer paragraph; guide `troubleshooting.md` / `providers.md` schema mentions | Assembly stubs only up to a durable watermark so cross-run requests extend each other (ADR-0056 § 6) | Done in the CX3 PR |
+| 2026-10-13 | action-bias plan (ENG-1037) | `docs/README.md` (research row), `docs/plans/README.md` (plan row, priority, ownership), `docs/plans/progress/README.md` (ledger row) | Index the new plan, research and ledger | Done in the plan PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,

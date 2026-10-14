@@ -32,6 +32,7 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | --- | --- |
 | [`autonomous-core.md`](./autonomous-core.md) | Long unattended runs and reliability: AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped; AP5 evidence pending; AC3 in review; AC17 tolerant arguments next, AC18 truncation recovery, AC19 stream repair and evidence-gated AC20 latency diagnostics. AC4–AC6 and remaining embedding/resource slices stay open |
 | [`goals.md`](./goals.md) | `/goal`: a session goal the runtime pursues across runs, restarts and days until its check passes, its budget runs out, it is blocked, or the user pauses it. G0–G5 planned (with autonomous-core AC4); ADR-0049 Proposed |
+| [`action-bias.md`](./action-bias.md) | Runs that produce results: shell reads classed as reads for the progress rule, an action-biased prompt, a byte-budgeted read window, declared tools that match the run's authority, a root stall report that asks for the next change. AB1–AB6 planned; ADR-0059 reserved. Proposed |
 | [`compaction.md`](./compaction.md) | Fast, exact, cache-aligned compaction (ADR-0056). CX0–CX4 shipped; CX5 live qualification open |
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T20 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
 | [`token-efficiency.md`](./token-efficiency.md) | More verified work per token: task-tree economics, tools, selective discovery, evidence reuse and context experiments. TE0 and TE1.1 shipped; the rest of TE1 and TE2–TE8 planned |
@@ -57,6 +58,7 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | ---: | --- | --- | --- |
 | 0 | AP5 seven-day normal-use evidence (2026-10-06–13) | [`autonomous-core.md`](./autonomous-core.md) § Order | Confirms that long runs and sub-agents now produce output, not only activity (ADR-0054) |
 | 0a | AC3 transient summarizer recovery; goal branch AC4 + G0 → G2 → G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | AC1/AC2 shipped; qualification remains open. Embedding AC12.2–AC13 runs in parallel |
+| 0a′ | AB1 progress classification and AB2 prompt v20, then AB3–AB5 | [`action-bias.md`](./action-bias.md) | Root runs read in slices and re-read before they change anything, and the stall report that should catch it misses shell reads. Both slices are small and independent |
 | 0b | CX5 seven-day live qualification | [`compaction.md`](./compaction.md) | CX0–CX4 shipped; the speed and cache-read targets are unconfirmed on real sessions |
 | 0c | AC17 tolerant arguments (ENG-872), then AC18 truncation recovery (ENG-870) and AC19 stream repair (ENG-874) | [`autonomous-core.md`](./autonomous-core.md) | Remaining reliability gaps; read-hash persistence is already implemented. AC20 diagnostics require evidence |
 | 1 | GE5 keybindings, GE4 environment, then GE2, GE3, GE1, GE9 | [`guide-expansion.md`](./guide-expansion.md) | The references newcomers look for and cannot find. Small, independent, and each extends the docs-truth net |
@@ -85,6 +87,7 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | [`multi-surface-clients.md`](./multi-surface-clients.md) |
 | Long unattended runs and reliability: reset scopes, provider/stream recovery, tolerant tool arguments, continuation, loop guard, soak/live evidence; embedding and `qq-harness` | [`autonomous-core.md`](./autonomous-core.md) |
 | Goals (`/goal`): the session goal, goal driver, `update_goal`, completion check, goal budgets, waits, `qq run --goal` | [`goals.md`](./goals.md) |
+| Root-run action bias: what counts as a read for progress, the root prompt's working conventions, `read_file`'s default window, declared tools versus run authority | [`action-bias.md`](./action-bias.md) |
 | Compaction speed, fidelity and cache alignment | [`compaction.md`](./compaction.md) |
 | TUI layout, transcript rendering, chrome | [`tui-redesign.md`](./tui-redesign.md) |
 | Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md) |
