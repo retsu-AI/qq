@@ -20,6 +20,7 @@ mod feeds;
 mod migrations;
 mod nonblocking;
 mod progress;
+mod projection;
 mod replay_identity;
 mod runs;
 mod settlement;

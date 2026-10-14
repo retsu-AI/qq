@@ -957,3 +957,9 @@ newest last.
   each excluded subtree's complete terminal cursor before charging/advancing
   it. Eligible files at depth 64 are still inspected; ancestors are not
   prematurely marked complete. Focused continuation check follows.
+
+- Admission/frontier source `30eb4e93` passes all 31 focused AB2 fixtures.
+  Added stored historical descriptor-14/prompt-19 regression with sixteen
+  near-12KiB pages; the original main projector retains its eighth page
+  and later generic-floor recall markers, including after reopen. This
+  test establishes the replay regression before persistence repair.
