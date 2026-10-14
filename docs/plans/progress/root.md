@@ -572,3 +572,9 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 - AB4 additionally owns the read-only child user-follow-up assertion in
   `sessions/tests/delegation.rs`: it has root framing but retains ReadOnly
   authority. This updates expected wording, without weakening child policy.
+### 2026-10-14 — AB2 filtered tool description ownership
+
+- AB2 owns `plan.rs` compilation of filtered builtin descriptions: shell
+  recommendations name only present companion tools; edit-only profiles
+  refer to a content hash without naming unavailable read_file. Descriptions
+  are adjusted once after catalog-input policy filtering, off requests.

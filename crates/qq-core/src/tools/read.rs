@@ -510,7 +510,12 @@ fn lines(
     out.push_str(&body);
     if stopped || (continue_to_eof && shown.last().is_some_and(|(_, last)| *last < total_lines)) {
         let next = shown.last().map_or(0, |(_, last)| last + 1);
-        if loaded.hash.is_none() {
+        if next > MAX_READ_OFFSET {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}more lines; start-offset limit {MAX_READ_OFFSET} reached; no later starting offset is supported]…"
+            );
+        } else if loaded.hash.is_none() {
             let _ = writeln!(
                 out,
                 "{MARKER_PREFIX}more lines (count unknown; {} MiB scan cap); continue from offset={next}]…",

@@ -10733,7 +10733,12 @@ mod tests {
 
     #[tokio::test]
     async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
-        for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
+        for exposed in [
+            Vec::new(),
+            vec!["read_file".to_owned()],
+            vec!["shell".to_owned()],
+            vec!["edit_file".to_owned()],
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let runtime = Runtime::new(
@@ -10756,11 +10761,21 @@ mod tests {
             .await
             .unwrap();
             let events = plan
-                .run(RunCommand::new("review the available context"))
+                .execute(
+                    vec![Message::user("review the available context")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::clone(&plan.runtime.network),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None),
+                )
                 .collect::<Vec<_>>()
                 .await;
             assert!(
-                matches!(events.last(), Some(RunEvent::Completed)),
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
                 "{events:?}"
             );
             let requests = requests.lock().unwrap();
@@ -10770,6 +10785,25 @@ mod tests {
                 expected.iter().map(String::as_str).collect::<Vec<_>>()
             );
             let prompt = requests[0].system().unwrap();
+            if !expected.iter().any(|name| name == "read_file") {
+                assert!(
+                    !prompt.contains("with ranges"),
+                    "absent read_file ranges guidance: {prompt}"
+                );
+            }
+            if expected == ["shell"] {
+                let shell = &requests[0].tools()[0];
+                for absent in ["read_file", "search", "tree"] {
+                    assert!(
+                        !shell
+                            .description()
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == absent),
+                        "absent {absent} in shell description: {}",
+                        shell.description()
+                    );
+                }
+            }
             for name in [
                 "read_file",
                 "tree",

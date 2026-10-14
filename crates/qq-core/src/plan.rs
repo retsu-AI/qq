@@ -926,6 +926,49 @@ impl CompiledAgentPlan {
         {
             static_tools.retain(|tool| !follows_spawn(tool));
         }
+        let has_read_file = static_tools
+            .iter()
+            .any(|tool| tool.spec.name() == "read_file");
+        let has_search = static_tools.iter().any(|tool| tool.spec.name() == "search");
+        let has_tree = static_tools.iter().any(|tool| tool.spec.name() == "tree");
+        for tool in &mut static_tools {
+            let description = match tool.spec.name() {
+                "shell" if !(has_read_file && has_search && has_tree) => {
+                    let read_names: Vec<&str> = [
+                        ("read_file", has_read_file),
+                        ("search", has_search),
+                        ("tree", has_tree),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, present)| present.then_some(name))
+                    .collect();
+                    let guidance = if read_names.is_empty() {
+                        "Use this tool for file inspection or searching when no specialized reader is declared.".to_owned()
+                    } else {
+                        format!(
+                            "For file inspection or searching, prefer {} when those tools cover the operation; otherwise use this tool.",
+                            read_names.join(", ")
+                        )
+                    };
+                    Some(tool.spec.description().replace(
+                        "Not for reading files or searching; use read_file, search, tree.",
+                        &guidance,
+                    ))
+                }
+                "edit_file" if !has_read_file => Some(tool.spec.description().replace(
+                    "hash from its current read_file header",
+                    "current content hash",
+                )),
+                _ => None,
+            };
+            if let Some(description) = description {
+                tool.spec = qq_provider::ToolSpec::from_raw(
+                    tool.spec.name(),
+                    description,
+                    tool.spec.input_schema().to_owned(),
+                );
+            }
+        }
         let catalog = ToolCatalog::compile(static_tools, contributions, &config_grants);
 
         let descriptor = AgentPlanDescriptor {

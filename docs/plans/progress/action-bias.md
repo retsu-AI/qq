@@ -6,8 +6,8 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; performance qualification open |
+| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In progress | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -411,3 +411,73 @@ newest last.
   rerun passes. Logs `target/qq-perf/ab4-2026-10-14/core-immutable-retry.log`.
 - ADR-0059 proposed, design/guide corrected. Integrate newest parent fixes
   before workspace/performance qualification and draft publication.
+### 2026-10-14 — AB2 subset correction qualification
+
+- Independent source review approved conditional conventions and captured
+  subsets; seven focused AB2 tests and 59 prompt tests pass. Workspace gates
+  pass: 2,284 tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0.
+  Logs: `target/qq-perf/ab2-2026-10-14/subset-final-gate-{0,1,2,3}.log`.
+- Fixed prefix 5,299 bytes; builtin schema unchanged. Matched plan compilation
+  performance remains unqualified; draft source review continues.
+
+### 2026-10-14 — AB3 integrated publication qualification
+
+- Independent final source review approved. Integrated workspace: 2,289
+  passed, 0 failed, 14 ignored; fmt, Clippy and build exit 0. First attempt
+  stopped when the filesystem filled; removed only task-owned obsolete
+  incremental caches, then reran all gates. Logs under this worktree
+  `target/qq-perf/ab3-2026-10-14/integrated-space-retry-{0,1,2,3}.log`.
+- Actual parallel coverage recovers all 6,000 rows: baseline 30 calls/0 cuts,
+  candidate 15 calls/4 cuts. Explicit windows, ranges and scan-cap fixtures pass.
+- Loaded-host diagnostics: dispatch 94,369 → 64,433 ns/iteration (1,000);
+  default output bounding 132,475 → 128,788 ns. Matched/noise performance
+  qualification remains open; these samples do not establish a speedup.
+- Draft source publication next, stacked on AB2; no readiness claim.
+
+### 2026-10-14 — AB3 continuation start-offset boundary
+
+- Hosted plan review supplied a 100,000-line start-offset boundary. A
+  105,000-short-line fixture starting at 99,999 reproduces an unusable
+  next offset 103,227. Test-first fails before the correction. Preserve
+  the existing bound and emit a terminal marker naming it instead.
+### 2026-10-14 — AB2 shell-only and range guidance regressions
+
+- Hosted review found absent companion tools in shell-only descriptions and
+  read_file-specific ranges in no-tools prompts. Extend captured subsets
+  with shell-only interactive requests and description/ranges assertions.
+  Test-first fails on no-tools range guidance before production correction.
+- Independent final review approved conditional ranges and compiled
+  descriptions. Seven focused tests pass, including shell-only/edit-only
+  captured profiles after the common-path allocation adjustment. Full
+  builtin schema remains unchanged; workspace requalification follows.
+### 2026-10-14 — fresh AB1 helper regressions
+
+- Latest hosted source review supplied signature-format verification,
+  compressed ripgrep helpers, configured Cargo compilers, repeated sed
+  expressions and JJ external formatters. Exact test-first table fails
+  before fixes; independent investigation confirms configuration defaults
+  can execute helpers, and bare JJ commands snapshot the working copy.
+- Narrowing canonical safe Git/JJ forms and treating Cargo queries as work
+  is required; no read verdict or approval authority is inferred from hints.
+- Independent final review approved helper narrowing; all five focused
+  regressions pass. Workspace requalification and fresh candidate build next.
+
+### 2026-10-14 — fifth hosted plan review corrections
+
+- Added explicit find file-list output and sort compressor exclusions,
+  inspection-only interactive authority, and terminal read offset bounds.
+  AB1/AB3/AB4 source regressions reproduce the corresponding cases.
+- Preview exclusion now tests JSON boolean true only and handles malformed
+  JSON explicitly. Exact-query fixture retains four failures/five calls
+  while excluding the actual preview; corrected fixed-window baseline remains
+  205/1,222. Evidence `target/qq-perf/ab-plan-2026-10-14/malformed-preview.json`.
+- Updated concrete helper rules from fresh AB1 review; independent final
+  review and documentation checks pending. No gates waived.
+- Independent review approved all five plan corrections. Docs truth 23
+  passed; exact malformed-preview fixture and baseline recount passed.
+  Production parent remains unchanged from its qualified source.
+
+
+- Latest helper source workspace gates pass: 2,277 tests, 0 failed,
+  14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
+  logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
