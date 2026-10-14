@@ -15,4 +15,9 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     updates=$((updates + 1))
 done
 [ "$updates" -gt 0 ] || exit 0
+
+if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+    echo 'pre-push: commit or stash staged, unstaged and untracked changes before validating the pushed tree' >&2
+    exit 1
+fi
 exec cargo xtask check --profile quick

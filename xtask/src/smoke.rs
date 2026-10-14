@@ -254,8 +254,21 @@ impl Home {
             workspace.join("inventory.rs"),
             "pub struct Widget;\npub struct Gadget;\n",
         )?;
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
+        let mut git = std::process::Command::new("git");
+        git.env_clear();
+        for name in ["PATH", "SYSTEMROOT", "WINDIR"] {
+            if let Some(value) = env::var_os(name) {
+                git.env(name, value);
+            }
+        }
+        let status = git
+            .env("HOME", &root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .args(["-c", "init.templateDir=", "init", "-q", "--template="])
             .current_dir(&workspace)
             .status()?;
         if !status.success() {
