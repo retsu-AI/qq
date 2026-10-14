@@ -471,8 +471,9 @@ pub fn parse_nextest_failures(output: &str, rerun_flags: &str) -> Vec<TestFailur
         let Some((status, rest)) = trimmed.split_once(' ') else {
             continue;
         };
-        if (!FAILURE_STATUSES.contains(&status) && status != "FLAKY")
-            || !rest.trim_start().starts_with('[') && status != "FLAKY"
+        let flaky = matches!(status, "FLAKY" | "FLKY-FL");
+        if (!FAILURE_STATUSES.contains(&status) && !flaky)
+            || !rest.trim_start().starts_with('[') && !flaky
         {
             continue;
         }
@@ -1308,6 +1309,12 @@ mod tests {
 
     #[test]
     fn ci_profile_retries_and_flaky_failures_are_parsed() {
+        assert_eq!(
+            names(
+                "  FLKY-FL 2/2 [ 12.580s] (2438/2439) qq-core tools::tests::ab2_depth_skip_does_not_block_later_directory_watermarks\n"
+            ),
+            ["tools::tests::ab2_depth_skip_does_not_block_later_directory_watermarks"]
+        );
         assert_eq!(
             names(CI_PROFILE),
             ["tests::bad", "tests::seg", "tests::slow", "tests::flaky"]
