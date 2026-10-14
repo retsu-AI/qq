@@ -118,6 +118,7 @@ pub struct AgentProfile {
     task_router: Option<Arc<dyn crate::sessions::TaskRouter>>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
+    approved_read_images: crate::runtime::ApprovedReadImages,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
@@ -166,6 +167,7 @@ impl AgentProfile {
             task_router: None,
             reasoning_effort: None,
             shell: ShellPolicy::default(),
+            approved_read_images: crate::runtime::ApprovedReadImages::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
@@ -266,6 +268,7 @@ impl AgentProfile {
             task_router: runtime.task_router.clone(),
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
+            approved_read_images: runtime.approved_read_images.as_ref().clone(),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
@@ -386,6 +389,13 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_audit(mut self, audit: AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Exact host-approved self-contained native read implementations.
+    #[must_use]
+    pub fn with_approved_read_images(mut self, images: crate::runtime::ApprovedReadImages) -> Self {
+        self.approved_read_images = images;
         self
     }
 
@@ -671,6 +681,7 @@ impl CompiledAgentPlan {
             task_router,
             reasoning_effort,
             shell,
+            approved_read_images,
             network,
             turn_recovery,
             approval_delegate,
@@ -703,6 +714,7 @@ impl CompiledAgentPlan {
         .with_delegation(delegation)
         .with_audit(audit)
         .with_shell_policy(shell)
+        .with_approved_read_images(approved_read_images)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
         .with_approval_delegate(approval_delegate)
@@ -995,6 +1007,8 @@ impl CompiledAgentPlan {
             },
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
+            approved_read_images: (!runtime.approved_read_images.entries().is_empty())
+                .then(|| runtime.approved_read_images.digest()),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
             approval_delegate: runtime
                 .approval_delegate_identity
@@ -1616,6 +1630,7 @@ mod tests {
                 max_depth: 1,
                 write_children: false,
             },
+            approved_read_images: None,
             audit: AuditDescriptor {
                 mode: AuditModeDescriptor::Heuristic,
                 max_revisions: 1,
@@ -1673,20 +1688,20 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v13\0{\"version\":13,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v14\0{\"version\":14,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 13 and prompt 20: action contract, AB2).
+        // changing the encoding (descriptor 14 and prompt 20; golden refresh pending: action contract, AB2).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
             "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v13\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v14\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }

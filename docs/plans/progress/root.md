@@ -83,6 +83,7 @@ may append a **request** row; only root changes a request's status.
 | 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
+| 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -154,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0060. Reserve here before opening a PR that adds an ADR.
+Next free number: 0061. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -585,3 +586,37 @@ its digest, and write/read child assertions must pin the new action bullet.
 - AB2 additionally reserves tools/walk.rs for search-specific cancellable,
   deadline-aware entry/name-byte enumeration ceilings before sorting. Existing
   callers retain their listing API; incomplete search listings are errors.
+### 2026-10-14 — AB1 execution-context shared-path request
+
+- User authorized host execution-context capture/verification and required every PR to stay out of draft. AB1 owns the concrete process preparation/receipt seam, startup approval flags in `src/{cli,main,runtime}.rs`, descriptor v14, and nullable store receipt migration; AB5 must follow the current main schema with its notice-only migration. ADR-0060 is reserved in the parent follow-up.
+- Newly merged main includes #295/#296/#297. Integrating it before publishing AB1; migration numbering must preserve AC3's schema46 rather than reuse it. Historical process qualification stays unavailable.
+### 2026-10-13 — AC3 dependent integration and spend repair ownership
+
+The full-stack executor owns `fix/eng-1029-ac3-durable-summary-spend` in `.worktrees/autonomous-core-stack`, based on qualified AC17 #294 (`10ad59a9`). Read-only audit of AC3 #279 (`455d3181`) approves adopting its three commits as inputs for repair, not submitting unchanged. No AC3 writing agent is live in this thread; its original worktree stays untouched and its draft remains open until replacement is qualified. Integration preserves newer consolidation/AC17 ledger receipts.
+
+Scope includes `lib.rs`, `runtime/{compaction,run_loop,budget}.rs`, `sessions/{in_run_compaction,store,streaming,compaction,settlement}.rs` as needed, deterministic soak/accounting/replay tests, architecture/protocol design amendments and autonomous-core ledger. Known usage from completed summarizer subturns must be durable before the next request; unknown aggregate usage remains unknown. Prompt caller token/cost remainder must constrain both successful compaction and failed retries without double-counting session spend. Deadline, cancellation, unchanged request retries and persisted replay need qualification. Existing model-turn rows provide the initial persistence seam; no protocol/schema/ADR number bump reserved absent a demonstrated need. Capture `turn_overhead` baseline before source changes.
+
+- AC3 accounting scope extends to `sessions/deliveries.rs` and focused delegation/spend tests: owned prompt spend must include internal compactions exactly once so a parent cannot regrant a child’s spent token/cost allowance. This is a concrete safety finding from independent prototype review, not a new public boundary.
+
+### 2026-10-13 — AC3 owned compaction lookup schema reservation
+
+AC3 reserves session-store schema 44 → 45 for a non-unique partial `runs_owned_compaction` index on `auto_compaction_for_run_id`, restricted to internal compaction owners. The new exact child-spend receipt needs this lookup; test-first query-plan evidence currently shows `SCAN runs`, which scales with stored history. Own `sessions/store/schema.rs`, migration/receipt tests, protocol schema-history and guide version amendments. No new columns, wire or descriptor change. Upgrade/reopen/data-preservation and index-use evidence are required before push.
+
+### 2026-10-13 — AC3 shared client regression ownership
+
+AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existing ModelTurnCompleted/RunFinished projection: internal measured summarizer turns must remain scoped to their run, serialized replay must match live application, and internal failure must preserve the prompt's activity/approval state. No client wire or production seam change is authorized absent a concrete failing regression.
+
+AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
+
+AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
+
+### 2026-10-13 — AC0.2.1 controlled CI recorder ownership (ENG-1044)
+
+User's full autonomous-core goal owns CI diagnostic recording in isolated `.worktrees/autonomous-perf-ci`, branch `ci/eng-1044-turn-overhead-recording`, stacked on draft AC3 #296 at a76b7cd9. Reserve `.github/workflows/ci.yml`, focused `.github/scripts/record-turn-overhead.py` and its CLI tests, performance runbook/inventory and autonomous ledger. Add an explicitly dispatched job using immutable 40-hex SHAs, separate baseline/candidate target directories, saved optimized binaries and 30 A/B +30 A/A pairs with raw artifacts. Contents-read permissions, no persisted checkout credentials or provider calls; regular PR CI behavior unchanged. This is AC0.2.1's concrete diagnostic seam, not completion of H0 registration, concurrency/fsync or live gates. Existing AC0.1 ENG-986 remains Done; new issue ENG-1044 tracks this work. No protocol/schema/descriptor/prompt reservation.
+
+### 2026-10-13 — AC0.2.1 compiled fixture identity review repair
+
+Recorder review reproduces materially different included soak fixtures across earlier A/B arms. Extend this slice to the concrete `turn_overhead.rs` benchmark, source-manifest/dep-info verification script and tests. Pin its two direct source files from one immutable fixture checkout in both production arms; embedded source SHA-256 binds each sample to the compiled fixture. Production crates remain the comparison variable. Earlier recordings are retained as confounded whole-build diagnostics, not attributed runtime measurements. No new dependency, public protocol or schema change.
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.

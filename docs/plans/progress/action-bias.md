@@ -853,3 +853,29 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab2-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+- AB1 execution-context test-first: a child test process captures PATH with a
+  workspace-local executable named grep that actually writes written.txt.
+  Existing literal exec classification calls it Read, so progress and audit
+  assertions fail. The real helper execution and side effect are checked before
+  the verdict. context-shadow-red.log retains the failing worker/parent result.
+
+### 2026-10-14 — expanded context implementation in progress
+
+- Inherited-PATH executable spoof reproduced red and now passes with execution-derived Work accounting. Prepared launch captures environment once, holds cwd, binds explicitly approved self-contained static Linux exec images with sealed bytes, and produces typed atomic store receipts. CLI approvals propagate through immutable factories; existing-server attachment rejects nonempty flags.
+- Local source remains unqualified: focused tests identified a store-fixture table typo (fixed), broader tests exposed old heuristic assumptions and partial-migration fixtures (fixed); descriptor golden awaits refresh. No new source pushed. Integrating newly merged main #295/#296/#297 and preserving its schema46 before the next qualification.
+
+### 2026-10-14 — current-main integration and focused context evidence
+
+- Local merge `24653324` includes main `f87d5d9d` (#295/#296/#297). Resolved schema conflict by preserving AC3's46 and appending receipt47; AB5 must move its notice to48. GitHub still has the older head until qualified source is pushed.
+- Focused AB1 run:25 tests pass,0 fail; CLI/factory run:3 pass,0 fail. Real static-image worker proves64 verified exec calls reach the stall report, replacement image/cwd paths cannot replace held inputs, and failed writes trigger audits. Receipt rollback/bounds/reopen and historical NULL fixtures pass.
+- Independent read-only reviews approved host flag propagation and receipt transaction/migration wiring; executable review found and fixed unreadable-PATH skipping and unbounded sealed readback. Full workspace checks and matched performance remain open. Logs `/tmp/qq-context-{focused,root-tests}.log` (will copy into task-owned evidence before qualification).
+
+- First fresh expanded-source workspace attempt on `1f48e28d` stopped in root tests:268 passed,2 failed,2 ignored; new CLI flag lacked its guide entry and the current descriptor assertion still expected13. Both corrected; no later gates ran. Failed logs retained under `target/qq-perf/ab1-2026-10-14/expanded-context-first-gates-*`. Independent final read-only reviews approved executable binding and receipt/ADR wiring on1f48.
+
+- Fresh source `ea6482b7`: workspace tests2341 passed,0 failed,14 ignored; fmt passed. Clippy failed2 large-enum checks because inline process receipts enlarged `TurnStep`/`RunInput`; build not run. Receipts now allocate one boxed payload only for started processes, preserving ordinary/default event size. Cwd capability stays owned on unsupported platforms too. Failed logs retained as `expanded-context-final-gates-*`; fresh requalification follows.
+
+### 2026-10-14 — expanded AB1 qualification and conflict repair published
+
+- Qualified immutable source `9cbbaa7d7dcb989756ddaff970974601b24d3cab` includes main `f87d5d9d`:2341 passed,0 failed,14 ignored (38 report blocks); fmt, all-target/all-feature Clippy `-D warnings` and workspace build exit0. Logs/receipt `target/qq-perf/ab1-2026-10-14/expanded-context-final2-gates-*`.
+- Three independent read-only reviews approved launch binding, startup manifest propagation and atomic receipts/docs. Clippy-driven boxing changes only optional process payload ownership; ordinary events stay small. Unsupported/historical contexts remain unqualified.
+- All PRs stay out of draft. Publishing this source removes the old main conflict on301; fresh Codex review and current-head hosted CI follow. Matched default/process/turn/persistence measurements remain open, so merge acceptance is not yet claimed.

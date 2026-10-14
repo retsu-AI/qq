@@ -33,7 +33,7 @@ pub use checkpoint::{
 };
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
-    InRunCompactor,
+    InRunCompactor, SummarizeError, SummarizeStep,
 };
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
@@ -59,7 +59,8 @@ pub(crate) use prompt::{
 };
 pub(crate) use shell_policy::builtin_alternative;
 pub use shell_policy::{
-    BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ShellPolicy,
+    ApprovedReadImage, ApprovedReadImages, BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_ALLOWLIST,
+    MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract, ReadImageFamily, ShellPolicy,
     valid_env_name,
 };
 pub(crate) use spill::{
