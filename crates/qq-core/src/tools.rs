@@ -796,6 +796,73 @@ mod tests {
     }
 
     #[test]
+    fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
+        let directory = tempfile::tempdir().unwrap();
+        let content = "x".repeat(output::MAX_LINE_BYTES);
+        fs::write(directory.path().join("row.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(&workspace, &FileState::default(), "read_file", r#"{"path":"row.txt"}"#);
+        assert!(!result.is_error);
+        let row = result.model_text.lines().find_map(|line| line.split_once('\t')).unwrap();
+        assert_eq!(row.1, content);
+    }
+
+    #[test]
+    fn ab3_secret_masking_preserves_contiguous_default_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let long_path = format!("{prefix}/{}notes.txt", "SECRET=abcdefgh ".repeat(8));
+        for path in ["notes.txt", long_path.as_str()] {
+            fs::write(
+                directory.path().join(path),
+                "SECRET=abcdefgh\n".repeat(2_500),
+            )
+            .unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            let mut offset = 1;
+            while offset <= 2_500 {
+                let arguments = serde_json::json!({"path":path,"offset":offset,
+                    "ranges":"[]","cwd":".","include_ignored":true})
+                .to_string();
+                let result = run_tool(&workspace, &state, "read_file", &arguments);
+                assert!(!result.is_error, "{}", result.model_text);
+                assert!(result.spill.is_none(), "read window must survive masking");
+                assert!(!result.model_text.contains("SECRET=abcdefgh"));
+                let rows = result
+                    .model_text
+                    .lines()
+                    .filter_map(|line| {
+                        line.split_once('\t')
+                            .and_then(|(number, _)| number.trim().parse::<usize>().ok())
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!rows.is_empty());
+                assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+                let last = *rows.last().unwrap();
+                if last == 2_500 {
+                    break;
+                }
+                let next = result
+                    .model_text
+                    .split("offset=")
+                    .nth(1)
+                    .unwrap()
+                    .split(|ch: char| !ch.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(next, last + 1);
+                offset = next;
+            }
+        }
+    }
+
+    #[test]
     fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();

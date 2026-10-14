@@ -585,3 +585,10 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   classification field in its existing shell preview pattern. Approval
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
+
+### 2026-10-14 — AB3 masked read admission
+
+- Reserve tools/output.rs shared allocation-free masked escaped-size measure
+  and tools/dispatch.rs actual repaired-argument note byte reservation. Read
+  construction uses post-mask costs and retains unmasked spill semantics.
+  Returned line bounds preserve manually clipped complete rows and gutters.

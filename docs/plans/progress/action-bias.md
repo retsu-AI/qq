@@ -679,3 +679,12 @@ newest last.
   target/qq-perf/ab3-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
   Independent integration review approves; read-window behavior unchanged.
   Matched performance and final hosted review remain open.
+
+### 2026-10-14 — masked read window regressions
+
+- Public default reads of 2,500 short credential-shaped rows spill after
+  masking expansion, invalidating the advertised contiguous window. Regression
+  fails before correction; includes repaired arguments and a long filename.
+- Full 2,000-byte rows also lose content when dispatch clips the added gutter.
+  Test-first failure captured; shared masked measure and actual note budget
+  preserve complete rows while retaining the existing content clip ceiling.
