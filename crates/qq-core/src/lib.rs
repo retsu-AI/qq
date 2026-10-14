@@ -5047,7 +5047,7 @@ mod tests {
                     ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text),
                     _ => None,
                 })
-                .last()
+                .next_back()
                 .unwrap();
             assert!(notice.len() <= 32 * 1024);
             assert!(notice.ends_with("…[truncated]"));

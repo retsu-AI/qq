@@ -1080,3 +1080,7 @@ newest last.
   its following barrier then settles continuation with zero new provider requests
   and a healthy runtime. Current source freezes for fresh workspace gates.
   Raw red/green logs are under`target/qq-perf/ab2-2026-10-14/`.
+
+- Checkpoint source6d09bb91 passes fresh workspace tests and formatting; Clippy
+  catches `.last()` on a double-ended iterator in the new final-candidate test.
+  Replace with `.next_back()`, retain the failed receipt, and rerun all gates before push.
