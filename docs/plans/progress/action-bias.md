@@ -580,3 +580,9 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab1-2026-10-14/fresh-final-review-wave-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+
+- AB1 execution-context test-first: a child test process captures PATH with a
+  workspace-local executable named grep that actually writes written.txt.
+  Existing literal exec classification calls it Read, so progress and audit
+  assertions fail. The real helper execution and side effect are checked before
+  the verdict. context-shadow-red.log retains the failing worker/parent result.

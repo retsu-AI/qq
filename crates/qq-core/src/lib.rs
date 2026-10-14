@@ -8710,6 +8710,81 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("QQ_CONTEXT_SHADOW_WORKER").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let bin = directory.path().join("bin");
+            let workspace = directory.path().join("workspace");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::create_dir(&workspace).unwrap();
+            let program = bin.join("grep");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\nprintf changed > written.txt\nprintf 'match\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                    "--nocapture",
+                ])
+                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
+                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                .env("PATH", &bin)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "shadowed executable classification worker failed"
+            );
+            return;
+        }
+        let path = std::path::PathBuf::from(std::env::var_os("QQ_CONTEXT_SHADOW_ROOT").unwrap());
+        let arguments = r#"{"program":"grep","args":["-n","x","f"]}"#.to_owned();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tools::execute(
+                workspace::Workspace::open(&path).unwrap(),
+                Arc::new(workspace::FileState::default()),
+                "exec".to_owned(),
+                arguments.clone(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::new(tools::network::NetworkPolicy::default()),
+            ));
+        assert!(!output.is_error, "{}", output.model_text);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        let call = RuntimeToolCall {
+            id: ToolCallId::from_bytes([42; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "shadow".to_owned(),
+            name: "exec".to_owned(),
+            arguments,
+            effect: catalog::EffectClass::Shell,
+            rejection: None,
+        };
+        assert!(
+            runtime::is_progress(&call, None, &output),
+            "unverified executable must count as work"
+        );
+        let mut triggers = runtime::AuditTriggers::default();
+        note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &output);
+        assert!(
+            triggers.non_read_shell,
+            "unverified mutation must not suppress audit"
+        );
+    }
+
     /// Scripts one `spawn_agent` call on the first turn, then completes.
     struct SpawnCallProvider {
         turn: Mutex<usize>,
