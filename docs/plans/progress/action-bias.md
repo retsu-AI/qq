@@ -758,3 +758,101 @@ newest last.
   canonical prompt-20 bytes remain a historical golden. Sixty-two prompt
   focused tests pass; independent source review approves. Full integrated
   qualification follows upstream repair integration.
+### 2026-10-14 — masked read window regressions
+
+- Public default reads of 2,500 short credential-shaped rows spill after
+  masking expansion, invalidating the advertised contiguous window. Regression
+  fails before correction; includes repaired arguments and a long filename.
+- Full 2,000-byte rows also lose content when dispatch clips the added gutter.
+  Test-first failure captured; shared masked measure and actual note budget
+  preserve complete rows while retaining the existing content clip ceiling.
+
+
+- Masked escaped row/header admission includes actual repair-note bytes,
+  preserves unmasked spill contents and prevents a second gutter-based clip.
+  Ten focused regressions pass; independent source review approves. Existing
+  range-separator accounting now charges its four escaped bytes.
+  Full integrated gates and dispatch measurements remain pending.
+### 2026-10-14 — long cursors and read/write-only prompt contract
+
+- Two public regressions fail before correction: a completed subtree with
+  two 250-byte components emits an undecodable cursor, and read_file plus
+  write_file describes absent anchor-edit semantics. Fourteen focused pass,
+  two fail; long-cursor-readwrite-contract-red.log.
+- Cursor repair must budget its full header and preserve native line bounds.
+  Unsupported paths must be explicit blockers, never skipped or unusable next.
+
+
+- The cursor repair supports 4,096-byte paths with complete dynamically
+  reserved headers, explicit path/first-record budget errors and releasable
+  reservation as the frontier shortens. Nineteen focused AB2 tests pass,
+  including long-directory continuation, Unicode boundaries and exact-once
+  long-header pagination. long-cursor-final.log; independent review approves.
+- Read/write-only prompt guidance excludes absent anchor-edit semantics.
+  Full integrated gates and matched performance remain pending.
+### 2026-10-14 — lazy fetch, operation merge and timestamp regressions
+
+- Test-first hosted regressions reproduce Git history lazy fetching, JJ
+  operation reconciliation and file's explicit timestamp restoration as false
+  reads. The same fixture requires Unix sed's literal last-line address.
+- Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
+  confirms the side effects. Constrain canonical Git reads, classify JJ as
+  work, and exclude timestamp-restoring file modes; approval unchanged.
+
+- Nine focused fixtures pass after lazy-fetch/operation/timestamp repairs.
+  Additional test-first Git --help case reproduces a false read: repository
+  help settings may launch a browser/helper. rev-parse and worktree listing
+  now use closed suffixes. Receipt git-help-red.log; final focused run next.
+
+### 2026-10-14 — ninth hosted plan review reconciliation
+
+- Instruction-scope qualification now requires the exact anchored basename
+  regex and JSON boolean regex=true. The fixed-window recount is 108 roots,
+  one scope/start, zero repeats; the 25-start substring proxy remains context.
+  The deterministic query fixture rejects NOTAGENTS, mistyped regex flags,
+  literal searches and continuation pages; anchored-scope-query.json.
+- AB1 acceptance requires --no-lazy-fetch, closed Git inspection forms,
+  JJ classified as work and file preserve-date excluded. AB4 records version
+  21; historical 19/20 are AB2 treatment labels on the same accepted runtime.
+- Coverage, matched performance, final classifier recount and deployed
+  candidate observation remain open; no deployment or paid calls performed.
+
+- Docs truth passes 23 tests; formatting and diff checks pass. Independent
+  review caught and corrected the branch-list acceptance example's missing
+  no-lazy-fetch switch. Source is unchanged; slice-specific source gates
+  remain tracked independently.
+
+
+- Immutable integrated source 007d6728 passes 2,282 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
+  Ten focused classifier fixtures pass; independent source review approves.
+  Matched performance and final hosted review remain open.
+
+
+- Integrated gate caught the cursor schema's generated maxLength change and
+  an old fixture requiring a clipped-header spill. The bound is intentionally
+  widened to 5,476; canonical tool identity is now af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d.
+  The repair-note fixture now requires a complete decodable header and no
+  spill while preserving baseline content/cursor. Prior green receipts remain
+  historical; fresh integrated gates follow this correction.
+
+
+- Immutable integrated source d0274113 passes 2,301 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/long-cursor-final-gate-{0,1,2,3}.log.
+  Nineteen focused AB2 fixtures pass; independent source and schema review
+  approves. Matched performance and final hosted review remain open.
+
+
+- Integrated the qualified complete-cursor schema and classifier repairs.
+  Combined AB3 tool identity is 2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27;
+  both canonical goldens reflect the observed declaration identity. No
+  production description or schema change beyond the upstream cursor bound.
+
+
+- Integrated workspace test found a legacy repair-note fixture requiring a
+  separate row even when the complete read header now fits. It now checks
+  visibility as a complete token for both inline and separate-line rendering.
+  The note text and public visibility contract remain asserted. Fresh gates
+  follow this fixture correction; no failed check is waived.

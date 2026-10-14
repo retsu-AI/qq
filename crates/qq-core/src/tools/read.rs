@@ -8,7 +8,8 @@ use super::{
     dispatch::{ReadSideOutput, ToolCancellation},
     lang::Language,
     output::{
-        Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len, push_line,
+        Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, masked_escaped_len,
+        push_line,
     },
     search::path_error,
     walk::looks_binary,
@@ -100,6 +101,7 @@ pub(super) fn read_file(
     file_state: &FileState,
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
+    argument_note_bytes: usize,
 ) -> ReadSideOutput {
     #[cfg(test)]
     {
@@ -215,7 +217,10 @@ pub(super) fn read_file(
                     total_lines,
                     &ranges,
                     arguments.ranges.is_empty(),
-                    offset_ignored,
+                    HeaderNotes {
+                        offset_ignored,
+                        argument_note_bytes,
+                    },
                     cancelled,
                 )
             }
@@ -352,6 +357,11 @@ fn load(workspace: &Workspace, requested: &str) -> Result<Loaded, String> {
     })
 }
 
+struct HeaderNotes {
+    offset_ignored: bool,
+    argument_note_bytes: usize,
+}
+
 /// Line-numbered content for the merged `ranges`. Numbers use one gutter
 /// width per call so columns align across ranges; ranges are separated by
 /// `--`. Lines past the end of the file are reported, not silently dropped.
@@ -361,7 +371,7 @@ fn lines(
     total_lines: usize,
     ranges: &[Range],
     continue_to_eof: bool,
-    offset_ignored: bool,
+    notes: HeaderNotes,
     cancelled: &ToolCancellation,
 ) -> ReadSideOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
@@ -410,7 +420,7 @@ fn lines(
         .field("note", "offset_ignored")
         .into_line();
     // Keep ordinary-path windows stable; long headers reserve their full weight.
-    let header_bytes = escaped_len(&header_bound).max(256);
+    let header_bytes = (masked_escaped_len(&header_bound) + notes.argument_note_bytes).max(256);
     let header_lines = header_bound.lines().count();
     if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
         || header_lines + 1 >= READ_BOUNDS.max_lines
@@ -466,11 +476,11 @@ fn lines(
             });
             // A row is shown whole (clipped only at the per-line ceiling) or
             // not at all: a partial last line would break edit anchors.
-            let (cost, clipped) =
+            let (_cost, clipped) =
                 push_line(&mut body, content, MAX_LINE_BYTES, usize::MAX).unwrap_or((0, false));
             body.push('\n');
             // The gutter's tab and the newline each escape to two bytes.
-            let row_cost = escaped_len(&number_buffer) + cost + 2;
+            let row_cost = masked_escaped_len(&body[before..]);
             if body_escaped + row_cost > body_budget {
                 body.truncate(before);
                 stopped = true;
@@ -489,13 +499,13 @@ fn lines(
             break 'ranges;
         }
         if index + 1 < ranges.len() && current.is_some() {
-            if body_lines >= body_line_budget || body_escaped + 3 > body_budget {
+            if body_lines >= body_line_budget || body_escaped + 4 > body_budget {
                 stopped = true;
                 line_stopped = body_lines >= body_line_budget;
                 break 'ranges;
             }
             body.push_str("--\n");
-            body_escaped += 3;
+            body_escaped += 4;
             body_lines += 1;
         }
     }
@@ -526,7 +536,7 @@ fn lines(
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
     }
     // In the header before bounding, so a spilled result stores it too.
-    if offset_ignored {
+    if notes.offset_ignored {
         header = header.field("note", "offset_ignored");
     }
     let mut out = header.into_line();
@@ -567,7 +577,11 @@ fn lines(
             MAX_READ_SCAN_BYTES / (1024 * 1024)
         );
     }
-    ReadSideOutput::with_bounds(out, &READ_BOUNDS, false)
+    let bounds = Bounds {
+        max_line_bytes: READ_BOUNDS.max_bytes,
+        ..READ_BOUNDS
+    };
+    ReadSideOutput::with_bounds(out, &bounds, false)
 }
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the

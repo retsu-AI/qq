@@ -436,7 +436,15 @@ pub(super) fn execute_blocking(
         Some(BuiltInTool::ReadFile) => deserialize_read_only(name, arguments).map_or_else(
             ToolOutput::error,
             |(args, notes)| {
-                with_argument_notes(read_file(workspace, file_state, args, cancelled), &notes)
+                let note_bytes = if notes.is_empty() {
+                    0
+                } else {
+                    6 + notes.iter().map(|note| note.len()).sum::<usize>() + notes.len() - 1
+                };
+                with_argument_notes(
+                    read_file(workspace, file_state, args, cancelled, note_bytes),
+                    &notes,
+                )
             },
         ),
         Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments)

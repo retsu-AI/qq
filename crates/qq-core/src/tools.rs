@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn readonly_argument_repairs_preserve_spilled_search_text_and_original_cursor() {
+    fn readonly_argument_repairs_preserve_complete_search_text_and_original_cursor() {
         let directory = tempfile::tempdir().unwrap();
         let query = "needle";
         let nested = directory.path().join(vec!["a".repeat(120); 15].join("/"));
@@ -421,52 +421,24 @@ mod tests {
             "{}",
             result.model_text
         );
-        let spill = result
-            .spill
-            .as_ref()
-            .expect("long search header exceeds the reserved header budget");
-        let complete_header = spill.text.lines().next().unwrap();
-        assert!(
-            spill
-                .text
-                .lines()
-                .any(|line| line == "note=include_array_coerced,cwd_ignored,offset_ignored")
-        );
-        let encoded = complete_header
+        assert!(result.spill.is_none(), "complete cursor header must fit");
+        assert!(baseline.spill.is_none());
+        let encoded = header
             .split_once(" next=")
             .unwrap()
             .1
             .split_whitespace()
             .next()
             .unwrap();
-        let original = baseline.spill.as_ref().expect("baseline also spills");
+        assert!(search::Cursor::decode(encoded).is_some());
         assert_eq!(
-            spill.text.replace(
+            result.model_text.replace(
                 "note=include_array_coerced,cwd_ignored,offset_ignored\n",
                 ""
             ),
-            original.text,
-            "repair must preserve complete spilled content"
+            baseline.model_text,
+            "repair must preserve complete bounded content and its cursor"
         );
-        let original_cursor = original
-            .text
-            .lines()
-            .next()
-            .unwrap()
-            .split_once(" next=")
-            .unwrap()
-            .1
-            .split_whitespace()
-            .next()
-            .unwrap();
-        assert_eq!(
-            encoded, original_cursor,
-            "repair must preserve the original cursor"
-        );
-        assert_eq!(spill.digest, content_hash(spill.text.as_bytes()));
-        assert!(spill.text.len() > result.model_text.len());
-        assert!(spill.omitted_from_line > 1);
-        assert!(spill.omitted_from_line <= spill.text.lines().count());
     }
 
     #[test]
@@ -537,8 +509,8 @@ mod tests {
             assert!(
                 result
                     .model_text
-                    .lines()
-                    .any(|line| line == "note=cwd_ignored"),
+                    .split_whitespace()
+                    .any(|field| field == "note=cwd_ignored"),
                 "{}",
                 result.model_text
             );
@@ -793,6 +765,82 @@ mod tests {
             "visible rows have a gap"
         );
         assert!(!output.model_text.contains("not stored"));
+    }
+
+    #[test]
+    fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
+        let directory = tempfile::tempdir().unwrap();
+        let content = "x".repeat(output::MAX_LINE_BYTES);
+        fs::write(directory.path().join("row.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"row.txt"}"#,
+        );
+        assert!(!result.is_error);
+        let row = result
+            .model_text
+            .lines()
+            .find_map(|line| line.split_once('\t'))
+            .unwrap();
+        assert_eq!(row.1, content);
+    }
+
+    #[test]
+    fn ab3_secret_masking_preserves_contiguous_default_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let long_path = format!("{prefix}/{}notes.txt", "SECRET=abcdefgh ".repeat(8));
+        for path in ["notes.txt", long_path.as_str()] {
+            fs::write(
+                directory.path().join(path),
+                "SECRET=abcdefgh\n".repeat(2_500),
+            )
+            .unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            let mut offset = 1;
+            while offset <= 2_500 {
+                let arguments = serde_json::json!({"path":path,"offset":offset,
+                    "ranges":"[]","cwd":".","include_ignored":true})
+                .to_string();
+                let result = run_tool(&workspace, &state, "read_file", &arguments);
+                assert!(!result.is_error, "{}", result.model_text);
+                assert!(result.spill.is_none(), "read window must survive masking");
+                assert!(!result.model_text.contains("SECRET=abcdefgh"));
+                let rows = result
+                    .model_text
+                    .lines()
+                    .filter_map(|line| {
+                        line.split_once('\t')
+                            .and_then(|(number, _)| number.trim().parse::<usize>().ok())
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!rows.is_empty());
+                assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+                let last = *rows.last().unwrap();
+                if last == 2_500 {
+                    break;
+                }
+                let next = result
+                    .model_text
+                    .split("offset=")
+                    .nth(1)
+                    .unwrap()
+                    .split(|ch: char| !ch.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(next, last + 1);
+                offset = next;
+            }
+        }
     }
 
     #[test]
@@ -1673,6 +1721,165 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         for index in 0..search::MAX_SCAN_ENTRIES {
             fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_cursor_path_boundary_round_trips_without_header_clipping() {
+        for path in ["a".repeat(4_096), "界".repeat(1_365) + "/"] {
+            let cursor = search::Cursor {
+                path,
+                line: u32::MAX,
+            };
+            assert_eq!(search::Cursor::decode(&cursor.encode()), Some(cursor));
+        }
+        let cursor = search::Cursor {
+            path: "a".repeat(4_097),
+            line: 0,
+        };
+        assert!(search::Cursor::decode(&cursor.encode()).is_none());
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..8)
+            .map(|_| "a".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cursor = None::<String>;
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let args =
+                serde_json::json!({"query":"x", "mode":"names", "cursor":cursor}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), "search", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(!result.model_text.contains("…+"), "{}", result.model_text);
+            assert!(output::escaped_len(&result.model_text) <= 12 * 1024);
+            for path in result.model_text.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate path");
+            }
+            cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .map(str::to_owned);
+            if let Some(encoded) = &cursor {
+                assert!(search::Cursor::decode(encoded).is_some());
+            } else {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 10);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn ab2_long_nonmatching_prefix_releases_its_cursor_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = (0..14)
+            .map(|_| "a".repeat(235))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(prefix)).unwrap();
+        let text = format!(
+            "{}needle{}\n",
+            format!("{}\n", "x".repeat(1_900)).repeat(4),
+            "x".repeat(1_890)
+        );
+        fs::write(directory.path().join("z.txt"), text).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","context":4}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("L5: needle"),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            !result.model_text.contains("truncated="),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_unrepresentable_match_returns_an_explicit_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..16)
+            .map(|_| "\"".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        fs::write(directory.path().join(&root).join("AGENTS.md"), "rules").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("search_output_budget"),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[test]
+    fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(&root).join(format!("d{index:05}"))).unwrap();
         }
         fs::create_dir(directory.path().join("z")).unwrap();
         fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
@@ -2591,7 +2798,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
     }
 

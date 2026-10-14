@@ -733,6 +733,19 @@ fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
     None
 }
 
+/// JSON-escaped size after the same masking used at the output boundary.
+/// Secret spans never cross a line, so a complete rendered row is measurable.
+pub(crate) fn masked_escaped_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut copied = 0;
+    let mut cost = 0;
+    while let Some(hit) = next_hit(bytes, copied, copied) {
+        cost += escaped_len(&text[copied..hit.start]) + 9 + hit.kind.label().len();
+        copied = hit.end;
+    }
+    cost + escaped_len(&text[copied..])
+}
+
 /// Replaces secret-shaped spans with `[masked:<kind>]`. Returns the input
 /// untouched (no allocation) when nothing matches, which is the common case.
 pub fn mask_secrets(text: String) -> String {
