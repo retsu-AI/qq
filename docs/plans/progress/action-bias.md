@@ -1070,3 +1070,14 @@ newest last.
   (excluding the pre-existing SC2129 release-size style diagnostic). Logs:
   fresh-zero-row-final-{0,1,2,3,4}.log; source receipt alongside these logs.
   Native Windows zero-row execution and matched performance remain open.
+
+
+- Fresh immutable AB4 source dac23ede passes 2,331 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Source remains
+  clean/unchanged; prompt21, captured grant snapshots and deterministic child
+  gates retain their behavior. Logs: fresh-search-read-integrated-{0..4}.log
+  and source receipt under AB4 target/qq-perf. Matched performance open.
+- Native Windows proof for the final AB3 repair: run38576567373 at fbbb9985
+  passes both zero-row and separate repair-note exact tests and completes
+  the entire Windows teardown job successfully; wasm also passes.
