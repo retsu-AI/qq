@@ -1648,6 +1648,19 @@ impl Store {
         .await
     }
 
+    pub(super) async fn persist_tool_projection(
+        &self,
+        claimed: &ClaimedRun,
+        turn: u32,
+        projection: Arc<crate::runtime::ProjectedToolTurn>,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            super::projection::persist_tool_projection(connection, identity, turn, &projection)
+        })
+        .await
+    }
+
     /// One stored complete output for `read_tool_result`, scoped to the
     /// calling session. On the control lane so a saturated output queue
     /// cannot starve a running tool call.

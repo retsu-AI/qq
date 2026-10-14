@@ -1910,6 +1910,8 @@ impl RunState {
                                     // executable call above, which always fits this bound.
                                     debug_assert!(!reviews_tools);
                                     call.rejection = Some(runtime::CallRejection::OutputBudget);
+                                    // Streaming counted this request before final admission.
+                                    slice.slice_tool_calls -= 1;
                                 }
                             }
                         }
@@ -3596,11 +3598,20 @@ impl RunState {
                                 }
                             })
                             .collect();
-                        let tool_results = Message::tool_results(result_blocks);
+                        let projection = Arc::new(runtime::ProjectedToolTurn {
+                            message: Message::tool_results(result_blocks),
+                            correction_notice: checkpoint_correction_notice.take(),
+                        });
+                        yield TurnStep::Emit(RuntimeEvent::ToolResultsProjected {
+                            turn_ordinal,
+                            projection: Arc::clone(&projection),
+                        });
+                        let runtime::ProjectedToolTurn { message: tool_results, correction_notice } =
+                            Arc::unwrap_or_clone(projection);
                         window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&tool_results));
                         Arc::make_mut(messages).push(tool_results);
-                        if let Some(notice) = checkpoint_correction_notice.take() {
+                        if let Some(notice) = correction_notice {
                             let notice = Message::user(notice);
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&notice));

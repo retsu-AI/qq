@@ -508,6 +508,16 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
             ],
         )
         .unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2 WHERE id=?3",
+            params![
+                r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+                r#"{"descriptor_version":15}"#,
+                run_id.to_string()
+            ],
+        )
+        .unwrap();
     // Two early read_file turns whose results total ~6 MiB of stored
     // rows — well over the 4 MiB budget — followed by four text turns
     // that push them out of the recency window.

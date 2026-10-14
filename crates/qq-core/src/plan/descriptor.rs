@@ -11,10 +11,11 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 14;
+pub const DESCRIPTOR_VERSION: u16 = 15;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v14\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v15\0";
+const V14_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v14\0";
 const LEGACY_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v13\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
@@ -162,6 +163,12 @@ pub struct SkillIndexDescriptor {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputProjection {
+    StrictReservedV1,
+}
+
 /// Everything behavior-affecting about a compiled plan, and nothing secret.
 ///
 /// Field order is the canonical order: the digest hashes the compact JSON
@@ -193,6 +200,9 @@ pub struct AgentPlanDescriptor {
     /// Public digest of immutable host-approved read images (version 14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_read_images: Option<ContentHash>,
+    /// Explicit model-facing tool projection policy (version 15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_projection: Option<ToolOutputProjection>,
     /// Mandatory post-result/final reviewer identity; absent means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
@@ -278,12 +288,23 @@ impl AgentPlanDescriptor {
     /// The exact bytes the digest covers: the domain separator followed by
     /// compact JSON in declaration order.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, PlanCompileError> {
-        let mut bytes = if self.version == 13 {
-            LEGACY_DIGEST_DOMAIN
-        } else {
-            DIGEST_DOMAIN
+        let domain = match self.version {
+            13 => LEGACY_DIGEST_DOMAIN,
+            14 => V14_DIGEST_DOMAIN,
+            15 => DIGEST_DOMAIN,
+            _ => {
+                return Err(PlanCompileError::Encode {
+                    message: format!("unsupported descriptor version {}", self.version),
+                });
+            }
+        };
+        if (self.version == 15) != self.tool_output_projection.is_some() {
+            return Err(PlanCompileError::Encode {
+                message: "tool output projection identity must be present only in descriptor 15"
+                    .to_owned(),
+            });
         }
-        .to_vec();
+        let mut bytes = domain.to_vec();
         serde_json::to_writer(&mut bytes, self).map_err(|error| PlanCompileError::Encode {
             message: error.to_string(),
         })?;

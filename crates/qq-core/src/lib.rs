@@ -1845,6 +1845,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
+                | RuntimeEvent::ToolResultsProjected { .. }
                 // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
@@ -4241,6 +4242,63 @@ mod tests {
         eprintln!(
             "AB3 parallel runtime: calls={} turn_budget_cuts={}",
             state.calls, state.cuts
+        );
+    }
+
+    #[tokio::test]
+    async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
+        let arguments = serde_json::json!({"query":"AGENTS.md","mode":"names"}).to_string();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![("search", arguments); 16]; 20],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("inspect")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).stall_exempt(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|request| request
+                .messages()
+                .iter()
+                .any(|message| { *message == Message::user(SLICE_CHECKPOINT_NOTICE) })),
+            "140 executed searches must not trigger the 256-execution slice boundary"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
+                ))
+                .count(),
+            140
         );
     }
 
