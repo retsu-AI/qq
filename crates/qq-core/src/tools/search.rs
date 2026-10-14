@@ -39,6 +39,23 @@ pub(super) const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_SCAN_ENTRIES: usize = 50_000;
 /// Soft deadline; the walk returns `partial=time` with a cursor.
 const SEARCH_DEADLINE: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_SCAN_ENTRIES) };
+}
+
+#[cfg(test)]
+pub(super) fn with_scan_entries<T>(entries: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset(usize);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_SCAN_ENTRIES.set(self.0);
+        }
+    }
+    let _reset = Reset(TEST_SCAN_ENTRIES.replace(entries));
+    run()
+}
 pub(super) const MAX_QUERY_BYTES: usize = 1_024;
 pub(super) const MAX_LIMIT: usize = 500;
 const DEFAULT_LIMIT: usize = 60;
@@ -871,13 +888,18 @@ pub(super) fn search(
     };
 
     let deadline = started + SEARCH_DEADLINE;
+
+    #[cfg(test)]
+    let max_scan_entries = TEST_SCAN_ENTRIES.get();
+    #[cfg(not(test))]
+    let max_scan_entries = MAX_SCAN_ENTRIES;
     let mut walker = Walker {
         workspace,
         cancelled,
         matcher: &matcher,
         filter: &filter,
         stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
-        budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
+        budget: ScanBudget::new(max_scan_entries, MAX_SCAN_BYTES, deadline),
         cursor: cursor.as_ref(),
         limit: arguments.limit,
         max_per_file: arguments.max_per_file,
@@ -923,7 +945,7 @@ pub(super) fn search(
             matcher: &insensitive,
             filter: &filter,
             stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
-            budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
+            budget: ScanBudget::new(max_scan_entries, MAX_SCAN_BYTES, deadline),
             cursor: cursor.as_ref(),
             limit: usize::MAX,
             max_per_file: usize::MAX,

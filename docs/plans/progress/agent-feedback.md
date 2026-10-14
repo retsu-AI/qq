@@ -102,3 +102,17 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - Sleep ceiling 78 → 77. Full CI-profile gate passed; smoke 6/6.
   Remaining modules (especially shell-heavy compaction/delegation), AF5 tracing
   ADR, AF9 lesson mining and AF10 blinded eval remain open.
+
+- Codex review: every cancellation waiter now owns a distinct wake counter;
+  each counter must equal one before manually polling completion.
+
+#### 2026-10-14 CI follow-through
+
+- CI exposed three additional retried-pass fixtures. Search pagination now
+  uses a thread-local, panic-safe test entry budget of 128 instead of creating
+  50,000 entries; production bounds unchanged, original assertions retained.
+- Blocking preparation deadline test freezes time until the hold hook enters,
+  then advances past the deadline before asserting cleanup holds RunFinished.
+  This removes the admission-vs-500ms race; attachment/guidance/skill all pass.
+- Focused regressions pass; full CI-profile gate passes in 181.1s. Continuing
+  until remote CI and Codex are green, not treating local gates as completion.
