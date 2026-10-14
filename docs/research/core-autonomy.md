@@ -74,7 +74,7 @@ adds about 105 KiB, so it never gets near the limit.
 | --- | --- | --- |
 | In-run summarizer fails for any reason (transient provider fault included) | `lib.rs:1823–1831`; `sessions/in_run_compaction.rs:152–158` | `Failed { Policy }` on the first failure. Turn recovery (ADR-0040) does not cover the summarizer turn |
 | Slice checkpoint reply has no content | `lib.rs:2633–2638` | `Failed { ProviderResponse }`. A normal turn in the same state takes the placeholder path (`EMPTY_TURN_PLACEHOLDER`, `lib.rs:205`) |
-| Turn recovery exhausted | `lib.rs:153–195`; `MAX_TURN_RETRIES` = 5 (`qq-protocol/src/lib.rs:76`) | `Paused`. Five retries at 2→60 s plus four provider attempts at 0.5→8 s cover about 2–3 minutes of outage. Nothing resumes a paused run. ADR-0040 § Alternatives deferred `resume_run`, and `run-reliability.md` § RR4's "connection failures retry to the run deadline" was not built |
+| Turn recovery exhausted | `lib.rs:153–195`; `MAX_TURN_RETRIES` = 5 (`qq-protocol/src/lib.rs:76`) | `Paused`. Five retries at 2→60 s plus four provider attempts at 0.5→8 s cover about 2–3 minutes of outage. Nothing resumes a paused run. ADR-0040 § Alternatives deferred `resume_run`, and [the historical reliability plan](https://github.com/retsu-AI/qq/blob/ce768bbc2fb7a25b227fe3405734a316adf020a1/docs/plans/run-reliability.md) § RR4's "connection failures retry to the run deadline" was not built |
 | Process crash or restart | `sessions/settlement.rs:958–1110` | Every `running` run settles `Interrupted`. Queued runs stay eligible; no running run continues |
 
 `MAX_COMPACTION_STEPS` = 32 (`sessions/context.rs:162`) is charged per
@@ -92,8 +92,9 @@ in-run compaction had no count limit.)
 
 ### A3 — Nothing detects a run that is busy but getting nowhere (V)
 
-The run loop has no identical-call or repeated-failure detection. RR12
-(ENG-874) is planned and still Todo. The 256-call slice boundary checkpoints
+The run loop has no identical-call or repeated-failure detection. At this
+snapshot RR12 (ENG-874) was planned; its loop guard is now owned by
+autonomous-core AC4. The 256-call slice boundary checkpoints
 and continues (`lib.rs:111`, `:1658`), so a looping model spends until a
 caller budget stops it. Unattended runs usually have no caller budget.
 

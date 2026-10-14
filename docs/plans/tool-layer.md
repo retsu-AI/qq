@@ -211,7 +211,7 @@ The read-side and edit errors in that window (753) break down by cause:
 | empty `{}` arguments | 234 | whole parallel batches of `read_file`/`search` with `{}` | Codex only (all routes) | Not a model mistake: an adapter gap, confirmed by capture. 286 empty calls across 60 turns had only 18 non-empty siblings; see T16 |
 | `edit_file` empty strings | 63 | `"old":"","insert_before":"","insert_after":"…"` | `gpt-6.1-sol`, `gpt-6-astra` | Fill-every-field again: `""` for the unused forms reads as "given" |
 | `path_not_found` | 42 | guessed paths | all | Real outcome; the model should see it. It is not a failure of the run |
-| `context` > 5 | 36 | `context: 10` | Claude | Bound refusal where a clamp with a note would do (RR10) |
+| `context` > 5 | 36 | `context: 10` | Claude | Bound refusal where a clamp with a note would do (AC17) |
 | `not executed` | 26 | slice checkpoint / > 16 calls per turn | Codex | Harness refusal. The model acts on it, but it renders as a failure |
 | empty glob | 16 | `"glob":""` | mixed | Same as the `edit_file` empty strings |
 | empty `query` in `read_tool_result` | 11 | `"query":""` with `offset`/`limit` | Codex | Same |
@@ -228,9 +228,9 @@ Three observations drive the slices:
    above has exactly one sensible reading. Refusing it costs a round trip
    and a red row, and the retry often fails the same way. After a contract
    error, the next call to the same tool failed again 434 times and
-   succeeded 127 times. RR10 (ENG-872) owns type coercion (stringified
+   succeeded 127 times. AC17 (ENG-872) owns type coercion (stringified
    arrays, clamped integers, unknown fields such as `search.offset`). T15
-   owns the *semantic* defaults below, which RR10's list does not cover.
+   owns the *semantic* defaults below, which AC17's list does not cover.
 2. **Empty arguments on Responses were an adapter gap, not a model
    mistake** (confirmed by capture, T16). `openai.rs` built arguments only
    from `response.function_call_arguments.delta` and ignored the complete
@@ -257,8 +257,8 @@ what was ignored, so the model learns without failing:
   before the exactly-one-form check. An empty anchor that is the *only* form
   still fails, because it has no reading.
 - `tree`/`search` globs, `read_tool_result.query`: `""` is absent.
-- `search.context` above the bound clamps with a note. This is RR10's rule;
-  T15 lands it only if RR10 has not.
+- `search.context` above the bound clamps with a note. T15 shipped this clamp;
+  AC17 owns the remaining type coercion.
 
 Not in T15: anything that changes which file is written, which command runs,
 or which approval applies. `path_not_found` and `range_out_of_bounds` stay
@@ -408,7 +408,7 @@ remaining friction has moved:
 3. **Small refusals with one reading remain.** `search.max_per_file` > 50
    refused 4 times (Claude). The `context` clamp from T15 did not cover it.
    `read_file` with 9 ranges refused once (cap 8). `read_file` with
-   `include_ignored` refused twice (unknown field; RR10's drop-and-note
+   `include_ignored` refused twice (unknown field; AC17's drop-and-note
    rule covers it). `read_tool_result` with the documented placeholder
    handle `t:read_file:00000000:00000000` refused twice. The model copied
    the prompt's example shape instead of a real handle.
@@ -564,7 +564,7 @@ of the current content. Gate: `edit_batch` unchanged.
   `handle_placeholder` joins the `Correction` list in
   `ToolErrorKind::of`. The prompt and the marker never show a zero
   handle; any example uses `t:<tool>:<call8>:<digest8>`.
-- `read_file.include_ignored` and similar unknown fields belong to RR10
+- `read_file.include_ignored` and similar unknown fields belong to AC17
   (ENG-872). T20 does not take them.
 - Regressions: `sed -n 1,5p a` hints and `strict` refuses;
   `cargo test && grep x log`, `cd 'x;grep y z' && cargo test`, and
@@ -611,7 +611,7 @@ table is `tools.md` § Approval Policy.
 | T12 | `@` mentions: grammar, ranges field, dirs/globs, `@diff`/`@sha`, completion | M | T2 | `qq-tui` composer, `src/headless.rs`, `qq-protocol/src/input.rs` | TUI render gate unchanged |
 | T13 | Ablation harness: arms A0–A5, fixtures, adversarial corpora, report | M | T1–T7, T18–T20 | `benchmarks/tools/` | Phase 6 acceptance |
 | T14 | `select_tools` lexical index over external tools + skills | S | T4 | `catalog.rs` | schema-bytes budget unchanged |
-| T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with RR10) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
+| T15 | Default-shaped arguments read as absent, with `note=` (D9) | S | — (coordinate with AC17) | `tools/{read,edit,tree,search}.rs`, `runtime/spill.rs` | `tool_dispatch` unchanged |
 | T16 | Responses tool arguments from `*.done` events when no deltas arrived (D9) | S | captured Codex stream (done) | `qq-provider/src/providers/openai.rs` | minimal provider profile green |
 | T17 | `ToolErrorKind` severity derived from the error code (no wire field), TUI `↻`/`!`/`✕`, fold corrections (D9) | M | T15 | `qq-protocol` `ToolErrorKind::of`, `qq-tui/src/view/tools.rs` | TUI render gate unchanged |
 | T18 (shipped #283) | Classifier false prompts: closed-set launchers with their own options, stream-only list redirects, `git -C`, `git worktree list`/`branch --list`, path-qualified programs, `/tmp` and `GIT_DIR` escapes (D10); globs and `git fetch` unchanged | M | — | `approval/{classify,rules}.rs`, `tools.md` § Shell Classification | `classify_command` ≤ 200 µs / 1 KiB; checked-in `d10_held` table; no replay row crosses Forbidden (integration expansion overflow refuses) |

@@ -30,12 +30,11 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 
 | Plan | Scope and what is open |
 | --- | --- |
-| [`autonomous-core.md`](./autonomous-core.md) | A core that runs one task unattended for 8+ hours and embeds in under 100 lines. AP0–AP4.2, AC0.1, AC10, AC11 and AC12.1 shipped; AP5 evidence window 2026-10-06–13; then AC1 run-loop state, AC2/AC3 bounds that reset at seams, AC5/AC6 continuation, AC12.2–AC16. ADR-0048, 0050 and 0054 Proposed |
+| [`autonomous-core.md`](./autonomous-core.md) | Long unattended runs and reliability: AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped; AP5 evidence pending; AC3 in review; AC17 tolerant arguments next, AC18 truncation recovery, AC19 stream repair and evidence-gated AC20 latency diagnostics. AC4–AC6 and remaining embedding/resource slices stay open |
 | [`goals.md`](./goals.md) | `/goal`: a session goal the runtime pursues across runs, restarts and days until its check passes, its budget runs out, it is blocked, or the user pauses it. G0–G5 planned (with autonomous-core AC4); ADR-0049 Proposed |
 | [`action-bias.md`](./action-bias.md) | Runs that produce results: shell reads classed as reads for the progress rule, an action-biased prompt, a byte-budgeted read window, declared tools that match the run's authority, a root stall report that asks for the next change. AB1–AB6 planned; ADR-0059 reserved. Proposed |
 | [`compaction.md`](./compaction.md) | Fast, exact, cache-aligned compaction (ADR-0056). CX0–CX4 shipped; CX5 live qualification open |
-| [`run-reliability.md`](./run-reliability.md) | Sessions finish: turn recovery and `Paused`, reactive overflow, tolerant checkpoint, admission validation, lenient tool arguments. RR1–RR9 shipped except RR8's mid-tool-call re-issue (ENG-870); open: that item and RR10–RR12 |
-| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T17 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
+| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T20 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
 | [`token-efficiency.md`](./token-efficiency.md) | More verified work per token: task-tree economics, tools, selective discovery, evidence reuse and context experiments. TE0 and TE1.1 shipped; the rest of TE1 and TE2–TE8 planned |
 | [`guide-expansion.md`](./guide-expansion.md) | The user guide's missing pages, each guarded by docs-truth. GE0 and GE10 shipped; GE1–GE9 planned |
 | [`tui-redesign.md`](./tui-redesign.md) | Responsive layout and a legible transcript. U0–U7, U9 and L1–L3 shipped; open: L4 split transcripts, U8 chrome |
@@ -58,10 +57,10 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | # | Next slice | Plan | Why now |
 | ---: | --- | --- | --- |
 | 0 | AP5 seven-day normal-use evidence (2026-10-06–13) | [`autonomous-core.md`](./autonomous-core.md) § Order | Confirms that long runs and sub-agents now produce output, not only activity (ADR-0054) |
-| 0a | AC1 run-loop state extraction, then AC2/AC3 (bounds reset at seams; no single-shot fatal faults); goal branch AC4 + G0 → G2 → G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | Three per-run bounds (4 MiB context reservation, 16 MiB model text, one empty-output retry) end any multi-hour run regardless of model behaviour. The embedding track (AC12.2–AC13) runs in parallel |
+| 0a | AC3 transient summarizer recovery; goal branch AC4 + G0 → G2 → G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | AC1/AC2 shipped; qualification remains open. Embedding AC12.2–AC13 runs in parallel |
 | 0a′ | AB1 progress classification and AB2 prompt v20, then AB3–AB5 | [`action-bias.md`](./action-bias.md) | Root runs read in slices and re-read before they change anything, and the stall report that should catch it misses shell reads. Both slices are small and independent |
 | 0b | CX5 seven-day live qualification | [`compaction.md`](./compaction.md) | CX0–CX4 shipped; the speed and cache-read targets are unconfirmed on real sessions |
-| 0c | RR8 mid-tool-call re-issue (ENG-870), RR10 lenient arguments, RR11 read-hash ledger | [`run-reliability.md`](./run-reliability.md) | The remaining turn-costing failures |
+| 0c | AC17 tolerant arguments (ENG-872), then AC18 truncation recovery (ENG-870) and AC19 stream repair (ENG-874) | [`autonomous-core.md`](./autonomous-core.md) | Remaining reliability gaps; read-hash persistence is already implemented. AC20 diagnostics require evidence |
 | 1 | GE5 keybindings, GE4 environment, then GE2, GE3, GE1, GE9 | [`guide-expansion.md`](./guide-expansion.md) | The references newcomers look for and cannot find. Small, independent, and each extends the docs-truth net |
 | 2 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
 | 3 | Harness-comparison findings triage | [`../research/harness-comparison.md`](../research/harness-comparison.md) § Proposed work order | F01–F07, F10, F11, F14 and F23–F25 shipped (see `progress/root.md` and Git history). F19 (build profiles) and F20 (retention) are inputs to `autonomous-core.md` AC11 and AC16; the rest are unowned |
@@ -86,11 +85,10 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | Built-in tool contracts, output bounding and spill, shell classification, `exec`/`fetch`/`ask_user`/`terminal`, `@` mentions | [`tool-layer.md`](./tool-layer.md) |
 | Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | [`supervised-delegation.md`](./supervised-delegation.md) |
 | Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | [`multi-surface-clients.md`](./multi-surface-clients.md) |
-| Long unattended runs: run-loop state and reset scopes, run continuation and auto-continue, loop guard, soak/resource evidence; the embedding surface and `qq-harness` | [`autonomous-core.md`](./autonomous-core.md) |
+| Long unattended runs and reliability: reset scopes, provider/stream recovery, tolerant tool arguments, continuation, loop guard, soak/live evidence; embedding and `qq-harness` | [`autonomous-core.md`](./autonomous-core.md) |
 | Goals (`/goal`): the session goal, goal driver, `update_goal`, completion check, goal budgets, waits, `qq run --goal` | [`goals.md`](./goals.md) |
 | Root-run action bias: what counts as a read for progress, the root prompt's working conventions, `read_file`'s default window, declared tools versus run authority | [`action-bias.md`](./action-bias.md) |
 | Compaction speed, fidelity and cache alignment | [`compaction.md`](./compaction.md) |
-| Run outcome policy: turn recovery, `Paused`, checkpoint, admission validation, tool-argument leniency | [`run-reliability.md`](./run-reliability.md) |
 | TUI layout, transcript rendering, chrome | [`tui-redesign.md`](./tui-redesign.md) |
 | Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md) |
 | User guide pages and the docs site's content | [`guide-expansion.md`](./guide-expansion.md) |

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::workspace::Workspace;
 
 use super::{
-    dispatch::{ToolCancellation, ToolOutput},
+    dispatch::{ReadSideOutput, ToolCancellation},
     lang::{Language, REGEX_SIZE_LIMIT, SymbolError, SymbolMatchers},
     output::{Bounds, Header, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len},
     walk::{
@@ -601,20 +601,20 @@ pub(super) fn search(
     workspace: &Workspace,
     mut arguments: SearchArgs,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     let started = Instant::now();
     if arguments.query.is_empty() || arguments.query.len() > MAX_QUERY_BYTES {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_query: query must contain between 1 and {MAX_QUERY_BYTES} bytes"
         ));
     }
     if arguments.limit == 0 || arguments.limit > MAX_LIMIT {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_limit: limit must be between 1 and {MAX_LIMIT}"
         ));
     }
     if arguments.max_per_file == 0 || arguments.max_per_file > MAX_PER_FILE {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_max_per_file: max_per_file must be between 1 and {MAX_PER_FILE}"
         ));
     }
@@ -640,13 +640,13 @@ pub(super) fn search(
             .chain(&arguments.exclude)
             .any(|glob| glob.len() > MAX_GLOB_BYTES)
     {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "bad_glob: at most {MAX_GLOBS} include and {MAX_GLOBS} exclude globs of 1 to {MAX_GLOB_BYTES} bytes"
         ));
     }
     let filter = match PathFilter::new(&arguments.include, &arguments.exclude) {
         Ok(filter) => filter,
-        Err(error) => return ToolOutput::error(error.to_string()),
+        Err(error) => return ReadSideOutput::error(error.to_string()),
     };
     let cursor = match arguments.cursor.as_deref().map(str::trim) {
         // Models routinely send an empty or placeholder cursor on the first
@@ -667,7 +667,7 @@ pub(super) fn search(
         Some(encoded) => match Cursor::decode(encoded) {
             Some(cursor) => Some(cursor),
             None => {
-                return ToolOutput::error(
+                return ReadSideOutput::error(
                     "cursor_invalid: omit `cursor` for the first page; to continue a previous search, pass the exact next= value from its result header",
                 );
             }
@@ -675,7 +675,7 @@ pub(super) fn search(
     };
     let root = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolOutput::error(path_error(&arguments.path, &error)),
+        Err(error) => return ReadSideOutput::error(path_error(&arguments.path, &error)),
     };
     let root = relative_string(&root);
     let case_insensitive = match arguments.case {
@@ -693,7 +693,7 @@ pub(super) fn search(
             match build_regex(&pattern, case_insensitive) {
                 Ok(regex) if arguments.mode == SearchMode::Names => Matcher::Names(regex),
                 Ok(regex) => Matcher::Content(regex),
-                Err(message) => return ToolOutput::error(message),
+                Err(message) => return ReadSideOutput::error(message),
             }
         }
         SearchMode::Definition | SearchMode::References => {
@@ -702,7 +702,9 @@ pub(super) fn search(
                     matchers: Box::new(matchers),
                     definitions: arguments.mode == SearchMode::Definition,
                 },
-                Err(error @ SymbolError::Invalid) => return ToolOutput::error(error.to_string()),
+                Err(error @ SymbolError::Invalid) => {
+                    return ReadSideOutput::error(error.to_string());
+                }
             }
         }
     };
@@ -736,10 +738,10 @@ pub(super) fn search(
         scratch: String::new(),
     };
     if let Err(message) = run(&mut walker, &root) {
-        return ToolOutput::error(message);
+        return ReadSideOutput::error(message);
     }
     if walker.stop == Some(Stop::Cancelled) {
-        return ToolOutput::error(CANCELLED_MESSAGE);
+        return ReadSideOutput::error(CANCELLED_MESSAGE);
     }
 
     // A sensitive search that found nothing tells the model what a
@@ -863,7 +865,7 @@ pub(super) fn search(
     }
     let mut text = header.into_line();
     text.push_str(&walker.body);
-    ToolOutput::bounded(text, &SEARCH_BOUNDS, false)
+    ReadSideOutput::with_bounds(text, &SEARCH_BOUNDS, false)
 }
 
 /// `path_escapes_workspace` for absolute, parent-relative, and symlinked-out

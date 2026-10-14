@@ -483,9 +483,20 @@ pub(super) fn load_session_summary_with_accounting(
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
                      (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback,
-                     s.reasoning_effort, s.approval_delegate
+                     s.reasoning_effort, s.approval_delegate,
+                     (SELECT group_concat(h.id || ':' || h.approval_delegated) FROM (
+                          SELECT id, approval_delegated FROM tool_calls
+                           WHERE run_id = s.active_run_id AND state = 'awaiting_approval'
+                             AND approval_resolution IS NULL
+                           ORDER BY approval_delegated, turn_ordinal, call_ordinal
+                           LIMIT ?2) h),
+                     (SELECT id FROM side_questions
+                       WHERE session_id = s.id AND state = 'running')
               FROM sessions s WHERE s.id = ?1",
-            [session_id.to_string()],
+            params![
+                session_id.to_string(),
+                u64::try_from(MAX_PENDING_HOLDS).expect("hold bound fits u64")
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -509,6 +520,8 @@ pub(super) fn load_session_summary_with_accounting(
                     row.get::<_, bool>(18)?,
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             },
         )
@@ -537,6 +550,8 @@ pub(super) fn load_session_summary_with_accounting(
                 model_is_fallback,
                 reasoning_effort,
                 approval_delegate,
+                holds,
+                running_side_question,
             )| {
                 let direct_cost = accounting.direct.estimated_cost_usd_nanos;
                 let active_run_id: Option<RunId> = active.as_deref().map(parse_id).transpose()?;
@@ -581,6 +596,29 @@ pub(super) fn load_session_summary_with_accounting(
                     last_outcome: last_outcome
                         .as_deref()
                         .map(serde_json::from_str)
+                        .transpose()?,
+                    pending_holds: match holds {
+                        // `id:delegated` pairs; ids are hex and never hold
+                        // the separators.
+                        Some(holds) if active_run_id.is_some() => holds
+                            .split(',')
+                            .map(|hold| match hold.split_once(':') {
+                                Some((id, "0")) => Ok(PendingHold {
+                                    tool_call_id: parse_id(id)?,
+                                    delegated: false,
+                                }),
+                                Some((id, "1")) => Ok(PendingHold {
+                                    tool_call_id: parse_id(id)?,
+                                    delegated: true,
+                                }),
+                                Some(_) | None => Err(SessionRuntimeError::CODEC),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Some(_) | None => Vec::new(),
+                    },
+                    running_side_question: running_side_question
+                        .as_deref()
+                        .map(parse_id)
                         .transpose()?,
                 })
             },

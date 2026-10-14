@@ -449,7 +449,29 @@ and keeps the schema for each tool in one place:
   (§ Network Tools).
 
 Each returns complete domain output within its own scan and count limits;
-the model-facing text is then bounded once at dispatch (§ Output Bounding).
+the model-facing text is then bounded at dispatch (§ Output Bounding).
+Read/tree/search carry their complete domain text and selected bounds to
+dispatch. Repair notes are added before the single masking/bounding pass.
+
+Read-only argument decoding first uses the strict typed shape. Only a failed
+shape takes the repair path: `search.include`/`exclude` and `read_file.ranges`
+may be JSON arrays encoded as strings, provided every element is a string.
+For these three tools, an extra `cwd:"."` is the existing workspace root;
+for `search`, an extra `offset:0` requests no skipped matches. They are
+ignored with deterministic `note=` tokens. A boolean `read_file.include_ignored`
+is also irrelevant to reading a named file and is dropped with a note. Other
+types remain invalid. A non-neutral value, duplicate
+field, other unknown field or malformed authority field still refuses.
+Mutation, shell, exec, approval and path validation do not take this repair
+path. Existing array/count/output caps and the `search.context` clamp hold.
+
+Repair notes are added to the result header alongside tool-specific notes,
+ahead of search cursors. If the resulting header would exceed the line cap
+or search’s 512-byte pruning-header cap, notes use a separate line immediately
+after the unchanged header. Execution errors retain their error flag and
+repair notes. The complete noted output is bounded once for persistence. Full
+spill text, its digest/omission metadata and file-state updates stay consistent
+with that header; valid calls do not parse or format a repair record.
 
 Read-only tools (`read_file`, `tree`, `search`) never require approval
 inside the workspace and may execute concurrently. `ask_user` is
@@ -1485,8 +1507,8 @@ escalation or delegate cut-off with one — so a slow delegate never eats into
 it. Headless `qq run` has no human and does not rely on either clock: an
 `auto` hold with no delegate configured is denied the moment it is
 published, and with a delegate it is denied 20 s after the request unless
-the delegate settled it first (§ Headless Contract). This is the RR9 policy
-from the run-reliability plan, shipped here.
+the delegate settled it first (§ Headless Contract). This approval-wait policy
+shipped in delegated-approval DA2 (#150).
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL

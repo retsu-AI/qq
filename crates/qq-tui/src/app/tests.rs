@@ -237,6 +237,7 @@ fn a_command_past_the_grant_cap_approves_once_and_says_why() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     });
@@ -365,6 +366,7 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         )
     });
@@ -434,6 +436,7 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
                     ],
                 })),
                 fetch: None,
+                delegated: false,
             },
         )
     };
@@ -527,6 +530,7 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
             }),
             question: None,
             fetch: None,
+            delegated: false,
         },
     ));
     assert_eq!(
@@ -2622,6 +2626,7 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -3048,6 +3053,58 @@ fn the_shown_session_is_pinned_warm_while_others_evict() {
 }
 
 #[test]
+fn an_included_body_older_than_live_events_is_caught_up_by_replay() {
+    // Regression (PR #289 review): a snapshot that installs another
+    // session's body replaces its hold state as of the snapshot's cursor.
+    // Events after that cursor already applied must be replayed for every
+    // installed body, not only the focused one, or a hold requested while
+    // the snapshot was in flight disappears.
+    let (mut app, _, other) = two_session_app();
+    let base = app.last_sequence;
+    let run_id = id(4, RunId::from_bytes);
+    let held = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 0,
+        provider_call_id: "c".to_owned(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(0x75, ToolCallId::from_bytes), other, "shell")
+    };
+    app.apply_live_event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        ..fixtures::envelope(
+            base + 1,
+            other,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: held,
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: false,
+            },
+        )
+    });
+    assert!(matches!(
+        app.sessions.activity(),
+        qq_client::state::StoreActivity::Blocked { .. }
+    ));
+
+    // A snapshot cut before that event arrives with the other body included.
+    let summary = app.sessions[&other].summary.clone();
+    let mut stale = snapshot();
+    stale.cursor.sequence = base;
+    stale.included.push(body_for(&summary, "other body"));
+    app.apply_snapshot(stale);
+    assert!(
+        matches!(
+            app.sessions.activity(),
+            qq_client::state::StoreActivity::Blocked { .. }
+        ),
+        "the replayed request outlives the older body"
+    );
+}
+
+#[test]
 fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() {
     let (mut app, first, _) = two_session_app();
     let cold = summary_named(0x77, "cold");
@@ -3248,6 +3305,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
     assert!(matches!(
         attention(effects),

@@ -77,6 +77,8 @@ fn summary() -> SessionSummary {
         estimated_cost_usd_nanos: Some(42),
         updated_at_ms: 1_700_000_000_000,
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
     }
 }
 
@@ -664,6 +666,64 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
+            },
+        ),
+    );
+    // Version 32: the hold goes to an approval delegate before any human.
+    check(
+        "event_tool_approval_requested_delegated",
+        &envelope(
+            22,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"git push"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: Some(Box::new(ShellCommandPreview {
+                    command: "git push".to_owned(),
+                    cwd: None,
+                    verdict: Some(ShellVerdict::Prompt),
+                    reasons: vec!["publishes".to_owned()],
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
+            },
+        ),
+    );
+    // Version 32: a summary says who each held call waits on and whether a
+    // side question runs, for clients that never load the body.
+    check(
+        "event_session_updated_with_holds",
+        &envelope(
+            22,
+            SessionEvent::SessionUpdated {
+                session: Box::new(SessionSummary {
+                    pending_holds: vec![
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([6; 16]),
+                            delegated: false,
+                        },
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([7; 16]),
+                            delegated: true,
+                        },
+                    ],
+                    running_side_question: Some(RunId::from_bytes([8; 16])),
+                    ..summary()
+                }),
             },
         ),
     );
@@ -735,6 +795,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     }],
                 })),
                 fetch: None,
+                delegated: false,
             },
         ),
     );
@@ -766,6 +827,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         ),
     );
