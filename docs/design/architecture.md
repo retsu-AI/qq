@@ -195,8 +195,11 @@ xtask/
   replay charges each ordinal once. Cancelling the last queued prompt releases
   an idle draft even when that prompt never started. Terminal run cost comes
   from the run snapshot, not the session total that also includes compaction
-  spend. The bounded run tail reserves slots for the active run and latest visible
-  terminal receipt before admitting newer internal steps. Focused completion requests a body refresh; warm background completion
+  spend. Snapshot admission reserves metadata for the active run and every
+  displayed message's run, charging each new receipt with its first message.
+  Bounded newer internal rows fill remaining slots; an empty body may load the
+  last visible terminal receipt. Row or byte pressure drops older messages with
+  their unadmitted receipts rather than displaying an answer without its cost. Focused completion requests a body refresh; warm background completion
   requests an included body without changing focus. Included-body refreshes
   replay newer retained events just as focused refreshes do, preserving unread
   badges and drafts without repeating notices, attention or draft submission.
