@@ -657,3 +657,9 @@ newest last.
   tests grant addition/removal between stream construction and polling; both
   declarations and execution follow the newly compiled grants. Focused pass
   requires no production change. Rerun workspace before publishing the test.
+
+- Immutable first-poll regression source 5759c682 passes all workspace gates:
+  2,306 tests, zero failed, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab4-2026-10-14/uncompiled-grants-gate-{0,1,2,3}.log.
+  Declarations and execution use grants compiled at first poll; no production
+  change was needed. Hosted review and matched performance remain open.
