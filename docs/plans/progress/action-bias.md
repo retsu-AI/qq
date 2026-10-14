@@ -863,3 +863,9 @@ newest last.
   target/qq-perf/ab3-2026-10-14/masked-cursor-final-gate-{0,1,2,3}.log.
   Ten focused masked-read regressions pass; independent repair and integration
   reviews approve. Matched dispatch/output performance remains open.
+
+
+- Full integrated gate caught the JSONL headless provenance fixture's old
+  prompt-20 expectation. Updated that public output assertion to 21; the
+  canonical descriptor and historical prompt-20 goldens remain distinct.
+  Fresh integrated gates follow; no failed check is waived.

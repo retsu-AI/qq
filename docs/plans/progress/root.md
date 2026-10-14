@@ -602,3 +602,8 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   and tools/dispatch.rs actual repaired-argument note byte reservation. Read
   construction uses post-mask costs and retains unmasked spill semantics.
   Returned line bounds preserve manually clipped complete rows and gutters.
+
+
+- 2026-10-14 AB4 owns the prompt-version assertion in src/headless.rs for
+  JSONL provenance: the expected current value follows the version-21 bump.
+  No production CLI behavior is changed; root is the sole writer.
