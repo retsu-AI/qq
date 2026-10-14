@@ -963,3 +963,13 @@ newest last.
   actual read_file identity to AB2's shared projection signature. Initial
   fresh integration compile failure is retained in fresh-zero-row-integrated-
   1.log; the corrected combined source is qualified before publishing.
+
+
+- Fresh immutable AB3 source 55da9c1c passes 2,322 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Twelve Linux AB3
+  regressions pass, including zero admitted rows through actual dispatch.
+  Independent source review approves; exact-test guard and actionlint pass
+  (excluding the pre-existing SC2129 release-size style diagnostic). Logs:
+  fresh-zero-row-final-{0,1,2,3,4}.log; source receipt alongside these logs.
+  Native Windows zero-row execution and matched performance remain open.
