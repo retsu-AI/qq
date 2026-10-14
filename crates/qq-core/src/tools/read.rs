@@ -513,6 +513,11 @@ fn lines(
             body_lines += 1;
         }
     }
+    if stopped && shown.is_empty() {
+        return ReadSideOutput::error(
+            "output_limit: first requested row cannot fit with the read header; select a nearer workspace root",
+        );
+    }
     let mut window = String::with_capacity(32);
     for (index, (first, last)) in shown.iter().enumerate() {
         if index > 0 {
@@ -711,6 +716,41 @@ fn image_mime(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ab3_zero_row_window_returns_an_explicit_budget_error() {
+        let path = format!(
+            "{}/f.txt",
+            std::iter::repeat_n("界".repeat(95), 110)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = format!("{}\n", "x".repeat(2_000)).into_bytes();
+        let hash = content_hash(&bytes);
+        let loaded = Loaded {
+            path,
+            size: bytes.len() as u64,
+            bytes,
+            hash: Some(hash.clone()),
+            perms: "rw".to_owned(),
+        };
+        let output = lines(
+            &loaded,
+            &hash[..SHORT_HASH_LEN],
+            1,
+            &[Range { start: 1, end: 1 }],
+            true,
+            HeaderNotes {
+                offset_ignored: false,
+                argument_note_bytes: 0,
+            },
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        )
+        .with_test_notes(&[]);
+        assert!(output.is_error, "{}", output.model_text);
+        assert!(output.model_text.contains("output_limit:"));
+        assert!(!output.model_text.contains("offset=0"));
+    }
 
     #[test]
     fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {

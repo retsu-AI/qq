@@ -1157,3 +1157,116 @@ newest last.
   required environment disqualification metadata. Independent review approves.
   New upstream review findings, final pinned baseline recount, matched
   performance and the deployed seven-day candidate cohort remain open.
+### 2026-10-14 — zero-row read windows
+
+- Valid long Windows paths can leave a positive body budget smaller than the
+  first row. Actual renderer/dispatch fixture reproduces unusable offset=0:
+  zero-row-real-red.log. Reject zero-row stopped windows with an explicit
+  output_limit error and nearer-root advice. Native Windows public fixture
+  is selected in CI; hosted execution and full qualification remain pending.
+- Shared-target reuse selected zero tests in the initial zero-row command.
+  Invalidate workspace-package debug artifacts on worktree switches; zero-
+  test selections never count as verification. Fresh final receipts supersede
+  source-reuse uncertainty in earlier local receipts.
+### 2026-10-14 — complete pages and bounded directory enumeration
+
+- Long cursor-page regression fails under the generic per-turn projection:
+  turn-page-red.log. Live and replay now pass actual tool identity; search's
+  complete 12KiB pages survive the per-result floor and are fully charged.
+- Search listing checks cancellation/deadline during enumeration and after
+  sorting, with 100,000 entries and 32MiB retained name/path bytes. Incomplete
+  listing returns an explicit search_listing_limit error without a cursor.
+  Existing caller API remains shared; no unsorted-prefix pagination is used.
+  Focused listing regression fails before enforcement:
+  directory-listing-final-red.log. Final checks and integration remain open.
+### 2026-10-14 — output-only shell reads and workspace temporaries
+
+- Focused regressions reproduce Work for sed line-number printing/uniq
+  stdout and Read for workspace sort temporary-directory options. Receipts
+  extra-output-red.log and sort-temporary-red.log. Accept output-only `=`
+  sed scripts and uniq's second-operand stdout sentinel; reject sort's
+  temporary-directory options, including clusters and long abbreviations.
+  Approval authority remains unchanged. Full integration/performance open.
+
+
+- Immutable source 218cb185 passes 2,287 workspace tests, zero failures,
+  14 ignored; fmt, Clippy and build exit 0. Fifteen focused classifiers pass.
+  Logs: target/qq-perf/ab1-2026-10-14/output-temporary-gate-{0,1,2,3}.log.
+  Latest shell-read repairs retain authority and preview behavior. Matched
+  performance remains open; downstream integration is pending.
+### 2026-10-14 — whole-run discovery repetition and export inputs
+
+- Repetition counts now include starts after the first below-root edit;
+  coverage retains separate successful pre-edit/per-target requirements.
+  Executable fixture adds successful and failed placeholder starts after
+  edits: [1,2,16,1,1,2]. Fixed baseline remains [108,1,1,0,0,1].
+  Receipt: post-edit-discovery-starts.json. Independent query review agrees.
+- AB6 contract requires exact runtime-envelope parsing, typed requested-env
+  status and pinned exporter/recount identity. AB4 explicitly tests feature-
+  enabled fetch exclusion; current unattended Network filtering already
+  excludes it, so the hosted exposure claim is stale. AB2 acceptance bounds
+  pre-budget directory enumeration and rejects incomplete sorted-page proof.
+
+- Fresh parent docs-truth verification passes 23 tests after invalidating
+  qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
+  change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
+  current fixed-window recount retain the baseline above.
+
+
+- Fresh immutable source 2a59cfeb passes 2,287 workspace tests (0 failures,
+  14 ignored), fmt, all-target/all-feature Clippy and build after explicitly
+  cleaning every workspace package's debug artifacts. The source remained
+  clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
+  logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
+  supersedes earlier shared-cache qualification uncertainty. Performance open.
+
+- Live wiring regression fails with the original generic name and passes
+  with actual search identity (live-wiring-red.log/green.log). All 2,310
+  fresh workspace tests pass, including mid-enumeration cancellation and
+  stored replay. Clippy flags the new fixture's explicit drop before await;
+  a lexical scope now ends the capture lock. Full checks are rerun before push.
+
+
+- Fresh immutable AB2 source 03686601 passes 2,310 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after explicitly cleaning every workspace package's debug artifacts.
+  Twenty-three AB2 fixtures cover live direct complete-page continuation,
+  stored replay and cancellation after entry two. Independent final source
+  review approves. Logs: fresh-complete-page-final-{0,1,2,3,4}.log; receipt
+  fresh-complete-page-final-receipt.json under AB2 target/qq-perf. This fresh
+  source-specific receipt supersedes earlier cache uncertainty. Performance open.
+
+- AB3 integration updates its existing read-window budget fixture to supply
+  actual read_file identity to AB2's shared projection signature. Initial
+  fresh integration compile failure is retained in fresh-zero-row-integrated-
+  1.log; the corrected combined source is qualified before publishing.
+
+
+- Fresh immutable AB3 source 55da9c1c passes 2,322 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Twelve Linux AB3
+  regressions pass, including zero admitted rows through actual dispatch.
+  Independent source review approves; exact-test guard and actionlint pass
+  (excluding the pre-existing SC2129 release-size style diagnostic). Logs:
+  fresh-zero-row-final-{0,1,2,3,4}.log; source receipt alongside these logs.
+  Native Windows zero-row execution and matched performance remain open.
+
+
+- Fresh immutable AB4 source dac23ede passes 2,331 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Source remains
+  clean/unchanged; prompt21, captured grant snapshots and deterministic child
+  gates retain their behavior. Logs: fresh-search-read-integrated-{0..4}.log
+  and source receipt under AB4 target/qq-perf. Matched performance open.
+- Native Windows proof for the final AB3 repair: run38576567373 at fbbb9985
+  passes both zero-row and separate repair-note exact tests and completes
+  the entire Windows teardown job successfully; wasm also passes.
+
+
+- Fresh immutable AB5 source a21602ad passes 2,337 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after clearing every workspace package debug artifact. Root authority-
+  neutral notices, legacy/child wording, schema46 version-only migration and
+  future-schema guards remain qualified. Logs: fresh-search-read-authority-
+  integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
+  Native Windows upstream gates pass. No user store migrated; performance open.

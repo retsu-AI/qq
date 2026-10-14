@@ -705,7 +705,7 @@ fn read_only_sed_script(script: &str) -> bool {
             }
         }
         match bytes.get(position) {
-            Some(b'p') => position += 1,
+            Some(b'p' | b'=') => position += 1,
             Some(b's') => {
                 position += 1;
                 let Some(&delimiter) = bytes.get(position) else {
@@ -837,15 +837,18 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
             !cfg!(windows)
                 && !args.iter().any(|arg| {
                     let option = arg.split('=').next().unwrap_or(arg);
-                    (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                    (arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && (arg.contains('o') || arg.contains('T')))
                         || (option.len() > 2
-                            && ["--output", "--compress-program"]
+                            && ["--output", "--compress-program", "--temporary-directory"]
                                 .iter()
                                 .any(|name| name.starts_with(option)))
                 })
         }
         "uniq" => {
             let mut operands = 0;
+            let mut stdout = false;
             let mut value = false;
             let mut options = true;
             for arg in args {
@@ -865,9 +868,10 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     value = true;
                 } else if !options || !arg.starts_with('-') || *arg == "-" {
                     operands += 1;
+                    stdout = *arg == "-";
                 }
             }
-            operands <= 1
+            operands <= 1 || (operands == 2 && stdout)
         }
         "sed" => {
             let mut quiet = false;
@@ -896,7 +900,9 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
         "cargo" => args == ["--version"],
         "rustc" => args.first() == Some(&"--version"),
         "tree" => !args.iter().any(|arg| {
-            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+            (arg.starts_with('-')
+                && !arg.starts_with("--")
+                && (arg.contains('o') || arg.contains('T')))
                 || arg.starts_with("--out")
         }),
         "fd" => !args.iter().any(|arg| {
@@ -1351,6 +1357,32 @@ mod tests {
             "sed -n 's/foo/bar/w out' f",
             "sed -n 's/foo/bar/p; e touch out' f",
             "sed -n -e 's/foo/bar/p' -e 's/foo/bar/e' f",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_output_only_sed_and_uniq_are_reads() {
+        for script in ["=", "1,3=", "=; p"] {
+            assert!(super::read_only_sed_script(script), "{script}");
+        }
+        for command in ["uniq input -", "uniq -- input -", "uniq - -"] {
+            assert!(super::read_only_shell_command(command), "{command}");
+        }
+        for command in ["uniq input out", "uniq input - extra"] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_workspace_sort_temporaries_are_work() {
+        for command in [
+            "sort -T . -S1K huge-input",
+            "sort -T. input",
+            "sort --temporary-directory . input",
+            "sort --temporary-directory=. input",
+            "sort --temp=. input",
         ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
