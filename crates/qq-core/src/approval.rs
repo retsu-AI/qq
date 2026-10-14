@@ -14,6 +14,13 @@ pub use rules::RuleId;
 /// Entry point for the `classify_command` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {
+    pub use crate::tools::process_context::{
+        ProcessEvidenceStatus, ProcessProducerPin, validate_process_evidence,
+    };
+
+    pub fn process_policy_digest() -> qq_protocol::ContentHash {
+        crate::tools::process_context::policy_digest()
+    }
     /// Original command-byte ceiling of the progress-read recognizer.
     pub const MAX_READ_COMMAND_BYTES: usize = super::classify::MAX_CLASSIFIED_BYTES;
 

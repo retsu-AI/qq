@@ -49,6 +49,8 @@ mod sessions;
 mod tools;
 
 #[doc(hidden)]
+pub use tools::process_context::ProcessProducer;
+
 pub use approval::bench_support as classify_bench;
 #[doc(hidden)]
 pub use sessions::bench_support as context_assembly_bench;
@@ -1035,6 +1037,7 @@ pub struct Runtime {
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
+    pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
@@ -1092,6 +1095,7 @@ impl Runtime {
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             approved_read_images: Arc::new(runtime::ApprovedReadImages::default()),
+            process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
@@ -1518,15 +1522,23 @@ impl Runtime {
         self
     }
 
-    /// Sets the shell environment allowlist and built-in preference.
+    /// Share the executing host's provenance across this runtime's plans and children.
     #[must_use]
+    pub fn with_process_producer(mut self, producer: Arc<ProcessProducer>) -> Self {
+        self.process_producer = producer;
+        self
+    }
+
     /// Approve exact self-contained native read implementations for this host.
     /// Empty by default; this trust must never come from tool or workspace input.
+    #[must_use]
     pub fn with_approved_read_images(mut self, images: runtime::ApprovedReadImages) -> Self {
         self.approved_read_images = Arc::new(images);
         self
     }
 
+    /// Sets the shell environment allowlist and built-in preference.
+    #[must_use]
     pub fn with_shell_policy(mut self, shell: runtime::ShellPolicy) -> Self {
         self.shell = Arc::new(shell);
         self

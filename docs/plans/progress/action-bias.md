@@ -1901,3 +1901,27 @@ newest last.
   cases and fails with5 lexical reads/9 malformed before the fix. Qualification
   parsing now requires the dispatcher's pure Launch validation through canonical
   argument digest, so invalid timeout/cwd/env/command cannot become reads.
+
+### 2026-10-14 — AB6 producer-bound execution receipts
+
+- User merged AB2–AB5; fetched main62c65930. PR306 targets main; integration
+  follows this owned core checkpoint before publication.
+- V2 carries actual tool-call ID, bounded canonical approved-image manifest,
+  build policy hash, shared producer instance/source/running executable hash.
+  Explicit deployed source/binary pin is required for qualification; V1/NULL,
+  unknown/dirty source and missing evidence remain unqualified. No schema bump:
+  the existing16KiB receipt column holds the ten-entry V2 proof.
+- Initial independent review reproduced producer loss during plan compile and
+  contradictory requested-env evidence. Both repaired; public builder→plan→
+  real exec source/identity, contradiction, call/manifest/plan/policy/producer
+  mismatch, max manifest, and transient cancelled-capture tests pass (5 cases).
+  Actual store rollback/reopen test now covers V2 and rejects swapped call ID.
+- Producer hashing is serialized on bounded preparation workers, cached after
+  successful/permanent capture, and cancellation/expiry are retryable. Manifest
+  bytes/digest and empty manifest are cached; no executable/source hash per call.
+  Format3 exporter/recount, concurrency/expiry tests, independent follow-up,
+  integrated checks and performance remain open.
+- At user request removed clean, confirmed merged AB1–AB5 worktrees. Preserved
+  evidence and actual47/48/49/50 binaries under main target/qq-perf/
+  merged-worktrees-2026-10-14T204742Z (manifest records original heads/paths).
+  Freed approximately65GiB; active306/performance and unrelated worktrees remain.

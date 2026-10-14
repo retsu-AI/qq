@@ -106,8 +106,20 @@ impl ReadImageFamily {
 
 /// Bounded explicit approvals supplied by the trusted host. Empty by default;
 /// workspace instructions and tool requests cannot add entries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ApprovedReadImages(Arc<[ApprovedReadImage]>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedReadImages {
+    entries: Arc<[ApprovedReadImage]>,
+    digest: qq_protocol::ContentHash,
+}
+
+impl Default for ApprovedReadImages {
+    fn default() -> Self {
+        static EMPTY: std::sync::OnceLock<ApprovedReadImages> = std::sync::OnceLock::new();
+        EMPTY
+            .get_or_init(|| Self::new(Vec::new()).expect("empty approval manifest is valid"))
+            .clone()
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReadImageApprovalError {
@@ -166,21 +178,28 @@ impl ApprovedReadImages {
                 });
             }
         }
-        Ok(Self(images.into()))
+        use sha2::Digest as _;
+        let bytes = serde_json::to_vec(&images).expect("fixed read image fields serialize");
+        Ok(Self {
+            entries: images.into(),
+            digest: qq_protocol::ContentHash::from_bytes(sha2::Sha256::digest(bytes).into()),
+        })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.entries.is_empty()
     }
 
     pub(crate) fn digest(&self) -> qq_protocol::ContentHash {
-        use sha2::Digest as _;
-        let bytes = serde_json::to_vec(self.entries()).expect("fixed read image fields serialize");
-        qq_protocol::ContentHash::from_bytes(sha2::Sha256::digest(bytes).into())
+        self.digest
+    }
+
+    pub(crate) fn shared_entries(&self) -> Arc<[ApprovedReadImage]> {
+        Arc::clone(&self.entries)
     }
 
     pub(crate) fn entries(&self) -> &[ApprovedReadImage] {
-        &self.0
+        &self.entries
     }
 }
 

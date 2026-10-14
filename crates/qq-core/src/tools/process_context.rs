@@ -1,5 +1,9 @@
-//! Call-time process inputs and the evidence used for progress accounting.
-//! Values stay private; receipts contain identities and closed facts only.
+mod evidence;
+mod provenance;
+
+pub use evidence::{ProcessEvidenceStatus, ProcessProducerPin, validate_process_evidence};
+
+pub use provenance::ProcessProducer;
 
 use std::{ffi::OsString, path::PathBuf, sync::Arc, time::Instant};
 
@@ -22,9 +26,17 @@ const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_EXECUTION_CONTEXT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "version")]
+pub(crate) enum ExecutionContextReceipt {
+    #[serde(rename = "1")]
+    V1(ExecutionContextFacts),
+    #[serde(rename = "2")]
+    V2(ExecutionContextProof),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExecutionContextReceipt {
-    pub(crate) version: ContextVersion,
+pub(crate) struct ExecutionContextFacts {
     pub(crate) context_id: ToolCallId,
     pub(crate) arguments_sha256: ContentHash,
     pub(crate) manifest_sha256: ContentHash,
@@ -36,10 +48,22 @@ pub(crate) struct ExecutionContextReceipt {
     pub(crate) pid: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ContextVersion {
-    #[serde(rename = "1")]
-    V1,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExecutionContextProof {
+    pub(crate) facts: ExecutionContextFacts,
+    pub(crate) manifest: Arc<[crate::runtime::ApprovedReadImage]>,
+    pub(crate) policy_sha256: ContentHash,
+    pub(crate) producer: Arc<provenance::ProducerEvidence>,
+}
+
+pub(crate) fn policy_digest() -> ContentHash {
+    static DIGEST: std::sync::OnceLock<ContentHash> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        env!("QQ_PROCESS_POLICY_SHA256")
+            .parse()
+            .expect("build emits a policy digest")
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,36 +109,91 @@ pub(crate) enum UnverifiedReason {
 }
 
 impl ExecutionContextReceipt {
+    pub(crate) fn facts(&self) -> &ExecutionContextFacts {
+        match self {
+            Self::V1(facts) => facts,
+            Self::V2(proof) => &proof.facts,
+        }
+    }
+
+    pub(crate) fn facts_mut(&mut self) -> &mut ExecutionContextFacts {
+        match self {
+            Self::V1(facts) => facts,
+            Self::V2(proof) => &mut proof.facts,
+        }
+    }
+
     pub(crate) fn is_work(&self) -> bool {
-        matches!(self.verdict, ExecutionVerdict::Work { .. })
+        matches!(self.facts().verdict, ExecutionVerdict::Work { .. })
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.pid != 0
-            && self.base_env_present < 32
-            && (!matches!(self.verdict, ExecutionVerdict::VerifiedRead { .. })
-                || (!self.requested_env
-                    && self.locale != Locale::Other
-                    && matches!(self.cwd, CwdIdentity::HeldDirectory { .. })))
+        let facts = self.facts();
+        facts.pid != 0
+            && facts.base_env_present < 32
+            && (!matches!(facts.verdict, ExecutionVerdict::VerifiedRead { .. })
+                || (!facts.requested_env
+                    && facts.locale != Locale::Other
+                    && matches!(facts.cwd, CwdIdentity::HeldDirectory { .. })))
+            && match self {
+                Self::V1(_) => true,
+                Self::V2(proof) => {
+                    let Ok(manifest) = ApprovedReadImages::new(proof.manifest.to_vec()) else {
+                        return false;
+                    };
+                    manifest.entries() == proof.manifest.as_ref()
+                        && manifest.digest() == facts.manifest_sha256
+                        && match facts.verdict {
+                            ExecutionVerdict::VerifiedRead {
+                                family,
+                                sealed_image_sha256,
+                            } => manifest.entries().iter().any(|entry| {
+                                entry.family == family && entry.sha256 == sealed_image_sha256
+                            }),
+                            ExecutionVerdict::Work { .. } => true,
+                        }
+                }
+            }
+    }
+
+    pub(crate) fn bound_to(&self, call_id: ToolCallId, tool: &str, arguments: &str) -> bool {
+        let Some((digest, requested_env)) = argument_identity(tool, arguments) else {
+            return false;
+        };
+        self.valid()
+            && digest == self.facts().arguments_sha256
+            && match self {
+                Self::V1(_) => true,
+                Self::V2(proof) => {
+                    proof.facts.context_id == call_id && proof.facts.requested_env == requested_env
+                }
+            }
     }
 }
 
 /// Canonical parsed arguments bind the receipt without copying raw request text.
 pub(crate) fn arguments_digest(tool: &str, arguments: &str) -> Option<ContentHash> {
-    let bytes = match tool {
+    argument_identity(tool, arguments).map(|(digest, _)| digest)
+}
+
+fn argument_identity(tool: &str, arguments: &str) -> Option<(ContentHash, bool)> {
+    let (bytes, requested_env) = match tool {
         "shell" => {
             let args: ShellArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Shell(&args).validate().ok()?;
-            serde_json::to_vec(&args).ok()?
+            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
         }
         "exec" => {
             let args: ExecArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Exec(&args).validate().ok()?;
-            serde_json::to_vec(&args).ok()?
+            (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
         }
         _ => return None,
     };
-    Some(ContentHash::from_bytes(Sha256::digest(bytes).into()))
+    Some((
+        ContentHash::from_bytes(Sha256::digest(bytes).into()),
+        requested_env,
+    ))
 }
 
 #[derive(Clone)]
@@ -154,7 +233,7 @@ impl PreparedLaunch {
         let child = self.command.spawn()?;
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
-            receipt.pid = pid;
+            receipt.facts_mut().pid = pid;
             Box::new(receipt)
         });
         Ok((child, receipt))
@@ -181,6 +260,8 @@ pub(super) fn prepare(
     workspace: Workspace,
     launch: OwnedLaunch,
     approvals: Arc<ApprovedReadImages>,
+    producer: Arc<ProcessProducer>,
+    call_id: Option<ToolCallId>,
     cancelled: &ToolCancellation,
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
@@ -200,7 +281,6 @@ pub(super) fn prepare(
         ),
     };
     let encoded = encoded.map_err(PreparationError::Arguments)?;
-    let manifest = serde_json::to_vec(approvals.entries()).map_err(PreparationError::Arguments)?;
     let mut environment =
         Vec::<(OsString, OsString)>::with_capacity(BASE_ENV.len() + requested.len());
     let mut bytes = 0_usize;
@@ -312,21 +392,33 @@ pub(super) fn prepare(
         }
     };
     command.env_clear().envs(environment).current_dir(cwd_path);
-    let context_id = ToolCallId::generate().map_err(PreparationError::Identity)?;
+    let context_id = match call_id {
+        Some(id) => id,
+        None => ToolCallId::generate().map_err(PreparationError::Identity)?,
+    };
+    let facts = ExecutionContextFacts {
+        context_id,
+        arguments_sha256: ContentHash::from_bytes(Sha256::digest(encoded).into()),
+        manifest_sha256: approvals.digest(),
+        base_env_present,
+        requested_env: !requested.is_empty(),
+        locale,
+        cwd: cwd_identity,
+        verdict,
+        pid: 0,
+    };
+    let receipt = match call_id {
+        Some(_) => ExecutionContextReceipt::V2(ExecutionContextProof {
+            facts,
+            manifest: approvals.shared_entries(),
+            policy_sha256: policy_digest(),
+            producer: producer.capture(cancelled, deadline),
+        }),
+        None => ExecutionContextReceipt::V1(facts),
+    };
     Ok(PreparedLaunch {
         command,
-        receipt: ExecutionContextReceipt {
-            version: ContextVersion::V1,
-            context_id,
-            arguments_sha256: ContentHash::from_bytes(Sha256::digest(encoded).into()),
-            manifest_sha256: ContentHash::from_bytes(Sha256::digest(manifest).into()),
-            base_env_present,
-            requested_env: !requested.is_empty(),
-            locale,
-            cwd: cwd_identity,
-            verdict,
-            pid: 0,
-        },
+        receipt,
         _cwd: directory,
         #[cfg(target_os = "linux")]
         _image: image,
@@ -624,12 +716,14 @@ mod tests {
             workspace.clone(),
             OwnedLaunch::Exec(requested),
             approved.clone(),
+            Arc::default(),
+            None,
             &cancelled,
             Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!(
-            unsupported.receipt.verdict,
+            unsupported.receipt.facts().verdict,
             ExecutionVerdict::Work {
                 reason: UnverifiedReason::RequestedEnvironment
             }
@@ -638,12 +732,14 @@ mod tests {
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             Arc::default(),
+            Arc::default(),
+            None,
             &cancelled,
             Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!(
-            unapproved.receipt.verdict,
+            unapproved.receipt.facts().verdict,
             ExecutionVerdict::Work {
                 reason: UnverifiedReason::UnapprovedProgram
             }
@@ -652,12 +748,14 @@ mod tests {
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             approved.clone(),
+            Arc::default(),
+            None,
             &cancelled,
             Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
         assert!(matches!(
-            prepared.receipt.verdict,
+            prepared.receipt.facts().verdict,
             ExecutionVerdict::VerifiedRead { .. }
         ));
         std::fs::create_dir(root.join("work")).unwrap();
@@ -670,6 +768,8 @@ mod tests {
                 .unwrap(),
             ),
             Arc::default(),
+            Arc::default(),
+            None,
             &cancelled,
             Instant::now() + std::time::Duration::from_secs(5),
         )
@@ -694,7 +794,7 @@ mod tests {
             b"old"
         );
         assert!(!root.join("work/cwd.txt").exists());
-        let old_cwd = prepared.receipt.cwd;
+        let old_cwd = prepared.receipt.facts().cwd;
         assert!(matches!(old_cwd, CwdIdentity::HeldDirectory { .. }));
         // Replace the selected pathname after preparation. Execution still uses
         // the sealed, approved bytes, never this new executable.
@@ -724,6 +824,8 @@ mod tests {
             Arc::new(ShellPolicy::default()),
             Arc::default(),
             approved.clone(),
+            Arc::default(),
+            None,
         ));
         assert_eq!(std::fs::read(root.join("written.txt")).unwrap(), b"changed");
         assert!(
@@ -743,12 +845,14 @@ mod tests {
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             script_approval,
+            Arc::default(),
+            None,
             &cancelled,
             Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!(
-            script_bound.receipt.verdict,
+            script_bound.receipt.facts().verdict,
             ExecutionVerdict::Work {
                 reason: UnverifiedReason::Image
             },
@@ -766,6 +870,8 @@ mod tests {
             Arc::new(ShellPolicy::default()),
             Arc::default(),
             approved,
+            Arc::default(),
+            None,
         ));
         let receipt = result.execution_context.unwrap();
         assert!(!receipt.is_work());
