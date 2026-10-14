@@ -31,7 +31,7 @@ pub use descriptor::{
     AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
     ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
     McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
-    SkillIndexDescriptor, ToolCatalogDescriptor,
+    SkillIndexDescriptor, ToolCatalogDescriptor, ToolOutputProjection,
 };
 pub use fingerprint::SourceFingerprint;
 
@@ -932,6 +932,58 @@ impl CompiledAgentPlan {
         {
             static_tools.retain(|tool| !follows_spawn(tool));
         }
+        let has_read_file = static_tools
+            .iter()
+            .any(|tool| tool.spec.name() == "read_file");
+        let has_search = static_tools.iter().any(|tool| tool.spec.name() == "search");
+        let has_tree = static_tools.iter().any(|tool| tool.spec.name() == "tree");
+        let has_shell = static_tools.iter().any(|tool| tool.spec.name() == "shell");
+        for tool in &mut static_tools {
+            let description = match tool.spec.name() {
+                "shell" if !(has_read_file && has_search && has_tree) => {
+                    let read_names: Vec<&str> = [
+                        ("read_file", has_read_file),
+                        ("search", has_search),
+                        ("tree", has_tree),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, present)| present.then_some(name))
+                    .collect();
+                    let guidance = if read_names.is_empty() {
+                        "Use this tool for file inspection or searching when no specialized reader is declared.".to_owned()
+                    } else {
+                        format!(
+                            "For file inspection or searching, prefer {} when those tools cover the operation; otherwise use this tool.",
+                            read_names.join(", ")
+                        )
+                    };
+                    Some(tool.spec.description().replace(
+                        "Not for reading files or searching; use read_file, search, tree.",
+                        &guidance,
+                    ))
+                }
+                "exec" if !has_shell => Some(tool.spec.description()
+                    .replace("no shell interpretation", "arguments are literal")
+                    .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
+                    .replace("; reserve shell for pipelines", "")
+                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
+                "write_file" if !has_read_file => Some(
+                    "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
+                ),
+                "edit_file" if !has_read_file => Some(tool.spec.description().replace(
+                    "hash from its current read_file header",
+                    "current content hash",
+                )),
+                _ => None,
+            };
+            if let Some(description) = description {
+                tool.spec = qq_provider::ToolSpec::from_raw(
+                    tool.spec.name(),
+                    description,
+                    tool.spec.input_schema().to_owned(),
+                );
+            }
+        }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
         let descriptor = AgentPlanDescriptor {
@@ -957,6 +1009,7 @@ impl CompiledAgentPlan {
             audit: AuditDescriptor::from(runtime.audit),
             approved_read_images: (!runtime.approved_read_images.entries().is_empty())
                 .then(|| runtime.approved_read_images.digest()),
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
             approval_delegate: runtime
                 .approval_delegate_identity
@@ -1579,6 +1632,7 @@ mod tests {
                 write_children: false,
             },
             approved_read_images: None,
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             audit: AuditDescriptor {
                 mode: AuditModeDescriptor::Heuristic,
                 max_revisions: 1,
@@ -1636,22 +1690,44 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v14\0{\"version\":14,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v15\0{\"version\":15,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 14 and prompt 19).
+        // changing the encoding (descriptor 15 and prompt 20: strict projection identity, AB2).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "2c1b29cca0fda17b842ac4698b949ddb0e0d6e91dd37593122cf2f6617b6883b"
+            "c884d5651634f28914923f54e284b3d6c14e54d747910dd51cf525fdfafd3608"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v14\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
+    }
+
+    #[test]
+    fn historical_descriptor_13_prompt_20_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 13;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
+        );
+    }
+
+    #[test]
+    fn historical_descriptor_14_prompt_20_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 14;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
+        );
     }
 
     #[test]

@@ -273,6 +273,16 @@ The process executor's receipt commits with its result and finished event;
 historical rows remain NULL and cannot qualify execution effects. No wire
 shape changes. Older binaries refuse the upgraded store at open.
 
+Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
+2 MiB. It commits the exact ordered model-facing tool replies and optional
+correction notice before the next provider request. The internal barrier adds
+no wire event. Descriptor 15 records the strict projector policy; historical
+13/14 encodings remain unchanged. Known pre-AB2 histories use their original
+projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
+without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
+experimental schema-48 AB5 build because it lacks that build's root-notice
+codec; the final AB5 reader migrates both 48 and 49 at schema 50.
+
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
 starts, and nothing else for its life; a prompt run reports it before it

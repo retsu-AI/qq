@@ -1854,10 +1854,10 @@ impl RunState {
                             #[cfg(test)]
                             let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                             let (effect, rejection) = match known {
-                                Some(effect) => (effect, pending.rejection),
+                                Some(effect) => (effect, pending.rejection.map(runtime::CallRejection::Runtime)),
                                 None => (
                                     catalog::EffectClass::ReadOnly,
-                                    Some(format!("unknown tool {:?}", pending.name)),
+                                    Some(runtime::CallRejection::Runtime(format!("unknown tool {:?}", pending.name))),
                                 ),
                             };
                             if rejection.is_none() {
@@ -1887,10 +1887,28 @@ impl RunState {
                         {
                             for call in &mut calls {
                                 if call.rejection.is_none() {
-                                    call.rejection = Some(
-                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone"
-                                            .to_owned(),
-                                    );
+                                    call.rejection = Some(runtime::CallRejection::Runtime(
+                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone".to_owned()));
+                                }
+                            }
+                        }
+                        // Reserve complete search pages before execution. A cursor may
+                        // advance only when its whole page can enter this turn's context.
+                        let reviews_tools = checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools());
+                        let mut search_space = tools::output::MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(
+                            calls.iter().map(|call| tools::output::result_reserve_bytes(&call.name)).sum::<usize>());
+                        let page_reserve = tools::output::search_reservation_bytes(reviews_tools);
+                        for call in &mut calls {
+                            if call.name == "search" && call.rejection.is_none() {
+                                if search_space >= page_reserve {
+                                    search_space -= page_reserve;
+                                } else {
+                                    // Tool-checkpoint enforcement admitted at most one
+                                    // executable call above, which always fits this bound.
+                                    debug_assert!(!reviews_tools);
+                                    call.rejection = Some(runtime::CallRejection::OutputBudget);
+                                    // Streaming counted this request before final admission.
+                                    slice.slice_tool_calls -= 1;
                                 }
                             }
                         }
@@ -2669,10 +2687,10 @@ impl RunState {
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(messages).push(assistant);
                             run.live_turns.push(turn_ordinal);
-                            let notice = format!(
+                            let notice = runtime::bounded_checkpoint_correction_notice(format!(
                                 "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
-                                verdict.outcome.label(), verdict.feedback
-                            );
+                                verdict.outcome.label(), runtime::bounded_checkpoint_text(&verdict.feedback)
+                            ));
                             Arc::make_mut(messages).push(Message::user(notice));
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
@@ -2902,8 +2920,8 @@ impl RunState {
                                             alternative.program, alternative.builtin
                                         )
                                     });
-                                let result = match call.rejection.clone().or(strict_refusal) {
-                                    Some(error) => tools::ToolOutput::verbatim_error(error),
+                                let result = match call.rejection.clone().or_else(|| strict_refusal.map(runtime::CallRejection::Runtime)) {
+                                    Some(error) => tools::ToolOutput::verbatim_error(error.into_message()),
                                     // spawn_agent dispatches to the session layer. A
                                     // run without a spawner rejects the call outright:
                                     // the declaration is already absent there, but a
@@ -3515,17 +3533,17 @@ impl RunState {
                                 if !verdict.outcome.allows_progress()
                                     && verdict.outcome != runtime::CheckpointOutcome::Unavailable
                                 {
-                                    correction.push(format!("{}: {}", call.name, verdict.feedback));
+                                    correction.push(format!("{}: {}", call.name, runtime::bounded_checkpoint_text(&verdict.feedback)));
                                 }
                             }
                             // Both correction attempts spent: the RED markers stay on
                             // the results as evidence and the model proceeds without
                             // another redirect, instead of the run failing.
                             if !correction.is_empty() && context.repair() {
-                                checkpoint_correction_notice = Some(format!(
+                                checkpoint_correction_notice = Some(runtime::bounded_checkpoint_correction_notice(format!(
                                     "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                                     correction.join("\n- ")
-                                ));
+                                )));
                             }
                         }
 
@@ -3551,7 +3569,8 @@ impl RunState {
                         // replayed turn is byte-identical to what the model saw here.
                         // A cut names its recall path: the spill when the call
                         // spilled, else the stored result row itself in a session run.
-                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::new() };
+                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::for_results(
+                            calls.iter().zip(results.iter()).map(|(call, result)| (call.name.as_str(), result.as_ref().expect("all outcomes retained").model_text.as_str()))) };
                         let stored = spills.is_some();
                         let result_blocks = calls
                             .iter()
@@ -3567,7 +3586,7 @@ impl RunState {
                                     },
                                     (None, false) => tools::ResultRecall::None,
                                 };
-                                output_scope.budget.admit(&mut content, recall);
+                                output_scope.budget.admit(&call.name,&mut content, recall);
                                 run.budget.charge_tool_output(content.len());
                                 ContentBlock::ToolResult {
                                     call_id: call.provider_call_id.clone(),
@@ -3576,11 +3595,20 @@ impl RunState {
                                 }
                             })
                             .collect();
-                        let tool_results = Message::tool_results(result_blocks);
+                        let projection = Arc::new(runtime::ProjectedToolTurn {
+                            message: Message::tool_results(result_blocks),
+                            correction_notice: checkpoint_correction_notice.take(),
+                        });
+                        yield TurnStep::Emit(RuntimeEvent::ToolResultsProjected {
+                            turn_ordinal,
+                            projection: Arc::clone(&projection),
+                        });
+                        let runtime::ProjectedToolTurn { message: tool_results, correction_notice } =
+                            Arc::unwrap_or_clone(projection);
                         window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&tool_results));
                         Arc::make_mut(messages).push(tool_results);
-                        if let Some(notice) = checkpoint_correction_notice.take() {
+                        if let Some(notice) = correction_notice {
                             let notice = Message::user(notice);
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(&notice));

@@ -55,9 +55,21 @@ Tool declarations tell the model what it may call; they do not tell it
 that it is an agent. `ModelRequest` carries a system-prompt field, and
 `qq-core` owns a base agent prompt assembled per run: what the workspace
 is, which tools are available, and the working conventions — read a file
-before editing it, prefer `search` over guessing paths, cite paths
-relative to the workspace root, establish observable completion criteria,
-verify resulting state, and report remaining failures honestly. The prompt is
+before editing it, define what done looks like, inspect only what the next
+action needs, make requested changes, verify resulting state, and report
+remaining failures honestly. Analysis-only requests produce findings without
+file changes. The prompt discourages re-reading retained context except
+changed/new lines and pruned stubs, maps shell reads to the built-ins, and
+finds scoped instruction files once per discovery root, following cursor
+pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
+targets also use their highest ignored ancestor with `include_ignored=true`,
+covering instructions within that subtree and multiple worktrees. Targets deeper
+than 64 directory components use additional target-ancestor discovery roots at each
+64-component boundary. Search/tree calls into ignored roots include both path
+and include_ignored=true. Tool-specific header descriptions and working conventions
+are emitted only for declared tools, including restricted and no-tools profiles.
+A read_file plus write_file profile describes whole-file replacement with its
+current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own
@@ -78,6 +90,13 @@ version plus a validated SHA-256 hash of the prepared root path and bytes (or
 the empty-selection hash). Historical runs and runs that fail before
 preparation keep no identity. Nested instruction reads stay in the durable tool
 transcript and do not retroactively change the pre-provider identity.
+
+Names discovery includes exact `AGENTS.md` and `CLAUDE.md` basenames despite
+file-level ignores inside visible directories, including contained file links.
+Directory ignores remain in force unless an explicit discovery scope uses
+`include_ignored=true`. Completed-directory scan watermarks skip only fully
+visited subtrees; a depth-limited subtree cannot suppress watermarks in later
+completed directories. Depth exclusions remain explicit in the header.
 
 ### Explicit Commands And Skills
 
@@ -273,15 +292,23 @@ dependency); clean text is returned without allocation.
 
 **Per-turn budget.** The sum of `model_text` across one turn's tool calls is
 capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
-call order; a result that would overshoot is re-bounded to the remainder
-(never below 4 KiB) and its marker adds `turn budget reached`. The
+call order. Before execution, the runtime reserves complete search pages and
+short replies for every requested call. Searches that cannot fit return
+`turn_output_budget` without executing; retry the same arguments on the next
+turn. Admitted search pages retain all rows and their continuation cursor.
+Ordinary results that would overshoot are re-bounded to the remaining space,
+including their recall marker, which adds `turn budget reached`. The
 persisted `tool_calls.result` row keeps the call's own bounded text; the
-budget is a **projection** over those rows (`TurnOutputBudget`) that both
-the live run and context assembly (`append_run_turns`) apply, in call
-order, so a replayed turn — follow-up run, reopened store, compaction
-summarizer input — is byte-identical to the request the model saw live.
-Nothing extra is persisted: the projection is a pure function of the stored
-rows. A budget cut always names a recall path in its marker: the spill
+budget is a **projection** over those rows (`TurnOutputBudget`). After all
+checkpoint annotations, session execution commits the exact ordered projected
+replies and correction notice before sending another provider request. Replay,
+reopen and compaction input use this stored projection verbatim. Descriptor 15
+records the strict policy for unchecked incomplete turns that stopped before
+that barrier; checkpoint-enabled tool turns require the exact projection even
+for final-only reviewers, otherwise reconstruction fails closed;
+known pre-AB2 plans retain the original generic projector. Ambiguous prompt-20
+history without exact replies or policy evidence returns an actionable error.
+A budget cut always names a recall path in its marker: the spill
 handle when the call spilled, else a handle over the stored result row
 itself (`t:<tool>:<call8>:<digest8>`, the digest being that of the stored
 result text, with `read_tool_result offset=` pointing at the first omitted
@@ -613,6 +640,18 @@ refusal would cost a turn for nothing. Anything else that does not decode
 fails `cursor_invalid`, and the message says to omit `cursor` for the first
 page or pass the exact `next=` value from a previous result; the tool
 description and the `cursor` schema property say the same.
+Names searches may report a symlink pathname when its resolved target is a
+regular file inside the workspace. Content searches and directory traversal
+exclude symlinks. A matching AGENTS.md/CLAUDE.md link that is broken, escapes
+or resolves to a nonfile returns an actionable error rather than disappearing.
+
+The walk descends at most 64 directory levels from the selected root.
+`partial=depth` reports omitted deeper directories without an unusable cursor;
+when another limit also stops the page, `depth_limited=64` reports that omission.
+Target ancestors at 64-component intervals give complete bounded instruction
+coverage for deep edit targets. Cursor pages resume output/scan bounds but do
+not recover omitted deeper directories.
+
 `partial=scan|bytes|time` names a scan bound (50 000
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
@@ -626,6 +665,15 @@ an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
 and hands back a cursor, so no match is lost between pages.
+Cursor paths are capped at 4,096 UTF-8 bytes, including a completed-directory
+slash; their base64url tokens and the cursor schema maxLength are capped at 5,476
+bytes. This widens the former 512-byte schema ceiling. The walk reserves the
+current frontier's full cursor before admitting body text, and dispatch keeps
+the complete header. A longer path produces `search_path_budget`; a first
+match that cannot fit with its cursor produces `search_output_budget`.
+Selecting a nearer workspace root shortens cursor paths; reducing context can
+also make a content match fit. These explicit limits do not claim a universal
+filesystem path maximum.
 
 **`tree`.** Fills breadth-first so the top level is complete before any
 deeper level appears — a model asking about a repository sees every
@@ -813,8 +861,9 @@ rejected outright rather than re-rooted, so the model learns the real
 addressing scheme instead of being silently corrected. Each path is then
 canonicalized inside the capability: `..` traversal that escapes the root
 fails there, and a resolved path that still carries a parent component is
-rejected as a belt-and-suspenders check. `search` never follows symlinks
-at all. Paths outside the workspace remain not an error class the agent
+rejected as a belt-and-suspenders check. Content search never follows symlinks;
+names search resolves only matching file links within the capability and never
+traverses directory links. Paths outside the workspace remain not an error class the agent
 can approve its way through by default — wider access is an explicit
 per-session grant, off by default.
 
@@ -1742,3 +1791,13 @@ dispatch overhead has a benchmark.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.
+
+Search pages retain their complete bounded content during per-turn projection.
+Their cursor advances past every emitted match, so a second generic head/tail
+cut would skip matches on continuation. The turn charges the complete page.
+
+Before ordered search traversal, each directory listing admits at most 100,000
+entries and 32MiB of retained name/path bytes. Cancellation and the search
+deadline are checked during enumeration and after sorting. An incomplete listing
+returns an explicit search-listing-limit error with nearer-root advice and no
+continuation cursor; an unsorted prefix cannot prove an ordered frontier.

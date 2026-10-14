@@ -428,7 +428,25 @@ fn assemble_model_context(
     // `search_history`.
     let mut turns: HashMap<String, Vec<StoredTurn>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice
+        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice,
+                    CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
+                          AND json_extract(r.plan_descriptor_json,'$.version') BETWEEN 10 AND 14
+                          AND json_extract(r.plan_descriptor_json,'$.prompt_version') BETWEEN 1 AND 19
+                          AND json_extract(r.plan_identity_json,'$.descriptor_version') = json_extract(r.plan_descriptor_json,'$.version')
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
+                          AND json_extract(r.plan_descriptor_json,'$.version')=15
+                          AND json_extract(r.plan_identity_json,'$.descriptor_version')=15
+                          AND json_extract(r.plan_descriptor_json,'$.tool_output_projection')='strict_reserved_v1'
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN t.tool_results_projection_json IS NULL THEN NULL
+                         WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
+                    length(CAST(t.tool_results_projection_json AS BLOB)),
+                    CASE WHEN json_valid(r.plan_descriptor_json)
+                         THEN CASE WHEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
+                                        OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
+                                   THEN 0 ELSE 1 END
+                         ELSE 1 END
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -449,7 +467,19 @@ fn assemble_model_context(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         remaining_turn_bytes -= raw.len();
+        let projection_bytes = row.get::<_, Option<usize>>(8)?.unwrap_or(0);
+        if projection_bytes > super::projection::MAX_PROJECTION_JSON_BYTES
+            || projection_bytes > remaining_turn_bytes
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        remaining_turn_bytes -= projection_bytes;
         let turn = StoredTurn {
+            strict_projection: row.get(6)?,
+            checkpoint_projection_required: row.get(9)?,
+            projection_json: row.get(7)?,
+            run_id: row.get(0)?,
+            legacy_projection: row.get(5)?,
             ordinal: row.get::<_, u32>(1)?,
             content_json: raw.to_owned(),
             truncated: row.get::<_, bool>(3)?,
@@ -1421,6 +1451,11 @@ pub(super) fn assembled_context_bytes(
 
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
+    pub(super) strict_projection: bool,
+    pub(super) checkpoint_projection_required: bool,
+    pub(super) projection_json: Option<String>,
+    pub(super) run_id: String,
+    pub(super) legacy_projection: bool,
     pub(super) ordinal: u32,
     pub(super) content_json: String,
     /// The provider cut the turn at its output limit; the truncation notice
@@ -1502,6 +1537,11 @@ pub(super) fn append_run_turns(
         }
     }
     for StoredTurn {
+        strict_projection,
+        checkpoint_projection_required,
+        projection_json,
+        run_id,
+        legacy_projection,
         ordinal: turn_ordinal,
         content_json,
         truncated,
@@ -1541,16 +1581,70 @@ pub(super) fn append_run_turns(
         // and its tool_calls rows in an older store) gets an explicit
         // interrupted result so replayed context stays provider-valid
         // instead of poisoning the session.
+        let mut saved_projection = projection_json
+            .as_deref()
+            .map(super::projection::SavedProjection::decode)
+            .transpose()?;
+        let call_ids = content.iter().filter_map(|block| match block {
+            ContentBlock::ToolCall { id, .. } => Some(id),
+            _ => None,
+        });
+        if let Some(saved) = &saved_projection {
+            if !saved.matches_calls(call_ids.clone()) {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+        } else if (checkpoint_projection_required || (!legacy_projection && !strict_projection))
+            && call_ids.clone().next().is_some()
+        {
+            return Err(SessionRuntimeError::ToolProjectionUnavailable { run: run_id });
+        }
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
-        let mut turn_output = crate::tools::TurnOutputBudget::new();
+        let mut legacy_output =
+            legacy_projection.then(crate::tools::output::LegacyTurnOutputBudget::new);
+        let mut turn_output =
+            crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
+                match block {
+                    ContentBlock::ToolCall { id, name, .. } => Some((
+                        name.as_str(),
+                        recorded_turn
+                            .get(id)
+                            .map_or(INTERRUPTED_TOOL_RESULT, |result| result.content.as_str()),
+                    )),
+                    _ => None,
+                }
+            }));
+        let mut projected_replies = saved_projection
+            .as_mut()
+            .map(|saved| std::mem::take(&mut saved.results).into_iter());
         let results = content
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::ToolCall { id, name, .. } => {
                     let block_index = result_index;
                     result_index += 1;
-                    Some(match recorded_turn.remove(id) {
+                    if let Some(projected) = &mut projected_replies {
+                        let reply = projected
+                            .next()
+                            .expect("ordered projected IDs were validated");
+                        let stored = recorded_turn
+                            .remove(id)
+                            .ok_or(SessionRuntimeError::CONSTRAINT);
+                        match stored {
+                            Ok(stored) => {
+                                if let Some(effect) = stored.effect {
+                                    effects.insert((result_message_index, block_index), effect);
+                                }
+                            }
+                            Err(_) => return Some(Err(SessionRuntimeError::CONSTRAINT)),
+                        }
+                        return Some(Ok(ContentBlock::ToolResult {
+                            call_id: reply.call_id,
+                            content: reply.content,
+                            is_error: reply.is_error,
+                        }));
+                    }
+                    Some(Ok(match recorded_turn.remove(id) {
                         Some(RecordedResult {
                             mut content,
                             is_error,
@@ -1571,7 +1665,11 @@ pub(super) fn append_run_turns(
                                     call: tool_call_id,
                                 },
                             };
-                            turn_output.admit(&mut content, recall);
+                            if let Some(legacy) = &mut legacy_output {
+                                legacy.admit(&mut content, recall);
+                            } else {
+                                turn_output.admit(name, &mut content, recall);
+                            }
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -1580,18 +1678,26 @@ pub(super) fn append_run_turns(
                         }
                         None => {
                             let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
-                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            if let Some(legacy) = &mut legacy_output {
+                                legacy.admit(&mut content, crate::tools::ResultRecall::None);
+                            } else {
+                                turn_output.admit(
+                                    name,
+                                    &mut content,
+                                    crate::tools::ResultRecall::None,
+                                );
+                            }
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
                                 is_error: true,
                             }
                         }
-                    })
+                    }))
                 }
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
         let mut message = Message::new(Role::Assistant, content);
         if let Some(replay) = replay {
             message = message.with_replay(replay.into());
@@ -1607,6 +1713,9 @@ pub(super) fn append_run_turns(
         context.push(message);
         if !results.is_empty() {
             context.push(Message::tool_results(results));
+        }
+        if let Some(notice) = saved_projection.and_then(|saved| saved.correction_notice) {
+            context.push(Message::user(notice));
         }
         // A truncated turn was followed in the live run by the continuation
         // notice; replaying it keeps the assembled context identical to the
@@ -1628,4 +1737,195 @@ pub(super) fn append_run_turns(
         context.push(Message::user(text));
     }
     Ok(ends)
+}
+
+#[cfg(test)]
+mod action_bias_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn ab2_pruning_preserves_long_search_cursor_and_is_idempotent() {
+        let path = format!("{}/file.txt", "a".repeat(4_000));
+        let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
+        let header = format!("search . mode=names next={cursor}");
+        let page = format!("{header}\n{}\n", "row\n".repeat(2_000));
+        let calls = HashMap::from([(
+            "search-call".to_owned(),
+            ("search".to_owned(), "{}".to_owned()),
+        )]);
+        let stub =
+            prunable_stub(&calls, Some(EffectClass::ReadOnly), "search-call", &page).unwrap();
+        assert_eq!(stub.lines().next(), Some(header.as_str()));
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(stub.split("next=").nth(1).unwrap().lines().next().unwrap())
+                .unwrap(),
+            format!("{path}\0{}", 0).as_bytes()
+        );
+        assert!(prunable_stub(&calls, Some(EffectClass::ReadOnly), "search-call", &stub).is_none());
+    }
+
+    #[test]
+    fn ab2_replay_matches_live_projection_for_sixty_four_mixed_replies() {
+        let long_name = "x".repeat(128);
+        let page = format!(
+            "search . mode=names next=YWJjADA\n{}",
+            "match\n".repeat(2_030)
+        );
+        let mut blocks = Vec::new();
+        let mut recorded = HashMap::new();
+        let mut rows = Vec::new();
+        for index in 0..64_u8 {
+            let name = if [1, 12, 23, 34, 63].contains(&index) {
+                "search"
+            } else {
+                long_name.as_str()
+            };
+            let text = if name == "search" {
+                page.clone()
+            } else {
+                "ordinary\n".repeat(4_000)
+            };
+            let id = format!("call-{index}");
+            let call = ToolCallId::from_bytes([index + 1; 16]);
+            blocks.push(super::super::codec::PersistedContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.to_owned(),
+                arguments: serde_json::json!({}),
+            });
+            recorded.insert(
+                id.clone(),
+                RecordedResult {
+                    content: text.clone(),
+                    is_error: false,
+                    effect: None,
+                    id: call,
+                    spill_digest: None,
+                },
+            );
+            rows.push((id, name.to_owned(), text, call));
+        }
+        let mut budget = crate::tools::TurnOutputBudget::for_results(
+            rows.iter()
+                .map(|(_, name, text, _)| (name.as_str(), text.as_str())),
+        );
+        let expected = rows
+            .iter()
+            .map(|(id, name, text, call)| {
+                let mut content = text.clone();
+                budget.admit(
+                    name,
+                    &mut content,
+                    crate::tools::ResultRecall::StoredResult {
+                        tool: name,
+                        call: *call,
+                    },
+                );
+                ContentBlock::ToolResult {
+                    call_id: id.clone(),
+                    content,
+                    is_error: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut context = Vec::new();
+        append_run_turns(
+            vec![StoredTurn {
+                strict_projection: true,
+                checkpoint_projection_required: false,
+                projection_json: None,
+                run_id: "fixture".to_owned(),
+                legacy_projection: false,
+                ordinal: 1,
+                content_json: serde_json::to_string(&blocks).unwrap(),
+                truncated: false,
+                notice: None,
+            }],
+            HashMap::from([(1, recorded)]),
+            Default::default(),
+            Default::default(),
+            None,
+            &mut context,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(context[1].content(), expected);
+        let total = expected
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => content.len(),
+                _ => unreachable!(),
+            })
+            .sum::<usize>();
+        assert!(total <= crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES);
+        for index in [1, 12, 23, 34, 63] {
+            let ContentBlock::ToolResult { content, .. } = &expected[index] else {
+                unreachable!()
+            };
+            assert_eq!(content, &page);
+        }
+    }
+
+    #[test]
+    fn ab2_replay_preserves_complete_late_search_pages() {
+        let path = format!("{}/file.txt", "a".repeat(2_000));
+        let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
+        let page = format!(
+            "search . mode=names next={cursor}\n{path}\n{}\n",
+            "b".repeat(4_000)
+        );
+        let mut blocks = Vec::new();
+        let mut recorded = HashMap::new();
+        for index in 0..4_u8 {
+            let id = format!("call-{index}");
+            let name = if index == 3 { "search" } else { "read_file" };
+            blocks.push(super::super::codec::PersistedContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.to_owned(),
+                arguments: serde_json::json!({}),
+            });
+            recorded.insert(
+                id,
+                RecordedResult {
+                    content: if index == 3 {
+                        page.clone()
+                    } else {
+                        "x".repeat(32 * 1024)
+                    },
+                    is_error: false,
+                    effect: None,
+                    id: ToolCallId::from_bytes([index + 1; 16]),
+                    spill_digest: None,
+                },
+            );
+        }
+        let turn = StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
+            ordinal: 1,
+            content_json: serde_json::to_string(&blocks).unwrap(),
+            truncated: false,
+            notice: None,
+        };
+        let mut context = Vec::new();
+        append_run_turns(
+            vec![turn],
+            HashMap::from([(1, recorded)]),
+            Default::default(),
+            Default::default(),
+            None,
+            &mut context,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let ContentBlock::ToolResult { content, .. } = &context[1].content()[3] else {
+            panic!("replayed search");
+        };
+        assert_eq!(content, &page);
+        assert!(!content.contains("turn budget reached"));
+    }
 }

@@ -20,6 +20,7 @@ mod feeds;
 mod migrations;
 mod nonblocking;
 mod progress;
+mod projection;
 mod replay_identity;
 mod runs;
 mod settlement;
@@ -2183,6 +2184,7 @@ fn denial_capacity_fixture(
         model: ModelSelection::default(),
         messages: Vec::new(),
         message_effects: Vec::new(),
+        unresolved_tool_projection: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2889,7 +2891,18 @@ mod reference_assembly {
             // turn commit and its tool_calls rows in an older store)
             // gets an explicit interrupted result so replayed context
             // stays provider-valid instead of poisoning the session.
-            let mut turn_output = crate::tools::TurnOutputBudget::new();
+            let mut turn_output =
+                crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
+                    match block {
+                        ContentBlock::ToolCall { id, name, .. } => Some((
+                            name.as_str(),
+                            recorded
+                                .get(id)
+                                .map_or(INTERRUPTED_TOOL_RESULT, |row| row.0.as_str()),
+                        )),
+                        _ => None,
+                    }
+                }));
             let results = content
                 .iter()
                 .filter_map(|block| match block {
@@ -2906,7 +2919,7 @@ mod reference_assembly {
                                     call: tool_call_id,
                                 },
                             };
-                            turn_output.admit(&mut content, recall);
+                            turn_output.admit(name, &mut content, recall);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -2915,7 +2928,7 @@ mod reference_assembly {
                         }
                         None => {
                             let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
-                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            turn_output.admit(name, &mut content, crate::tools::ResultRecall::None);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -7020,7 +7033,7 @@ fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(STORE_SCHEMA_VERSION, 47);
+    assert_eq!(STORE_SCHEMA_VERSION, 49);
     let count: u64 = connection
         .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
         .unwrap();

@@ -168,6 +168,10 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         chunk: String,
     },
+    ToolResultsProjected {
+        turn_ordinal: u32,
+        projection: Arc<ProjectedToolTurn>,
+    },
     ToolCallFinished {
         id: ToolCallId,
         result: String,
@@ -303,6 +307,27 @@ pub(crate) enum RuntimeEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectedToolTurn {
+    pub(crate) message: Message,
+    pub(crate) correction_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallRejection {
+    Runtime(String),
+    OutputBudget,
+}
+
+impl CallRejection {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Runtime(message) => message,
+            Self::OutputBudget => "turn_output_budget: search was not executed; retry the exact same arguments on the next turn".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeToolCall {
     pub(crate) id: ToolCallId,
@@ -319,7 +344,7 @@ pub(crate) struct RuntimeToolCall {
     /// were not valid JSON, or the name is not in the catalog. The call never
     /// reaches the gate; this message is returned to the model as a
     /// retryable tool error instead of failing the run.
-    pub(crate) rejection: Option<String>,
+    pub(crate) rejection: Option<CallRejection>,
 }
 
 pub(crate) struct PendingToolCall {

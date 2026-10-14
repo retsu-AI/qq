@@ -1418,6 +1418,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error(
+        "tool projection for run {run} is unresolved: it lacks the exact tool-result projection needed to preserve its history; start a new session to continue without changing this history"
+    )]
+    ToolProjectionUnavailable { run: String },
     #[error("maximum active runs must be greater than zero")]
     InvalidRunLimit,
     #[error("a side question is already active for this session")]

@@ -208,6 +208,7 @@ async fn check_repeated_call_replay(missing_first_result: bool) {
         // Legacy crash fixture: the assistant turn committed, but the old
         // writer never created its tool row. Exercise recovery via reopen.
         let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        connection.execute("UPDATE model_turns SET tool_results_projection_json=NULL WHERE run_id=?1 AND turn_ordinal=1", [first_run.unwrap().to_string()]).unwrap();
         assert_eq!(
             connection
                 .execute(

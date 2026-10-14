@@ -1822,6 +1822,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
+                | RuntimeEvent::ToolResultsProjected { .. }
                 // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
@@ -2752,8 +2753,8 @@ mod tests {
             .expect("the provider request must carry a system prompt");
         assert!(system.contains("Workspace instructions from AGENTS.md"));
         assert!(system.contains("Run the repository's focused checks"));
-        assert!(system.contains("observable completion criteria"));
-        assert!(system.contains("preserve unrelated work"));
+        assert!(system.contains("Do the work. Decide what done looks like"));
+        assert!(system.contains("Preserve unrelated work"));
         assert!(system.contains("analysis-only"));
         assert!(system.contains("failed tools and tests as evidence"));
         assert!(system.contains("continue when a safe path remains"));
@@ -2761,7 +2762,7 @@ mod tests {
         assert!(system.contains("Do not claim success without evidence"));
         assert!(system.contains("remaining failures and uncertainty honestly"));
         assert!(system.contains("time, token, cost, and safety budgets"));
-        assert!(system.contains("root-to-leaf"));
+        assert!(system.contains("more specific first"));
     }
 
     #[tokio::test]
@@ -4100,6 +4101,292 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
+        let arguments = serde_json::json!({"query":"AGENTS.md","mode":"names"}).to_string();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![("search", arguments); 16]; 20],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("inspect")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).stall_exempt(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|request| request
+                .messages()
+                .iter()
+                .any(|message| { *message == Message::user(SLICE_CHECKPOINT_NOTICE) })),
+            "140 executed searches must not trigger the 256-execution slice boundary"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
+                ))
+                .count(),
+            140
+        );
+    }
+
+    #[tokio::test]
+    async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
+        for count in [16, 64] {
+            let directory = tempfile::tempdir().unwrap();
+            // Long names fill a page and force an actual continuation cursor.
+            for index in 0..100 {
+                std::fs::write(
+                    directory
+                        .path()
+                        .join(format!("{index:03}{}", "x".repeat(220))),
+                    "",
+                )
+                .unwrap();
+            }
+            let arguments = serde_json::json!({"query":"x","mode":"names"}).to_string();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![
+                        vec![("search", arguments.clone()); count],
+                        vec![("search", arguments.clone())],
+                    ],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requested = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::AssistantTurnCompleted { calls, .. } if !calls.is_empty() => {
+                        Some(calls)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
+                - count * tools::output::result_reserve_bytes("search"))
+                / tools::output::search_reservation_bytes(false);
+            assert_eq!(requested[0].len(), count);
+            for (index, call) in requested[0].iter().enumerate() {
+                assert_eq!(call.arguments, arguments);
+                if index >= MAX_TOOL_CALLS_PER_TURN {
+                    assert!(matches!(
+                        call.rejection,
+                        Some(runtime::CallRejection::Runtime(_))
+                    ));
+                } else {
+                    assert_eq!(
+                        call.rejection,
+                        (index >= admitted).then_some(runtime::CallRejection::OutputBudget)
+                    );
+                }
+            }
+            assert!(requested[1][0].rejection.is_none());
+            let completed = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        result, is_error, ..
+                    } => Some((result, *is_error)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(completed.len(), count + 1);
+            let pages = completed
+                .iter()
+                .filter(|(_, error)| !error)
+                .map(|(text, _)| *text)
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), admitted + 1);
+            assert!(pages[0].len() > 10 * 1024);
+            assert!(pages[0].lines().next().unwrap().contains("next="));
+            assert!(pages.iter().all(|page| *page == pages[0]));
+            assert!(
+                completed
+                    .iter()
+                    .filter(|(_, error)| *error)
+                    .all(|(text, _)| text.starts_with("turn_output_budget:")
+                        || text.contains("not executed"))
+            );
+            let requests = requests.lock().unwrap();
+            for request in requests.iter().skip(1) {
+                for message in request.messages() {
+                    let total = message
+                        .content()
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                            _ => None,
+                        })
+                        .sum::<usize>();
+                    assert!(
+                        total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
+                        "{total}"
+                    );
+                    for block in message.content() {
+                        if let ContentBlock::ToolResult {
+                            content,
+                            is_error: false,
+                            ..
+                        } = block
+                        {
+                            assert_eq!(content, pages[0], "admitted page must remain whole");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_late_direct_search_preserves_complete_pages_and_continuation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::iter::repeat_n("a".repeat(240), 8)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            std::fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            directory.path().join("big.txt"),
+            format!("{}\n", "b".repeat(1_900)).repeat(17),
+        )
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    (
+                        "search",
+                        r#"{"query":"x{10}","regex":true,"mode":"names"}"#.to_owned(),
+                    ),
+                ]],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let recorded = events
+            .iter()
+            .filter_map(|e| match e {
+                RuntimeEvent::ToolCallFinished { result, .. } if result.starts_with("search ") => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recorded.len(), 1);
+        let mut page = {
+            let captured = requests.lock().unwrap();
+            let results = captured[1].messages()[2].content();
+            let ContentBlock::ToolResult { content, .. } = &results[3] else {
+                panic!("search result");
+            };
+            assert_eq!(
+                content, &recorded[0],
+                "live projection must retain every page row and its cursor"
+            );
+            assert!(!content.contains("turn budget reached"));
+            assert!(content.len() > 4 * 1024);
+            content.clone()
+        };
+        let workspace = workspace::Workspace::open(directory.path()).unwrap();
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            for path in page.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate match");
+            }
+            let next = page
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|f| f.strip_prefix("next="));
+            let Some(next) = next else {
+                break;
+            };
+            let result = tools::execute(
+                workspace.clone(),
+                Arc::new(workspace::FileState::default()),
+                "search".to_owned(),
+                serde_json::json!({"query":"x{10}","regex":true,"mode":"names","cursor":next})
+                    .to_string(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+            .await;
+            assert!(!result.is_error, "{}", result.model_text);
+            page = result.model_text;
+        }
+        assert_eq!(found.len(), 10);
+    }
+
+    #[tokio::test]
     async fn a_turns_tool_output_is_capped_and_persisted_results_stay_whole() {
         // Four reads of ~28 KiB each: per call every one fits its own 32 KiB
         // bound, together they exceed the 96 KiB turn budget. The fourth
@@ -4646,6 +4933,124 @@ mod tests {
                 matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
                 "{events:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_checkpoint_feedback_and_combined_correction_notice_are_bounded() {
+        struct Oversized;
+        impl CheckpointReviewer for Oversized {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: if request.phase == runtime::CheckpointPhase::ToolResult {
+                        CheckpointOutcome::Contradicted
+                    } else {
+                        CheckpointOutcome::Supported
+                    },
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        for count in [1, 3] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("note"), "evidence").unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("read_file", r#"{"path":"note"}"#.to_owned()); count]],
+                    requests: Arc::clone(&requests),
+                },
+                "test",
+                256,
+            )
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Oversized));
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                events.last(),
+                Some(RuntimeEvent::Completed { .. })
+            ));
+            let notice = events
+                .iter()
+                .find_map(|event| match event {
+                    RuntimeEvent::ToolResultsProjected { projection, .. } => {
+                        projection.correction_notice.as_deref()
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                notice.len() <= 32 * 1024,
+                "{count} results: {} notice bytes",
+                notice.len()
+            );
+            assert!(notice.starts_with("JEV RED"));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].messages().contains(&Message::user(notice)));
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_final_candidate_correction_feedback_is_bounded() {
+        struct FinalRed;
+        impl CheckpointReviewer for FinalRed {
+            fn reviews_tools(&self) -> bool {
+                false
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: CheckpointOutcome::Contradicted,
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: Vec::new(),
+                requests: Arc::clone(&requests),
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(FinalRed));
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("finish")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            let notice = request
+                .messages()
+                .iter()
+                .flat_map(Message::content)
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap();
+            assert!(notice.len() <= 32 * 1024);
+            assert!(notice.ends_with("…[truncated]"));
         }
     }
 
@@ -9622,7 +10027,7 @@ mod tests {
 
     #[test]
     fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
-        const IMPLEMENT: &str = "- Implement requested changes rather than stopping at analysis";
+        const IMPLEMENT: &str = "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n";
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let render = |subagent| {
@@ -9665,15 +10070,7 @@ mod tests {
             head.to_owned()
         };
         assert_eq!(without_section(&write), root);
-        assert_eq!(
-            without_section(&read),
-            root.replacen(
-                "- Implement requested changes rather than stopping at analysis unless the user \
-                 requested analysis-only work.\n",
-                "",
-                1
-            )
-        );
+        assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1).replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change.", "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence.", 1));
     }
 
     #[test]
@@ -9797,6 +10194,18 @@ mod tests {
             None,
             None,
         );
+        // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
+        // older prompt-14 golden below stays unchanged.
+        let prompt = prompt
+            .replacen("- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n", "- Determine observable completion criteria from the user's request before acting.\n", 1)
+            .replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n", "", 1)
+            .replacen("- Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n", "", 1)
+            .replacen("Preserve unrelated work in the files you change.", "Inspect existing state before changing it and preserve unrelated work.", 1)
+            .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
+            .replacen("mode=outline for the shape of a long file", "mode=outline to see a file's shape before reading it", 1)
+            .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
+            .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1)
+            .replacen("- Give every tool path relative to the workspace root; absolute paths are rejected.\n", "- Give every tool path relative to the workspace root; absolute paths are rejected.\n- When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
         // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
         // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
@@ -9819,13 +10228,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // Every built-in declaration is unchanged except `edit_file`'s
-        // description, which T19 (ADR-0058) rewords.
+        // AB2 changes four descriptions and widens the cursor length bound.
+        // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb"
+            "af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -9875,7 +10284,7 @@ mod tests {
             None,
             None,
         );
-        assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
+        assert!(prompt.contains("- Do the work. Decide what done looks like"));
         assert!(!prompt.contains("Sub-agent:"));
     }
 
@@ -10585,6 +10994,135 @@ mod tests {
             let mut names = tool_names(request);
             names.sort_unstable();
             assert_eq!(names, ["read_file", "search", "tree"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
+        for exposed in [
+            Vec::new(),
+            vec!["read_file".to_owned()],
+            vec!["search".to_owned()],
+            vec!["tree".to_owned()],
+            vec!["shell".to_owned()],
+            vec!["exec".to_owned()],
+            vec!["edit_file".to_owned()],
+            vec!["write_file".to_owned()],
+            vec!["read_file".to_owned(), "write_file".to_owned()],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let expected = exposed.clone();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .execute(
+                    vec![Message::user("review the available context")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::clone(&plan.runtime.network),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                tool_names(&requests[0]),
+                expected.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            let prompt = requests[0].system().unwrap();
+            if !expected.iter().any(|name| name == "read_file") {
+                assert!(
+                    !prompt.contains("with ranges"),
+                    "absent read_file ranges guidance: {prompt}"
+                );
+            }
+            if expected == ["search"] || expected == ["tree"] {
+                assert!(
+                    requests[0].tools()[0]
+                        .description()
+                        .contains("path and include_ignored=true")
+                );
+            }
+            if expected == ["read_file", "write_file"] {
+                for absent in ["old matches", "note=unread", "extend old", "anchor"] {
+                    assert!(!prompt.contains(absent), "{absent}: {prompt}");
+                }
+            }
+            if expected == ["write_file"] {
+                let description = requests[0].tools()[0].description();
+                assert!(description.contains("create_only"), "{description}");
+                assert!(description.contains("independently known"), "{description}");
+                assert!(!description.contains("read earlier"), "{description}");
+            }
+            if expected == ["exec"] {
+                assert!(
+                    !requests[0].tools()[0]
+                        .description()
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .any(|token| token == "shell")
+                );
+            }
+            if expected == ["shell"] {
+                let shell = &requests[0].tools()[0];
+                for absent in ["read_file", "search", "tree"] {
+                    assert!(
+                        !shell
+                            .description()
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == absent),
+                        "absent {absent} in shell description: {}",
+                        shell.description()
+                    );
+                }
+            }
+            for name in [
+                "read_file",
+                "tree",
+                "search",
+                "edit_file",
+                "write_file",
+                "shell",
+                "exec",
+                "ask_user",
+                "fetch",
+                "read_tool_result",
+                "search_history",
+            ] {
+                if !expected.iter().any(|present| present == name) {
+                    assert!(
+                        !prompt
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == name),
+                        "absent {name} advertised: {prompt}"
+                    );
+                }
+            }
         }
     }
 

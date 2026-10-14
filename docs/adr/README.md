@@ -62,6 +62,7 @@ written.
 | 0058 | [Edit freshness: a unique exact match proves the region was seen](0058-edit-freshness-by-exact-match.md) | Accepted (tool-layer T19, ENG-1030); amends `tools.md` § Optimistic Concurrency step 2 |
 
 | 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
+| 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed (action-bias AB2, ENG-1039) |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet

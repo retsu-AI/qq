@@ -334,10 +334,10 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         "{spawned_system}"
     );
     assert!(spawned_system.contains("You cannot change files or run commands"));
-    assert!(!spawned_system.contains("- Implement requested changes"));
+    assert!(!spawned_system.contains("- Do the work."));
     let follow_up_system = child_reqs[2].system().unwrap();
     assert!(!follow_up_system.contains("Sub-agent:"));
-    assert!(follow_up_system.contains("- Implement requested changes"));
+    assert!(follow_up_system.contains("- Do the work."));
     assert!(
         !child_reqs[2]
             .tools()
@@ -2203,6 +2203,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         },
         messages: Vec::new(),
         message_effects: Vec::new(),
+        unresolved_tool_projection: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2369,7 +2370,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
     // tells it to implement the change rather than describe it.
     let child_system = child_reqs[0].system().unwrap();
     assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
-    assert!(child_system.contains("- Implement requested changes"));
+    assert!(child_system.contains("- Do the work."));
     assert!(!child_system.contains("You cannot change files or run commands"));
     // The spawn itself was a mutating call under the parent's Auto policy
     // and executed without a prompt.
@@ -5025,7 +5026,9 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     )
     .await;
     let limits = RunLimits {
-        max_total_tokens: Some(1_000_000),
+        // Two 48-turn children must finish; this test checks exact spend
+        // inheritance rather than exhausting the parent on prompt growth.
+        max_total_tokens: Some(2_000_000),
         max_cost_usd_nanos: Some(5_000_000_000),
         ..RunLimits::default()
     };
@@ -5082,7 +5085,7 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     assert!(summary_tokens > 0 && summary_cost > 0);
     assert_eq!(
         second_limits.max_total_tokens,
-        Some(1_000_000 - 15 - prompt_tokens - summary_tokens)
+        Some(2_000_000 - 15 - prompt_tokens - summary_tokens)
     );
     assert_eq!(
         second_limits.max_cost_usd_nanos,

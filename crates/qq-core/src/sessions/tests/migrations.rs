@@ -1986,6 +1986,11 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
     let mut context = Vec::new();
     append_run_turns(
         vec![StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
             ordinal,
             content_json,
             truncated,
@@ -3155,6 +3160,11 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
+                strict_projection: true,
+                checkpoint_projection_required: false,
+                projection_json: None,
+                run_id: "fixture".to_owned(),
+                legacy_projection: false,
                 ordinal: 1,
                 content_json: "[{\"type\":\"text\",\"text\":\"legacy\"}]".to_owned(),
                 truncated: false,

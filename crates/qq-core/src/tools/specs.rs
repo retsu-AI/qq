@@ -116,7 +116,7 @@ impl BuiltInTool {
         match self {
             Self::ReadFile => ToolSpec::new(
                 "read_file",
-                "Read a workspace file by line range(s), or get its outline or info. The header carries the content hash; pass if_changed_since to skip unchanged content.",
+                "Read a workspace file by line range(s), or get its outline or info. Use instead of cat, head, tail, or sed -n. The header carries the content hash; pass if_changed_since to skip unchanged content.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -133,7 +133,7 @@ impl BuiltInTool {
             ),
             Self::Tree => ToolSpec::new(
                 "tree",
-                "Show a depth-bounded, ignore-aware directory tree with sizes and counts.",
+                "Show a depth-bounded, ignore-aware directory tree with sizes and counts. Use instead of ls or find; pass path and include_ignored=true to inspect an ignored worktree.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -148,7 +148,7 @@ impl BuiltInTool {
             ),
             Self::Search => ToolSpec::new(
                 "search",
-                "Search workspace file contents or names, ignore-aware. Modes: content (default), names, definition, references. Omit cursor for the first page; pass the header's next= value to continue.",
+                "Search workspace file contents or names, ignore-aware. Use instead of grep or rg; pass path and include_ignored=true to search inside an ignored worktree. Modes: content (default), names, definition, references. Omit cursor for the first page; pass the header's next= value to continue.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -216,7 +216,7 @@ impl BuiltInTool {
             ),
             Self::Shell => ToolSpec::new(
                 "shell",
-                "Run one shell command in the workspace via `sh -c`, capturing combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Timeout 120 s by default; the process group is killed on timeout or cancel.",
+                "Run one shell command in the workspace via `sh -c`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Timeout 120 s by default; the process group is killed on timeout or cancel.",
                 json!({
                     "type": "object",
                     "properties": {
