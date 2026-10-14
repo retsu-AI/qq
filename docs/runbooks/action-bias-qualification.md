@@ -94,6 +94,13 @@ from V1, without promoting them to qualified evidence. The overall
 `verified_read_share` remains null otherwise. `execution_effects_qualified` stays
 false: these receipts do not prove which mutations occurred.
 
+Multiple producer instances matching the same source/executable pin are allowed,
+including sequential restarts. Their instance IDs remain in the raw exported
+receipts. Mixed source/executable identities or missing evidence leave call
+coverage unqualified. `execution_context_qualified` describes process-call
+coverage; it does not establish exclusive-writer or deployment continuity.
+Runs without exported process calls need separate deployment/per-run evidence.
+
 Historical NULL/V1 receipts cannot recover inherited PATH/TMPDIR or producer
 provenance and remain unqualified. No current manifest or build identity is
 attached retrospectively. A missing receipt does not prove a process never ran.

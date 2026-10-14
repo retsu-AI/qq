@@ -851,7 +851,7 @@ mod tests {
             ),
         ] {
             let id = ToolCallId::from_bytes([index; 16]);
-            let receipt = serde_json::json!({"version":"2","facts":{"context_id":id,"arguments_sha256":ContentHash::from_bytes(Sha256::digest(arguments.as_bytes()).into()),"manifest_sha256":plan.descriptor().approved_read_images.unwrap(),"base_env_present":1,"requested_env":false,"locale":"c","cwd":{"kind":"held_directory","device":1,"inode":2},"verdict":verdict,"pid":11},"manifest":[image.clone()],"policy_sha256":qq_core::classify_bench::process_policy_digest(),"producer":{"instance":ToolCallId::from_bytes([9;16]),"source":{"status":"clean","revision":pin.source_revision},"executable_sha256":pin.executable_sha256,"platform":format!("{}-{}",std::env::consts::ARCH,std::env::consts::OS)}});
+            let receipt = serde_json::json!({"version":"2","facts":{"context_id":id,"arguments_sha256":ContentHash::from_bytes(Sha256::digest(arguments.as_bytes()).into()),"manifest_sha256":plan.descriptor().approved_read_images.unwrap(),"base_env_present":1,"requested_env":false,"locale":"c","cwd":{"kind":"held_directory","device":1,"inode":2},"verdict":verdict,"pid":11},"manifest":[image.clone()],"policy_sha256":qq_core::classify_bench::process_policy_digest(),"producer":{"instance":ToolCallId::from_bytes([9+index;16]),"source":{"status":"clean","revision":pin.source_revision},"executable_sha256":pin.executable_sha256,"platform":format!("{}-{}",std::env::consts::ARCH,std::env::consts::OS)}});
             connection.execute("INSERT INTO tool_calls(id,run_id,state,name,arguments_json,execution_context_json) VALUES (?1,?2,'completed',?3,?4,?5)",params![id.to_string(),RunId::from_bytes([1;16]).to_string(),tool,arguments,receipt.to_string()]).unwrap();
             receipts.push(receipt);
         }
@@ -878,8 +878,58 @@ mod tests {
             ),
             (2, 1, 1, 1, 1, 1)
         );
-        assert!(result.execution_context_qualified);
+        assert_ne!(
+            receipts[0]["producer"]["instance"],
+            receipts[1]["producer"]["instance"]
+        );
+        assert!(
+            result.execution_context_qualified,
+            "same pinned build may restart"
+        );
         assert_eq!(result.verified_read_share, Some(0.5));
+        for (field, changed) in [
+            (
+                "source",
+                serde_json::json!({"status":"clean","revision":"b".repeat(40)}),
+            ),
+            (
+                "executable_sha256",
+                serde_json::json!(ContentHash::from_bytes([6; 32])),
+            ),
+        ] {
+            let mut mismatched = receipts[1].clone();
+            mismatched["producer"][field] = changed;
+            connection
+                .execute(
+                    "UPDATE tool_calls SET execution_context_json=?1 WHERE name='shell'",
+                    [mismatched.to_string()],
+                )
+                .unwrap();
+            let mixed_path = directory.path().join(format!("mixed-{field}.jsonl"));
+            export(
+                &test_identity(),
+                &store,
+                DAY_MS,
+                2 * DAY_MS,
+                3 * DAY_MS,
+                &mixed_path,
+                Some(&pin),
+            )
+            .unwrap();
+            let mixed = recount(&test_identity(), &mixed_path, Some(&pin)).unwrap();
+            assert!(!mixed.execution_context_qualified);
+            assert_eq!(mixed.unqualified_calls, 1);
+            assert_eq!(
+                mixed.execution_evidence_counts[&ProcessEvidenceStatus::UnqualifiedProducer],
+                1
+            );
+        }
+        connection
+            .execute(
+                "UPDATE tool_calls SET execution_context_json=?1 WHERE name='shell'",
+                [receipts[1].to_string()],
+            )
+            .unwrap();
         assert!(
             !result.execution_effects_qualified,
             "Work is not proof of mutation"

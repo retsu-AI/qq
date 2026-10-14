@@ -2057,3 +2057,8 @@ newest last.
 ### 2026-10-14 — H0 direct compiler path
 
 - Job116130357434 now avoids stable downloads but baseline convert_case selected its dependency-local1.83.0 toolchain via rustup proxies, producing incompatible rmeta. Pinning the default alone does not override per-directory toolchain files. Prepend the exact pinned toolchain binary directory to GITHUB_PATH before sanitized recorder builds; fixture/code/budgets remain unchanged. Failed artifact11931624160 retained; no performance comparison was produced.
+
+### 2026-10-14 — same-build producer restarts and capture measurement
+
+- Codex3ca513e1 mixed-instance finding conflates per-call execution_context_qualified with full treatment-cohort acceptance. Independent review confirms same pinned source/executable instances may restart; raw export retains instance IDs. Deployment continuity and process-free runs require separate evidence. Add regression with two instances on one pin (qualified call coverage) and one changed source/hash (unqualified); clarify runbook without rejecting legitimate restarts.
+- Focused release capture diagnostic on3ca513e1 plus retained measurement-only patch:30 first captures and30x10,000cached captures, same-binary repeat.29,967,568-byte fixture SHA3e7deaf982606ddd90a774596015708f4b190b42aacbb3538d03795b0f3ccb91. First p95=12.743ms/control12.800ms; cached p95=29ns/control31ns. Raw fixture, patch, pressure, logs and receipt at target/qq-perf/ab6-2026-10-14/capture-measurement/. Temporary measurement worktree removed; no production-first-shell or quiet-host performance acceptance claimed.
