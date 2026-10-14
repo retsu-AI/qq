@@ -88,7 +88,10 @@ impl Provider for Scripted {
                 format!("final-{turn}"),
             )));
         }
-        if notice == Some(STALL_REPORT_NOTICE) || notice == Some(SLICE_CHECKPOINT_NOTICE) {
+        if notice == Some(STALL_REPORT_NOTICE)
+            || notice == Some(ROOT_STALL_REPORT_NOTICE)
+            || notice == Some(SLICE_CHECKPOINT_NOTICE)
+        {
             return Box::pin(stream::iter(reply_events(
                 self.on_report,
                 format!("report-{turn}"),
@@ -266,7 +269,7 @@ async fn sixty_four_reads_without_output_get_a_report_turn() {
     );
     let report = requests
         .iter()
-        .position(|request| last_notice(request) == Some(STALL_REPORT_NOTICE))
+        .position(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE))
         .expect("a report turn");
     assert_eq!(
         report,
@@ -291,7 +294,7 @@ async fn sixty_four_reads_without_output_get_a_report_turn() {
     assert_eq!(
         notices(&events),
         [
-            runtime::TurnNotice::StallReport,
+            runtime::TurnNotice::RootStallReport,
             runtime::TurnNotice::Continuation
         ]
     );
@@ -314,7 +317,7 @@ async fn a_call_in_the_report_turn_is_not_executed() {
     assert!(!directory_has_out(&events));
     let report = requests
         .iter()
-        .position(|request| last_notice(request) == Some(STALL_REPORT_NOTICE))
+        .position(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE))
         .unwrap();
     let rejected = requests[report + 1]
         .messages()
@@ -336,7 +339,7 @@ async fn a_mutation_before_the_threshold_means_no_report() {
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
     assert!(directory_has_out(&events), "the write ran: {events:?}");
     assert_eq!(
-        calls_before_reports(&requests, STALL_REPORT_NOTICE),
+        calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE),
         Vec::<usize>::new()
     );
 }
@@ -354,7 +357,7 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
     });
     assert!(failed, "the command ran and failed: {events:?}");
     assert_eq!(
-        calls_before_reports(&requests, STALL_REPORT_NOTICE),
+        calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE),
         Vec::<usize>::new()
     );
 }
@@ -366,7 +369,7 @@ async fn a_read_only_command_is_not_progress() {
     script[59] = ("shell", r#"{"command":"git status"}"#);
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(
-        calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),
+        calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).len(),
         1
     );
 }
@@ -384,7 +387,7 @@ async fn a_root_run_reports_every_sixty_four_calls_and_is_never_ended() {
     );
     let reports = requests
         .iter()
-        .filter(|request| last_notice(request) == Some(STALL_REPORT_NOTICE))
+        .filter(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE))
         .count();
     // 1 000 calls: a stall report after each 64 (15), with the slice
     // checkpoints at 256-call boundaries taking the place of some of them.
@@ -526,7 +529,7 @@ async fn an_exempt_run_never_gets_a_stall_report() {
     )
     .await;
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert!(calls_before_reports(&requests, STALL_REPORT_NOTICE).is_empty());
+    assert!(calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).is_empty());
 }
 
 /// (n) When the stall report and the budget-final turn coincide, the budget
@@ -595,7 +598,7 @@ async fn denied_calls_count_toward_the_report() {
     assert!(
         requests
             .iter()
-            .any(|request| last_notice(request) == Some(STALL_REPORT_NOTICE)),
+            .any(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE)),
         "64 denied calls still reach the report"
     );
 }
@@ -611,11 +614,11 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     }
     impl Provider for CutReport {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
-            let at_report = last_notice(&request) == Some(STALL_REPORT_NOTICE)
+            let at_report = last_notice(&request) == Some(ROOT_STALL_REPORT_NOTICE)
                 && request
                     .messages()
                     .last()
-                    .is_some_and(|message| *message == Message::user(STALL_REPORT_NOTICE));
+                    .is_some_and(|message| *message == Message::user(ROOT_STALL_REPORT_NOTICE));
             let mut cut = self.cut.lock().unwrap();
             if at_report && !*cut {
                 *cut = true;
@@ -680,7 +683,7 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     assert_eq!(
         notices(&events),
         [
-            runtime::TurnNotice::StallReport,
+            runtime::TurnNotice::RootStallReport,
             runtime::TurnNotice::Continuation
         ],
         "one report notice across both attempts"
@@ -691,7 +694,7 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
         .unwrap()
         .messages()
         .iter()
-        .filter(|message| **message == Message::user(STALL_REPORT_NOTICE))
+        .filter(|message| **message == Message::user(ROOT_STALL_REPORT_NOTICE))
         .count();
     assert_eq!(report_notices, 1);
 }
@@ -710,7 +713,8 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     }
     impl Provider for InterruptsFirstReport {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
-            let at_report = request.messages().last() == Some(&Message::user(STALL_REPORT_NOTICE));
+            let at_report =
+                request.messages().last() == Some(&Message::user(ROOT_STALL_REPORT_NOTICE));
             let mut interrupted = self.interrupted.lock().unwrap();
             if at_report && !*interrupted {
                 *interrupted = true;
@@ -778,7 +782,7 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     let requests = requests.lock().unwrap();
     let report_requests = requests
         .iter()
-        .filter(|request| last_notice(request) == Some(STALL_REPORT_NOTICE))
+        .filter(|request| last_notice(request) == Some(ROOT_STALL_REPORT_NOTICE))
         .count();
     assert!(
         report_requests >= 3,
@@ -788,7 +792,7 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     assert_eq!(
         notices
             .iter()
-            .filter(|notice| **notice == runtime::TurnNotice::StallReport)
+            .filter(|notice| **notice == runtime::TurnNotice::RootStallReport)
             .count(),
         2,
         "two reports, each announced once: {notices:?}"
@@ -932,7 +936,7 @@ async fn read_only_external_tools_are_reads_and_others_are_work() {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(
-            calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),
+            calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).len(),
             reports,
             "read_only hint {read_only_hint}"
         );
@@ -1013,12 +1017,12 @@ async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
     provider.calls_per_turn = 1;
     let (events, requests) = run(provider, RunCapabilities::user(None)).await;
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert_eq!(last_notice(&requests[64]), Some(STALL_REPORT_NOTICE));
+    assert_eq!(last_notice(&requests[64]), Some(ROOT_STALL_REPORT_NOTICE));
     assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
     assert_eq!(
         notices(&events),
         [
-            runtime::TurnNotice::StallReport,
+            runtime::TurnNotice::RootStallReport,
             runtime::TurnNotice::Continuation
         ]
     );

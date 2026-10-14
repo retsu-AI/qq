@@ -279,9 +279,10 @@ async fn a_childs_answer_is_progress_for_the_parent() {
     let parent = parent_requests.lock().unwrap();
     assert_eq!(parent.len(), 122, "one call per turn, then the answer");
     assert!(
-        parent
-            .iter()
-            .all(|request| notice_of(request) != Some(crate::STALL_REPORT_NOTICE)),
+        parent.iter().all(|request| !matches!(
+            notice_of(request),
+            Some(crate::STALL_REPORT_NOTICE | crate::ROOT_STALL_REPORT_NOTICE)
+        )),
         "the child's answer reset the parent's count"
     );
 }
@@ -551,5 +552,95 @@ async fn a_report_retried_after_a_fault_reaches_the_parent_whole() {
             "{}\n\nwidgets live in inventory.rs:12 and the gadgets in gadgets.rs:4",
             crate::sessions::subagents::INTERIM_REPORT_LABEL
         )
+    );
+}
+
+#[tokio::test]
+async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&requests),
+        script: vec![("read_file", r#"{"path":"inventory.rs"}"#.to_owned()); 64],
+        turn: StdMutex::new(0),
+    });
+    let mut harness = spawn_harness(
+        Vec::new(),
+        vec![Arc::clone(&provider), Arc::clone(&provider), provider],
+        8,
+    )
+    .await;
+    std::fs::write(
+        harness._directory.path().join("inventory.rs"),
+        "struct Widget;\n",
+    )
+    .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::ReadOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "inspect").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            notice_of(&requests[64]),
+            Some(crate::ROOT_STALL_REPORT_NOTICE)
+        );
+        assert!(
+            requests[64]
+                .system()
+                .unwrap()
+                .contains("This run cannot change files or run commands")
+        );
+    }
+    let follow_up = submit_prompt_to(&harness.runtime, harness.session_id, "thanks").await;
+    collect_until_run_finished(&mut harness.events, follow_up).await;
+    {
+        let requests = requests.lock().unwrap();
+        let notices: Vec<String> = request_texts(requests.last().unwrap())
+            .into_iter()
+            .filter(|text| text.starts_with("[QQ runtime notice"))
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|text| text == crate::ROOT_STALL_REPORT_NOTICE)
+        );
+    }
+    assert_assembly_matches_reference(
+        &harness._directory.path().join("sessions.sqlite3"),
+        harness.session_id,
+    );
+    let connection =
+        rusqlite::Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+    assert_eq!(connection.execute("UPDATE model_turns SET notice='stall_report' WHERE run_id=?1 AND notice='root_stall_report'", [run_id.to_string()]).unwrap(), 1);
+    drop(connection);
+    let legacy = submit_prompt_to(&harness.runtime, harness.session_id, "legacy replay").await;
+    collect_until_run_finished(&mut harness.events, legacy).await;
+    let requests = requests.lock().unwrap();
+    let notices: Vec<String> = request_texts(requests.last().unwrap())
+        .into_iter()
+        .filter(|text| text.starts_with("[QQ runtime notice"))
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text == crate::STALL_REPORT_NOTICE)
+    );
+    assert!(
+        !notices
+            .iter()
+            .any(|text| text == crate::ROOT_STALL_REPORT_NOTICE)
     );
 }

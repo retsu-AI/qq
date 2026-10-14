@@ -490,3 +490,20 @@ newest last.
 - Independent read-only investigation mapped root/child/retry fixtures and
   historical migration skips. Pin a schema45 test binary before the bump
   and verify actual file opening refuses46, without per-session decoding.
+
+### 2026-10-14 — AB5 root notice and compatibility evidence
+
+- Test-first mapping, live-root and migration assertions reproduced the
+  missing behavior. Root policy now emits RootStallReport; child and legacy
+  notices retain their original text. Pinned retries and delivery decoding
+  recognize both report variants; unknown persisted values remain errors.
+- Schema46 adds a version-only migration. The pinned schema45 probe binary
+  (SHA256 7723fe8faa0b05ad9ee421e705f37cb283fc26cd0bb59133de965a7bd4be732e)
+  refuses an actual schema46 store at open with CONSTRAINT, leaving46 intact.
+- Five focused AB5 tests pass, including live read-only root, persisted
+  follow-up, independent reference assembly and byte-identical legacy replay.
+  Historical migration and child progress tests pass in the focused run.
+  Logs: target/qq-perf/ab5-2026-10-14/{focused-final,replay-focused,progress-complete-decode}.log.
+- Independent production-source review approves. Parent integration, full
+  immutable workspace gates, final measurements and draft publication remain
+  open; no readiness or rollout acceptance is claimed.

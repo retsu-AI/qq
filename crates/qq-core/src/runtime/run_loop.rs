@@ -851,7 +851,7 @@ impl RunState {
                         let report_due = match (budget_final_turn, slice.placed_report) {
                             (true, _) => runtime::ReportDue::None,
                             (false, Some(runtime::TurnNotice::FinalAnswer)) => runtime::ReportDue::FinalAnswer,
-                            (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport)) => {
+                            (false, Some(runtime::TurnNotice::Report | runtime::TurnNotice::StallReport | runtime::TurnNotice::RootStallReport)) => {
                                 runtime::ReportDue::Report
                             }
                             (false, Some(runtime::TurnNotice::Continuation) | None) => {
@@ -881,7 +881,7 @@ impl RunState {
                             } else if slice_report {
                                 runtime::TurnNotice::Report
                             } else {
-                                runtime::TurnNotice::StallReport
+                                run.stall.stall_report_notice()
                             };
                             slice.placed_report = Some(notice);
                             Some(notice)

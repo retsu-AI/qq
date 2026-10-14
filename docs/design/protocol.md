@@ -260,7 +260,12 @@ Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 `side_questions`, the isolated side-question rows behind protocol 32.
 Schema 45 adds `tool_calls.approval_delegated`, behind
 `SessionSummary.pending_holds`; holds written before it read as waiting for
-a human.
+a human. Schema 46 adds the replay value
+`root_stall_report` through a version-only migration. Roots receive an
+invariant action-oriented, authority-neutral notice; historical `stall_report`
+wording remains byte-identical and children retain it. Older schema-45 binaries
+refuse the new store at open rather than discovering an unknown notice during
+session assembly.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

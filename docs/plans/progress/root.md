@@ -586,3 +586,8 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   replay fixtures and protocol/guide schema mentions. Preserve every old
   notice byte; reject46 at open in the pinned45 binary. Branch
   `feat/eng-1042-ab5-root-stall-action` stacks on AB4, source qualification open.
+- AB5 also owns the exhaustive stored-report decode in `sessions/deliveries.rs`;
+  RootStallReport is a report there, while unknown values remain CODEC errors.
+
+- AB5 also updates the independent reference-history decoder in
+  `sessions/tests.rs` to recognize RootStallReport in replay comparisons.

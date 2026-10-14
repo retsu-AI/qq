@@ -195,7 +195,9 @@ fn report_spans(
             }
             let report = match crate::runtime::TurnNotice::from_stored(&notice) {
                 Some(
-                    crate::runtime::TurnNotice::Report | crate::runtime::TurnNotice::StallReport,
+                    crate::runtime::TurnNotice::Report
+                    | crate::runtime::TurnNotice::StallReport
+                    | crate::runtime::TurnNotice::RootStallReport,
                 ) => true,
                 Some(
                     crate::runtime::TurnNotice::Continuation

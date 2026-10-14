@@ -2850,6 +2850,9 @@ mod reference_assembly {
                     context.push(Message::user(crate::SLICE_CONTINUATION_NOTICE));
                 }
                 Some("stall_report") => context.push(Message::user(crate::STALL_REPORT_NOTICE)),
+                Some("root_stall_report") => {
+                    context.push(Message::user(crate::ROOT_STALL_REPORT_NOTICE))
+                }
                 Some("final_answer") => {
                     context.push(Message::user(crate::SUBAGENT_FINAL_ANSWER_NOTICE));
                 }
