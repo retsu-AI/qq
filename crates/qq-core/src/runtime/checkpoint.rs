@@ -5,6 +5,7 @@ use qq_provider::{ContentBlock, Message, Role};
 use sha2::{Digest, Sha256};
 
 pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 24 * 1024;
+pub(crate) const MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES: usize = 32 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_ITEM_BYTES: usize = 2048;
 const MAX_EVIDENCE_ITEMS: usize = 32;
@@ -276,11 +277,26 @@ pub(crate) fn bounded_checkpoint_text(text: &str) -> String {
     if text.len() <= MAX_CHECKPOINT_TEXT_BYTES {
         return text.to_owned();
     }
-    let mut end = MAX_CHECKPOINT_TEXT_BYTES;
+    let mut end = MAX_CHECKPOINT_TEXT_BYTES - "…[truncated]".len();
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     format!("{}…[truncated]", &text[..end])
+}
+
+pub(crate) fn bounded_checkpoint_correction_notice(mut notice: String) -> String {
+    if notice.len() <= MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES {
+        return notice;
+    }
+    let suffix = "…[truncated]";
+    let mut end = MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES - suffix.len();
+    while !notice.is_char_boundary(end) {
+        end -= 1;
+    }
+    notice.truncate(end);
+    notice.push_str(suffix);
+    notice.shrink_to_fit();
+    notice
 }
 
 pub(crate) fn checkpoint_text_fits(text: &str) -> bool {

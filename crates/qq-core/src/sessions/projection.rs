@@ -4,7 +4,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_PROJECTION_JSON_BYTES: usize = 2 * 1024 * 1024;
-const MAX_CORRECTION_NOTICE_BYTES: usize = 32 * 1024;
+use crate::runtime::MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,7 +67,9 @@ fn validate_limits<'a>(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    if ids.is_empty() || notice.is_some_and(|text| text.len() > MAX_CORRECTION_NOTICE_BYTES) {
+    if ids.is_empty()
+        || notice.is_some_and(|text| text.len() > MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES)
+    {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
