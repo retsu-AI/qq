@@ -315,3 +315,8 @@ newest last.
 - Six Linux focused regressions pass; independent final source review approves.
   Full workspace rerun and fresh matched performance remain open.
   Evidence target/qq-perf/ab1-2026-10-14/environment-helpers-{red,focused-final}.log.
+
+- Initial full rerun found one existing live progress fixture using plain
+  git status, now intentionally work because of configured fsmonitor. Update
+  its read case to canonical git -c core.fsmonitor=false status; keep its
+  report assertion. Core957 passed,one failed,three ignored before correction.
