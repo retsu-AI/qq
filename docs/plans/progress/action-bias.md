@@ -280,3 +280,5 @@ newest last.
   can execute helpers, and bare JJ commands snapshot the working copy.
 - Narrowing canonical safe Git/JJ forms and treating Cargo queries as work
   is required; no read verdict or approval authority is inferred from hints.
+- Independent final review approved helper narrowing; all five focused
+  regressions pass. Workspace requalification and fresh candidate build next.

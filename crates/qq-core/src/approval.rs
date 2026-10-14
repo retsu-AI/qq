@@ -588,7 +588,16 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                         (*subcommand == "diff" && args == ["--stat"])
                             || (drivers_disabled
                                 && (*subcommand == "diff"
-                                    || args.get(2) == Some(&"--no-show-signature")))
+                                    || (args.get(2) == Some(&"--no-show-signature")
+                                        && args.get(3) == Some(&"--format=oneline")
+                                        && !args[4..].iter().any(|arg| {
+                                            let option = arg.split('=').next().unwrap_or(arg);
+                                            arg.contains("%G")
+                                                || (option.len() > 2
+                                                    && ["--format", "--pretty"]
+                                                        .iter()
+                                                        .any(|name| name.starts_with(option)))
+                                        }))))
                     }
                     "blame" => {
                         args.first() == Some(&"--no-textconv")
@@ -647,7 +656,7 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 let mut script = false;
                 let mut expect_script = false;
                 for arg in args {
-                    if !script && (expect_script || !arg.starts_with('-')) {
+                    if expect_script || (!script && !arg.starts_with('-')) {
                         // Understood print scripts: numeric addresses/ranges,
                         // optionally several commands. Other scripts are work.
                         if !arg.split(';').all(|part| {
@@ -682,25 +691,20 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                     } else if arg.starts_with('-') {
                         match *arg {
                             "-n" | "--quiet" | "--silent" => quiet = true,
-                            "-e" | "--expression" if !script => expect_script = true,
+                            "-e" | "--expression" => expect_script = true,
                             _ => return false,
                         }
                     }
                 }
                 quiet && script && !expect_script
             }
+            // Other JJ commands may snapshot the working copy or run configured diff tools.
             "jj" => {
-                matches!(args.first(), Some(&("diff" | "log" | "show" | "status")))
-                    || args.starts_with(&["op", "log"])
+                args == ["--ignore-working-copy", "--no-pager", "status"]
+                    || args == ["--no-pager", "--ignore-working-copy", "status"]
             }
-            "cargo" => match args.first() {
-                Some(&"--version") => true,
-                Some(&("metadata" | "tree")) => {
-                    matches!(args.get(1), Some(&("--locked" | "--frozen")))
-                        && !args.iter().any(|arg| arg.starts_with("--config"))
-                }
-                _ => false,
-            },
+            // Locked metadata/tree still invoke configured compiler wrappers.
+            "cargo" => args == ["--version"],
             "rustc" => args.first() == Some(&"--version"),
             "tree" => !args.iter().any(|arg| {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
@@ -710,9 +714,12 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
                     || arg.starts_with("--exec")
             }),
-            "rg" => !args
-                .iter()
-                .any(|arg| arg.starts_with("--pre") || arg.starts_with("--hostname-bin")),
+            "rg" => !args.iter().any(|arg| {
+                arg.starts_with("--pre")
+                    || arg.starts_with("--hostname-bin")
+                    || arg.starts_with("--search-zip")
+                    || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
+            }),
             "file" => !args.iter().any(|arg| {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')) || {
                     let option = arg.split('=').next().unwrap_or(arg);
@@ -878,9 +885,18 @@ mod tests {
     #[test]
     fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
         let cases = [
-            ("git log --no-ext-diff --no-textconv --no-show-signature --format=%GG", false),
-            ("git log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?", false),
-            ("git show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD", true),
+            (
+                "git log --no-ext-diff --no-textconv --no-show-signature --format=%GG",
+                false,
+            ),
+            (
+                "git log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?",
+                false,
+            ),
+            (
+                "git show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD",
+                true,
+            ),
             ("rg -z needle f.gz", false),
             ("rg --search-zip needle f.gz", false),
             ("rg -nz needle f.gz", false),
