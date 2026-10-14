@@ -1907,6 +1907,8 @@ impl RunState {
                                     // executable call above, which always fits this bound.
                                     debug_assert!(!reviews_tools);
                                     call.rejection = Some(runtime::CallRejection::OutputBudget);
+                                    // Streaming counted this request before final admission.
+                                    slice.slice_tool_calls -= 1;
                                 }
                             }
                         }

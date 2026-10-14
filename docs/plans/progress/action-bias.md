@@ -937,3 +937,9 @@ newest last.
 - #302 has real fresh Codex findings in progress. #303–#305 currently report
   mergeable against their parents and CI passes at #302–#304 published heads;
   #306 still needs parent/context implementation integration. No draft PRs.
+
+- Slice regression now reproduces the premature checkpoint at immutable
+  `2dc01dff`; evidence `deferred-slice-red.log`. Final OutputBudget rejection
+  now removes only that previously counted request from slice accounting;
+  existing rejected/denied-call semantics remain unchanged. Focused check
+  follows; replay/frontier fixes and full qualification remain open.
