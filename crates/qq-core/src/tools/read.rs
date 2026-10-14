@@ -24,7 +24,6 @@ const MAX_OUTLINE_ITEMS: usize = 400;
 /// The short content hash carried by the header: `h:` + 12 hex digits.
 pub(super) const SHORT_HASH_LEN: usize = 12;
 /// Escaped bytes reserved for the header line ahead of the body.
-const HEADER_RESERVE_BYTES: usize = 256;
 const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 const IMAGE_EXTENSIONS_EXTRA: [&str; 1] = ["webp"];
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
@@ -392,9 +391,32 @@ fn lines(
         .unwrap_or(0)
         .min(total_lines);
     let width = last_wanted.max(1).to_string().len();
-    let body_budget = READ_BOUNDS
-        .max_bytes
-        .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES);
+    // Render the largest header this window can produce, including its real path.
+    // The actual first line numbers have no more digits than their range ends.
+    let mut header_window = String::with_capacity(ranges.len() * 16);
+    for (index, range) in ranges.iter().enumerate() {
+        if index > 0 {
+            header_window.push(',');
+        }
+        let last = range.end.min(total_lines);
+        let _ = write!(header_window, "{last}-{last}");
+    }
+    let header_bound = Header::new("read", Some(&loaded.path))
+        .token(format_args!("L{header_window}/{total_lines}"))
+        .token(format_args!("h:{short}"))
+        .field("clipped", READ_BOUNDS.max_lines)
+        .field("truncated", "bytes")
+        .field("scanned", MAX_READ_SCAN_BYTES)
+        .field("note", "offset_ignored")
+        .into_line();
+    let header_bytes = escaped_len(&header_bound);
+    let header_lines = header_bound.lines().count();
+    if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
+        || header_lines + 1 >= READ_BOUNDS.max_lines
+    {
+        return ReadSideOutput::error("output_limit: read header exceeds the output bound");
+    }
+    let body_budget = READ_BOUNDS.max_bytes - header_bytes - MARKER_RESERVE_BYTES;
     // Sized to the file, not the budget: most reads are small and a 32 KiB
     // allocation per call is measurable on the tool loop.
     let mut body = String::with_capacity(
@@ -403,7 +425,7 @@ fn lines(
             .min(body_budget),
     );
     // Keep the header and a possible continuation marker inside the bound.
-    let body_line_budget = READ_BOUNDS.max_lines.saturating_sub(2);
+    let body_line_budget = READ_BOUNDS.max_lines - header_lines - 1;
     let mut body_lines = 0_usize;
     let mut line_stopped = false;
     let mut body_escaped = 0_usize;

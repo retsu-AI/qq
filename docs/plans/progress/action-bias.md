@@ -464,3 +464,6 @@ newest last.
   header reservation allows generic bounding to drop middle rows while
   reporting contiguous offsets. The model-visible row-contiguity fixture
   fails before correction; budget the rendered header before the body.
+- Rendered header upper bound now reserves actual escaped path and metadata
+  bytes plus header rows. All seven focused AB3 tests pass; independent
+  final review approved. Workspace requalification follows.
