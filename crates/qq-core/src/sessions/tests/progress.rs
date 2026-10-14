@@ -689,6 +689,25 @@ async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
             |row| row.get(0),
         )
         .unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_notice_version BEFORE UPDATE OF value ON metadata WHEN NEW.key='schema_version' AND NEW.value='50' BEGIN SELECT RAISE(ABORT,'injected final notice migration failure'); END;").unwrap();
+    drop(connection);
+    assert!(Store::open(path.clone()).await.is_err());
+    let connection = Connection::open(&path).unwrap();
+    let failed_version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        failed_version, "48",
+        "failed48 upgrade must never expose49 to a reader without root-notice support"
+    );
+    assert!(!has_column(&connection, "model_turns", "tool_results_projection_json").unwrap());
+    connection
+        .execute_batch("DROP TRIGGER reject_notice_version")
+        .unwrap();
     drop(connection);
     for _ in 0..2 {
         let reopened = Store::open(path.clone()).await.unwrap();

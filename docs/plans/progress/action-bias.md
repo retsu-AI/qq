@@ -1714,3 +1714,8 @@ newest last.
   as expected. Add an actual stored `root_stall_report` fixture with experimental48
   layout: its text/store identity and newly nullable projection must survive50
   migration and a second reopen. Focused red evidence precedes implementation.
+
+- Independent migration review finds an atomicity gap:48→projection49→notice50
+  could crash after publishing49 while retaining root notices its reader cannot
+  decode. Add a trigger-injected final-version failure;48 must retain both its
+  version and original structure. Publish48→50 projection/version together.
