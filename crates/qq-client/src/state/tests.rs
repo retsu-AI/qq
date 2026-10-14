@@ -521,7 +521,11 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             ..context(&[])
         },
     );
-    assert!(effects.is_empty());
+    assert!(
+        effects
+            .iter()
+            .all(|effect| matches!(effect, StateEffect::RequestSnapshot(_)))
+    );
     assert_eq!(store[&session_id].drafts, ["second"]);
     assert_eq!(store[&session_id].unread, 1);
 }
@@ -809,6 +813,74 @@ fn an_owned_summary_finish_does_not_submit_the_second_draft() {
 }
 
 #[test]
+fn observed_turn_prices_survive_older_snapshot_replay_once() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(run_id);
+    let snapshot = qq_protocol::SessionSnapshot {
+        side_questions: Vec::new(),
+        summary: running,
+        messages: vec![message(8, session_id, run_id, "work")],
+        runs: vec![
+            serde_json::from_value(serde_json::json!({
+                "id":run_id,"session_id":session_id,"status":"running","correlation":{}
+            }))
+            .unwrap(),
+        ],
+        tool_calls: Vec::new(),
+        has_older_messages: false,
+        has_older_tool_calls: false,
+    };
+    let turns: Vec<_> = [(7, 1, 100), (8, 2, 50)]
+        .into_iter()
+        .map(|(sequence, ordinal, cost)| {
+            envelope(
+                sequence,
+                session_id,
+                SessionEvent::ModelTurnCompleted {
+                    run_id,
+                    turn_ordinal: ordinal,
+                    model: qq_protocol::ModelSelection::default(),
+                    usage: None,
+                    estimated_cost_usd_nanos: Some(cost),
+                },
+            )
+        })
+        .collect();
+    let mut store = SessionStore::default();
+    store.install_session_snapshot(snapshot.clone(), &[], 6);
+    store.reduce_event(&turns[0], context(&[]));
+    assert_eq!(
+        store[&session_id].runs[&run_id].live_cost_usd_nanos,
+        Some(100)
+    );
+    // A stale response arrives after the newer event; the surface replays
+    // every retained event newer than the snapshot cursor.
+    store.install_session_snapshot(snapshot.clone(), &[], 6);
+    store.reduce_event(&turns[0], context(&[]));
+    assert_eq!(
+        store[&session_id].runs[&run_id].live_cost_usd_nanos,
+        Some(100)
+    );
+    store.reduce_event(&turns[1], context(&[]));
+    assert_eq!(
+        store[&session_id].runs[&run_id].live_cost_usd_nanos,
+        Some(150)
+    );
+    store.install_session_snapshot(snapshot, &[], 6);
+    for turn in &turns {
+        store.reduce_event(turn, context(&[]));
+    }
+    assert_eq!(
+        store[&session_id].runs[&run_id].live_cost_usd_nanos,
+        Some(150)
+    );
+    assert_eq!(store[&session_id].runs[&run_id].turns, 2);
+}
+
+#[test]
 fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
     for session_cost in [Some(14_150), None] {
         let session_id = SessionId::from_bytes([3; 16]);
@@ -878,6 +950,8 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
         };
         store.install_session_snapshot(snapshot, &[], 2);
         assert_eq!(store[&session_id].runs[&prompt].cost_usd_nanos, Some(150));
+        assert_eq!(store[&session_id].runs[&prompt].started_at_ms, Some(1));
+        assert_eq!(store[&session_id].runs[&prompt].finished_at_ms, Some(2));
     }
 }
 
