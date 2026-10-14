@@ -310,3 +310,11 @@ newest last.
   cannot qualify historical discovery identity. Shell qualification is explicitly
   lexical_read_share; inherited executable/environment effects remain unqualified.
   Updated the sort temporary-directory and uniq stdout contracts to match AB1.
+
+- 2026-10-14 qualification follow-up: typed discovery paths cannot become
+  scopes through SQLite coercion. The diagnostic now exposes invalid scopes
+  and executed shell/exec/external runs with unproven mutation paths. Fixtures
+  cover numeric/array/object roots and a shell-only sed edit. Historical scope
+  diagnostic is 108/1/1/0/0/1, invalid scopes 0, unproven mutation runs 208;
+  the whole editing cohort remains unqualified. First-edit ordering has the
+  same immutable mutation-evidence requirement.

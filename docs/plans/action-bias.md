@@ -17,7 +17,9 @@ When a run is asked for a change, it makes the change, verifies it and
 reports, without reading the same material repeatedly first. Specifically:
 
 - **Root runs reach their first edit sooner.** Built-in reads before the
-  first edit: median 9 → ≤ 6, p90 57 → ≤ 30.
+  first observed built-in edit: median 9 → ≤ 6, p90 57 → ≤ 30.
+  Unknown shell/exec/external mutation paths or ordering leave the whole-run
+  first-edit and instruction-coverage gates unqualified.
 - **Fewer re-reads.** Same-path re-reads fall from 44 % of root `read_file`
   calls (historical argument-spelling proxy: 1,631 of 3,669) to ≤ 25%.
   Qualification groups successful reads by persisted canonical file identity;
@@ -38,6 +40,9 @@ reports, without reading the same material repeatedly first. Specifically:
   records one discovery start across 108 qualifying roots, no repeated roots.
   Path/page/read coverage remains
   unqualified; the historical raw argument counts are separate context.
+  The built-in nested-edit subset is diagnostic. Malformed discovery paths and
+  shell/exec/external calls without immutable mutation-path evidence leave
+  whole-cohort qualification open, including shell-only edits.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
   receives a stall report. Today `cd … && grep` and `sed -n` count as work,
   so this never happened in the window: 0 root stall reports in 30 days

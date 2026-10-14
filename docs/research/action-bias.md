@@ -411,7 +411,7 @@ per-run-over-one diagnostic alongside scope counts rather than relabelling
 all such runs as passing.
 
 ```sh
-# Scope counts: runs, distinct roots, searches, repeated roots, affected runs, maximum roots in one run.
+# Built-in nested-edit diagnostic: runs, roots, starts, repeated roots, affected runs, max roots, invalid scopes, unproven mutation runs.
 q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, t.turn_ordinal, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
@@ -426,7 +426,8 @@ q "WITH rr AS ($RR), paths AS (
      WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
      GROUP BY p.run_id),
    cursor_space AS (SELECT char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288) ws),
-   discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
+   discovery AS (SELECT t.run_id, CASE WHEN coalesce(json_type(t.arguments_json, '\$.path'),'null') IN ('null','text')
+       THEN coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') END path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id CROSS JOIN cursor_space
      WHERE t.name = 'search'
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
@@ -439,9 +440,24 @@ q "WITH rr AS ($RR), paths AS (
        AND json_extract(t.arguments_json, '\$.query') = '(^|/)(AGENTS|CLAUDE)\\.md\$'
      GROUP BY 1, 2),
    per_run AS (SELECT q.run_id, count(d.path) roots, coalesce(sum(d.n),0) searches,
-     coalesce(sum(d.n > 1),0) repeated_roots FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1)
-   SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots) FROM per_run;"
+     coalesce(sum(d.n > 1),0) repeated_roots,
+     coalesce(sum(d.path IS NULL AND d.n IS NOT NULL),0) invalid_scopes
+     FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1),
+   unproven_mutations AS (SELECT DISTINCT t.run_id FROM tool_calls t JOIN rr ON rr.id=t.run_id
+     WHERE rr.child=0 AND t.state IN ('completed','failed','interrupted')
+       AND (t.name IN ('shell','exec') OR t.name GLOB 'ext__*'))
+   SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots),
+     sum(invalid_scopes), (SELECT count(*) FROM unproven_mutations) FROM per_run;"
 ```
+
+The first six columns describe only observed built-in nested edits, not the
+whole editing cohort. A nonzero invalid-scope count leaves qualification open:
+nonstring roots cannot become permitted roots through SQLite coercion. A
+nonzero unproven-mutation count also leaves qualification open. Shell, exec and
+external calls may edit without a built-in path; establish their actual affected
+paths and ordering from immutable execution evidence before applying discovery
+and first-edit gates. Lexical read status cannot prove those effects absent.
+Do not exclude shell-only editing runs and report the remaining subset as passing.
 
 Paths with `./` or doubled separators require lexical normalization before
 qualification. Resolve symlink aliases only from
