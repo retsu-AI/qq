@@ -434,3 +434,13 @@ newest last.
   target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
   Ten focused classifier fixtures pass; independent source review approves.
   Matched performance and final hosted review remain open.
+
+
+### 2026-10-14 — trailing reads, substitutions and explicit environments
+
+- Hosted review identifies trailing-semicolon and print-substitution reads
+  wrongly treated as work, and explicit passthrough environments that can
+  mutate via process initialization. Test-first cases cover both shell/exec
+  environments, safe substitutions and incomplete/mutating script exclusions.
+- Nonempty requested environments must count as work without changing
+  execution authority; AB6 must retain that fact through export/recount.

@@ -1214,6 +1214,83 @@ mod tests {
     }
 
     #[test]
+    fn ab1_trailing_separators_and_substitutions_preserve_read_verdicts() {
+        for command in [
+            "grep x f;",
+            "grep x f;  ",
+            "cat f; grep x f;",
+            "cd x; grep x f;",
+            "sed -n 's/foo/bar/p' f",
+            "sed -n 's#foo#bar#gp' f",
+            "sed -n '1,$s/foo/bar/p' f",
+            "sed -n 's/foo;bar/baz;p/p' f",
+            "sed -n 's/foo\\/bar/baz/p' f",
+            "sed -n -e 's/foo/bar/p' -e '2p' f",
+        ] {
+            assert_eq!(
+                super::read_only_shell_command(command),
+                !cfg!(windows),
+                "{command}"
+            );
+        }
+        for command in [
+            ";",
+            "grep x f;;",
+            "grep x f &&",
+            "grep x f |",
+            "grep x f ||",
+            "sed -n 's/foo/bar/ep' f",
+            "sed -n 's/foo/bar/pe' f",
+            "sed -n 's/foo/bar/w out' f",
+            "sed -n 's/foo/bar/p; e touch out' f",
+            "sed -n -e 's/foo/bar/p' -e 's/foo/bar/e' f",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_explicit_process_environments_are_work_without_changing_authority() {
+        for tool in ["shell", "exec"] {
+            for env in [
+                serde_json::json!(["LD_PRELOAD"]),
+                serde_json::json!(["LANG"]),
+                serde_json::json!(42),
+            ] {
+                let mut args = if tool == "shell" {
+                    serde_json::json!({"command":"pwd"})
+                } else {
+                    serde_json::json!({"program":"pwd"})
+                };
+                args["env"] = env;
+                let class = super::shell_class(tool, &args.to_string());
+                assert!(
+                    matches!(
+                        class,
+                        super::ToolClass::Shell {
+                            read_only: false,
+                            ..
+                        }
+                    ),
+                    "{tool} {args}"
+                );
+            }
+            let args = if tool == "shell" {
+                r#"{"command":"pwd","env":[]}"#
+            } else {
+                r#"{"program":"pwd","env":[]}"#
+            };
+            assert!(matches!(
+                super::shell_class(tool, args),
+                super::ToolClass::Shell {
+                    read_only: true,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn ab1_lazy_fetch_operation_merge_and_timestamp_restoration_are_work() {
         for command in [
             "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path",
