@@ -1368,3 +1368,39 @@ newest last.
 - Corrected the inherited receipt-reopen fixture's current-schema assertion
   from 47 to 48; its historical NULL and malformed claimed-47 rejection
   fixtures remain unchanged. AB5 qualification still awaits the parent.
+### 2026-10-14 — AB3 current-main/context integration qualification
+
+- Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
+  2,383 workspace tests, zero failures, 14 ignored across 38 report blocks;
+  formatting, Clippy/all targets/all features with warnings denied, and
+  workspace build all exit zero. Source remained clean and unchanged.
+- Receipts: `target/qq-perf/ab3-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Independent integration review approves
+  retained byte-window/masking/repair reservations and live/replay bounds.
+- PR remains nondraft. Fresh hosted/Codex review and performance gates
+  remain open; this local receipt does not qualify those gates.
+
+- Focused canonical-encoding check identified the descriptor 14/prompt 22
+  digest `a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d`;
+  the inherited prompt-20 golden was replaced. Descriptor 13 prompt 20–22
+  historical fixtures stay unchanged. Independent integration review approves
+  immutable image-manifest propagation and frozen child authority; full gates
+  now run against the corrected immutable source.
+
+### 2026-10-14 — AB4 immutable verified-context qualification
+
+- Immutable `2f061eccc285687365faf8eb054ded9a1cbca62d`: fresh workspace
+  passes 2,393 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source remained clean and unchanged throughout the run.
+- Receipts: `target/qq-perf/ab4-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Current 14/prompt 22 and historical 13/prompt
+  20–22 digests pass. Independent integration review approves immutable
+  manifest propagation and frozen read-only child declarations.
+- Nondraft publication follows; fresh hosted/Codex and named performance
+  gates remain open and are not waived by local qualification.
+
+- Qualified parent AB4 `364eb74c` is now integrated, including the corrected
+  descriptor 14/prompt 22 golden and parent receipt. Independent schema and
+  notice integration review approves. Full child gates start against this
+  immutable merge; schema-47 old-reader refusal probe follows its build.
