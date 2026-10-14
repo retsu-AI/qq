@@ -1124,3 +1124,15 @@ newest last.
   historical descriptor 13 identity are inherited unchanged.
 - PR remains nondraft. Fresh source qualification and independent integration
   review follow; hosted and named performance gates remain open.
+
+### 2026-10-14 — AB3 current-main/context integration qualification
+
+- Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
+  2,383 workspace tests, zero failures, 14 ignored across 38 report blocks;
+  formatting, Clippy/all targets/all features with warnings denied, and
+  workspace build all exit zero. Source remained clean and unchanged.
+- Receipts: `target/qq-perf/ab3-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Independent integration review approves
+  retained byte-window/masking/repair reservations and live/replay bounds.
+- PR remains nondraft. Fresh hosted/Codex review and performance gates
+  remain open; this local receipt does not qualify those gates.
