@@ -467,3 +467,10 @@ newest last.
 - Rendered header upper bound now reserves actual escaped path and metadata
   bytes plus header rows. All seven focused AB3 tests pass; independent
   final review approved. Workspace requalification follows.
+
+- Retained the historical 256-byte minimum reservation while reserving the
+  full rendered header for longer paths. This preserves ordinary read-window
+  sizes and the existing replay-budget fixture without weakening bounds.
+  Seven focused AB3 regressions and the exact replay fixture pass; independent
+  final review approves this compatibility adjustment. Full workspace rerun
+  remains open, along with fresh scan-cap review and matched performance.

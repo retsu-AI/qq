@@ -409,7 +409,8 @@ fn lines(
         .field("scanned", MAX_READ_SCAN_BYTES)
         .field("note", "offset_ignored")
         .into_line();
-    let header_bytes = escaped_len(&header_bound);
+    // Keep ordinary-path windows stable; long headers reserve their full weight.
+    let header_bytes = escaped_len(&header_bound).max(256);
     let header_lines = header_bound.lines().count();
     if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
         || header_lines + 1 >= READ_BOUNDS.max_lines

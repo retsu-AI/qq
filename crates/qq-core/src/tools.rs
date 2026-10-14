@@ -761,16 +761,37 @@ mod tests {
     #[test]
     fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
         let directory = tempfile::tempdir().unwrap();
-        let prefix = std::iter::repeat_n("a".repeat(100), 6).collect::<Vec<_>>().join("/");
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
         std::fs::create_dir_all(directory.path().join(&prefix)).unwrap();
         let path = format!("{prefix}/notes.txt");
-        std::fs::write(directory.path().join(&path), ("x".repeat(80) + "\n").repeat(2_000)).unwrap();
+        std::fs::write(
+            directory.path().join(&path),
+            ("x".repeat(80) + "\n").repeat(2_000),
+        )
+        .unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let output = run_tool(&workspace, &FileState::default(), "read_file", &serde_json::json!({"path":path}).to_string());
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            &serde_json::json!({"path":path}).to_string(),
+        );
         assert!(!output.is_error, "{}", output.model_text);
-        let rows: Vec<usize> = output.model_text.lines().filter_map(|line| line.split_once('\t').and_then(|(number,_)| number.trim().parse().ok())).collect();
+        let rows: Vec<usize> = output
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(number, _)| number.trim().parse().ok())
+            })
+            .collect();
         assert!(rows.len() > 200);
-        assert!(rows.windows(2).all(|pair| pair[1] == pair[0] + 1), "visible rows have a gap");
+        assert!(
+            rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "visible rows have a gap"
+        );
         assert!(!output.model_text.contains("not stored"));
     }
 
