@@ -10,7 +10,7 @@ newest last.
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In review | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Published e93c4e8a; exact projection and review repairs qualified; fresh hosted/Codex and performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
-| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Latest parent integration and notice docs in progress; performance open |
+| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Schema50 atomic migration qualified at c3618e8b; fresh parent grant repair, hosted review and performance open |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
@@ -1725,3 +1725,19 @@ newest last.
   one transaction. All six focused AB5 cases pass, including rollback, retained
   notice bytes/store identity and two reopens. Parent migration expectations now
   follow the reader version and require the notice codec before admitting48.
+
+### 2026-10-14 — AB5 schema50 qualification receipt
+
+- Immutable c3618e8b8fb0084c947708ef97acb4fabef7ab86: fresh workspace
+  2,416 passed, zero failed,14 ignored across38 result blocks; formatting,
+  all-target/all-feature Clippy with warnings denied, and workspace build pass.
+  Evidence: target/qq-perf/ab5-2026-10-14/schema50-atomic-final-gate-*.
+- Independent migration review approves all guards, atomic48 upgrade and
+  structure/notice/store identity preservation. Six focused AB5 tests and the
+  inherited projection migration regression pass; injected-failure red retained.
+- Actual retained48 and49 binaries refuse a new50 store with exit1 and unchanged
+  metadata/structure, zero sessions/model calls. Qualified binary retained as
+  legacy-schema50-qq (SHA256 cbc24a6ac38629cd00430c87010ea6d5e8ad7f0033183d378305e13c8de558e7).
+- This publication adds only the receipt. Parent304 has a new host grant
+  provenance repair in progress; final hosted/Codex and named performance gates
+  remain open. No entire-stack readiness claim.
