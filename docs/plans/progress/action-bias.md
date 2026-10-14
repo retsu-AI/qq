@@ -1566,3 +1566,9 @@ newest last.
   exposure and the effective descriptor must retain declaring-host provenance.
   Add a regression covering all owner/later grant combinations and host dispatch
   counters before changing admission. The original grant union predates AB4.
+
+- The owner regression fails against329c569c: a later-only grant appears in
+  the descriptor. Grants now travel with each host contribution and attach only
+  to admitted entries; the descriptor derives effective grants from those
+  surviving entries. Thirteen AB4 focused cases pass. Extend the regression to
+  normal Ask gates as well as unattended declarations and dispatch.

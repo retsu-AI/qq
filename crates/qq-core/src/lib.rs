@@ -11249,34 +11249,101 @@ mod tests {
 
     #[tokio::test]
     async fn ab4_duplicate_host_grants_authorize_only_the_surviving_owner() {
-        for (first_granted, later_granted) in [(false, true), (true, false), (false, false), (true, true)] {
-            let directory = tempfile::tempdir().unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let mut first = WideHost::new(2);
-            first.granted = first_granted;
-            let first_calls = Arc::clone(&first.calls);
-            let mut later = WideHost::new(2);
-            later.granted = later_granted;
-            let later_calls = Arc::clone(&later.calls);
-            let runtime = Runtime::new(
-                TurnScript {
-                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
-                    requests: Arc::clone(&requests),
-                },
-                "test-model",
-                256,
-            ).unwrap().with_tool_host(Arc::new(first)).with_tool_host(Arc::new(later));
-            let workspace = std::fs::canonicalize(directory.path()).unwrap();
-            let plan = tokio::task::spawn_blocking(move || {
-                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(&runtime, workspace)).unwrap()
-            }).await.unwrap();
-            assert_eq!(plan.descriptor().tools.config_grants.iter().any(|name| name == "ext__wide__tool01"), first_granted);
-            let events = plan.run(RunCommand::new("perform the requested operation")).collect::<Vec<_>>().await;
-            assert!(matches!(events.last(), Some(RunEvent::Completed)), "{events:?}");
-            assert_eq!(first_calls.lock().unwrap().len(), usize::from(first_granted));
-            assert!(later_calls.lock().unwrap().is_empty());
-            for request in requests.lock().unwrap().iter() {
-                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), first_granted);
+        for unattended in [false, true] {
+            for (first_granted, later_granted) in
+                [(false, true), (true, false), (false, false), (true, true)]
+            {
+                let directory = tempfile::tempdir().unwrap();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let mut first = WideHost::new(2);
+                first.granted = first_granted;
+                let first_calls = Arc::clone(&first.calls);
+                let mut later = WideHost::new(2);
+                later.granted = later_granted;
+                let later_calls = Arc::clone(&later.calls);
+                let runtime = Runtime::new(
+                    TurnScript {
+                        turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                        requests: Arc::clone(&requests),
+                    },
+                    "test-model",
+                    256,
+                )
+                .unwrap()
+                .with_tool_host(Arc::new(first))
+                .with_tool_host(Arc::new(later));
+                let workspace = std::fs::canonicalize(directory.path()).unwrap();
+                let plan = tokio::task::spawn_blocking(move || {
+                    plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                        &runtime, workspace,
+                    ))
+                    .unwrap()
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    plan.descriptor()
+                        .tools
+                        .config_grants
+                        .iter()
+                        .any(|name| name == "ext__wide__tool01"),
+                    first_granted
+                );
+                if unattended {
+                    let events = plan
+                        .run(RunCommand::new("perform the requested operation"))
+                        .collect::<Vec<_>>()
+                        .await;
+                    assert!(
+                        matches!(events.last(), Some(RunEvent::Completed)),
+                        "{events:?}"
+                    );
+                } else {
+                    let events = plan
+                        .execute(
+                            vec![Message::user("perform the requested operation")],
+                            RunCancellation::new(),
+                            Arc::new(StaticPolicyGate {
+                                mode: ApprovalMode::Ask,
+                                grants: approval::SessionGrants {
+                                    tools: plan
+                                        .descriptor()
+                                        .tools
+                                        .config_grants
+                                        .iter()
+                                        .cloned()
+                                        .collect(),
+                                    ..approval::SessionGrants::default()
+                                },
+                                network: Arc::default(),
+                            }),
+                            Arc::new(workspace::FileState::default()),
+                            RunCapabilities::user(None),
+                        )
+                        .collect::<Vec<_>>()
+                        .await;
+                    assert!(
+                        matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                        "{events:?}"
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .any(|event| matches!(event, RuntimeEvent::ToolCallDenied { .. })),
+                        !first_granted
+                    );
+                }
+                assert_eq!(
+                    first_calls.lock().unwrap().len(),
+                    usize::from(first_granted)
+                );
+                assert!(later_calls.lock().unwrap().is_empty());
+                for request in requests.lock().unwrap().iter() {
+                    assert_eq!(
+                        tool_names(request).contains(&"ext__wide__tool01"),
+                        !unattended || first_granted
+                    );
+                }
             }
         }
     }
