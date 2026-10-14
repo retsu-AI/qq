@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) (draft) | Latest parent integration checks in progress; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) (draft) | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
@@ -663,3 +663,69 @@ newest last.
   target/qq-perf/ab4-2026-10-14/uncompiled-grants-gate-{0,1,2,3}.log.
   Declarations and execution use grants compiled at first poll; no production
   change was needed. Hosted review and matched performance remain open.
+
+### 2026-10-14 — AB2 file ignores, empty directories and write-only contract
+
+- Test-first public discovery fixtures reproduce hidden instruction basenames
+  in visible directories and no resumable cursor after 50,000 empty dirs:
+  12 focused tests pass, two fail. Captured write-only request separately
+  reproduces unavailable prior-read guidance. Red receipts under AB2 target.
+- Repair preserves directory ignores and names-only safe-link handling; only
+  fully visited directories may advance a scan watermark. Work in progress.
+
+- Initial repairs pass 14 focused fixtures. Independent review found a depth
+  skip could suppress later empty-directory watermarks; new public fixture
+  reproduces it (one failed). A per-subtree depth-skip counter now permits
+  only completed subtrees to advance. Ignored instruction links are covered
+  alongside regular files; write-only captured declarations name creation
+  and an independently known current hash, without unavailable prior reads.
+
+### 2026-10-14 — configured Git helpers and literal exec regressions
+
+- New hosted findings reproduced test-first: working-tree filters, signature
+  branch formatting/default sort and remerge helpers must count as work.
+- Exact exec argv containing spaces, quotes and shell metacharacters is a
+  literal read, independent of native shell quoting. Focused red run: six
+  pass, two fail; configured-git-exact-exec-red.log in AB1 receipts.
+- Repair and independent read-only review in progress; performance remains open.
+
+- Repair caches one progress/audit verdict from exact exec argv or checked shell
+  syntax. Working-tree Git forms count as work; branch reads force refname
+  sorting, and history reads force no patch/merge-diff generation. Approval
+  previews, grants and decisions are unchanged. Initial focused green: eight
+  tests passed; independent final review and immutable workspace gates next.
+
+- Immutable source 4bd16392 passes workspace checks: 2,280 tests, zero failed,
+  14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/configured-git-exact-exec-gate-{0,1,2,3}.log.
+  Independent final read-only review approves; eight focused regressions pass.
+  Matched performance remains open; no readiness claim.
+
+### 2026-10-14 — eighth hosted plan review reconciliation
+
+- Corrected Goal scope baseline to 25 starts, seven repeated roots, five runs;
+  raw argument counts remain separate and coverage remains unqualified.
+- Candidate begins after pinned AB1–AB5 main deployment and prior-writer
+  retirement, with runtime source/binary and continuity proof. Merge dates
+  and prompt version alone cannot qualify treatment. No deployment performed.
+- Public uncompiled first-poll grant regression is qualified in AB4; AB1
+  helper/exec and AB2 ignored-file/empty-directory repairs are in progress.
+
+- Independent eighth plan review approves; docs truth 23 passed. Source
+  qualification remains attached to the respective slice receipts; no
+  performance or deployed observation gate is waived.
+
+- Integrated immutable source e1e56e7a passes all workspace checks: 2,295
+  tests, zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/ignored-files-empty-dirs-gate-{0,1,2,3}.log.
+  Fifteen focused AB2 fixtures pass; independent final review approves the
+  depth/empty-directory continuation fix, instruction file-ignore handling
+  and write-only contract. Matched performance and hosted review remain open.
+
+- Integrated accepted AB1 helper/exec fixes and AB2 discovery fixes with their
+  qualified receipts. AB3 production read-window behavior is unchanged; rerun
+  immutable workspace gates on the combined source before updating draft #303.
+
+- Integrated accepted AB1 exact-argv/Git-helper and AB2 instruction discovery
+  repairs through the AB3 parent. AB4 authority implementation is unchanged.
+  Rerun immutable combined workspace gates; hosted review and performance open.
