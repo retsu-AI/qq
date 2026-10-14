@@ -570,11 +570,34 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 };
                 match *subcommand {
                     "branch" => rules::branch_lists(args),
-                    "diff" | "log" | "show" => !args.iter().any(|arg| {
-                        let option = arg.split('=').next().unwrap_or(arg);
-                        option.len() > 2 && "--output".starts_with(option)
-                    }),
-                    "blame" | "status" | "rev-parse" => true,
+                    "diff" | "log" | "show" => {
+                        if args.iter().any(|arg| {
+                            let option = arg.split('=').next().unwrap_or(arg);
+                            option.len() > 2
+                                && ["--output", "--ext-diff", "--textconv", "--show-signature"]
+                                    .iter()
+                                    .any(|name| name.starts_with(option))
+                        }) {
+                            return false;
+                        }
+                        // Patch output can invoke configured helpers by default.
+                        // Exact stat-only output skips both diff driver kinds.
+                        let drivers_disabled = args
+                            .starts_with(&["--no-ext-diff", "--no-textconv"])
+                            || args.starts_with(&["--no-textconv", "--no-ext-diff"]);
+                        (*subcommand == "diff" && args == ["--stat"])
+                            || (drivers_disabled
+                                && (*subcommand == "diff"
+                                    || args.get(2) == Some(&"--no-show-signature")))
+                    }
+                    "blame" => {
+                        args.first() == Some(&"--no-textconv")
+                            && !args.iter().any(|arg| {
+                                let option = arg.split('=').next().unwrap_or(arg);
+                                option.len() > 2 && "--textconv".starts_with(option)
+                            })
+                    }
+                    "status" | "rev-parse" => true,
                     "worktree" => args.first() == Some(&"list"),
                     _ => false,
                 }
@@ -670,7 +693,14 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 matches!(args.first(), Some(&("diff" | "log" | "show" | "status")))
                     || args.starts_with(&["op", "log"])
             }
-            "cargo" => matches!(args.first(), Some(&("metadata" | "tree" | "--version"))),
+            "cargo" => match args.first() {
+                Some(&"--version") => true,
+                Some(&("metadata" | "tree")) => {
+                    matches!(args.get(1), Some(&("--locked" | "--frozen")))
+                        && !args.iter().any(|arg| arg.starts_with("--config"))
+                }
+                _ => false,
+            },
             "rustc" => args.first() == Some(&"--version"),
             "tree" => !args.iter().any(|arg| {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
@@ -680,7 +710,9 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
                     || arg.starts_with("--exec")
             }),
-            "rg" => !args.iter().any(|arg| arg.starts_with("--pre")),
+            "rg" => !args
+                .iter()
+                .any(|arg| arg.starts_with("--pre") || arg.starts_with("--hostname-bin")),
             "file" => !args.iter().any(|arg| {
                 (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')) || {
                     let option = arg.split('=').next().unwrap_or(arg);
@@ -862,10 +894,52 @@ mod tests {
             ("git log --output=out", false),
             ("git show --output=written.txt HEAD", false),
             ("sed -n -f write.sed input.txt", false),
+            ("sed -n 's/.*/touch generated/e' input.txt", false),
+            ("sed -n 's/x/y/w generated.txt' input.txt", false),
+            ("sort --o=written.txt input.txt", false),
             ("sed -n --file=write.sed input.txt", false),
             ("tree -o out", false),
             ("fd -x cargo fmt", false),
             ("rg --pre 'touch out' x f", false),
+            (
+                "cd sub && rg --hostname-bin ./mutate --hyperlink-format default --color=always x f",
+                false,
+            ),
+            ("git -C sub diff --ext-diff", false),
+            ("git diff", false),
+            ("git show HEAD", false),
+            ("git log -p", false),
+            ("git diff --stat -p", false),
+            ("git diff --no-ext-diff --no-textconv", true),
+            (
+                "git show --no-ext-diff --no-textconv --no-show-signature HEAD",
+                true,
+            ),
+            ("git diff --no-ext-diff --no-textconv --ext-diff", false),
+            ("git diff --ext-diff --no-ext-diff --no-textconv", false),
+            ("git diff --ext --no-textconv", false),
+            ("git log --textc", false),
+            ("git diff -- --no-ext-diff --no-textconv", false),
+            ("git diff --src-prefix --no-ext-diff --no-textconv", false),
+            ("git blame f", false),
+            ("git blame --no-textconv f", true),
+            ("git blame -- --no-textconv", false),
+            ("git blame --no-textconv --textc f", false),
+            ("git show --no-ext-diff --no-textconv HEAD", false),
+            ("git log --textconv -p", false),
+            ("git show --ext-diff HEAD", false),
+            ("cd sub && cargo metadata --format-version=1", false),
+            ("cargo tree", false),
+            ("cargo metadata --offline", false),
+            ("cargo metadata -- --locked", false),
+            ("cargo tree --prefix --locked", false),
+            (
+                "cargo metadata --locked --config build.rustc=./mutate",
+                false,
+            ),
+            ("rg --hostname-bin=./mutate x f", false),
+            ("cargo metadata --locked --format-version=1", true),
+            ("cargo tree --frozen", true),
             ("file -C", false),
             ("file --comp -m magic", false),
             ("find . -de*", false),

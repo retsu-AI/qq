@@ -9759,7 +9759,8 @@ mod tests {
             .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
             .replacen("mode=outline for the shape of a long file", "mode=outline to see a file's shape before reading it", 1)
             .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
-            .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1);
+            .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1)
+            .replacen("- Give every tool path relative to the workspace root; absolute paths are rejected.\n", "- Give every tool path relative to the workspace root; absolute paths are rejected.\n- When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
         // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
         // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
@@ -10548,6 +10549,70 @@ mod tests {
             let mut names = tool_names(request);
             names.sort_unstable();
             assert_eq!(names, ["read_file", "search", "tree"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
+        for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let expected = exposed.clone();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .run(RunCommand::new("review the available context"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                tool_names(&requests[0]),
+                expected.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            let prompt = requests[0].system().unwrap();
+            for name in [
+                "read_file",
+                "tree",
+                "search",
+                "edit_file",
+                "write_file",
+                "shell",
+                "exec",
+                "ask_user",
+                "fetch",
+                "read_tool_result",
+                "search_history",
+            ] {
+                if !expected.iter().any(|present| present == name) {
+                    assert!(
+                        !prompt
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == name),
+                        "absent {name} advertised: {prompt}"
+                    );
+                }
+            }
         }
     }
 
