@@ -444,3 +444,13 @@ newest last.
   environments, safe substitutions and incomplete/mutating script exclusions.
 - Nonempty requested environments must count as work without changing
   execution authority; AB6 must retain that fact through export/recount.
+
+
+- Safe sed fields/flags and trailing separators are implemented without
+  accepting incomplete pipelines/conjunctions or write/execute flags. Ten
+  prior plus two new focused regressions pass; an additional duplicate/escaped
+  environment fixture preserves the original command preview. Both independent
+  source reviews approve; full integration gates follow.
+- Environment inspection runs only for read candidates and does not alter
+  approval input. The zero-sized ignored-element vector does not allocate
+  element storage. Parsing overhead still needs matched measurement.

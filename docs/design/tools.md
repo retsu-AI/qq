@@ -458,7 +458,14 @@ history reads disable patch generation, merge diffs, external diff/textconv and
 signature display with a fixed oneline format and global `--no-lazy-fetch`;
 branch reads require explicit
 refname sorting and reject custom formats or alternative sorts. These verdicts
-never grant execution authority. JJ repository loading counts as work because
+never grant execution authority. A final semicolon after validated reads is
+accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
+only supported addresses, printing and pattern-space substitutions with safe
+flags; delimiter escapes and embedded semicolons are parsed before separators.
+Any nonempty requested shell/exec environment counts as work, including benign
+names conservatively. An additional environment view only disqualifies read
+candidates, preserving command/cwd parsing and approval previews even when the
+environment field is malformed or duplicated. JJ repository loading counts as work because
 operation reconciliation may persist state. File timestamp-restoring modes
 count as work; Unix sed supports a literal last-line print address.
 
