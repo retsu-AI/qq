@@ -632,3 +632,15 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   identity while retaining descriptor 13/14 canonical domains.
 - Root remains sole writer; store/identity/output integration requires
   independent review and fresh qualification before any push.
+
+### 2026-10-14 — AB2 projection version reservation correction
+
+- Projection storage is schema49, following accepted receipt schema47. Schema48
+  is already used by the published experimental AB5 notice build and is refused
+  by the AB2 reader, whose codec cannot decode those notices.
+- The final AB5 reader is schema50 and must migrate experimental48 and projection49
+  while retaining the root notice codec. Descriptor15 remains the projection identity.
+
+- AB2 also owns the synthetic seed in `sessions.rs` and context/replay test
+  fixtures so they explicitly identify the projector under test. These fixture
+  identities are not evidence assigning a policy to unversioned stored history.

@@ -5654,6 +5654,9 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
             legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
@@ -5691,6 +5694,9 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     live.splice(1..1 + replace_through, [summary]);
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
             legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
@@ -5746,6 +5752,9 @@ fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
             legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),

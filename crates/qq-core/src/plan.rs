@@ -31,7 +31,7 @@ pub use descriptor::{
     AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
     ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
     McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
-    SkillIndexDescriptor, ToolCatalogDescriptor,
+    SkillIndexDescriptor, ToolCatalogDescriptor, ToolOutputProjection,
 };
 pub use fingerprint::SourceFingerprint;
 
@@ -1009,6 +1009,7 @@ impl CompiledAgentPlan {
             audit: AuditDescriptor::from(runtime.audit),
             approved_read_images: (!runtime.approved_read_images.entries().is_empty())
                 .then(|| runtime.approved_read_images.digest()),
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
             approval_delegate: runtime
                 .approval_delegate_identity
@@ -1631,6 +1632,7 @@ mod tests {
                 write_children: false,
             },
             approved_read_images: None,
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             audit: AuditDescriptor {
                 mode: AuditModeDescriptor::Heuristic,
                 max_revisions: 1,
@@ -1688,20 +1690,20 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v14\0{\"version\":14,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v15\0{\"version\":15,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 14 and prompt 20: action contract, AB2).
+        // changing the encoding (descriptor 15 and prompt 20: strict projection identity, AB2).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
+            "c884d5651634f28914923f54e284b3d6c14e54d747910dd51cf525fdfafd3608"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v14\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
@@ -1710,9 +1712,21 @@ mod tests {
     fn historical_descriptor_13_prompt_20_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 13;
+        descriptor.tool_output_projection = None;
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
             "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
+        );
+    }
+
+    #[test]
+    fn historical_descriptor_14_prompt_20_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 14;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
         );
     }
 

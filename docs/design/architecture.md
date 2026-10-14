@@ -1534,6 +1534,16 @@ results, file state, spills and finished events. Historical rows remain NULL;
 saved command shape alone cannot qualify execution effects. These internal
 receipts do not change protocol envelopes or model-facing tool output.
 
+Session tool-turn replay persists the exact model-facing projection (ADR-0061).
+The core emits an internal barrier after budgeting and checkpoint annotations;
+session execution awaits its durable store acknowledgement before polling the
+runtime for another provider request. A failed projection write stops/drains the
+run and settles a persistence failure. Direct execution retains its live
+projection. Per-call rows remain authoritative for actual outcomes and effects;
+the projection preserves the ordered text, flags and correction notice seen by
+the next request. Descriptor15 identifies the strict policy for partial turns,
+and schema49 stores the bounded projection independently of those per-call rows.
+
 ## Concurrency And Multiple Agents
 
 Parallel model requests are mechanically simple; useful parallel agents are

@@ -2,6 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
+    for version in 10..=14 {
+        historical_projection_fixture(version).await;
+    }
+}
+
+async fn historical_projection_fixture(version: u16) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -10,10 +16,16 @@ async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
     let loaded = loaded_runtime(runtime, directory.path().to_str().unwrap(), None);
     let mut descriptor = loaded.plan.descriptor().as_ref().clone();
     descriptor.version = 14;
+    descriptor.tool_output_projection = None;
     descriptor.prompt_version = qq_protocol::PromptVersion::new(19).unwrap();
     let (digest, descriptor_json) = descriptor.encode().unwrap();
+    // SQL loading recognizes historical identities independently of the
+    // current encoder, which only emits and decodes its retained domains.
+    let mut stored_descriptor: serde_json::Value = serde_json::from_str(&descriptor_json).unwrap();
+    stored_descriptor["version"] = serde_json::json!(version);
+    let descriptor_json = stored_descriptor.to_string();
     let mut identity = loaded.plan.identity();
-    identity.descriptor_version = 14;
+    identity.descriptor_version = version;
     identity.digest = digest;
     let identity_json = serde_json::to_string(&identity).unwrap();
     let run_id = claimed.identity.run_id.to_string();
@@ -106,6 +118,9 @@ async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
             &store
         } else {
             store.close().await.unwrap();
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='47' WHERE key='schema_version'").unwrap();
+            drop(connection);
             reopened = Store::open(path.clone()).await.unwrap();
             &reopened
         };
@@ -214,15 +229,27 @@ async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
     let (session, claimed, _) = projection_fixture(&store, directory.path()).await;
-    let exact = serde_json::json!({"version":1,"results":[
-        {"call_id":"call-0","content":"bounded first reply","is_error":false},
-        {"call_id":"call-1","content":"second reply\n[JEV RED checkpoint: change required]","is_error":true}
-    ],"correction_notice":"Correct the next action using the checkpoint feedback."}).to_string();
-    let run = claimed.identity.run_id.to_string();
-    store.call(Priority::Control, move |connection| {
-        connection.execute("UPDATE model_turns SET tool_results_projection_json=?1 WHERE run_id=?2 AND turn_ordinal=1", params![exact, run])?;
-        Ok(())
-    }).await.unwrap();
+    let projected = Arc::new(crate::runtime::ProjectedToolTurn {
+        message: Message::tool_results(vec![
+            ContentBlock::ToolResult {
+                call_id: "call-0".to_owned(),
+                content: "bounded first reply".to_owned(),
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                content: "second reply\n[JEV RED checkpoint: change required]".to_owned(),
+                is_error: true,
+            },
+        ]),
+        correction_notice: Some(
+            "Correct the next action using the checkpoint feedback.".to_owned(),
+        ),
+    });
+    store
+        .persist_tool_projection(&claimed, 1, projected)
+        .await
+        .unwrap();
     store
         .finish_run(
             &claimed,
@@ -270,4 +297,278 @@ async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
         ))
     );
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, claimed, _) = projection_fixture(&store, directory.path()).await;
+    let projection = |ids: &[&str], content: &str, notice: Option<String>| {
+        Arc::new(crate::runtime::ProjectedToolTurn {
+            message: Message::tool_results(
+                ids.iter()
+                    .map(|id| ContentBlock::ToolResult {
+                        call_id: (*id).to_owned(),
+                        content: content.to_owned(),
+                        is_error: false,
+                    })
+                    .collect(),
+            ),
+            correction_notice: notice,
+        })
+    };
+    for ids in [
+        &["call-0"][..],
+        &["call-1", "call-0"],
+        &["call-0", "call-0"],
+        &["call-0", "unknown"],
+    ] {
+        assert!(
+            store
+                .persist_tool_projection(&claimed, 1, projection(ids, "reply", None))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        store
+            .persist_tool_projection(
+                &claimed,
+                2,
+                projection(&["call-0", "call-1"], "reply", None)
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .persist_tool_projection(
+                &claimed,
+                1,
+                projection(&["call-0", "call-1"], &"x".repeat(48 * 1024 + 1), None)
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .persist_tool_projection(
+                &claimed,
+                1,
+                projection(
+                    &["call-0", "call-1"],
+                    "reply",
+                    Some("x".repeat(32 * 1024 + 1))
+                )
+            )
+            .await
+            .is_err()
+    );
+    let mut wrong_owner = claimed.clone();
+    wrong_owner.identity.session_id = SessionId::from_bytes([0xEE; 16]);
+    assert!(
+        store
+            .persist_tool_projection(
+                &wrong_owner,
+                1,
+                projection(&["call-0", "call-1"], "reply", None)
+            )
+            .await
+            .is_err()
+    );
+    let run = claimed.identity.run_id.to_string();
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE tool_calls SET result=NULL WHERE run_id=?1 AND call_ordinal=1",
+                [run],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .persist_tool_projection(
+                &claimed,
+                1,
+                projection(&["call-0", "call-1"], "reply", None)
+            )
+            .await
+            .is_err()
+    );
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE tool_calls SET result='original per-call text' WHERE run_id=?1 AND call_ordinal=1", [run])?;
+        Ok(())
+    }).await.unwrap();
+    // Worst-case control-character escaping still fits the serialized ceiling.
+    let accepted = projection(
+        &["call-0", "call-1"],
+        &"\0".repeat(48 * 1024),
+        Some("\0".repeat(32 * 1024)),
+    );
+    store
+        .persist_tool_projection(&claimed, 1, Arc::clone(&accepted))
+        .await
+        .unwrap();
+    store
+        .persist_tool_projection(&claimed, 1, Arc::clone(&accepted))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .persist_tool_projection(
+                &claimed,
+                1,
+                projection(&["call-0", "call-1"], "conflicting", None)
+            )
+            .await
+            .is_err()
+    );
+    let run = claimed.identity.run_id.to_string();
+    let raw: String = store.call(Priority::Control, move |connection| {
+        Ok(connection.query_row("SELECT tool_results_projection_json FROM model_turns WHERE run_id=?1 AND turn_ordinal=1", [run], |row| row.get(0))?)
+    }).await.unwrap();
+    let saved = super::super::projection::SavedProjection::decode(&raw).unwrap();
+    assert_eq!(saved.results[0].content, "\0".repeat(48 * 1024));
+    assert_eq!(
+        saved.correction_notice.as_deref(),
+        accepted.correction_notice.as_deref()
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ab2_projection_write_failure_stops_before_next_provider_request() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::ReadOnly,
+        vec![vec![("read_file", r#"{"path":"note.txt"}"#.to_owned())]],
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
+    harness.runtime.inner.store.call(Priority::Control, |connection| {
+        connection.execute_batch("CREATE TRIGGER reject_tool_projection BEFORE UPDATE OF tool_results_projection_json ON model_turns BEGIN SELECT RAISE(ABORT,'injected projection failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    submit_prompt(&harness, "read the note").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(harness.requests.lock().unwrap().len(), 1);
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if !tool_call.is_error)));
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
+        if failure.message.contains("failed to persist projected tool results"))));
+    let (turns, projections, results): (u32, u32, u32) = harness.runtime.inner.store.call(Priority::Control, |connection| {
+        Ok(connection.query_row("SELECT (SELECT count(*) FROM model_turns),(SELECT count(*) FROM model_turns WHERE tool_results_projection_json IS NOT NULL),(SELECT count(*) FROM tool_calls WHERE result IS NOT NULL)", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?)
+    }).await.unwrap();
+    assert_eq!((turns, projections, results), (1, 0, 1));
+    harness.runtime.close().await.unwrap();
+    let reopened = Store::open(harness.workspace_path.join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let count: u32 = reopened
+        .call(Priority::Control, |connection| {
+            Ok(connection.query_row(
+                "SELECT count(*) FROM tool_calls WHERE result IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    reopened.close().await.unwrap();
+}
+
+#[test]
+fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='47' WHERE key='schema_version'").unwrap();
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    assert!(has_column(&connection, "model_turns", "tool_results_projection_json").unwrap());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "49"
+    );
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute_batch("UPDATE metadata SET value='48' WHERE key='schema_version'")
+        .unwrap();
+    drop(connection);
+    assert!(
+        open_database(&path).is_err(),
+        "experimental notice schema requires its notice decoder"
+    );
+    let connection = Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "48"
+    );
+    connection.execute_batch("UPDATE metadata SET value='49' WHERE key='schema_version'; ALTER TABLE model_turns DROP COLUMN tool_results_projection_json").unwrap();
+    drop(connection);
+    assert!(
+        open_database(&path).is_err(),
+        "claimed schema49 cannot omit projection storage"
+    );
+}
+
+#[tokio::test]
+async fn ab2_ambiguous_history_is_not_assigned_the_current_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (session, claimed, _) = projection_fixture(&store, directory.path()).await;
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    // A crash before the barrier with explicit policy remains reconstructible.
+    store
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, session, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE runs SET plan_descriptor_json='{\"version\":14,\"prompt_version\":20}',plan_identity_json='{\"descriptor_version\":14}' WHERE id=?1", [run])?;
+        Ok(())
+    }).await.unwrap();
+    let error = store
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, session, u64::MAX)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SessionRuntimeError::ToolProjectionUnavailable { .. }
+    ));
+    store.close().await.unwrap();
 }

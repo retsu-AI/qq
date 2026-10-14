@@ -20,10 +20,13 @@ prompt identity alone cannot identify which text a historical model saw.
    them. Session execution awaits durable persistence before polling the
    runtime stream again and sending the next provider request. A failed write
    stops/drains the run and settles a persistence failure.
-2. Schema 48 adds nullable `model_turns.tool_results_projection_json`, after
-   receipt schema 47. All earlier guards recognize 48 and still validate their
-   structures. AB5's notice-only migration follows at 49. No wire change is
-   needed: the barrier is internal, and direct runs retain their existing live
+2. Schema 49 adds nullable `model_turns.tool_results_projection_json`, after
+   receipt schema 47. All earlier guards recognize 49 and still validate their
+   structures. AB5's notice-only migration follows at 50. No wire change is
+   needed. Experimental schema 48 belongs to the published AB5 notice build;
+   this AB2 reader refuses it because it lacks that notice codec. The final
+   AB5 schema 50 reader migrates both 48 and 49 with the notice codec present.
+   The barrier is internal, and direct runs retain their existing live
    projection without session persistence.
 3. The write validates run/turn ownership, at most 64 replies, ordered IDs
    exactly matching the assistant ToolCall blocks, and one result per call.
@@ -40,7 +43,8 @@ prompt identity alone cannot identify which text a historical model saw.
    descriptor 13/14 canonical domains and omitted-field encodings remain
    unchanged. Live output uses the compiled policy. Replay uses a stored
    exact projection verbatim, preserving effects, order and correction notice.
-6. A known historical pre-AB2 plan uses the preserved original generic
+6. A known historical pre-AB2 descriptor 10–14 with matching identity and
+   prompt 1–19 uses the preserved original generic
    projector, including its 4 KiB remainder floor. An incomplete future turn
    before the barrier is recoverable using its explicit strict policy and
    interrupted results. That reconstruction is distinct from a committed

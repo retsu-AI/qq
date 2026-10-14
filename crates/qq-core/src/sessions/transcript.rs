@@ -430,10 +430,18 @@ fn assemble_model_context(
     let mut statement = transaction.prepare_cached(
         "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice,
                     CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
-                          AND json_extract(r.plan_descriptor_json,'$.version') IN (13,14)
+                          AND json_extract(r.plan_descriptor_json,'$.version') BETWEEN 10 AND 14
                           AND json_extract(r.plan_descriptor_json,'$.prompt_version') BETWEEN 1 AND 19
                           AND json_extract(r.plan_identity_json,'$.descriptor_version') = json_extract(r.plan_descriptor_json,'$.version')
-                         THEN 1 ELSE 0 END
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
+                          AND json_extract(r.plan_descriptor_json,'$.version')=15
+                          AND json_extract(r.plan_identity_json,'$.descriptor_version')=15
+                          AND json_extract(r.plan_descriptor_json,'$.tool_output_projection')='strict_reserved_v1'
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN t.tool_results_projection_json IS NULL THEN NULL
+                         WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
+                    length(CAST(t.tool_results_projection_json AS BLOB))
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -454,7 +462,17 @@ fn assemble_model_context(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
         remaining_turn_bytes -= raw.len();
+        let projection_bytes = row.get::<_, Option<usize>>(8)?.unwrap_or(0);
+        if projection_bytes > super::projection::MAX_PROJECTION_JSON_BYTES
+            || projection_bytes > remaining_turn_bytes
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        remaining_turn_bytes -= projection_bytes;
         let turn = StoredTurn {
+            strict_projection: row.get(6)?,
+            projection_json: row.get(7)?,
+            run_id: row.get(0)?,
             legacy_projection: row.get(5)?,
             ordinal: row.get::<_, u32>(1)?,
             content_json: raw.to_owned(),
@@ -1427,6 +1445,9 @@ pub(super) fn assembled_context_bytes(
 
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
+    pub(super) strict_projection: bool,
+    pub(super) projection_json: Option<String>,
+    pub(super) run_id: String,
     pub(super) legacy_projection: bool,
     pub(super) ordinal: u32,
     pub(super) content_json: String,
@@ -1509,6 +1530,9 @@ pub(super) fn append_run_turns(
         }
     }
     for StoredTurn {
+        strict_projection,
+        projection_json,
+        run_id,
         legacy_projection,
         ordinal: turn_ordinal,
         content_json,
@@ -1549,6 +1573,21 @@ pub(super) fn append_run_turns(
         // and its tool_calls rows in an older store) gets an explicit
         // interrupted result so replayed context stays provider-valid
         // instead of poisoning the session.
+        let mut saved_projection = projection_json
+            .as_deref()
+            .map(super::projection::SavedProjection::decode)
+            .transpose()?;
+        let call_ids = content.iter().filter_map(|block| match block {
+            ContentBlock::ToolCall { id, .. } => Some(id),
+            _ => None,
+        });
+        if let Some(saved) = &saved_projection {
+            if !saved.matches_calls(call_ids.clone()) {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+        } else if !legacy_projection && !strict_projection && call_ids.clone().next().is_some() {
+            return Err(SessionRuntimeError::ToolProjectionUnavailable { run: run_id });
+        }
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
         let mut legacy_output =
@@ -1565,13 +1604,37 @@ pub(super) fn append_run_turns(
                     _ => None,
                 }
             }));
+        let mut projected_replies = saved_projection
+            .as_mut()
+            .map(|saved| std::mem::take(&mut saved.results).into_iter());
         let results = content
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::ToolCall { id, name, .. } => {
                     let block_index = result_index;
                     result_index += 1;
-                    Some(match recorded_turn.remove(id) {
+                    if let Some(projected) = &mut projected_replies {
+                        let reply = projected
+                            .next()
+                            .expect("ordered projected IDs were validated");
+                        let stored = recorded_turn
+                            .remove(id)
+                            .ok_or(SessionRuntimeError::CONSTRAINT);
+                        match stored {
+                            Ok(stored) => {
+                                if let Some(effect) = stored.effect {
+                                    effects.insert((result_message_index, block_index), effect);
+                                }
+                            }
+                            Err(_) => return Some(Err(SessionRuntimeError::CONSTRAINT)),
+                        }
+                        return Some(Ok(ContentBlock::ToolResult {
+                            call_id: reply.call_id,
+                            content: reply.content,
+                            is_error: reply.is_error,
+                        }));
+                    }
+                    Some(Ok(match recorded_turn.remove(id) {
                         Some(RecordedResult {
                             mut content,
                             is_error,
@@ -1620,11 +1683,11 @@ pub(super) fn append_run_turns(
                                 is_error: true,
                             }
                         }
-                    })
+                    }))
                 }
                 ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
         let mut message = Message::new(Role::Assistant, content);
         if let Some(replay) = replay {
             message = message.with_replay(replay.into());
@@ -1640,6 +1703,9 @@ pub(super) fn append_run_turns(
         context.push(message);
         if !results.is_empty() {
             context.push(Message::tool_results(results));
+        }
+        if let Some(notice) = saved_projection.and_then(|saved| saved.correction_notice) {
+            context.push(Message::user(notice));
         }
         // A truncated turn was followed in the live run by the continuation
         // notice; replaying it keeps the assembled context identical to the
@@ -1756,6 +1822,9 @@ mod action_bias_tests {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
+                strict_projection: true,
+                projection_json: None,
+                run_id: "fixture".to_owned(),
                 legacy_projection: false,
                 ordinal: 1,
                 content_json: serde_json::to_string(&blocks).unwrap(),
@@ -1821,6 +1890,9 @@ mod action_bias_tests {
             );
         }
         let turn = StoredTurn {
+            strict_projection: true,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
             legacy_projection: false,
             ordinal: 1,
             content_json: serde_json::to_string(&blocks).unwrap(),

@@ -168,6 +168,10 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         chunk: String,
     },
+    ToolResultsProjected {
+        turn_ordinal: u32,
+        projection: Arc<ProjectedToolTurn>,
+    },
     ToolCallFinished {
         id: ToolCallId,
         result: String,
@@ -301,6 +305,12 @@ pub(crate) enum RuntimeEvent {
     BudgetExhausted {
         exhaustion: BudgetExhaustion,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectedToolTurn {
+    pub(crate) message: Message,
+    pub(crate) correction_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

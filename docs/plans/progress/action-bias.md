@@ -998,3 +998,22 @@ newest last.
   per-call text. The missing column/replay seam must fail before implementation.
 - Implements ADR-0061's accepted scope; root owns the new store barrier and
   decoder. No source publication or review resolution precedes qualification.
+
+### 2026-10-14 — #301 merge and exact projection repair in progress
+
+- Actual main007adcda is integrated locally into AB2; no repair wave pushed yet.
+- Deferred slice accounting, depth-frontier continuation and known legacy replay
+  pass focused checks. Durable projection writer uses existing group-commit savepoints;
+  35 focused AB2 tests pass, including exact reopen and injected write failure before
+  a second provider request. Migration/ambiguity fixtures and full gates remain open.
+- Projection schema49/final notice50 avoid reusing published experimental48.
+
+- Full core repair check: 1,028passed,0failed,3ignored in
+  `/tmp/qq-ab2-projection-core-third.log`. Independent writer/barrier review approves;
+  independent replay review required descriptors10–12 and rejects prompt-only inference.
+  Final ownership/unfinished-result and47→49 historical-row checks are being qualified.
+
+- Final narrow repair checks:37AB2passed,0failed (`/tmp/qq-ab2-projection-final-focused.log`).
+  Historical10–14 rows survive47→49 migration; writer rejects wrong session/turn,
+  unfinished/mismatched calls and limits, preserving first commit. Stored retry JSON
+  is also bounded in SQL before copying. Source is being frozen for fresh workspace gates.
