@@ -601,3 +601,9 @@ newest last.
 - First fresh expanded-source workspace attempt on `1f48e28d` stopped in root tests:268 passed,2 failed,2 ignored; new CLI flag lacked its guide entry and the current descriptor assertion still expected13. Both corrected; no later gates ran. Failed logs retained under `target/qq-perf/ab1-2026-10-14/expanded-context-first-gates-*`. Independent final read-only reviews approved executable binding and receipt/ADR wiring on1f48.
 
 - Fresh source `ea6482b7`: workspace tests2341 passed,0 failed,14 ignored; fmt passed. Clippy failed2 large-enum checks because inline process receipts enlarged `TurnStep`/`RunInput`; build not run. Receipts now allocate one boxed payload only for started processes, preserving ordinary/default event size. Cwd capability stays owned on unsupported platforms too. Failed logs retained as `expanded-context-final-gates-*`; fresh requalification follows.
+
+### 2026-10-14 — expanded AB1 qualification and conflict repair published
+
+- Qualified immutable source `9cbbaa7d7dcb989756ddaff970974601b24d3cab` includes main `f87d5d9d`:2341 passed,0 failed,14 ignored (38 report blocks); fmt, all-target/all-feature Clippy `-D warnings` and workspace build exit0. Logs/receipt `target/qq-perf/ab1-2026-10-14/expanded-context-final2-gates-*`.
+- Three independent read-only reviews approved launch binding, startup manifest propagation and atomic receipts/docs. Clippy-driven boxing changes only optional process payload ownership; ordinary events stay small. Unsupported/historical contexts remain unqualified.
+- All PRs stay out of draft. Publishing this source removes the old main conflict on301; fresh Codex review and current-head hosted CI follow. Matched default/process/turn/persistence measurements remain open, so merge acceptance is not yet claimed.
