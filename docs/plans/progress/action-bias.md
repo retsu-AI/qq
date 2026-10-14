@@ -302,3 +302,11 @@ newest last.
   qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
   change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
   current fixed-window recount retain the baseline above.
+
+- 2026-10-14 review follow-up: corrected nearest-rank offsets for both first-edit
+  queries. Deterministic empty/singleton/even/odd/duplicate fixtures pass;
+  the actual-edit baseline remains 109 roots, median 9, p90 57. Alias grouping
+  now requires immutable call-time evidence; current filesystem resolution
+  cannot qualify historical discovery identity. Shell qualification is explicitly
+  lexical_read_share; inherited executable/environment effects remain unqualified.
+  Updated the sort temporary-directory and uniq stdout contracts to match AB1.

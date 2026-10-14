@@ -23,9 +23,12 @@ reports, without reading the same material repeatedly first. Specifically:
   Qualification groups successful reads by persisted canonical file identity;
   unresolved historical aliases make the cohort unqualified. Remeasure both
   windows with the same extractor before comparing.
-- **Reads go through the built-ins.** Root shell calls whose program (after
-  an optional leading `cd DIR`) is a read fall from 38 % of root `shell`
-  calls (725 of 1,886) to ≤ 15 %.
+- **Reads go through the built-ins.** Root shell calls matching the pinned lexical read classifier
+  (`lexical_read_share`) fall from 38 % of root `shell`
+  calls (725 of 1,886, historical program-name proxy) to ≤ 15 %.
+  This measures command shape, not execution effects. Inherited PATH/TMPDIR
+  and executable identity are absent from historical records, so actual
+  nonmutation remains unqualified; progress classification grants no authority.
 - **No per-directory instruction walk.** Each run that actually edits below root starts at most one instruction
   names search per permitted discovery root (workspace root plus applicable
   highest ignored subtrees, plus justified target ancestors at 64-component
@@ -161,9 +164,11 @@ The rule:
      command or substitution `w`/`e` flag. Parse field delimiters/escapes before
      separators, so literal semicolons inside patterns/replacements are data;
    - `nl`, `cut`;
-   - `sort` without `-o` (including attached `-oFILE`), `--output`,
+   - `sort` without `-o` (including attached `-oFILE`), `-T` (including clusters),
+     `--temporary-directory`, `--output`,
      `--compress-program` or accepted abbreviations such as `--o=FILE` and
-     `--compress=./mutate`; `uniq` with at most one operand;
+     `--compress=./mutate` or `--temporary=.`; `uniq` with at most one
+     input operand and an optional second operand `-` for stdout;
    - `git -C DIR` followed by a read under the same rules, and
      `git worktree list`.
 
@@ -186,6 +191,7 @@ The rule:
 | `find . -fls written.txt`, `sort -S1K --batch-size=2 --compress-program=./mutating-compressor input.txt` | no |
 | `sed -n -f write.sed input.txt`, `sed -n --file=write.sed input.txt` | no |
 | `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |
+| `sort -S1K -T . huge-input`, `sort --temporary-directory=. huge-input` | no |
 | `sort -o f.rs f.rs`, `sort -oout f.rs`, `sort --output=out f.rs`, `sort --output out f.rs`, `uniq in out` | no |
 | `git branch --delete topic`, `git branch --move old new`, `git branch --copy old new`, `git branch --force topic` | no |
 | `git show --output=written.txt HEAD`, `git log --output=written.txt` | no |
@@ -428,7 +434,12 @@ The wording of a stored notice is part of every run that carried it
 ### AB6 — reproducible qualification
 
 Qualification uses the same pinned AB1 classifier for both windows to
-recount shell reads, not the historical program-name SQL proxy. Add a
+recount lexical shell-read shapes (`lexical_read_share`), not the historical
+program-name SQL proxy. Inherited PATH/TMPDIR and executable provenance are
+not captured; this receipt cannot qualify actual nonmutation. A fake `grep`
+on inherited PATH may write, and `sort -S1K` may spill inside an inherited
+TMPDIR even without an explicit `-T`. Execution trust requires separate
+authoritative call-time evidence and is outside this lexical metric. Add a
 bounded read-only JSONL export/recount tool (AB6.1) before qualification,
 using the existing hidden support seam to call `read_only_shell_command`, not
 approval `classify`. Export in a consistent read transaction: version, schema,
