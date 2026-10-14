@@ -864,7 +864,7 @@ impl App {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) -> Effects {
+    fn apply_snapshot(&mut self, mut snapshot: WorkspaceSnapshot) -> Effects {
         let initial = self.workspace_id.is_none();
         if self
             .workspace_id
@@ -873,7 +873,28 @@ impl App {
             self.set_warning("server returned a snapshot for another workspace".to_owned());
             return Effects::redraw(Redraw::Scheduled);
         }
+        // A replaced body already loaded through a newer cursor needs no
+        // replay from this older response; keep its authoritative receipt.
+        let body_is_current = |body: &qq_protocol::SessionSnapshot| {
+            self.sessions.get(&body.summary.id).is_none_or(|view| {
+                !view.is_warm() || view.loaded_through <= snapshot.cursor.sequence
+            })
+        };
+        snapshot.included.retain(body_is_current);
+        if snapshot
+            .focused
+            .as_ref()
+            .is_some_and(|body| !body_is_current(body))
+        {
+            snapshot.focused = None;
+        }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
+        let installed_sessions: Vec<_> = snapshot
+            .included
+            .iter()
+            .map(|body| body.summary.id)
+            .chain(snapshot_focus)
+            .collect();
         // A late snapshot for a session no longer shown is stale navigation
         // output; installing it would yank focus back.
         if !initial
@@ -937,15 +958,24 @@ impl App {
             .iter()
             .filter(|event| {
                 event.cursor.sequence > snapshot_sequence
-                    && snapshot_focus.is_some_and(|focused| event.session_id == focused)
+                    && installed_sessions.contains(&event.session_id)
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            effects.extend(self.reduce_event(&event));
+            self.sessions.replay_event(
+                &event,
+                ReduceContext {
+                    focused: self.view().transcript(),
+                    attentive: self.terminal_focused,
+                    workspace_id: self.workspace_id,
+                    capabilities: self.capabilities.as_ref(),
+                    models: &self.models,
+                    caused_by_me: false,
+                },
+            );
         }
-        effects
+        Effects::redraw(Redraw::Scheduled)
     }
 
     /// Reduce one event into the store and apply what the reducer asks of the

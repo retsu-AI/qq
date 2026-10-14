@@ -6591,6 +6591,99 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
 }
 
 #[tokio::test]
+async fn prompt_terminal_receipt_waits_for_abandoned_owned_summary() {
+    for panicked in [false, true] {
+        for sent in [false, true] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("abandoned-summary.sqlite");
+            let store = Store::open(path.clone()).await.unwrap();
+            let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
+            let model = Arc::new(test_resolved_model(
+                "test/model",
+                "test-model",
+                256,
+                Some(budget_pricing()),
+            ));
+            let (summary, _) = store
+                .start_in_run_compaction(&parent, &model, 1)
+                .await
+                .unwrap()
+                .unwrap();
+            if sent {
+                store.start_in_run_summary_request(&summary).await.unwrap();
+            }
+            let events = if panicked {
+                let parent = parent.clone();
+                let summary_id = summary.identity.run_id;
+                let store_id = store.store_id();
+                store
+                    .call(Priority::Control, move |connection| {
+                        let settled = crate::sessions::settle_panicked_execution(
+                            connection,
+                            store_id,
+                            &parent,
+                            RunOutcome::Interrupted,
+                        )?;
+                        assert!(settled.run_ids.contains(&summary_id));
+                        Ok(settled.events)
+                    })
+                    .await
+                    .unwrap()
+            } else {
+                store
+                    .finish_run(
+                        &parent,
+                        RunOutcome::Cancelled,
+                        None,
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap()
+            };
+            let terminal: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event.event {
+                    SessionEvent::RunFinished { run_id, .. } => Some(run_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(terminal, [summary.identity.run_id, parent.identity.run_id]);
+            let (outcome, spend) = store
+                .run_outcome(parent.identity.run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if panicked {
+                    RunOutcome::Interrupted
+                } else {
+                    RunOutcome::Cancelled
+                }
+            );
+            assert_eq!(spend.cost_usd_nanos, None);
+            assert!(
+                store
+                    .finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            store.close().await.unwrap();
+            let connection = Connection::open(path).unwrap();
+            let known: bool = connection
+                .query_row(
+                    "SELECT cost_known FROM sessions WHERE id = ?1",
+                    [session_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(known, !sent);
+        }
+    }
+}
+
+#[tokio::test]
 async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("queued-summary.sqlite");

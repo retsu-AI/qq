@@ -5109,6 +5109,147 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
 }
 
 #[tokio::test]
+async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() {
+    for deadline in [false, true] {
+        let parent: Arc<dyn Provider> = Arc::new(MultiSpawnProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            spawns: 1,
+            arguments: |_| {
+                r#"{"task":"research","model":"test/child","authority":"write"}"#.to_owned()
+            },
+            turn: StdMutex::new(0),
+        });
+        let child: Arc<dyn Provider> = Arc::new(AutoCompactProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            served: StdMutex::new(0),
+            script: AutoCompactScript::Measured {
+                script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                    turns: 48,
+                    text: "child done".to_owned(),
+                    summary: "__STALL__".to_owned(),
+                }),
+                bytes_per_token: 4,
+            },
+        });
+        let mut harness = child_budget_harness_with_window(
+            parent,
+            child,
+            true,
+            crate::runtime::AuditMode::Off,
+            Some(16 * 1024),
+        )
+        .await;
+        let root = submit_child_budget_prompt(
+            &harness,
+            RunLimits {
+                max_duration_ms: deadline.then_some(5000),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, |event| matches!(event,
+        SessionEvent::RunStarted { session, run_id, .. } if session.parent_id == Some(harness.session_id) && session.active_run_id != Some(*run_id)
+    )).await;
+        let SessionEvent::RunStarted {
+            session,
+            run_id: summary,
+            ..
+        } = &observed.last().unwrap().event
+        else {
+            panic!("summary start");
+        };
+        let child_prompt = session.active_run_id.unwrap();
+        let (entered, release) = crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
+        let summary_id = *summary;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let sent = harness
+                    .runtime
+                    .inner
+                    .store
+                    .call(Priority::AwaitControl, move |connection| {
+                        Ok(connection.query_row(
+                            "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
+                            [summary_id.to_string()],
+                            |row| row.get::<_, bool>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                if sent {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if !deadline {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun {
+                        run_id: child_prompt,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = collect_until_run_finished(&mut harness.events, root).await;
+        let ids: Vec<_> = finished
+            .iter()
+            .filter_map(|event| match event.event {
+                SessionEvent::RunFinished { run_id, .. } => Some(run_id),
+                _ => None,
+            })
+            .collect();
+        let summary_index = ids.iter().position(|run| run == summary).unwrap();
+        let child_index = ids.iter().position(|run| *run == child_prompt).unwrap();
+        assert!(summary_index < child_index, "{ids:?}");
+        let child_outcome = finished_outcome(&finished, child_prompt).unwrap();
+        assert!(matches!(
+            child_outcome,
+            RunOutcome::Cancelled | RunOutcome::BudgetExhausted { .. }
+        ));
+        let root_outcome = finished_outcome(&finished, root).unwrap();
+        if deadline {
+            assert!(matches!(root_outcome, RunOutcome::BudgetExhausted { .. }));
+        } else {
+            assert_eq!(root_outcome, RunOutcome::Completed);
+        }
+        let (_, spend) = harness
+            .runtime
+            .inner
+            .store
+            .run_outcome(child_prompt)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spend.cost_usd_nanos, None);
+        assert!(!*harness.runtime.inner.failed.borrow());
+        release.send(()).unwrap();
+        let next = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            "still usable".to_owned(),
+        )
+        .await;
+        let next_events = collect_until_run_finished(&mut harness.events, next).await;
+        assert_eq!(
+            finished_outcome(&next_events, next),
+            Some(RunOutcome::Completed)
+        );
+        assert!(!next_events.iter().any(|event| matches!(event.event, SessionEvent::RunFinished { run_id, .. } if run_id == *summary)));
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_balanced_child_of_a_max_effort_parent_is_admitted_at_medium() {
     // RR8.4 regression: children inherited the parent's pin verbatim, so a
     // read-only worker under `max` spent ~14 k reasoning tokens per read.

@@ -192,10 +192,15 @@ xtask/
   Views retain the observed foreground run identity across idle summaries,
   keeping late identified internal completions out of attention and draft
   handoff. Body snapshots preserve observed timing and priced-turn ordinals;
-  replay charges each ordinal once. Terminal run cost comes from the run
-  snapshot, not the session total that also includes compaction spend.
-  Focused completion requests a body refresh; its terminal cost remains
-  unknown until the authoritative run receipt loads. Surfaces supply a
+  replay charges each ordinal once. Cancelling the last queued prompt releases
+  an idle draft even when that prompt never started. Terminal run cost comes
+  from the run snapshot, not the session total that also includes compaction
+  spend. Focused completion requests a body refresh; warm background completion
+  requests an included body without changing focus. Included-body refreshes
+  replay newer retained events just as focused refreshes do, preserving unread
+  badges and drafts without repeating surface effects. Late responses do not
+  replace a body already loaded through a newer cursor. Terminal cost
+  remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
   pins the projection of every `event_*` wire fixture, natively and on
@@ -1363,6 +1368,12 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 `run_finished.final_output` and `RunSnapshot.final_output`. No verdict is
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
+
+After cancellation, deadline teardown or panic, a started prompt's terminal
+transaction settles its abandoned in-run summary first. This preserves the
+summary's durable measured prefix and unknown pending-send aggregate, and
+makes the owned child receipt readable when the prompt's terminal event arrives.
+Delayed drop cleanup observes the terminal row and adds no event or charge.
 
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal

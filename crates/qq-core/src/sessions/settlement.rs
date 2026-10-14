@@ -95,6 +95,7 @@ pub(super) fn complete_run(
         return Ok(Vec::new());
     }
     let mut events = Vec::new();
+    settle_abandoned_owned_summary(&transaction, store_id, claimed, &mut events)?;
     supersede_pending_steering(
         &transaction,
         store_id,
@@ -121,6 +122,57 @@ pub(super) fn complete_run(
     )?;
     transaction.commit()?;
     Ok(events)
+}
+
+/// Teardown has dropped the summary future, whose asynchronous drop cleanup
+/// may still be queued. Commit that receipt before exposing its owner's finish.
+fn settle_abandoned_owned_summary(
+    transaction: &Connection,
+    store_id: StoreId,
+    prompt: &ClaimedRun,
+    events: &mut Vec<SessionEventEnvelope>,
+) -> Result<Option<RunId>, SessionRuntimeError> {
+    if prompt.identity.kind != RunKind::Prompt {
+        return Ok(None);
+    }
+    let mut statement = transaction.prepare_cached(
+        "SELECT step.id, step.command_id FROM runs step JOIN runs owner
+            ON owner.id = step.auto_compaction_for_run_id
+         WHERE owner.id = ?1 AND owner.session_id = ?2 AND owner.kind = 'prompt'
+            AND owner.status = 'running' AND owner.outcome_json IS NULL
+            AND step.session_id = owner.session_id AND step.kind = 'compaction'
+            AND step.status = 'running' AND step.outcome_json IS NULL
+         LIMIT 2",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                prompt.identity.run_id.to_string(),
+                prompt.identity.session_id.to_string()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if rows.len() > 1 {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    let Some((run_id, command_id)) = rows.first() else {
+        return Ok(None);
+    };
+    let mut summary = prompt.clone();
+    summary.identity.run_id = parse_id(run_id)?;
+    summary.identity.command_id = parse_id(command_id)?;
+    summary.identity.kind = RunKind::Compaction;
+    events.push(expect_settled(settle_run(
+        transaction,
+        store_id,
+        &summary,
+        RunOutcome::Cancelled,
+        None,
+        SettlementCause::Recovery,
+    )?)?);
+    Ok(Some(summary.identity.run_id))
 }
 
 /// Who is settling a started run. The executor that owns the run knows the
@@ -620,6 +672,11 @@ pub(super) fn settle_panicked_execution(
     // new terminal event: a concurrent cancel may already have settled the
     // original while its task still owns the in-memory registration.
     let mut run_ids = vec![original.identity.run_id];
+    if let Some(summary) =
+        settle_abandoned_owned_summary(&transaction, store_id, original, &mut events)?
+    {
+        run_ids.push(summary);
+    }
     if let Some(active_run) = active_run {
         let active = transaction
             .query_row(

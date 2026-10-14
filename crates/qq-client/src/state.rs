@@ -405,6 +405,8 @@ impl SessionStore {
                     stats.owned_step |= observed.owned_step;
                 }
             }
+            view.unread = previous.unread;
+            view.finished_unread = previous.finished_unread;
             view.last_focused = previous.last_focused;
             view.drafts = previous.drafts;
             // Live tool output for calls this body no longer reports as

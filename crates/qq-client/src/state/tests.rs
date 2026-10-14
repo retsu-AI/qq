@@ -881,8 +881,87 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
 }
 
 #[test]
+fn last_queued_cancellation_releases_a_draft_without_run_started() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let prompt = RunId::from_bytes([4; 16]);
+    let queued = RunId::from_bytes([6; 16]);
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(prompt);
+    running.queued_prompts = 1;
+    let mut store = SessionStore::default();
+    store.upsert_summary(running.clone(), &[], 0);
+    store
+        .get_mut(&session_id)
+        .unwrap()
+        .drafts
+        .push_back("next".to_owned());
+    running.active_run_id = None;
+    running.status = SessionStatus::Idle;
+    let first = store.reduce_event(
+        &envelope(
+            1,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running.clone()),
+                run_id: prompt,
+                outcome: RunOutcome::Completed,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert!(
+        !first
+            .iter()
+            .any(|effect| matches!(effect, StateEffect::SubmitDraft { .. }))
+    );
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::CancellationRequested {
+                session: Box::new(running.clone()),
+                run_id: queued,
+            },
+        ),
+        context(&[]),
+    );
+    running.queued_prompts = 0;
+    let last = store.reduce_event(
+        &envelope(
+            3,
+            session_id,
+            SessionEvent::RunFinished {
+                session: Box::new(running),
+                run_id: queued,
+                outcome: RunOutcome::Cancelled,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert_eq!(
+        last.iter()
+            .filter(
+                |effect| matches!(effect, StateEffect::SubmitDraft { text, .. } if text == "next")
+            )
+            .count(),
+        1
+    );
+    assert!(store[&session_id].drafts.is_empty());
+}
+
+#[test]
 fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
-    for session_cost in [Some(14_150), None] {
+    for (session_cost, shown) in [Some(14_150), None]
+        .into_iter()
+        .flat_map(|cost| [true, false].map(|shown| (cost, shown)))
+    {
         let session_id = SessionId::from_bytes([3; 16]);
         let prompt = RunId::from_bytes([4; 16]);
         let mut running = summary(session_id);
@@ -916,7 +995,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
         idle.status = SessionStatus::Idle;
         idle.estimated_cost_usd_nanos = session_cost;
         let mut focused = context(&[]);
-        focused.focused = Some(session_id);
+        focused.focused = shown.then_some(session_id);
         focused.workspace_id = Some(WorkspaceId::from_bytes([2; 16]));
         let effects = store.reduce_event(
             &envelope(
@@ -940,6 +1019,18 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
                 .filter(|effect| matches!(effect, StateEffect::RequestSnapshot(_)))
                 .count(),
             1
+        );
+        let request = effects
+            .iter()
+            .find_map(|effect| match effect {
+                StateEffect::RequestSnapshot(request) => Some(request),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(request.focused_session_id, shown.then_some(session_id));
+        assert_eq!(
+            request.include_sessions,
+            if shown { Vec::new() } else { vec![session_id] }
         );
         let snapshot = qq_protocol::SessionSnapshot {
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],

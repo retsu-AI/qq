@@ -105,6 +105,27 @@ pub enum StateEffect {
 pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
+    /// Rebuild a replaced body from retained events already observed live.
+    /// Keep client-owned unread state and drafts, and repeat no surface effect.
+    pub fn replay_event(&mut self, envelope: &SessionEventEnvelope, context: ReduceContext<'_>) {
+        let local = self.get_mut(&envelope.session_id).map(|view| {
+            (
+                view.unread,
+                view.finished_unread,
+                std::mem::take(&mut view.drafts),
+            )
+        });
+        // All effects were handled when this event first arrived.
+        let _ = self.reduce_event(envelope, context);
+        if let Some((unread, finished_unread, drafts)) = local
+            && let Some(view) = self.get_mut(&envelope.session_id)
+        {
+            view.unread = unread;
+            view.finished_unread = finished_unread;
+            view.drafts = drafts;
+        }
+    }
+
     /// Apply one durable event. The caller has already deduplicated by cursor
     /// and checked the workspace.
     pub fn reduce_event(
@@ -652,8 +673,13 @@ impl SessionStore {
                         .is_some_and(|stats| stats.owned_step);
                 let owned_step = owned_step
                     || self.get(&session_id).is_some_and(|view| {
-                        view.foreground_run_id
-                            .is_some_and(|foreground| foreground != *run_id)
+                        // Cancelling the last queued prompt has no RunStarted;
+                        // its queue transition still releases the idle slot.
+                        let finished_queued = view.summary.queued_prompts > session.queued_prompts;
+                        !finished_queued
+                            && view
+                                .foreground_run_id
+                                .is_some_and(|foreground| foreground != *run_id)
                     });
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if !context.attentive && !owned_step {
@@ -727,11 +753,15 @@ impl SessionStore {
                 if owned_step {
                     return effects;
                 }
-                if shown && let Some(workspace_id) = context.workspace_id {
-                    effects.push(StateEffect::RequestSnapshot(body_request(
-                        workspace_id,
-                        session_id,
-                    )));
+                if (shown || view.is_warm())
+                    && let Some(workspace_id) = context.workspace_id
+                {
+                    let mut request = body_request(workspace_id, session_id);
+                    if !shown {
+                        request.focused_session_id = None;
+                        request.include_sessions.push(session_id);
+                    }
+                    effects.push(StateEffect::RequestSnapshot(request));
                 }
                 // One draft per foreground run, in order.
                 if session.active_run_id.is_none()
