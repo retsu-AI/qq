@@ -531,3 +531,10 @@ newest last.
   clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
   logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
   supersedes earlier shared-cache qualification uncertainty. Performance open.
+
+- 2026-10-14 AB1 extended-regex/tree follow-up: reproduced both verdict bugs
+  (15 pass, 2 fail), then admitted sed -E/-r/--regexp-extended and closed n/E/r
+  short clusters while preserving write/execute rejection. tree -R is Work;
+  restored ordinary -T title handling. Final focused AB1 run: 17 pass, 0 fail.
+  Inherited PATH/TMPDIR effects remain outside lexical progress classification
+  and do not grant approval authority. Full immutable qualification follows.

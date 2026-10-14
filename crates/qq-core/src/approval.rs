@@ -872,6 +872,17 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     match *arg {
                         "-n" | "--quiet" | "--silent" => quiet = true,
                         "-e" | "--expression" => expect_script = true,
+                        "-E" | "-r" | "--regexp-extended" => {}
+                        option
+                            if option.starts_with('-')
+                                && !option.starts_with("--")
+                                && option.len() > 1
+                                && option[1..]
+                                    .bytes()
+                                    .all(|flag| matches!(flag, b'n' | b'E' | b'r')) =>
+                        {
+                            quiet |= option.contains('n');
+                        }
                         _ => return false,
                     }
                 }
@@ -886,7 +897,7 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
         "tree" => !args.iter().any(|arg| {
             (arg.starts_with('-')
                 && !arg.starts_with("--")
-                && (arg.contains('o') || arg.contains('T')))
+                && (arg.contains('o') || arg.contains('R')))
                 || arg.starts_with("--out")
         }),
         "fd" => !args.iter().any(|arg| {
@@ -1348,14 +1359,24 @@ mod tests {
 
     #[test]
     fn ab1_sed_extended_regex_is_read_without_write_options() {
-        for options in [vec!["-E", "-n"],vec!["-r", "-n"],vec!["--regexp-extended", "-n"],vec!["-En"],vec!["-nE"],vec!["-rn"]] {
+        for options in [
+            vec!["-E", "-n"],
+            vec!["-r", "-n"],
+            vec!["--regexp-extended", "-n"],
+            vec!["-En"],
+            vec!["-nE"],
+            vec!["-rn"],
+        ] {
             let mut args = vec!["sed"];
             args.extend(options);
             args.extend(["/foo+/p", "f"]);
-            assert!(super::read_only_argv(&args), "{args:?}");
+            assert!(super::read_only_argv(args[0], &args[1..]), "{args:?}");
         }
-        for args in [["sed","-Eni","/foo+/p","f"],["sed","-En","s/foo/bar/e","f"]] {
-            assert!(!super::read_only_argv(&args), "{args:?}");
+        for args in [
+            ["sed", "-Eni", "/foo+/p", "f"],
+            ["sed", "-En", "s/foo/bar/e", "f"],
+        ] {
+            assert!(!super::read_only_argv(args[0], &args[1..]), "{args:?}");
         }
     }
 
