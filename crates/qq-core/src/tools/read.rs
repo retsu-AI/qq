@@ -513,6 +513,11 @@ fn lines(
             body_lines += 1;
         }
     }
+    if stopped && shown.is_empty() {
+        return ReadSideOutput::error(
+            "output_limit: first requested row cannot fit with the read header; select a nearer workspace root",
+        );
+    }
     let mut window = String::with_capacity(32);
     for (index, (first, last)) in shown.iter().enumerate() {
         if index > 0 {

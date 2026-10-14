@@ -1802,3 +1802,7 @@ A read continuation never suggests a start offset above 100,000. If the next
 unread line exceeds that bound, the result carries a terminal start-offset
 limit marker instead; no later starting offset is supported. Existing
 explicit ranges beginning within the bound retain their behavior.
+
+A read whose header leaves insufficient room for its first requested row returns
+an explicit output-limit error, recommending a nearer workspace root. It emits
+no continuation for a window that admitted no rows.

@@ -878,3 +878,16 @@ newest last.
   Logs: target/qq-perf/ab3-2026-10-14/native-note-gate-{0,1,2,3,4}.log.
   Actionlint passes excluding the pre-existing SC2129 release-size style
   diagnostic. Native Windows execution and matched performance remain open.
+
+
+### 2026-10-14 — zero-row read windows
+
+- Valid long Windows paths can leave a positive body budget smaller than the
+  first row. Actual renderer/dispatch fixture reproduces unusable offset=0:
+  zero-row-real-red.log. Reject zero-row stopped windows with an explicit
+  output_limit error and nearer-root advice. Native Windows public fixture
+  is selected in CI; hosted execution and full qualification remain pending.
+- Shared-target reuse selected zero tests in the initial zero-row command.
+  Invalidate workspace-package debug artifacts on worktree switches; zero-
+  test selections never count as verification. Fresh final receipts supersede
+  source-reuse uncertainty in earlier local receipts.
