@@ -644,3 +644,82 @@ async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
             .any(|text| text == crate::ROOT_STALL_REPORT_NOTICE)
     );
 }
+
+#[tokio::test]
+async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, session, claimed) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .persist_model_turn(
+            &claimed,
+            ModelTurnCommit {
+                turn_ordinal: 1,
+                message: Message::assistant("report evidence"),
+                calls: Vec::new(),
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: None,
+                truncated: false,
+                notice: Some(crate::runtime::TurnNotice::RootStallReport),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='48' WHERE key='schema_version'; UPDATE runs SET plan_descriptor_json=json_remove(json_set(plan_descriptor_json,'$.version',14,'$.prompt_version',22),'$.tool_output_projection'),plan_identity_json=json_set(plan_identity_json,'$.descriptor_version',14)").unwrap();
+    let store_id: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='store_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let reopened = Store::open(path.clone()).await.unwrap();
+        let expected_id = store_id.clone();
+        let context = reopened
+            .call(Priority::Control, move |connection| {
+                let version: String = connection.query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(version, "50");
+                let current_id: String = connection.query_row(
+                    "SELECT value FROM metadata WHERE key='store_id'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(current_id, expected_id);
+                let notice: String =
+                    connection.query_row("SELECT notice FROM model_turns", [], |row| row.get(0))?;
+                assert_eq!(notice, "root_stall_report");
+                assert!(has_column(
+                    connection,
+                    "model_turns",
+                    "tool_results_projection_json"
+                )?);
+                load_model_context(connection, session, u64::MAX)
+            })
+            .await
+            .unwrap();
+        assert!(context.contains(&Message::user(crate::ROOT_STALL_REPORT_NOTICE)));
+        reopened.close().await.unwrap();
+    }
+}

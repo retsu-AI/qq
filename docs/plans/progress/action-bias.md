@@ -1709,3 +1709,8 @@ newest last.
   root-notice codec. Test-first migration fixtures target50 before the producer bump.
 - Runbook/truth boundary is50; experimental48 notice rows are explicitly retained.
   No new source is pushed before migration/reopen/structure gates pass.
+
+- The45→50 and49→50 structure/idempotency fixtures fail against inherited49,
+  as expected. Add an actual stored `root_stall_report` fixture with experimental48
+  layout: its text/store identity and newly nullable projection must survive50
+  migration and a second reopen. Focused red evidence precedes implementation.
