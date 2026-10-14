@@ -281,7 +281,15 @@ no wire event. Descriptor 15 records the strict projector policy; historical
 projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
 without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
 experimental schema-48 AB5 build because it lacks that build's root-notice
-codec; the final AB5 reader migrates both 48 and 49 at schema 50.
+codec. The schema50 reader migrates both experimental48 and projection49,
+adding projection storage and publishing version50 atomically for48 while
+retaining the root-notice codec. A failed48 upgrade leaves its original version
+and structure intact.
+
+Schema 50 adds the replay value `root_stall_report` through a version-only
+migration. Roots receive an action-oriented, authority-neutral notice;
+historical `stall_report` wording remains byte-identical and children retain
+it. Older readers refuse the new store at open before session assembly.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

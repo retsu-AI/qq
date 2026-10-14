@@ -149,6 +149,11 @@ The last 64 tool calls changed nothing and produced no answer. Do not call tools
 Write a short report: what is established (with path:line evidence), what is still unknown, and \
 the one next action. QQ keeps this report and continues the same run with tools available \
 again.";
+pub(crate) const ROOT_STALL_REPORT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+The last 64 tool calls changed nothing. Do not call tools in this reply. In three lines: what \
+you now know, the next action permitted by this task and run (path and what changes, or the \
+finding for an analysis task), or the concrete blocker. Continue with that permitted action \
+next turn.";
 const STALL_REPORT_REJECTION: &str = "not executed: this reply was a progress report, which \
 records what is established without running tools; the run continues and tools are available \
 on the next turn, so re-issue this call then";

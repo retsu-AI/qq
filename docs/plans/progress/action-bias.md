@@ -10,7 +10,7 @@ newest last.
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In review | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Published e93c4e8a; exact projection and review repairs qualified; fresh hosted/Codex and performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
-| AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
+| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Schema50 atomic migration qualified at c3618e8b; fresh parent grant repair, hosted review and performance open |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
@@ -482,6 +482,42 @@ newest last.
   14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
   logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
 
+### 2026-10-14 — AB5 replay-stable root notice start
+
+- Isolated branch `feat/eng-1042-ab5-root-stall-action`, AB4 parent604dc6a6.
+  User-authorized stack; parent final qualification remains open. Test-first
+  root notice mapping/live roots and schema46 migration/reopen next.
+- Independent read-only investigation mapped root/child/retry fixtures and
+  historical migration skips. Pin a schema45 test binary before the bump
+  and verify actual file opening refuses46, without per-session decoding.
+
+### 2026-10-14 — AB5 root notice and compatibility evidence
+
+- Test-first mapping, live-root and migration assertions reproduced the
+  missing behavior. Root policy now emits RootStallReport; child and legacy
+  notices retain their original text. Pinned retries and delivery decoding
+  recognize both report variants; unknown persisted values remain errors.
+- Schema46 adds a version-only migration. The pinned schema45 probe binary
+  (SHA256 7723fe8faa0b05ad9ee421e705f37cb283fc26cd0bb59133de965a7bd4be732e)
+  refuses an actual schema46 store at open with CONSTRAINT, leaving46 intact.
+- Five focused AB5 tests pass, including live read-only root, persisted
+  follow-up, independent reference assembly and byte-identical legacy replay.
+  Historical migration and child progress tests pass in the focused run.
+  Logs: target/qq-perf/ab5-2026-10-14/{focused-final,replay-focused,progress-complete-decode}.log.
+- Independent production-source review approves. Parent integration, full
+  immutable workspace gates, final measurements and draft publication remain
+  open; no readiness or rollout acceptance is claimed.
+
+- Initial immutable workspace gate found one stale schema45 constant assertion
+  in the side-question migration fixture (980 core tests passed, one failed).
+  Verify actual reopened metadata equals the current schema instead; rerun
+  workspace gates on the corrected commit.
+
+- Corrected immutable source05044927 passes full workspace gates: 2,301 tests,
+  zero failed,14 ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/root-notice-final-gate-{0,1,2,3}.log.
+  This qualifies the local slice against its current parent only; newer
+  parent integration, measurement and publication remain open.
 ### 2026-10-14 — AB3 long-header regression
 
 - Hosted source review supplied a valid 615-byte path. Fixed 256-byte
@@ -651,6 +687,15 @@ newest last.
   production change after full2305-test qualification. Matched performance
   remains open; no merge or readiness claim.
 
+- Immutable integrated source185f983e passes full workspace gates:2,310 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/integrated-root-notice-gate-{0,1,2,3}.log.
+  NO_COLOR removed, task-owned tmpfs temporaries, incremental off; dev/test
+  debug symbols disabled to bound task-owned build storage (debug assertions
+  retained). These are correctness gates, not performance measurements.
+- Integrated AB4 draft304 parent receipt with no production change. Matched
+  performance and hosted review remain open; publish AB5 as draft.
+
 - Fresh parent review alleged stale grants in uncompiled Runtime::run_messages.
   Current AB4 already replaces its empty placeholder gate after compilation
   using the compiled descriptor snapshot. Public first-poll regression now
@@ -730,6 +775,21 @@ newest last.
   repairs through the AB3 parent. AB4 authority implementation is unchanged.
   Rerun immutable combined workspace gates; hosted review and performance open.
 
+### 2026-10-14 — AB5 notice documentation regression
+
+- Hosted review found architecture's stored-notice list and report-query
+  runbook omit root_stall_report. New docs-truth regression fails before
+  correction (notice-docs-red.log); shared paths reserved in root ledger.
+- Correct the report vocabulary and all-report predicate, preserving Goal 6's
+  slice-only selection explicitly. Exact SQL fixture and full gates next.
+
+- Architecture now names root_stall_report and child/legacy stall_report.
+  Runbook defaults to all three report kinds on schema 40+, with schema 46
+  semantics explicit; Goal 6 uses its narrower slice-only predicate.
+- Docs truth 24 passed. Exact SQL fixture: all reports 3/missed 1; Goal 6
+  slice reports 1/missed 0. Evidence notice-query-fixture.json in AB5 receipts.
+  Independent documentation/integration review approves; full gates next.
+
 - Combined immutable source 0d82d86f passes all workspace gates: 2,303 tests,
   zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
   target/qq-perf/ab3-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
@@ -742,6 +802,12 @@ newest last.
   Independent integration review approves; AB3's completed receipt integrated
   without production changes. Hosted review and matched performance remain open.
 
+- Combined immutable source 38b3a374 passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab5-2026-10-14/helper-discovery-notice-gate-{0,1,2,3}.log.
+  Independent notice-documentation/integration review approves; exact SQL
+  fixture and 24 docs-truth tests pass. Hosted review and matched performance
+  remain open; no deployment or completed observation window is claimed.
 ### 2026-10-14 — AB4 prompt behavioral identity
 
 - Independent review confirms an unchanged read_file-only profile keeps the
@@ -977,6 +1043,18 @@ newest last.
   {0,1,2,3}.log. Prompt provenance is version 21; the deterministic child
   fixture retains separate gates. Independent integration review approves.
   Native Windows execution, matched performance and hosted review remain open.
+
+
+- Immutable integrated AB5 source e10b69b8 passes 2,330 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab5-2026-10-14/native-note-authority-
+  integrated-gate-{0,1,2,3}.log. Independent notice/schema integration
+  review approves. Schema 46 remains version-only and historical notices
+  remain byte-identical. No user store was migrated.
+- Native Windows upstream proof: CI run 38570370961 at eb28791c, job
+  115873674638, executes ab3_native_unicode_header_preserves_repaired_read_windows:
+  one passed, zero failed, then completes the entire teardown job successfully.
+  Matched performance and final hosted review remain open.
 ### 2026-10-14 — zero-row read windows
 
 - Valid long Windows paths can leave a positive body budget smaller than the
@@ -1082,6 +1160,14 @@ newest last.
   passes both zero-row and separate repair-note exact tests and completes
   the entire Windows teardown job successfully; wasm also passes.
 
+
+- Fresh immutable AB5 source a21602ad passes 2,337 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after clearing every workspace package debug artifact. Root authority-
+  neutral notices, legacy/child wording, schema46 version-only migration and
+  future-schema guards remain qualified. Logs: fresh-search-read-authority-
+  integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
+  Native Windows upstream gates pass. No user store migrated; performance open.
 - 2026-10-14 AB4 write-child follow-up: a public read-only root fixture with
   write_children configured reproduces the exposed write enum, while injected
   writes remain policy-denied. Cache a restricted spawn declaration at plan
@@ -1177,6 +1263,12 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab4-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+
+- AB5 final review wave immutable source 72b0601786a7aff304a87d3b95ca4cef8a645358: fresh
+  workspace package-clean qualification 2343 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab5-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
 - AB1 execution-context test-first: a child test process captures PATH with a
   workspace-local executable named grep that actually writes written.txt.
   Existing literal exec classification calls it Read, so progress and audit
@@ -1256,6 +1348,26 @@ newest last.
 - Preserved frozen read-only child authority and historical descriptor 13
   prompt 20–22 identities; current descriptor 14/prompt 22 golden refresh
   follows a focused encoding check. PR remains nondraft.
+
+### 2026-10-14 — AB5 schema sequencing and verified-read integration
+
+- Integrated AB4/current-main sources: AC3 owns schema 46; AB1 receipts own
+  schema 47; the root-stall replay-value migration now follows as schema 48.
+  All prior migration guards skip 48 and retain their structural validators.
+- Reconciled progress tests with executor receipts: unverified shell calls
+  count as Work; genuinely verified exec reads retain the root stall boundary
+  and now receive RootStallReport. Legacy child wording remains unchanged.
+- PR remains nondraft. Parent/child gates, old-reader refusal proof and fresh
+  hosted/Codex review follow; no unqualified source is being pushed.
+
+- Added schema-47→48 structure/store-identity idempotency regression and
+  schema-48 missing-receipt-column rejection. Updated the plan's shared-file
+  schema boundary to 47→48, matching its acceptance row. These fixtures still
+  await execution after parent qualification.
+
+- Corrected the inherited receipt-reopen fixture's current-schema assertion
+  from 47 to 48; its historical NULL and malformed claimed-47 rejection
+  fixtures remain unchanged. AB5 qualification still awaits the parent.
 ### 2026-10-14 — AB3 current-main/context integration qualification
 
 - Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
@@ -1287,6 +1399,37 @@ newest last.
   manifest propagation and frozen read-only child declarations.
 - Nondraft publication follows; fresh hosted/Codex and named performance
   gates remain open and are not waived by local qualification.
+
+- Qualified parent AB4 `364eb74c` is now integrated, including the corrected
+  descriptor 14/prompt 22 golden and parent receipt. Independent schema and
+  notice integration review approves. Full child gates start against this
+  immutable merge; schema-47 old-reader refusal probe follows its build.
+
+### 2026-10-14 — AB5 early-guard reopen correction
+
+- First immutable `4d66221a` workspace run failed root unclean-exit resume
+  at store reopen (`Persistence(Constraint)`); no push occurred. Focused
+  schema-47→48 structure/store-identity regression also reproduced rejection
+  on its second open. Red evidence: `schema48-reopen-red.log`.
+- Corrected the initial supported-version match and all earlier multiline
+  migration guards to include 48. Late receipt/accounting validators remain
+  intact. Focused migration/notice fixtures and full fresh gates rerun next.
+
+### 2026-10-14 — AB5 schema-48 local qualification and older-reader proof
+
+- Immutable `9971c44c802e88a1bbadb7d4888045746e71d35e`: fresh workspace
+  passes 2,399 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source stayed clean and unchanged. Five focused AB5 fixtures pass.
+- Evidence: `target/qq-perf/ab5-2026-10-14/verified-context-schema48-fixed-{0..4}.log`
+  and receipt JSON. First failing workspace/red reopen evidence is retained.
+- Real isolated schema-48 store was created and cleanly shut down by this
+  build; retained schema-47 binary `9cbbaa7d` exits 1 at store open, leaving
+  metadata, structure and empty session count unchanged. Receipt/log/script:
+  `schema47-refusal*` under the same evidence directory; no model calls.
+- Independent post-repair review checks all 37 historical migration guards,
+  structural validators and notice compatibility. Nondraft publication and
+  fresh hosted/Codex review follow; performance gates remain open.
 
 ### 2026-10-14 — AB4 fresh review documentation repairs
 
@@ -1559,6 +1702,45 @@ newest last.
   all external tools in read-only runs. This commit adds only the receipt.
   Fresh hosted/Codex, dependent propagation and named performance gates remain open.
 
+### 2026-10-14 — AB5 schema50 migration test-first integration
+
+- Integrated qualified parent329c569c and merged main007adcda. The final notice
+  reader is50 after projection49, and must also upgrade experimental48 with its
+  root-notice codec. Test-first migration fixtures target50 before the producer bump.
+- Runbook/truth boundary is50; experimental48 notice rows are explicitly retained.
+  No new source is pushed before migration/reopen/structure gates pass.
+
+- The45→50 and49→50 structure/idempotency fixtures fail against inherited49,
+  as expected. Add an actual stored `root_stall_report` fixture with experimental48
+  layout: its text/store identity and newly nullable projection must survive50
+  migration and a second reopen. Focused red evidence precedes implementation.
+
+- Independent migration review finds an atomicity gap:48→projection49→notice50
+  could crash after publishing49 while retaining root notices its reader cannot
+  decode. Add a trigger-injected final-version failure;48 must retain both its
+  version and original structure. Publish48→50 projection/version together.
+
+- The injected failure reproduced an unsafe committed49 intermediate version.
+  Schema48 now adds projection storage, validates its shape and publishes50 in
+  one transaction. All six focused AB5 cases pass, including rollback, retained
+  notice bytes/store identity and two reopens. Parent migration expectations now
+  follow the reader version and require the notice codec before admitting48.
+
+### 2026-10-14 — AB5 schema50 qualification receipt
+
+- Immutable c3618e8b8fb0084c947708ef97acb4fabef7ab86: fresh workspace
+  2,416 passed, zero failed,14 ignored across38 result blocks; formatting,
+  all-target/all-feature Clippy with warnings denied, and workspace build pass.
+  Evidence: target/qq-perf/ab5-2026-10-14/schema50-atomic-final-gate-*.
+- Independent migration review approves all guards, atomic48 upgrade and
+  structure/notice/store identity preservation. Six focused AB5 tests and the
+  inherited projection migration regression pass; injected-failure red retained.
+- Actual retained48 and49 binaries refuse a new50 store with exit1 and unchanged
+  metadata/structure, zero sessions/model calls. Qualified binary retained as
+  legacy-schema50-qq (SHA256 cbc24a6ac38629cd00430c87010ea6d5e8ad7f0033183d378305e13c8de558e7).
+- This publication adds only the receipt. Parent304 has a new host grant
+  provenance repair in progress; final hosted/Codex and named performance gates
+  remain open. No entire-stack readiness claim.
 ### 2026-10-14 — AB4 host grant provenance regression
 
 - Fresh Codex review identifies a later duplicate host grant authorizing the
@@ -1586,3 +1768,22 @@ newest last.
   target/qq-perf/ab4-2026-10-14/host-grant-final-gate-*.
   This publication adds only the receipt. Fresh hosted/Codex, child propagation
   and named performance gates remain open.
+
+### 2026-10-14 — AB5 declaring-host parent propagation
+
+- Integrated qualified parent26bf4763: grants stay with the admitted declaring
+  host, and effective descriptor grants match normalAsk/unattended eligibility.
+  Schema50 atomic migration remains unchanged. Fresh integrated gates follow.
+- Actual retained experimental48 binary created an isolated store; qualified
+  schema50 upgrades it, adds projection storage and preserves store identity
+  across reopen. Evidence: actual48-upgrade50-receipt.json; zero model calls.
+
+### 2026-10-14 — AB5 declaring-host integration qualification
+
+- Immutable b004300474c96c5470e79876b925832414dcd972 passes fresh workspace
+  2,417 tests, zero failures,14 ignored; formatting, all-target/all-feature
+  Clippy with warnings denied and workspace build pass. Source remained frozen.
+  Receipt: host-grant-integrated-final-gate-receipt.json.
+- Includes qualified304 owner-bound grant fix and schema50 atomic notice
+  migration. This commit adds only the receipt; fresh hosted/Codex,306
+  propagation and named performance gates remain open.

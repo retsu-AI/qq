@@ -1107,8 +1107,9 @@ conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
 cached prefix survives the seam. Each notice is stored on the first turn
 row whose request carried it, as `model_turns.notice` (`report`,
-`stall_report`, `continuation`, or `final_answer`), and replayed before that
-turn, so a later run assembles
+`stall_report`, `root_stall_report`, `continuation`, or `final_answer`), and replayed before that
+turn. New root stalls use `root_stall_report`; children retain `stall_report`,
+and historical root `stall_report` notices replay unchanged. A later run assembles
 exactly the messages the live run sent (ADR-0054 § 2). The column records
 where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and

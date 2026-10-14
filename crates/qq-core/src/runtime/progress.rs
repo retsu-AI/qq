@@ -66,6 +66,13 @@ impl StallScope {
         }
     }
 
+    pub(crate) const fn stall_report_notice(&self) -> crate::runtime::TurnNotice {
+        match self.policy {
+            StallPolicy::Root => crate::runtime::TurnNotice::RootStallReport,
+            StallPolicy::Subagent | StallPolicy::Exempt => crate::runtime::TurnNotice::StallReport,
+        }
+    }
+
     /// One settled call. Runtime rejections (over the per-turn cap, made in
     /// a report turn, Jev's one-call rule, unknown or malformed) are never
     /// passed here; denied calls are, so a run that keeps asking for denied

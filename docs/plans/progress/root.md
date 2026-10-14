@@ -580,6 +580,18 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   refer to a content hash without naming unavailable read_file. Descriptions
   are adjusted once after catalog-input policy filtering, off requests.
 
+### 2026-10-14 — AB5 schema and notice ownership
+
+- Reserve `sessions/store/schema.rs` version-only45→46 migration and
+  historical skip lists, `sessions/tests/migrations.rs`, root progress/
+  replay fixtures and protocol/guide schema mentions. Preserve every old
+  notice byte; reject46 at open in the pinned45 binary. Branch
+  `feat/eng-1042-ab5-root-stall-action` stacks on AB4, source qualification open.
+- AB5 also owns the exhaustive stored-report decode in `sessions/deliveries.rs`;
+  RootStallReport is a report there, while unknown values remain CODEC errors.
+
+- AB5 also updates the independent reference-history decoder in
+  `sessions/tests.rs` to recognize RootStallReport in replay comparisons.
 ### 2026-10-14 — AB2 instruction discovery completion ownership
 
 - AB2 additionally owns tools/search.rs and tools/walk.rs for bounded names
@@ -597,6 +609,12 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
 
+### 2026-10-14 — AB5 replay documentation completeness
+
+- Reserve docs/design/architecture.md stored-notice vocabulary, the existing
+  docs/runbooks/run-output-queries.md report predicate and src/docs_truth.rs
+  regression for root-stall documentation. Schema/history and Goal 6's
+  narrower slice-checkpoint cohort remain explicit. No runtime behavior change.
 ### 2026-10-14 — AB3 masked read admission
 
 - Reserve tools/output.rs shared allocation-free masked escaped-size measure
