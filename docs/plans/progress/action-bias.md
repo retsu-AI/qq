@@ -318,3 +318,9 @@ newest last.
   diagnostic is 108/1/1/0/0/1, invalid scopes 0, unproven mutation runs 208;
   the whole editing cohort remains unqualified. First-edit ordering has the
   same immutable mutation-evidence requirement.
+
+- AB1 scope correction: sort remains Work because ordinary spills can write
+  through inherited TMPDIR; explicit -T rejection alone is insufficient.
+  Cargo/rustc version queries are Work because rustup proxies can install
+  missing workspace-selected toolchains. These are known program semantics,
+  distinct from unqualified arbitrary executable identity.
