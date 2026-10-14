@@ -529,3 +529,10 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
   predicate; its verdicts do not change, and no approval authority is used
   by progress. This extends AB1 ownership by one visibility line rather
   than duplicating Git option-order and value parsing.
+
+### 2026-10-14 — AB1 exact argv classification
+
+- Extend AB1 to sessions/approvals.rs solely to ignore the new cached read
+  classification field in its existing shell preview pattern. Approval
+  authority and persisted/wire data remain unchanged. Literal exec arguments
+  share the command-effect predicate; shell syntax stays in the shell scanner.

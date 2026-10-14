@@ -369,3 +369,9 @@ newest last.
   literal read, independent of native shell quoting. Focused red run: six
   pass, two fail; configured-git-exact-exec-red.log in AB1 receipts.
 - Repair and independent read-only review in progress; performance remains open.
+
+- Repair caches one progress/audit verdict from exact exec argv or checked shell
+  syntax. Working-tree Git forms count as work; branch reads force refname
+  sorting, and history reads force no patch/merge-diff generation. Approval
+  previews, grants and decisions are unchanged. Initial focused green: eight
+  tests passed; independent final review and immutable workspace gates next.

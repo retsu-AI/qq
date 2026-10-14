@@ -532,9 +532,9 @@ fn note_audited_action(
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
         // Read-only shell (allowlisted VCS reads and the like) does not by
         // itself make a run worth auditing; anything else does.
-        approval::ToolClass::Shell { command, .. }
-            if !result.is_error && !approval::read_only_shell_command(&command) =>
-        {
+        approval::ToolClass::Shell {
+            read_only: false, ..
+        } if !result.is_error => {
             triggers.non_read_shell = true;
         }
         _ => {}

@@ -98,6 +98,7 @@ pub(crate) enum ToolClass {
     Shell {
         command: String,
         cwd: Option<String>,
+        read_only: bool,
     },
     /// An MCP or embedded-host tool. Host hints never grant authority, so
     /// every external call is gated like a mutation.
@@ -413,9 +414,8 @@ fn spawn_class(arguments: &str) -> ToolClass {
 }
 
 /// The shell class for `shell` (a command string) or `exec` (an argv). An
-/// `exec` call is rendered as the equivalent command line — each argument
-/// single-quoted when it holds shell metacharacters — so the classifier,
-/// prefix grants, and the approval preview see one shape for both tools.
+/// `exec` uses literal argv for progress reads. Its command-line rendering
+/// remains the shared approval preview and prefix-grant shape.
 fn shell_class(name: &str, arguments: &str) -> ToolClass {
     #[derive(Deserialize)]
     struct ShellArguments {
@@ -436,23 +436,41 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
     if name == "exec" {
         return match serde_json::from_str::<ExecArguments>(arguments) {
             Ok(arguments) => ToolClass::Shell {
+                read_only: arguments.args.len() < 128
+                    && arguments.program.len().saturating_add(
+                        arguments
+                            .args
+                            .iter()
+                            .map(|arg| arg.len().saturating_add(1))
+                            .sum::<usize>(),
+                    ) <= classify::MAX_CLASSIFIED_BYTES
+                    && {
+                        let mut args = [""; 127];
+                        for (slot, arg) in args.iter_mut().zip(&arguments.args) {
+                            *slot = arg;
+                        }
+                        read_only_argv(&arguments.program, &args[..arguments.args.len()])
+                    },
                 command: exec_command_line(&arguments.program, &arguments.args),
                 cwd: arguments.cwd,
             },
             Err(_) => ToolClass::Shell {
                 command: String::new(),
                 cwd: None,
+                read_only: false,
             },
         };
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
+            read_only: read_only_shell_command(&arguments.command),
             command: arguments.command,
             cwd: arguments.cwd,
         },
         Err(_) => ToolClass::Shell {
             command: String::new(),
             cwd: None,
+            read_only: false,
         },
     }
 }
@@ -553,197 +571,7 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 && !words[1].contains(['*', '?', '[', ']', '!', '~'])
                 && !words[1].starts_with('-');
         }
-        let (program, args) = (words[0], &words[1..]);
-        match program {
-            "git" => {
-                let args = if args.first() == Some(&"-C") {
-                    match args.get(2..) {
-                        Some(args) => args,
-                        None => return false,
-                    }
-                } else {
-                    args
-                };
-                // Working-tree reads may run a configured fsmonitor hook.
-                let Some(args) = args.strip_prefix(&["-c", "core.fsmonitor=false"]) else {
-                    return false;
-                };
-                let Some((subcommand, args)) = args.split_first() else {
-                    return false;
-                };
-                match *subcommand {
-                    "branch" => rules::branch_lists(args),
-                    "diff" | "log" | "show" => {
-                        if args.iter().any(|arg| {
-                            let option = arg.split('=').next().unwrap_or(arg);
-                            option.len() > 2
-                                && ["--output", "--ext-diff", "--textconv", "--show-signature"]
-                                    .iter()
-                                    .any(|name| name.starts_with(option))
-                        }) {
-                            return false;
-                        }
-                        // Patch output can invoke configured helpers by default.
-                        // Exact stat-only output skips both diff driver kinds.
-                        let drivers_disabled = args
-                            .starts_with(&["--no-ext-diff", "--no-textconv"])
-                            || args.starts_with(&["--no-textconv", "--no-ext-diff"]);
-                        (*subcommand == "diff" && args == ["--stat"])
-                            || (drivers_disabled
-                                && (*subcommand == "diff"
-                                    || (args.get(2) == Some(&"--no-show-signature")
-                                        && args.get(3) == Some(&"--format=oneline")
-                                        && !args[4..].iter().any(|arg| {
-                                            let option = arg.split('=').next().unwrap_or(arg);
-                                            arg.contains("%G")
-                                                || (option.len() > 2
-                                                    && ["--format", "--pretty"]
-                                                        .iter()
-                                                        .any(|name| name.starts_with(option)))
-                                        }))))
-                    }
-                    "blame" => {
-                        args.first() == Some(&"--no-textconv")
-                            && !args.iter().any(|arg| {
-                                let option = arg.split('=').next().unwrap_or(arg);
-                                option.len() > 2 && "--textconv".starts_with(option)
-                            })
-                    }
-                    "status" | "rev-parse" => true,
-                    "worktree" => args.first() == Some(&"list"),
-                    _ => false,
-                }
-            }
-            "find" => !args.iter().any(|arg| {
-                *arg == "-delete"
-                    || *arg == "-fls"
-                    || ["-exec", "-ok", "-fprint"]
-                        .iter()
-                        .any(|prefix| arg.starts_with(prefix))
-            }),
-            "sort" => {
-                !cfg!(windows)
-                    && !args.iter().any(|arg| {
-                        let option = arg.split('=').next().unwrap_or(arg);
-                        (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
-                            || (option.len() > 2
-                                && ["--output", "--compress-program"]
-                                    .iter()
-                                    .any(|name| name.starts_with(option)))
-                    })
-            }
-            "uniq" => {
-                let mut operands = 0;
-                let mut value = false;
-                let mut options = true;
-                for arg in args {
-                    if std::mem::take(&mut value) {
-                        continue;
-                    }
-                    if options && *arg == "--" {
-                        options = false;
-                        continue;
-                    }
-                    if options
-                        && matches!(
-                            *arg,
-                            "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
-                        )
-                    {
-                        value = true;
-                    } else if !options || !arg.starts_with('-') || *arg == "-" {
-                        operands += 1;
-                    }
-                }
-                operands <= 1
-            }
-            "sed" => {
-                let mut quiet = false;
-                let mut script = false;
-                let mut expect_script = false;
-                for arg in args {
-                    if expect_script || (!script && !arg.starts_with('-')) {
-                        // Understood print scripts: numeric addresses/ranges,
-                        // optionally several commands. Other scripts are work.
-                        if !arg.split(';').all(|part| {
-                            let part = part.trim();
-                            let Some(address) = part.strip_suffix('p') else {
-                                return false;
-                            };
-                            let mut position = 0;
-                            let bytes = address.as_bytes();
-                            while position < bytes.len() {
-                                if bytes[position] == b'/' {
-                                    let Some(end) =
-                                        bytes[position + 1..].iter().position(|b| *b == b'/')
-                                    else {
-                                        return false;
-                                    };
-                                    position += end + 2;
-                                } else if bytes[position].is_ascii_digit()
-                                    || matches!(bytes[position], b',' | b' ')
-                                {
-                                    position += 1;
-                                } else {
-                                    return false;
-                                }
-                            }
-                            true
-                        }) {
-                            return false;
-                        }
-                        script = true;
-                        expect_script = false;
-                    } else if arg.starts_with('-') {
-                        match *arg {
-                            "-n" | "--quiet" | "--silent" => quiet = true,
-                            "-e" | "--expression" => expect_script = true,
-                            _ => return false,
-                        }
-                    }
-                }
-                quiet && script && !expect_script
-            }
-            // Other JJ commands may snapshot the working copy or run configured diff tools.
-            "jj" => {
-                args == ["--ignore-working-copy", "--no-pager", "status"]
-                    || args == ["--no-pager", "--ignore-working-copy", "status"]
-            }
-            // Locked metadata/tree still invoke configured compiler wrappers.
-            "cargo" => args == ["--version"],
-            "rustc" => args.first() == Some(&"--version"),
-            "tree" => !args.iter().any(|arg| {
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
-                    || arg.starts_with("--out")
-            }),
-            "fd" => !args.iter().any(|arg| {
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X', 'l']))
-                    || arg.starts_with("--exec")
-                    || arg.starts_with("--list")
-            }),
-            "rg" => {
-                args.first() == Some(&"--no-config")
-                    && !args.iter().any(|arg| {
-                        arg.starts_with("--pre")
-                            || arg.starts_with("--hostname-bin")
-                            || arg.starts_with("--search-zip")
-                            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
-                    })
-            }
-            "file" => !args.iter().any(|arg| {
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z']))
-                    || {
-                        let option = arg.split('=').next().unwrap_or(arg);
-                        option.len() > 2
-                            && ["--compile", "--uncompress", "--uncompress-noreport"]
-                                .iter()
-                                .any(|name| name.starts_with(option))
-                    }
-            }),
-            "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
-            | "du" | "df" | "nl" | "cut" => true,
-            _ => false,
-        }
+        read_only_argv(words[0], &words[1..])
     };
     let bytes = command.as_bytes();
     let mut start = 0;
@@ -781,6 +609,210 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
         index += 1;
     }
     quote.is_none() && reads(command[start..].trim(), first, 0)
+}
+
+fn read_only_argv(program: &str, args: &[&str]) -> bool {
+    match program {
+        "git" => {
+            let args = if args.first() == Some(&"-C") {
+                match args.get(2..) {
+                    Some(args) => args,
+                    None => return false,
+                }
+            } else {
+                args
+            };
+            // Working-tree reads may run a configured fsmonitor hook.
+            let Some(args) = args.strip_prefix(&["-c", "core.fsmonitor=false"]) else {
+                return false;
+            };
+            let Some((subcommand, args)) = args.split_first() else {
+                return false;
+            };
+            match *subcommand {
+                "branch" => {
+                    args.contains(&"--sort=refname")
+                        && !args.iter().any(|arg| {
+                            arg.starts_with("--format")
+                                || (arg.starts_with("--sort") && *arg != "--sort=refname")
+                        })
+                        && rules::branch_lists(args)
+                }
+                "log" | "show" => {
+                    let Some(args) = args.strip_prefix(&[
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-patch",
+                        "--diff-merges=off",
+                        "--no-show-signature",
+                        "--format=oneline",
+                    ]) else {
+                        return false;
+                    };
+                    let mut paths = false;
+                    args.iter().all(|arg| {
+                        if paths {
+                            return true;
+                        }
+                        if *arg == "--" {
+                            paths = true;
+                            return true;
+                        }
+                        !arg.starts_with('-')
+                            || matches!(
+                                *arg,
+                                "--all"
+                                    | "--branches"
+                                    | "--tags"
+                                    | "--remotes"
+                                    | "--first-parent"
+                                    | "--no-merges"
+                                    | "--reverse"
+                            )
+                            || arg.strip_prefix("--max-count=").is_some_and(|n| {
+                                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                            })
+                            || arg.strip_prefix('-').is_some_and(|n| {
+                                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                            })
+                    })
+                }
+                // Working-tree reads can invoke configured clean/process filters.
+                "status" | "diff" | "blame" => false,
+                "rev-parse" => true,
+                "worktree" => args.first() == Some(&"list"),
+                _ => false,
+            }
+        }
+        "find" => !args.iter().any(|arg| {
+            *arg == "-delete"
+                || *arg == "-fls"
+                || ["-exec", "-ok", "-fprint"]
+                    .iter()
+                    .any(|prefix| arg.starts_with(prefix))
+        }),
+        "sort" => {
+            !cfg!(windows)
+                && !args.iter().any(|arg| {
+                    let option = arg.split('=').next().unwrap_or(arg);
+                    (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                        || (option.len() > 2
+                            && ["--output", "--compress-program"]
+                                .iter()
+                                .any(|name| name.starts_with(option)))
+                })
+        }
+        "uniq" => {
+            let mut operands = 0;
+            let mut value = false;
+            let mut options = true;
+            for arg in args {
+                if std::mem::take(&mut value) {
+                    continue;
+                }
+                if options && *arg == "--" {
+                    options = false;
+                    continue;
+                }
+                if options
+                    && matches!(
+                        *arg,
+                        "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
+                    )
+                {
+                    value = true;
+                } else if !options || !arg.starts_with('-') || *arg == "-" {
+                    operands += 1;
+                }
+            }
+            operands <= 1
+        }
+        "sed" => {
+            let mut quiet = false;
+            let mut script = false;
+            let mut expect_script = false;
+            for arg in args {
+                if expect_script || (!script && !arg.starts_with('-')) {
+                    // Understood print scripts: numeric addresses/ranges,
+                    // optionally several commands. Other scripts are work.
+                    if !arg.split(';').all(|part| {
+                        let part = part.trim();
+                        let Some(address) = part.strip_suffix('p') else {
+                            return false;
+                        };
+                        let mut position = 0;
+                        let bytes = address.as_bytes();
+                        while position < bytes.len() {
+                            if bytes[position] == b'/' {
+                                let Some(end) =
+                                    bytes[position + 1..].iter().position(|b| *b == b'/')
+                                else {
+                                    return false;
+                                };
+                                position += end + 2;
+                            } else if bytes[position].is_ascii_digit()
+                                || matches!(bytes[position], b',' | b' ')
+                            {
+                                position += 1;
+                            } else {
+                                return false;
+                            }
+                        }
+                        true
+                    }) {
+                        return false;
+                    }
+                    script = true;
+                    expect_script = false;
+                } else if arg.starts_with('-') {
+                    match *arg {
+                        "-n" | "--quiet" | "--silent" => quiet = true,
+                        "-e" | "--expression" => expect_script = true,
+                        _ => return false,
+                    }
+                }
+            }
+            quiet && script && !expect_script
+        }
+        // Other JJ commands may snapshot the working copy or run configured diff tools.
+        "jj" => {
+            args == ["--ignore-working-copy", "--no-pager", "status"]
+                || args == ["--no-pager", "--ignore-working-copy", "status"]
+        }
+        // Locked metadata/tree still invoke configured compiler wrappers.
+        "cargo" => args == ["--version"],
+        "rustc" => args.first() == Some(&"--version"),
+        "tree" => !args.iter().any(|arg| {
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                || arg.starts_with("--out")
+        }),
+        "fd" => !args.iter().any(|arg| {
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X', 'l']))
+                || arg.starts_with("--exec")
+                || arg.starts_with("--list")
+        }),
+        "rg" => {
+            args.first() == Some(&"--no-config")
+                && !args.iter().any(|arg| {
+                    arg.starts_with("--pre")
+                        || arg.starts_with("--hostname-bin")
+                        || arg.starts_with("--search-zip")
+                        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
+                })
+        }
+        "file" => !args.iter().any(|arg| {
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z'])) || {
+                let option = arg.split('=').next().unwrap_or(arg);
+                option.len() > 2
+                    && ["--compile", "--uncompress", "--uncompress-noreport"]
+                        .iter()
+                        .any(|name| name.starts_with(option))
+            }
+        }),
+        "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
+        | "du" | "df" | "nl" | "cut" => true,
+        _ => false,
+    }
 }
 
 /// Decides whether one classified tool call executes, waits for approval, or
@@ -883,8 +915,8 @@ mod tests {
         for (command, expected) in [
             ("git status", false),
             ("git diff --stat", false),
-            ("git -c core.fsmonitor=false status", true),
-            ("git -C sub -c core.fsmonitor=false diff --stat", true),
+            ("git -c core.fsmonitor=false status", false),
+            ("git -C sub -c core.fsmonitor=false diff --stat", false),
             ("rg needle f", false),
             ("rg --no-config 'foo(bar)' f.rs", !cfg!(windows)),
             ("rg --no-config '$#<>\\' f.rs", !cfg!(windows)),
@@ -952,7 +984,7 @@ mod tests {
                 false,
             ),
             (
-                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD",
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD",
                 true,
             ),
             ("rg -z needle f.gz", false),
@@ -968,14 +1000,14 @@ mod tests {
             ("sed -n 1,80p f.rs | nl", true),
             (
                 "git -C .worktrees/a -c core.fsmonitor=false diff --stat",
-                true,
+                false,
             ),
             ("git -c core.fsmonitor=false worktree list", true),
             ("cut -f 1 f.rs | sort | uniq", !cfg!(windows)),
             ("grep 'a;b' f | wc -l", !cfg!(windows)),
             ("sed -n '/write/p' f", !cfg!(windows)),
             (
-                "git -c core.fsmonitor=false branch --list 'topic*'",
+                "git -c core.fsmonitor=false branch --list --sort=refname 'topic*'",
                 !cfg!(windows),
             ),
             ("find . -de\"lete\"", false),
@@ -1006,7 +1038,7 @@ mod tests {
             ("git -c core.fsmonitor=false diff --stat -p", false),
             (
                 "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv",
-                true,
+                false,
             ),
             (
                 "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature HEAD",
@@ -1034,7 +1066,7 @@ mod tests {
                 false,
             ),
             ("git -c core.fsmonitor=false blame f", false),
-            ("git -c core.fsmonitor=false blame --no-textconv f", true),
+            ("git -c core.fsmonitor=false blame --no-textconv f", false),
             ("git -c core.fsmonitor=false blame -- --no-textconv", false),
             (
                 "git -c core.fsmonitor=false blame --no-textconv --textc f",
@@ -1116,6 +1148,9 @@ mod tests {
             "git -c core.fsmonitor=false branch --list --format='%(signature:grade)'",
             "git -c core.fsmonitor=false branch --list --sort=signature:grade",
             "git -c core.fsmonitor=false branch --list",
+            "git -c core.fsmonitor=false branch --list --sort=refname --sort=signature:grade",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --remerge-diff -1",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --diff-merges=remerge -1",
             "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --remerge-diff -1",
             "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --diff-merges=remerge -1",
         ] {
@@ -1143,8 +1178,11 @@ mod tests {
                 effect: crate::catalog::EffectClass::Shell,
             };
             let result = crate::tools::bounded_result("exec exit=0\nmatch".to_owned(), false);
+            assert!(!crate::runtime::is_progress(&call, None, &result), "{args}");
+            let mut triggers = crate::runtime::AuditTriggers::default();
+            crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
             assert!(
-                !crate::runtime::is_progress(&call, None, &result),
+                !triggers.fires(crate::runtime::AuditMode::Heuristic),
                 "{args}"
             );
         }
@@ -1169,6 +1207,7 @@ mod tests {
         ToolClass::Shell {
             command: command.to_owned(),
             cwd: None,
+            read_only: read_only_shell_command(command),
         }
     }
 
@@ -1530,6 +1569,7 @@ mod tests {
             ToolClass::Shell {
                 command: "cargo test -p qq-core -- --nocapture".to_owned(),
                 cwd: Some("crates".to_owned()),
+                read_only: false,
             }
         );
         // A grant on the prefix covers it; auto allows it.
@@ -1559,6 +1599,7 @@ mod tests {
             ToolClass::Shell {
                 command: r#"echo 'rm -rf /' '$HOME' 'a b' 'it'\''s'"#.to_owned(),
                 cwd: None,
+                read_only: true,
             }
         );
         assert_eq!(
@@ -1899,6 +1940,7 @@ mod tests {
             ToolClass::Shell {
                 command: "cargo test".to_owned(),
                 cwd: Some("crates".to_owned()),
+                read_only: false,
             }
         );
         // Every external tool is gated by its effect, whatever its prefix.
