@@ -10442,6 +10442,7 @@ mod tests {
             vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
             vec!["write_file".to_owned()],
+            vec!["read_file".to_owned(), "write_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10501,6 +10502,11 @@ mod tests {
                         .description()
                         .contains("path and include_ignored=true")
                 );
+            }
+            if expected == ["read_file", "write_file"] {
+                for absent in ["old matches", "note=unread", "extend old", "anchor"] {
+                    assert!(!prompt.contains(absent), "{absent}: {prompt}");
+                }
             }
             if expected == ["write_file"] {
                 let description = requests[0].tools()[0].description();

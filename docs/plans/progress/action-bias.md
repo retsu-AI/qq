@@ -577,3 +577,12 @@ newest last.
   Fifteen focused AB2 fixtures pass; independent final review approves the
   depth/empty-directory continuation fix, instruction file-ignore handling
   and write-only contract. Matched performance and hosted review remain open.
+
+### 2026-10-14 — long cursors and read/write-only prompt contract
+
+- Two public regressions fail before correction: a completed subtree with
+  two 250-byte components emits an undecodable cursor, and read_file plus
+  write_file describes absent anchor-edit semantics. Fourteen focused pass,
+  two fail; long-cursor-readwrite-contract-red.log.
+- Cursor repair must budget its full header and preserve native line bounds.
+  Unsupported paths must be explicit blockers, never skipped or unusable next.
