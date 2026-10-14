@@ -4100,6 +4100,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
+        for count in [16, 64] {
+            let directory = tempfile::tempdir().unwrap();
+            // Long names fill a page and force an actual continuation cursor.
+            for index in 0..100 {
+                std::fs::write(
+                    directory
+                        .path()
+                        .join(format!("{index:03}{}", "x".repeat(220))),
+                    "",
+                )
+                .unwrap();
+            }
+            let arguments = serde_json::json!({"query":"x","mode":"names"}).to_string();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![
+                        vec![("search", arguments.clone()); count],
+                        vec![("search", arguments.clone())],
+                    ],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requested = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::AssistantTurnCompleted { calls, .. } if !calls.is_empty() => {
+                        Some(calls)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
+                - count * tools::output::result_reserve_bytes("search"))
+                / tools::output::search_reservation_bytes(false);
+            assert_eq!(requested[0].len(), count);
+            for (index, call) in requested[0].iter().enumerate() {
+                assert_eq!(call.arguments, arguments);
+                if index >= MAX_TOOL_CALLS_PER_TURN {
+                    assert!(matches!(
+                        call.rejection,
+                        Some(runtime::CallRejection::Runtime(_))
+                    ));
+                } else {
+                    assert_eq!(
+                        call.rejection,
+                        (index >= admitted).then_some(runtime::CallRejection::OutputBudget)
+                    );
+                }
+            }
+            assert!(requested[1][0].rejection.is_none());
+            let completed = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        result, is_error, ..
+                    } => Some((result, *is_error)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(completed.len(), count + 1);
+            let pages = completed
+                .iter()
+                .filter(|(_, error)| !error)
+                .map(|(text, _)| *text)
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), admitted + 1);
+            assert!(pages[0].len() > 10 * 1024);
+            assert!(pages[0].lines().next().unwrap().contains("next="));
+            assert!(pages.iter().all(|page| *page == pages[0]));
+            assert!(
+                completed
+                    .iter()
+                    .filter(|(_, error)| *error)
+                    .all(|(text, _)| text.starts_with("turn_output_budget:")
+                        || text.contains("not executed"))
+            );
+            let requests = requests.lock().unwrap();
+            for request in requests.iter().skip(1) {
+                for message in request.messages() {
+                    let total = message
+                        .content()
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                            _ => None,
+                        })
+                        .sum::<usize>();
+                    assert!(
+                        total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
+                        "{total}"
+                    );
+                    for block in message.content() {
+                        if let ContentBlock::ToolResult {
+                            content,
+                            is_error: false,
+                            ..
+                        } = block
+                        {
+                            assert_eq!(content, pages[0], "admitted page must remain whole");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn ab2_late_direct_search_preserves_complete_pages_and_continuation() {
         let directory = tempfile::tempdir().unwrap();
         let root = std::iter::repeat_n("a".repeat(240), 8)

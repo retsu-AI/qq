@@ -1462,8 +1462,14 @@ mod tests {
                     call: qq_protocol::ToolCallId::from_bytes([0x31; 16]),
                 },
             ] {
-                let mut budget = TurnOutputBudget::new();
                 let mut prior = "x".repeat(93 * 1024);
+                let mut budget = TurnOutputBudget::for_results(
+                    [
+                        ("other", prior.as_str()),
+                        ("search", result.model_text.as_str()),
+                    ]
+                    .into_iter(),
+                );
                 budget.admit("other", &mut prior, ResultRecall::None);
                 let mut projected = result.model_text.clone();
                 assert!(!budget.admit("search", &mut projected, recall));

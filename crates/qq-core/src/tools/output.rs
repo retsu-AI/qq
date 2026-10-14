@@ -84,14 +84,7 @@ impl Bounds {
     }
 
     const fn with_max_bytes(self, max_bytes: usize) -> Self {
-        Self {
-            max_bytes: if max_bytes < MIN_MODEL_TEXT_BYTES {
-                MIN_MODEL_TEXT_BYTES
-            } else {
-                max_bytes
-            },
-            ..self
-        }
+        Self { max_bytes, ..self }
     }
 }
 
@@ -788,23 +781,63 @@ pub(crate) fn result_handle(tool: &str, call: ToolCallId, digest: &str) -> Strin
     format!("t:{tool}:{}:{}", &call[..8], &digest[..8])
 }
 
-/// Caps the model-facing text one turn's tool calls add to context. A call
-/// that would overshoot is re-bounded to the remainder (never below
-/// [`MIN_MODEL_TEXT_BYTES`]) and its marker says so.
-///
-/// This is the one projection from persisted per-call results to what the
-/// model sees: the live run applies it as the turn's results enter context,
-/// and context assembly re-applies it to the stored rows in the same call
-/// order, so replay reproduces the live request byte for byte.
+/// Reply space reserved for every call, including administrative rejections.
+/// Variable tool names still leave room for their recall marker.
+pub(crate) fn result_reserve_bytes(tool: &str) -> usize {
+    384 + tool.len()
+}
+
+pub(crate) const fn search_reservation_bytes(reviews_tools: bool) -> usize {
+    super::search::SEARCH_BOUNDS.max_bytes
+        + if reviews_tools {
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 512
+        } else {
+            0
+        }
+}
+
+fn complete_search_page(tool: &str, text: &str) -> bool {
+    tool == "search" && text.starts_with("search ") && text.len() <= search_reservation_bytes(true)
+}
+
+/// One strict projection from persisted per-call results to model context.
+/// Reserve complete admitted search pages and short replies before ordinary
+/// text is cut; replay uses the same call order and complete result bytes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutputBudget {
     remaining: usize,
+    protected: usize,
+    replies: usize,
 }
 
 impl TurnOutputBudget {
+    #[cfg(test)]
     pub(crate) const fn new() -> Self {
         Self {
             remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
+            protected: 0,
+            replies: 0,
+        }
+    }
+
+    pub(crate) fn for_results<'a>(
+        results: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    ) -> Self {
+        let replies = results.clone().fold(0_usize, |bytes, (tool, _)| {
+            bytes.saturating_add(result_reserve_bytes(tool))
+        });
+        let mut space = MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(replies);
+        let mut protected = 0;
+        for (tool, text) in results {
+            if complete_search_page(tool, text) && text.len() <= space {
+                protected += text.len();
+                space -= text.len();
+            }
+        }
+        Self {
+            remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
+            protected,
+            replies,
         }
     }
 
@@ -820,16 +853,21 @@ impl TurnOutputBudget {
         text: &mut String,
         recall: ResultRecall<'_>,
     ) -> bool {
-        // A search cursor advances past every row in its already-bounded page.
-        // Dropping page rows would make continuation lose matches without recall.
-        let floor = if tool == "search" {
-            // One bounded checkpoint annotation follows the page before projection.
-            // Reserve its fixed label/framing and UTF-8 truncation suffix too.
-            super::search::SEARCH_BOUNDS.max_bytes + crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 512
-        } else {
-            MIN_MODEL_TEXT_BYTES
-        };
-        let allowed = self.remaining.max(floor);
+        self.replies = self.replies.saturating_sub(result_reserve_bytes(tool));
+        if complete_search_page(tool, text) && text.len() <= self.protected {
+            self.protected -= text.len();
+            self.remaining -= text.len();
+            return false;
+        }
+        let allowed = self
+            .remaining
+            .saturating_sub(self.protected)
+            .saturating_sub(self.replies);
+        if allowed == 0 {
+            let cut = !text.is_empty();
+            text.clear();
+            return cut;
+        }
         let mut cut = false;
         if text.len() > allowed {
             // The stored-result handle digests the row's text, which is the
@@ -842,7 +880,22 @@ impl TurnOutputBudget {
                 )),
                 ResultRecall::None | ResultRecall::Spill(_) => None,
             };
-            let bounds = Bounds::DEFAULT.with_max_bytes(allowed);
+            let recall_reserve = match recall {
+                ResultRecall::None => 0,
+                ResultRecall::Spill(handle) => escaped_len(handle) + 64,
+                ResultRecall::StoredResult { .. } => stored_result
+                    .as_ref()
+                    .map_or(0, |handle| escaped_len(handle) + 64),
+            };
+            let bounded_bytes = allowed.saturating_sub(recall_reserve);
+            if bounded_bytes < MARKER_RESERVE_BYTES {
+                text.clear();
+                let notice = "turn output budget reached";
+                text.push_str(&notice[..notice.len().min(allowed)]);
+                self.remaining -= text.len();
+                return true;
+            }
+            let bounds = Bounds::DEFAULT.with_max_bytes(bounded_bytes);
             let bounded = bound_text(std::mem::take(text), &bounds, Some("turn budget reached"));
             cut = bounded.truncated();
             *text = bounded.text;
@@ -861,6 +914,14 @@ impl TurnOutputBudget {
                     }
                 }
             }
+        }
+        // Legacy/unreserved callers can leave less room than a marker itself.
+        // The production reservation path always leaves a complete short reply.
+        if text.len() > allowed {
+            text.clear();
+            let notice = "turn output budget reached";
+            text.push_str(&notice[..notice.len().min(allowed)]);
+            cut = true;
         }
         self.remaining = self.remaining.saturating_sub(text.len());
         cut
@@ -1314,14 +1375,57 @@ mod tests {
                     call: ToolCallId::from_bytes([7; 16]),
                 },
             ] {
-                let mut budget = TurnOutputBudget::new();
                 let mut spent = "x".repeat(MAX_TURN_TOOL_OUTPUT_BYTES);
+                let mut budget = TurnOutputBudget::for_results(
+                    [("other", spent.as_str()), ("search", annotated.as_str())].into_iter(),
+                );
                 budget.admit("other", &mut spent, ResultRecall::None);
                 let mut actual = annotated.clone();
                 assert!(!budget.admit("search", &mut actual, recall));
                 assert_eq!(actual, annotated);
             }
         }
+    }
+
+    #[test]
+    fn ab2_mixed_pages_and_long_recall_names_fit_all_sixty_four_replies() {
+        let long_name = "x".repeat(128);
+        let page = format!(
+            "search . mode=names next=YWJjADA\n{}",
+            "match\n".repeat(2_030)
+        );
+        let mut results = vec![(long_name.as_str(), "ordinary\n".repeat(4_000)); 64];
+        for index in [1, 12, 23, 34, 63] {
+            results[index] = ("search", page.clone());
+        }
+        let mut projected = Vec::new();
+        for _ in 0..2 {
+            let mut budget = TurnOutputBudget::for_results(
+                results.iter().map(|(name, text)| (*name, text.as_str())),
+            );
+            let mut texts = Vec::new();
+            for (index, (name, result)) in results.iter().enumerate() {
+                let mut text = result.clone();
+                budget.admit(
+                    name,
+                    &mut text,
+                    ResultRecall::StoredResult {
+                        tool: name,
+                        call: ToolCallId::from_bytes([index as u8 + 1; 16]),
+                    },
+                );
+                if *name == "search" {
+                    assert_eq!(text, page);
+                } else {
+                    assert!(!text.is_empty(), "each admitted slot has a reply");
+                    assert!(text.contains("full output t:"), "{text}");
+                }
+                texts.push(text);
+            }
+            assert!(texts.iter().map(String::len).sum::<usize>() <= MAX_TURN_TOOL_OUTPUT_BYTES);
+            projected.push(texts);
+        }
+        assert_eq!(projected[0], projected[1]);
     }
 
     #[test]
@@ -1339,15 +1443,15 @@ mod tests {
         assert!(second.contains("turn budget reached; not stored]"));
         assert!(budget.remaining() < MIN_MODEL_TEXT_BYTES);
 
-        // Never below the floor: a spent turn still gets a useful result.
+        let available = budget.remaining();
         let mut third = lines(4_000);
         assert!(budget.admit("other", &mut third, ResultRecall::None));
-        assert!(third.len() <= MIN_MODEL_TEXT_BYTES);
-        assert!(third.len() > MIN_MODEL_TEXT_BYTES / 2);
+        assert!(third.len() <= available);
 
+        let available = budget.remaining();
         let mut small = "fits".to_owned();
-        assert!(!budget.admit("other", &mut small, ResultRecall::None));
-        assert_eq!(small, "fits");
+        budget.admit("other", &mut small, ResultRecall::None);
+        assert!(small.len() <= available);
     }
 
     #[test]

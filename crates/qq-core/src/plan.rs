@@ -1695,15 +1695,25 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 14 and prompt 20; golden refresh pending: action contract, AB2).
+        // changing the encoding (descriptor 14 and prompt 20: action contract, AB2).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
+            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v14\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
+    }
+
+    #[test]
+    fn historical_descriptor_13_prompt_20_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 13;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
+        );
     }
 
     #[test]

@@ -5025,7 +5025,9 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     )
     .await;
     let limits = RunLimits {
-        max_total_tokens: Some(1_000_000),
+        // Two 48-turn children must finish; this test checks exact spend
+        // inheritance rather than exhausting the parent on prompt growth.
+        max_total_tokens: Some(2_000_000),
         max_cost_usd_nanos: Some(5_000_000_000),
         ..RunLimits::default()
     };
@@ -5082,7 +5084,7 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     assert!(summary_tokens > 0 && summary_cost > 0);
     assert_eq!(
         second_limits.max_total_tokens,
-        Some(1_000_000 - 15 - prompt_tokens - summary_tokens)
+        Some(2_000_000 - 15 - prompt_tokens - summary_tokens)
     );
     assert_eq!(
         second_limits.max_cost_usd_nanos,

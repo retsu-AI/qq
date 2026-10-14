@@ -1854,10 +1854,10 @@ impl RunState {
                             #[cfg(test)]
                             let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                             let (effect, rejection) = match known {
-                                Some(effect) => (effect, pending.rejection),
+                                Some(effect) => (effect, pending.rejection.map(runtime::CallRejection::Runtime)),
                                 None => (
                                     catalog::EffectClass::ReadOnly,
-                                    Some(format!("unknown tool {:?}", pending.name)),
+                                    Some(runtime::CallRejection::Runtime(format!("unknown tool {:?}", pending.name))),
                                 ),
                             };
                             if rejection.is_none() {
@@ -1887,10 +1887,26 @@ impl RunState {
                         {
                             for call in &mut calls {
                                 if call.rejection.is_none() {
-                                    call.rejection = Some(
-                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone"
-                                            .to_owned(),
-                                    );
+                                    call.rejection = Some(runtime::CallRejection::Runtime(
+                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone".to_owned()));
+                                }
+                            }
+                        }
+                        // Reserve complete search pages before execution. A cursor may
+                        // advance only when its whole page can enter this turn's context.
+                        let reviews_tools = checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools());
+                        let mut search_space = tools::output::MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(
+                            calls.iter().map(|call| tools::output::result_reserve_bytes(&call.name)).sum::<usize>());
+                        let page_reserve = tools::output::search_reservation_bytes(reviews_tools);
+                        for call in &mut calls {
+                            if call.name == "search" && call.rejection.is_none() {
+                                if search_space >= page_reserve {
+                                    search_space -= page_reserve;
+                                } else {
+                                    // Tool-checkpoint enforcement admitted at most one
+                                    // executable call above, which always fits this bound.
+                                    debug_assert!(!reviews_tools);
+                                    call.rejection = Some(runtime::CallRejection::OutputBudget);
                                 }
                             }
                         }
@@ -2902,8 +2918,8 @@ impl RunState {
                                             alternative.program, alternative.builtin
                                         )
                                     });
-                                let result = match call.rejection.clone().or(strict_refusal) {
-                                    Some(error) => tools::ToolOutput::verbatim_error(error),
+                                let result = match call.rejection.clone().or_else(|| strict_refusal.map(runtime::CallRejection::Runtime)) {
+                                    Some(error) => tools::ToolOutput::verbatim_error(error.into_message()),
                                     // spawn_agent dispatches to the session layer. A
                                     // run without a spawner rejects the call outright:
                                     // the declaration is already absent there, but a
@@ -3551,7 +3567,8 @@ impl RunState {
                         // replayed turn is byte-identical to what the model saw here.
                         // A cut names its recall path: the spill when the call
                         // spilled, else the stored result row itself in a session run.
-                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::new() };
+                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::for_results(
+                            calls.iter().zip(results.iter()).map(|(call, result)| (call.name.as_str(), result.as_ref().expect("all outcomes retained").model_text.as_str()))) };
                         let stored = spills.is_some();
                         let result_blocks = calls
                             .iter()

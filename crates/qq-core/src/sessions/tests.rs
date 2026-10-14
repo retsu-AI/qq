@@ -2889,7 +2889,18 @@ mod reference_assembly {
             // turn commit and its tool_calls rows in an older store)
             // gets an explicit interrupted result so replayed context
             // stays provider-valid instead of poisoning the session.
-            let mut turn_output = crate::tools::TurnOutputBudget::new();
+            let mut turn_output =
+                crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
+                    match block {
+                        ContentBlock::ToolCall { id, name, .. } => Some((
+                            name.as_str(),
+                            recorded
+                                .get(id)
+                                .map_or(INTERRUPTED_TOOL_RESULT, |row| row.0.as_str()),
+                        )),
+                        _ => None,
+                    }
+                }));
             let results = content
                 .iter()
                 .filter_map(|block| match block {

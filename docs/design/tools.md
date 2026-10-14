@@ -292,8 +292,12 @@ dependency); clean text is returned without allocation.
 
 **Per-turn budget.** The sum of `model_text` across one turn's tool calls is
 capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
-call order; a result that would overshoot is re-bounded to the remainder
-(never below 4 KiB) and its marker adds `turn budget reached`. The
+call order. Before execution, the runtime reserves complete search pages and
+short replies for every requested call. Searches that cannot fit return
+`turn_output_budget` without executing; retry the same arguments on the next
+turn. Admitted search pages retain all rows and their continuation cursor.
+Ordinary results that would overshoot are re-bounded to the remaining space,
+including their recall marker, which adds `turn budget reached`. The
 persisted `tool_calls.result` row keeps the call's own bounded text; the
 budget is a **projection** over those rows (`TurnOutputBudget`) that both
 the live run and context assembly (`append_run_turns`) apply, in call

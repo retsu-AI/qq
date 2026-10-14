@@ -7,7 +7,7 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Nondraft; batched-search cap repair in progress, performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -879,3 +879,23 @@ newest last.
 - Qualified immutable source `9cbbaa7d7dcb989756ddaff970974601b24d3cab` includes main `f87d5d9d`:2341 passed,0 failed,14 ignored (38 report blocks); fmt, all-target/all-feature Clippy `-D warnings` and workspace build exit0. Logs/receipt `target/qq-perf/ab1-2026-10-14/expanded-context-final2-gates-*`.
 - Three independent read-only reviews approved launch binding, startup manifest propagation and atomic receipts/docs. Clippy-driven boxing changes only optional process payload ownership; ordinary events stay small. Unsupported/historical contexts remain unqualified.
 - All PRs stay out of draft. Publishing this source removes the old main conflict on301; fresh Codex review and current-head hosted CI follow. Matched default/process/turn/persistence measurements remain open, so merge acceptance is not yet claimed.
+
+### 2026-10-14 — AB2 strict batched-search admission
+
+- Integrated published AB1 execution-context verification and current main,
+  including AC3 schema 46 followed by receipt schema 47. PR remains nondraft.
+- Reproduced the sixteen-page overflow before the repair; admission now
+  reserves full search pages and short replies before execution. Live and
+  replay projection share the strict 96 KiB calculation.
+- Focused AB2 tests passed before adding sixteen/sixty-four-call runtime
+  retry coverage. Independent review and fresh workspace gates remain open;
+  no unqualified changes have been pushed.
+
+- Final core qualification: 1,019 passed, zero failed, three ignored; logs
+  `/tmp/qq-ab2-cap-core-final.log`. Actual sixteen/sixty-four-call deferrals,
+  exact retry, mixed maximum-length recall names, complete pages, stored
+  replay parity, and historical descriptor 13/prompt 20 digest pass.
+- Independent cursor/admission and output/replay reviews approve production
+  behavior. The child-compaction fixture now grants two million tokens so
+  both scripted 48-turn children finish under the longer prompt; exact
+  inherited spend assertions remain intact. Full workspace gates follow.
