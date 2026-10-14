@@ -408,3 +408,19 @@ newest last.
   tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0. Logs
   `target/qq-perf/ab2-2026-10-14/description-final-gate-{0,1,2,3}.log`.
   Source and full builtin schema are independently reviewed; performance open.
+
+### 2026-10-14 — AB2 child, ignored-walk and exec-only guidance
+
+- Three test-first assertions reproduced read-child edit demand, incomplete
+  ignored-path guidance and exec-only absent-shell references. Read children
+  now return findings; ignored search/tree calls require path plus
+  include_ignored=true in prompts and declarations; exec-only descriptions
+  preserve literal arguments and cleared-environment semantics.
+- Eight focused AB2 tests and61 prompt-filtered tests pass. Independent
+  final review approves the prompt/compiler correction; declaration wording
+  is covered by captured search/tree requests. Full input schemas are unchanged;
+  corrected descriptions change canonical full tool identity to
+  f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed.
+  Full fixture prefix5342bytes. Historical prompt14 golden remains unchanged.
+- New symlink/depth discovery findings and upstream integration remain open;
+  workspace qualification and matched performance follow immutable final source.
