@@ -64,3 +64,19 @@ newest last.
   through the documented Bash/sqlite3 commands; outputs match the counts
   above. Relative links and `git diff --check` pass. Workspace gates running
   before push; no runtime code changed in this correction.
+
+
+### 2026-10-14 — AB1 baseline started; schema dependency refreshed
+
+- Previous continuation made progress: committed #295 corrections and
+  independently reviewed their final state. Workspace gate process remains
+  live; inspected its ongoing test output rather than restarting it.
+- Isolated AB1 branch `fix/eng-1038-ab1-shell-reads` now inherits `147e4eca`.
+  Baseline `cargo bench -p qq-core --bench turn_overhead` built successfully
+  and is running; raw output is under that worktree's
+  `target/qq-perf/ab1-2026-10-14/baseline.log`. Concurrent host work means
+  this diagnostic cannot qualify performance acceptance.
+- Fetched `origin/main`: `7de994b1` includes #289's schema 45 and #294's
+  tolerant arguments. AB5 now specifies schema 45→46; historical schema-44
+  research stays unchanged. Stack must integrate current main before its
+  final qualification; no runtime code changed yet.
