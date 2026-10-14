@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(19) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(20) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 19. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 20. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -29,6 +29,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// wait_agents, and cancel_agent; 17 → 18 makes delegation guidance reflect
 /// the spawn schema's write authority; 18 → 19 says an unread or changed
 /// file takes a unique exact edit, and how to recover from a refusal (T19).
+/// 19 → 20 adds action and exploration conventions, built-in mapping, nested
+/// instruction discovery and a header naming present read tools (AB2).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -165,6 +167,55 @@ fn agent_prompt_prefix(
             }
         }
     }
+    let mut read_tools = String::new();
+    for spec in specs {
+        if matches!(
+            spec.name(),
+            "read_file" | "tree" | "search" | "search_history" | "read_tool_result"
+        ) {
+            if !read_tools.is_empty() {
+                read_tools.push_str(", ");
+            }
+            read_tools.push_str(spec.name());
+        }
+    }
+    let read_description = if read_tools.is_empty() {
+        String::new()
+    } else {
+        format!("{read_tools} are read-only; ")
+    };
+    let has = |name: &str| specs.iter().any(|spec| spec.name() == name);
+    let edit_description = match (has("edit_file"), has("write_file")) {
+        (true, true) => {
+            "edit_file and write_file modify workspace files and may require user approval; "
+        }
+        (true, false) => "edit_file modifies workspace files and may require user approval; ",
+        (false, true) => "write_file modifies workspace files and may require user approval; ",
+        (false, false) => "",
+    };
+    let command_names = match (has("shell"), has("exec")) {
+        (true, true) => "shell and exec",
+        (true, false) => "shell",
+        (false, true) => "exec",
+        (false, false) => "",
+    };
+    let command_description = if command_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{command_names} run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; "
+        )
+    };
+    let ask_description = if has("ask_user") {
+        "ask_user puts a bounded multiple-choice question to the user and waits for the answer; "
+    } else {
+        ""
+    };
+    let ask_guidance = if has("ask_user") {
+        "- Use ask_user only when the request is genuinely ambiguous and a wrong guess would be expensive to undo; offer concrete options, ask once, and never ask what you can find out with a tool. If the result says no user is available, decide and state the assumption."
+    } else {
+        ""
+    };
     let has_fetch = specs.iter().any(|spec| spec.name() == "fetch");
     let fetch_description = if has_fetch {
         "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused."
@@ -240,34 +291,31 @@ fn agent_prompt_prefix(
     } else {
         String::new()
     };
-    // A read child cannot implement anything; telling it to keep going until
-    // it has only keeps it reading. Every other run keeps the line.
-    let implement = if subagent == Some(SubagentAuthority::Read) {
+    // A read child answers its brief; the root action contract would keep it reading.
+    let action = if subagent == Some(SubagentAuthority::Read) {
         ""
     } else {
-        "- Implement requested changes rather than stopping at analysis unless the user \
-         requested analysis-only work.\n"
+        "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n"
     };
     let mut prompt = format!(
         "You are QQ, a coding agent operating in the workspace rooted at {root}.\n\
          \n\
-         Available tools: {tool_names}. read_file, tree, search, search_history, and read_tool_result are read-only; \
-         edit_file and write_file modify workspace files and may require user approval; \
-         shell and exec run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; \
-         ask_user puts a bounded multiple-choice question to the user and waits for the answer; \
+         Available tools: {tool_names}. {read_description}\
+         {edit_description}{command_description}{ask_description}\
          {fetch_description}{mcp_note}\n\
          \n\
          Working conventions:\n\
-         - Determine observable completion criteria from the user's request before acting.\n\
-         - Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline to see a file's shape before reading it.\n\
+         {action}\
+         - Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n\
+         - Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n\
+         - Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline for the shape of a long file.\n\
          - edit_file takes a batch: edits=[{{path, old, new}}] or {{path, insert_before|insert_after, new}}; later edits see earlier results, the whole batch applies or none does, and the result names via=<strategy> when whitespace or indentation had to be forgiven. Extend old until it is unique rather than guessing; use dry_run to preview.\n\
-         - Inspect existing state before changing it and preserve unrelated work.\n\
-         - Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\
+         - Preserve unrelated work in the files you change.\n\
+         - Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd. Prefer search over guessing file paths; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n\
          - Batch independent tool calls in one turn: several read_file, search, or tree calls issued together run concurrently, and reads that precede the first edit or command in a turn overlap while the rest run in order. Up to 16 calls execute per turn; any beyond that return a not-executed error to re-issue next turn.\n\
          - Give every tool path relative to the workspace root; absolute paths are rejected.\n\
          - When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n\
-         - Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n\
-{implement}\
+         - Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.\n\
          - Treat failed tools and tests as evidence: diagnose them and continue when a safe path remains.\n\
          - Run the narrowest relevant verification before broader checks.\n\
          - Do not claim success without evidence from the resulting state.\n\
@@ -276,7 +324,7 @@ fn agent_prompt_prefix(
          - Prefer edit_file and write_file over shell for changing files.\n\
          - Prefer exec for a single program with arguments (exec program=cargo args=[test, -p, x]): no quoting or globbing surprises, and the approval gate sees exact words. Reserve shell for pipelines and redirection.\n\
 {fetch_guidance}\
-         - Use ask_user only when the request is genuinely ambiguous and a wrong guess would be expensive to undo; offer concrete options, ask once, and never ask what you can find out with a tool. If the result says no user is available, decide and state the assumption.{spawn_section}",
+         {ask_guidance}{spawn_section}",
         root = workspace.display(),
     );
     if let Some(authority) = subagent {
@@ -436,7 +484,7 @@ mod ab2_contract {
     const EXPLORE: &str = "Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.";
     const REREAD: &str = "Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.";
     const BUILTINS: &str = "Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd.";
-    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per run with search mode=names regex=true query="(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. For a target inside an ignored directory, pass that worktree root as path; include applicable ancestor instructions already supplied by the host."#;
+    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query="(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions."#;
 
     fn render(subagent: Option<SubagentAuthority>, specs: &[ToolSpec]) -> String {
         agent_system_prompt(
@@ -492,5 +540,35 @@ mod ab2_contract {
             .unwrap();
         assert!(!header.contains("search_history"));
         assert!(!header.contains("read_tool_result"));
+    }
+}
+
+#[cfg(test)]
+mod ab2_header_authority {
+    use super::*;
+
+    #[test]
+    fn ab2_prompt_omits_descriptions_and_question_guidance_for_absent_tools() {
+        let specs = crate::tools::specs()
+            .into_iter()
+            .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search"))
+            .collect::<Vec<_>>();
+        let prompt = agent_system_prompt(
+            Path::new("/tmp/qq-prompt-test"),
+            &specs,
+            PromptSections::default(),
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        );
+        let header = prompt
+            .lines()
+            .find(|line| line.starts_with("Available tools:"))
+            .unwrap();
+        assert!(!header.contains("edit_file"));
+        assert!(!header.contains("write_file"));
+        assert!(!header.contains("shell"));
+        assert!(!header.contains("exec"));
+        assert!(!prompt.contains("ask_user"));
     }
 }

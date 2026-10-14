@@ -2666,8 +2666,8 @@ mod tests {
             .expect("the provider request must carry a system prompt");
         assert!(system.contains("Workspace instructions from AGENTS.md"));
         assert!(system.contains("Run the repository's focused checks"));
-        assert!(system.contains("observable completion criteria"));
-        assert!(system.contains("preserve unrelated work"));
+        assert!(system.contains("Do the work. Decide what done looks like"));
+        assert!(system.contains("Preserve unrelated work"));
         assert!(system.contains("analysis-only"));
         assert!(system.contains("failed tools and tests as evidence"));
         assert!(system.contains("continue when a safe path remains"));
@@ -2675,7 +2675,7 @@ mod tests {
         assert!(system.contains("Do not claim success without evidence"));
         assert!(system.contains("remaining failures and uncertainty honestly"));
         assert!(system.contains("time, token, cost, and safety budgets"));
-        assert!(system.contains("root-to-leaf"));
+        assert!(system.contains("more specific first"));
     }
 
     #[tokio::test]
@@ -9461,7 +9461,7 @@ mod tests {
 
     #[test]
     fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
-        const IMPLEMENT: &str = "- Implement requested changes rather than stopping at analysis";
+        const IMPLEMENT: &str = "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n";
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let render = |subagent| {
@@ -9504,15 +9504,7 @@ mod tests {
             head.to_owned()
         };
         assert_eq!(without_section(&write), root);
-        assert_eq!(
-            without_section(&read),
-            root.replacen(
-                "- Implement requested changes rather than stopping at analysis unless the user \
-                 requested analysis-only work.\n",
-                "",
-                1
-            )
-        );
+        assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1));
     }
 
     #[test]
@@ -9636,6 +9628,17 @@ mod tests {
             None,
             None,
         );
+        // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
+        // older prompt-14 golden below stays unchanged.
+        let prompt = prompt
+            .replacen("- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n", "- Determine observable completion criteria from the user's request before acting.\n", 1)
+            .replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n", "", 1)
+            .replacen("- Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n", "", 1)
+            .replacen("Preserve unrelated work in the files you change.", "Inspect existing state before changing it and preserve unrelated work.", 1)
+            .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
+            .replacen("mode=outline for the shape of a long file", "mode=outline to see a file's shape before reading it", 1)
+            .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
+            .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
         // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
         // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
@@ -9658,13 +9661,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // Every built-in declaration is unchanged except `edit_file`'s
-        // description, which T19 (ADR-0058) rewords.
+        // AB2 changes four built-in descriptions; their schemas are unchanged.
+        // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb"
+            "f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -9714,7 +9717,7 @@ mod tests {
             None,
             None,
         );
-        assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
+        assert!(prompt.contains("- Do the work. Decide what done looks like"));
         assert!(!prompt.contains("Sub-agent:"));
     }
 

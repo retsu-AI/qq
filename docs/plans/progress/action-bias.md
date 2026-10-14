@@ -186,3 +186,16 @@ newest last.
   already pass. Fixed prompt fixture: 4,214 bytes; built-in schema hash
   `9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb`.
   Raw test evidence: `target/qq-perf/ab2-2026-10-14/red-compiled.log`.
+
+### 2026-10-14 — AB2 implementation review
+
+- Implemented prompt v20 and built-in mappings on AB1 `2d0bfa4f`; independent
+  review approved after adding both ignored and nonignored ancestor scopes.
+- `cargo test -p qq-core ab2_ -- --nocapture`: 5 passed; `cargo test -p
+  qq-core prompt -- --nocapture`: 58 passed. First fixture attempt failed
+  because its TMPDIR parent was missing; created the task-owned directory
+  and reran successfully. Prefix fixture: 5,516 bytes; descriptor schema
+  hash `f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85`.
+- Baseline plan compilation: 29,242 ns/iteration (2,000 iterations), digest
+  2,562 ns/iteration (20,000); candidate and noise qualification remain open.
+  Workspace gates are next; nothing in this slice has been pushed.

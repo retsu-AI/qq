@@ -55,9 +55,16 @@ Tool declarations tell the model what it may call; they do not tell it
 that it is an agent. `ModelRequest` carries a system-prompt field, and
 `qq-core` owns a base agent prompt assembled per run: what the workspace
 is, which tools are available, and the working conventions — read a file
-before editing it, prefer `search` over guessing paths, cite paths
-relative to the workspace root, establish observable completion criteria,
-verify resulting state, and report remaining failures honestly. The prompt is
+before editing it, define what done looks like, inspect only what the next
+action needs, make requested changes, verify resulting state, and report
+remaining failures honestly. Analysis-only requests produce findings without
+file changes. The prompt discourages re-reading retained context except
+changed/new lines and pruned stubs, maps shell reads to the built-ins, and
+finds scoped instruction files once per discovery root, following cursor
+pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
+targets also use their highest ignored ancestor with `include_ignored=true`,
+covering instructions within that subtree and multiple worktrees. Explicit paths reach
+ignored worktrees; only declared recall/spill tools appear in the read header. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own

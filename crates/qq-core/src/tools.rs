@@ -1288,9 +1288,21 @@ mod tests {
     fn ab2_names_and_content_search_reach_an_explicit_ignored_worktree() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        fs::write(root.join(".gitignore"), "/.worktrees/\n").unwrap();
+        fs::write(root.join(".gitignore"), "/.worktrees/\n/src/vendor/\n").unwrap();
+        fs::create_dir_all(root.join("src/vendor")).unwrap();
+        fs::write(root.join("src/AGENTS.md"), "source ancestor policy\n").unwrap();
+        fs::write(root.join("src/vendor/AGENTS.md"), "vendor policy\n").unwrap();
+        fs::write(root.join("src/vendor/x.rs"), "// target\n").unwrap();
         fs::create_dir_all(root.join(".worktrees/x/nested")).unwrap();
+        fs::write(root.join(".worktrees/AGENTS.md"), "ancestor policy\n").unwrap();
         fs::write(root.join(".worktrees/x/AGENTS.md"), "worktree policy\n").unwrap();
+        fs::create_dir_all(root.join("target/stk")).unwrap();
+        fs::write(root.join("target/CLAUDE.md"), "target ancestor policy\n").unwrap();
+        fs::write(
+            root.join("target/stk/AGENTS.md"),
+            "second worktree policy\n",
+        )
+        .unwrap();
         fs::write(
             root.join(".worktrees/x/nested/CLAUDE.md"),
             "nested policy\n",
@@ -1299,22 +1311,57 @@ mod tests {
         let workspace = Workspace::open(root).unwrap();
         for (arguments, expected) in [
             (
-                r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees/x"}"#,
+                r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees","include_ignored":true}"#,
                 ".worktrees/x/nested/CLAUDE.md",
             ),
             (
-                r#"{"query":"worktree policy","path":".worktrees/x"}"#,
+                r#"{"query":"worktree policy","path":".worktrees","include_ignored":true}"#,
                 "L1: worktree policy",
             ),
         ] {
             let result = run_tool(&workspace, &FileState::default(), "search", arguments);
             assert!(!result.is_error, "{}", result.model_text);
+            if arguments.contains("names") {
+                assert!(
+                    result.model_text.contains(".worktrees/AGENTS.md"),
+                    "{}",
+                    result.model_text
+                );
+            }
             assert!(
                 result.model_text.contains(expected),
                 "{}",
                 result.model_text
             );
         }
+
+        let second = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"target","include_ignored":true}"#,
+        );
+        assert!(!second.is_error, "{}", second.model_text);
+        assert!(second.model_text.contains("target/CLAUDE.md"));
+        assert!(second.model_text.contains("target/stk/AGENTS.md"));
+
+        let ancestors = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"."}"#,
+        );
+        assert!(!ancestors.is_error, "{}", ancestors.model_text);
+        assert!(ancestors.model_text.contains("src/AGENTS.md"));
+        assert!(!ancestors.model_text.contains("src/vendor/AGENTS.md"));
+        let ignored = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"src/vendor","include_ignored":true}"#,
+        );
+        assert!(!ignored.is_error, "{}", ignored.model_text);
+        assert!(ignored.model_text.contains("src/vendor/AGENTS.md"));
     }
 
     #[test]
