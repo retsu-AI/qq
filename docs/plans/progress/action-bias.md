@@ -1511,3 +1511,70 @@ newest last.
   oversized timeout, whitespace/NUL command, empty/absolute cwd, and invalid
   environment-name envelopes. Execution of the red fixture waits for the
   active parent gate run; production validation is not yet changed.
+### 2026-10-14 — AB3 current-main/context integration qualification
+
+- Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
+  2,383 workspace tests, zero failures, 14 ignored across 38 report blocks;
+  formatting, Clippy/all targets/all features with warnings denied, and
+  workspace build all exit zero. Source remained clean and unchanged.
+- Receipts: `target/qq-perf/ab3-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Independent integration review approves
+  retained byte-window/masking/repair reservations and live/replay bounds.
+- PR remains nondraft. Fresh hosted/Codex review and performance gates
+  remain open; this local receipt does not qualify those gates.
+
+- Focused canonical-encoding check identified the descriptor 14/prompt 22
+  digest `a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d`;
+  the inherited prompt-20 golden was replaced. Descriptor 13 prompt 20–22
+  historical fixtures stay unchanged. Independent integration review approves
+  immutable image-manifest propagation and frozen child authority; full gates
+  now run against the corrected immutable source.
+
+### 2026-10-14 — AB4 immutable verified-context qualification
+
+- Immutable `2f061eccc285687365faf8eb054ded9a1cbca62d`: fresh workspace
+  passes 2,393 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source remained clean and unchanged throughout the run.
+- Receipts: `target/qq-perf/ab4-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Current 14/prompt 22 and historical 13/prompt
+  20–22 digests pass. Independent integration review approves immutable
+  manifest propagation and frozen read-only child declarations.
+- Nondraft publication follows; fresh hosted/Codex and named performance
+  gates remain open and are not waived by local qualification.
+
+- Qualified parent AB4 `364eb74c` is now integrated, including the corrected
+  descriptor 14/prompt 22 golden and parent receipt. Independent schema and
+  notice integration review approves. Full child gates start against this
+  immutable merge; schema-47 old-reader refusal probe follows its build.
+
+### 2026-10-14 — AB5 early-guard reopen correction
+
+- First immutable `4d66221a` workspace run failed root unclean-exit resume
+  at store reopen (`Persistence(Constraint)`); no push occurred. Focused
+  schema-47→48 structure/store-identity regression also reproduced rejection
+  on its second open. Red evidence: `schema48-reopen-red.log`.
+- Corrected the initial supported-version match and all earlier multiline
+  migration guards to include 48. Late receipt/accounting validators remain
+  intact. Focused migration/notice fixtures and full fresh gates rerun next.
+
+### 2026-10-14 — AB5 schema-48 local qualification and older-reader proof
+
+- Immutable `9971c44c802e88a1bbadb7d4888045746e71d35e`: fresh workspace
+  passes 2,399 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source stayed clean and unchanged. Five focused AB5 fixtures pass.
+- Evidence: `target/qq-perf/ab5-2026-10-14/verified-context-schema48-fixed-{0..4}.log`
+  and receipt JSON. First failing workspace/red reopen evidence is retained.
+- Real isolated schema-48 store was created and cleanly shut down by this
+  build; retained schema-47 binary `9cbbaa7d` exits 1 at store open, leaving
+  metadata, structure and empty session count unchanged. Receipt/log/script:
+  `schema47-refusal*` under the same evidence directory; no model calls.
+- Independent post-repair review checks all 37 historical migration guards,
+  structural validators and notice compatibility. Nondraft publication and
+  fresh hosted/Codex review follow; performance gates remain open.
+
+- Inherited qualified AB5 `6aefbfc7`, including all early schema-48 guards,
+  current descriptor 14/prompt 22 golden, successful 2,399-test workspace
+  receipt and real schema-47 refusal proof. AB6 format/provenance work and
+  fresh parent AB2 review repairs remain incomplete; no child push yet.

@@ -17,7 +17,7 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 21. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 22. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
