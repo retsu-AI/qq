@@ -845,3 +845,10 @@ newest last.
   target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
   AB2 production behavior is unchanged by the qualified AB1/environment and
   scope-query integration. Matched prompt/catalog/search performance stays open.
+
+
+- Immutable integrated source ba137d16 passes 2,314 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  Masked-read behavior is unchanged by the qualified environment-aware upstream
+  integration. Matched dispatch/output performance and hosted review stay open.
