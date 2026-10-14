@@ -445,7 +445,7 @@ q "WITH rr AS ($RR), paths AS (
      FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1),
    unproven_mutations AS (SELECT DISTINCT t.run_id FROM tool_calls t JOIN rr ON rr.id=t.run_id
      WHERE rr.child=0 AND t.state IN ('completed','failed','interrupted')
-       AND (t.name IN ('shell','exec') OR t.name GLOB 'ext__*'))
+       AND (t.name IN ('shell','exec') OR t.name GLOB 'ext__*' OR t.name GLOB 'mcp__*'))
    SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots),
      sum(invalid_scopes), (SELECT count(*) FROM unproven_mutations) FROM per_run;"
 ```

@@ -570,3 +570,7 @@ newest last.
   Cargo/rustc version queries are Work because rustup proxies can install
   missing workspace-selected toolchains. These are known program semantics,
   distinct from unqualified arbitrary executable identity.
+
+- Independent parent review caught the separate mcp__ external prefix; include
+  it alongside ext__ in unproven mutation evidence. A completed MCP-only
+  mutation fixture now leaves the cohort unqualified too.
