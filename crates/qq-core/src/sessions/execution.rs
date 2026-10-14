@@ -832,6 +832,23 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
+    if let Some(run) = claimed.unresolved_tool_projection {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: SessionRuntimeError::ToolProjectionUnavailable {
+                        run: run.to_string(),
+                    }
+                    .to_string(),
+                },
+            },
+        )
+        .await;
+        return;
+    }
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
@@ -2881,6 +2898,32 @@ async fn execute_started_run(
                         return;
                     }
                     flush_at = None;
+                }
+            }
+            RunInput::Event(Some(RuntimeEvent::ToolResultsProjected {
+                turn_ordinal,
+                projection,
+            })) => {
+                if internal {
+                    continue;
+                }
+                if let Err(error) = inner
+                    .store
+                    .persist_tool_projection(&claimed, turn_ordinal, projection)
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist projected tool results", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {

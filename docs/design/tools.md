@@ -299,12 +299,16 @@ turn. Admitted search pages retain all rows and their continuation cursor.
 Ordinary results that would overshoot are re-bounded to the remaining space,
 including their recall marker, which adds `turn budget reached`. The
 persisted `tool_calls.result` row keeps the call's own bounded text; the
-budget is a **projection** over those rows (`TurnOutputBudget`) that both
-the live run and context assembly (`append_run_turns`) apply, in call
-order, so a replayed turn — follow-up run, reopened store, compaction
-summarizer input — is byte-identical to the request the model saw live.
-Nothing extra is persisted: the projection is a pure function of the stored
-rows. A budget cut always names a recall path in its marker: the spill
+budget is a **projection** over those rows (`TurnOutputBudget`). After all
+checkpoint annotations, session execution commits the exact ordered projected
+replies and correction notice before sending another provider request. Replay,
+reopen and compaction input use this stored projection verbatim. Descriptor 15
+records the strict policy for unchecked incomplete turns that stopped before
+that barrier; checkpoint-enabled tool turns require the exact projection even
+for final-only reviewers, otherwise reconstruction fails closed;
+known pre-AB2 plans retain the original generic projector. Ambiguous prompt-20
+history without exact replies or policy evidence returns an actionable error.
+A budget cut always names a recall path in its marker: the spill
 handle when the call spilled, else a handle over the stored result row
 itself (`t:<tool>:<call8>:<digest8>`, the digest being that of the stored
 result text, with `read_tool_result offset=` pointing at the first omitted

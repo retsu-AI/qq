@@ -155,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0061. Reserve here before opening a PR that adds an ADR.
+Next free number: 0062. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -678,3 +678,38 @@ Recorder review reproduces materially different included soak fixtures across ea
 ### 2026-10-14 — AC3/main schema integration and G0 reservation shift
 
 Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
+
+### 2026-10-14 — AB2 exact tool-turn projection ownership
+
+- Reserve ADR-0061 for the durable model-facing tool projection barrier.
+- AB2 additionally owns `runtime/events.rs`, `sessions/{execution,streaming,
+  store,transcript}.rs`, the store schema and projection tests for bounded
+  exact projected replies/correction notice persisted before the next request.
+- AB2 introduces schema 48 after receipt schema 47. AB5's notice-only step
+  moves to schema 49. Descriptor 15 records explicit strict projection
+  identity while retaining descriptor 13/14 canonical domains.
+- Root remains sole writer; store/identity/output integration requires
+  independent review and fresh qualification before any push.
+
+### 2026-10-14 — AB2 projection version reservation correction
+
+- Projection storage is schema49, following accepted receipt schema47. Schema48
+  is already used by the published experimental AB5 notice build and is refused
+  by the AB2 reader, whose codec cannot decode those notices.
+- The final AB5 reader is schema50 and must migrate experimental48 and projection49
+  while retaining the root notice codec. Descriptor15 remains the projection identity.
+
+- AB2 also owns the synthetic seed in `sessions.rs` and context/replay test
+  fixtures so they explicitly identify the projector under test. These fixture
+  identities are not evidence assigning a policy to unversioned stored history.
+
+- AB2 owns root `src/runtime.rs` error translation for the new unresolved replay
+  error, preserving its actionable recovery message in server responses.
+
+- AB2 additionally owns `sessions/{claim,compaction,settlement}.rs` constructor
+  integration to isolate unresolved replay to its reservation, rather than failing
+  the shared scheduler. Existing fatal persistence/codec handling stays intact.
+
+- AB2 owns `runtime/checkpoint.rs` for shared feedback/correction-notice bounds.
+  Checkpoint-enabled tool history without the exact barrier fails only its
+  reservation; recorded descriptor identity avoids per-turn archive scans.

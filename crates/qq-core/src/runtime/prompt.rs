@@ -32,6 +32,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// 19 → 20 adds action and exploration conventions, built-in mapping, nested
 /// instruction discovery and a header naming present read tools (AB2).
 /// 20 → 21 states actual read-only, unattended and declared-tool authority (AB4).
+/// 21 → 22 removes write-child guidance from read-only delegation and freezes
+/// the restricted spawn declaration to its actual authority (AB4).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///

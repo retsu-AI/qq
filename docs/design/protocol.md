@@ -273,7 +273,18 @@ The process executor's receipt commits with its result and finished event;
 historical rows remain NULL and cannot qualify execution effects. No wire
 shape changes. Older binaries refuse the upgraded store at open.
 
-Schema 48 adds the replay value `root_stall_report` through a version-only
+Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
+2 MiB. It commits the exact ordered model-facing tool replies and optional
+correction notice before the next provider request. The internal barrier adds
+no wire event. Descriptor 15 records the strict projector policy; historical
+13/14 encodings remain unchanged. Known pre-AB2 histories use their original
+projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
+without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
+experimental schema-48 AB5 build because it lacks that build's root-notice
+codec. The schema50 reader migrates both experimental48 and projection49,
+adding projection storage for48 while retaining the root-notice codec.
+
+Schema 50 adds the replay value `root_stall_report` through a version-only
 migration. Roots receive an action-oriented, authority-neutral notice;
 historical `stall_report` wording remains byte-identical and children retain
 it. Older readers refuse the new store at open before session assembly.
