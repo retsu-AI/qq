@@ -3303,6 +3303,24 @@ fn deleting_the_shown_session_moves_to_its_neighbour() {
 }
 
 #[test]
+fn late_snapshot_replay_keeps_the_only_deleted_session_unfocused() {
+    let mut app = App::new(TuiOptions::default());
+    let initial = snapshot();
+    let deleted = initial.sessions[0].id;
+    let late = initial.clone();
+    app.apply_snapshot(initial);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        deleted,
+        SessionEvent::SessionDeleted { session_id: deleted },
+    )));
+    assert_eq!(app.focused(), None);
+    app.apply_snapshot(late);
+    assert!(app.sessions.is_empty());
+    assert_eq!(app.focused(), None, "replayed deletion clears surface focus");
+}
+
+#[test]
 fn the_mouse_wheel_scrolls_the_transcript_from_anywhere_on_screen() {
     use crossterm::event::MouseEvent;
     let (mut app, _, _) = two_session_app();
