@@ -3124,11 +3124,34 @@ fn delayed_background_receipt_replay_does_not_submit_another_draft() {
     app.apply_client_update(ClientUpdate::Event(finish(4, second_run)));
     assert_eq!(app.sessions[&other].drafts, ["third"]);
     let unread = app.sessions[&other].unread;
-    let effects = app.apply_snapshot(response);
+    let effects = app.apply_snapshot(response.clone());
     assert_eq!(app.focused(), Some(first));
     assert_eq!(app.sessions[&other].drafts, ["third"]);
     assert_eq!(app.sessions[&other].unread, unread);
     assert!(effects.requests().next().is_none());
+    let mut latest_body = body_for(&idle, "other body");
+    latest_body.runs.push(
+        serde_json::from_value(serde_json::json!({
+            "id":second_run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+            "estimated_cost_usd_nanos":250,"correlation":{}
+        }))
+        .unwrap(),
+    );
+    let mut latest = snapshot();
+    latest.cursor = fixtures::cursor(4);
+    latest.focused = None;
+    latest.included = vec![latest_body];
+    app.apply_snapshot(latest);
+    assert_eq!(
+        app.sessions[&other].runs[&second_run].cost_usd_nanos,
+        Some(250)
+    );
+    app.apply_snapshot(response);
+    assert_eq!(
+        app.sessions[&other].runs[&second_run].cost_usd_nanos,
+        Some(250)
+    );
+    assert_eq!(app.sessions[&other].drafts, ["third"]);
 }
 
 #[test]
