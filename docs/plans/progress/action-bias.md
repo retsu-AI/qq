@@ -1274,3 +1274,16 @@ newest last.
   historical fixtures stay unchanged. Independent integration review approves
   immutable image-manifest propagation and frozen child authority; full gates
   now run against the corrected immutable source.
+
+### 2026-10-14 — AB4 immutable verified-context qualification
+
+- Immutable `2f061eccc285687365faf8eb054ded9a1cbca62d`: fresh workspace
+  passes 2,393 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source remained clean and unchanged throughout the run.
+- Receipts: `target/qq-perf/ab4-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Current 14/prompt 22 and historical 13/prompt
+  20–22 digests pass. Independent integration review approves immutable
+  manifest propagation and frozen read-only child declarations.
+- Nondraft publication follows; fresh hosted/Codex and named performance
+  gates remain open and are not waived by local qualification.
