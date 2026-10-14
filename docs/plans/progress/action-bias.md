@@ -854,3 +854,10 @@ newest last.
   proven bound-rejection status. No over-bound envelope enters Rust.
 - Eight focused AB6 fixtures pass, including all three typed-envelope
   regressions. Independent final review and immutable full gates next.
+
+- Combined immutable source 38b3a374 passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab5-2026-10-14/helper-discovery-notice-gate-{0,1,2,3}.log.
+  Independent notice-documentation/integration review approves; exact SQL
+  fixture and 24 docs-truth tests pass. Hosted review and matched performance
+  remain open; no deployment or completed observation window is claimed.
