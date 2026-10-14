@@ -3557,3 +3557,88 @@ fn ab5_schema_forty_five_migrates_once_to_forty_eight() {
         );
     }
 }
+
+#[test]
+fn ab5_schema_forty_seven_notice_migration_preserves_structure_and_store_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, store_id) = open_database(&path).unwrap();
+    let structure = connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value='47' WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, reopened_id) = open_database(&path).unwrap();
+        assert_eq!(reopened_id, store_id);
+        let current = connection
+            .prepare(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            current, structure,
+            "notice migration must not change receipt or accounting structure"
+        );
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "48");
+    }
+}
+
+#[test]
+fn ab5_schema_forty_eight_cannot_hide_a_missing_execution_receipt_column() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE tool_calls DROP COLUMN execution_context_json",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "48");
+}

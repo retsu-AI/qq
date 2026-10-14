@@ -1359,3 +1359,8 @@ newest last.
   and now receive RootStallReport. Legacy child wording remains unchanged.
 - PR remains nondraft. Parent/child gates, old-reader refusal proof and fresh
   hosted/Codex review follow; no unqualified source is being pushed.
+
+- Added schema-47→48 structure/store-identity idempotency regression and
+  schema-48 missing-receipt-column rejection. Updated the plan's shared-file
+  schema boundary to 47→48, matching its acceptance row. These fixtures still
+  await execution after parent qualification.

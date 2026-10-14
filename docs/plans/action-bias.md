@@ -539,7 +539,7 @@ bypass is authorized by this plan.
 | `autonomous-core.md` AC4 | Count novelty over AB1's read classification; no change requested | One definition of a read |
 | `tool-layer.md` | AB2 and AB3 edit built-in descriptions and `read_file` defaults; T13's arms use the accepted runtime's current identity; historical 19/20 label only the AB2 treatment | Owner of built-in contracts |
 | `token-efficiency.md` TE3, `supervised-delegation.md` D6b | Research § Delegation dominates wall time: 145 vs 24 min and 73 % of reads in children. Use as TE3 input; this plan does not change delegation defaults | Owners of delegation economics |
-| `progress/root.md` | ADR-0059 reservation; `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md` rows; at AB5, store schema 45 → 46 (version-only) | Shared files |
+| `progress/root.md` | ADR-0059 reservation; `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md` rows; at AB5, store schema 47 → 48 (version-only, after AC3 accounting and AB1 receipts) | Shared files |
 
 ## Risks
 
