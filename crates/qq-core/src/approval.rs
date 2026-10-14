@@ -857,6 +857,42 @@ pub(crate) fn evaluate(
 mod tests {
 
     #[test]
+    fn ab1_configured_helpers_and_quoted_literals_have_correct_verdicts() {
+        for (command, expected) in [
+            ("git status", false),
+            ("git diff --stat", false),
+            ("git -c core.fsmonitor=false status", true),
+            ("git -C sub -c core.fsmonitor=false diff --stat", true),
+            ("rg needle f", false),
+            ("rg --no-config 'foo(bar)' f.rs", true),
+            ("rg --no-config '$#<>\\' f.rs", true),
+            ("rg --no-config --pre=./mutate x f", false),
+            ("fd -l", false),
+            ("fd --list-details", false),
+            ("file -Sz sample.Z", false),
+            ("file --uncompress sample.Z", false),
+        ] {
+            assert_eq!(
+                super::read_only_shell_command(command),
+                expected,
+                "{command}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab1_cmd_separators_and_native_sort_output_are_work() {
+        for command in [
+            "echo 'x & cargo fmt & echo x'",
+            "sort input.txt /o output.txt",
+            "echo %MUTATING_COMMAND%",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
     fn ab1_read_scan_bounds_and_uncertain_shell_syntax() {
         assert!(super::read_only_shell_command(&format!(
             "echo {}",
