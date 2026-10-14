@@ -211,3 +211,7 @@ newest last.
   digest, tool-schema digest and two delegation prompts. Updated their
   expected v20 identities/text, including the negative read-child assertion;
   no production behavior was changed to satisfy them. Requalification next.
+- Third workspace attempt passed core behavior but failed five TUI ANSI
+  assertions under inherited `NO_COLOR=1`. The same compiled binary passes
+  all render tests (6) and highlighted-frame test (1) with NO_COLOR removed.
+  Re-run full gates with that test environment; no TUI code change needed.
