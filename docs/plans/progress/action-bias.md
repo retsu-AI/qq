@@ -167,3 +167,18 @@ newest last.
 - Independent final review approved the corrections and fixed-runtime paid
   comparator contract. Docs truth: 23 passed; fmt/diff checks passed.
   Production source unchanged from the previously qualified parent.
+
+### 2026-10-14 — fifth hosted plan review corrections
+
+- Added explicit find file-list output and sort compressor exclusions,
+  inspection-only interactive authority, and terminal read offset bounds.
+  AB1/AB3/AB4 source regressions reproduce the corresponding cases.
+- Preview exclusion now tests JSON boolean true only and handles malformed
+  JSON explicitly. Exact-query fixture retains four failures/five calls
+  while excluding the actual preview; corrected fixed-window baseline remains
+  205/1,222. Evidence `target/qq-perf/ab-plan-2026-10-14/malformed-preview.json`.
+- Updated concrete helper rules from fresh AB1 review; independent final
+  review and documentation checks pending. No gates waived.
+- Independent review approved all five plan corrections. Docs truth 23
+  passed; exact malformed-preview fixture and baseline recount passed.
+  Production parent remains unchanged from its qualified source.
