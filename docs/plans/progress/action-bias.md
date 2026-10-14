@@ -57,3 +57,10 @@ newest last.
   108 below-root editing runs, 44 instruction searches, 9 runs over one.
   Defined denominators, zero regression tolerance, window boundaries and
   unqualified cases. AB6 remains pending seven days after AB1–AB4 merge.
+- Independent read-only review confirmed the eight corrections and caught
+  one further write alias: `sort --output=out f` must count as work. Added
+  separate and attached short/long output flag verdict cases to AB1.
+- Documentation truth tests: 23 passed. Supplemental SQL also executed
+  through the documented Bash/sqlite3 commands; outputs match the counts
+  above. Relative links and `git diff --check` pass. Workspace gates running
+  before push; no runtime code changed in this correction.

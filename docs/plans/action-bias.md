@@ -116,7 +116,8 @@ The rule:
    - `sed` when `-n` is present, no flag contains `i` or is
      `--in-place`, and the script has no `w`, `W` or `e` command;
    - `nl`, `cut`;
-   - `sort` without `-o`, and `uniq` with at most one operand;
+   - `sort` without `-o` (including attached `-oFILE`), `--output` or
+     `--output=FILE`, and `uniq` with at most one operand;
    - `git -C DIR` followed by a read under the same rules, and
      `git worktree list`.
 
@@ -131,7 +132,7 @@ The rule:
 | `cd x && grep foo f > out` | no |
 | `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
 | `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |
-| `sort -o f.rs f.rs`, `uniq in out` | no |
+| `sort -o f.rs f.rs`, `sort -oout f.rs`, `sort --output=out f.rs`, `sort --output out f.rs`, `uniq in out` | no |
 | `git branch --delete topic`, `git branch --move old new`, `git branch --copy old new`, `git branch --force topic` | no |
 | `find . -name '*.orig' -delete`, `git branch -D topic`, `git diff --output=x` | no (read today; fixed) |
 | `grep x f` newline `cargo fmt`, `cat $(cargo fmt)` | no (read today; fixed) |
