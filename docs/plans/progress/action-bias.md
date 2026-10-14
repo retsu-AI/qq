@@ -785,3 +785,63 @@ newest last.
   target/qq-perf/ab3-2026-10-14/masked-cursor-final-gate-{0,1,2,3}.log.
   Ten focused masked-read regressions pass; independent repair and integration
   reviews approve. Matched dispatch/output performance remains open.
+### 2026-10-14 — trailing reads, substitutions and explicit environments
+
+- Hosted review identifies trailing-semicolon and print-substitution reads
+  wrongly treated as work, and explicit passthrough environments that can
+  mutate via process initialization. Test-first cases cover both shell/exec
+  environments, safe substitutions and incomplete/mutating script exclusions.
+- Nonempty requested environments must count as work without changing
+  execution authority; AB6 must retain that fact through export/recount.
+
+
+- Safe sed fields/flags and trailing separators are implemented without
+  accepting incomplete pipelines/conjunctions or write/execute flags. Ten
+  prior plus two new focused regressions pass; an additional duplicate/escaped
+  environment fixture preserves the original command preview. Both independent
+  source reviews approve; full integration gates follow.
+- Environment inspection runs only for read candidates and does not alter
+  approval input. The zero-sized ignored-element vector does not allocate
+  element storage. Parsing overhead still needs matched measurement.
+### 2026-10-14 — failed discovery starts and environment-aware reads
+
+- The repeated-root gate counts every matching start, including failed
+  attempts, while completed pre-edit coverage stays independent. A two-root
+  failed/retried fixture corrects 2 starts/0 repeats to 3 starts/1 repeat;
+  fixed-window baseline remains 108 roots, one scope/start, zero repeats.
+- Qualification derives historical root role from persisted depth; a
+  read-only check finds zero orphaned child runs in the fixed baseline.
+- AB1's narrow sed substitutions/trailing semicolons are reads; explicit
+  requested process environments disqualify reads without changing authority.
+  AB6 must preserve that status. Performance and deployed observation remain open.
+
+
+- Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
+  review approves. failed-discovery-starts.json records the executable SQL
+  fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Immutable integrated source 8f9c4253 passes 2,285 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
+  Thirteen focused classifier fixtures pass in the workspace run; independent
+  source reviews approve. Matched hot-path performance remains open.
+- Proactive scope review found first-page cursor placeholders were omitted
+  from start counts. The query now matches typed omitted/null values and all
+  runtime placeholders with Unicode whitespace trim and ASCII case folding.
+  A padded-placeholder fixture counts 14 starts across two roots with one
+  repeated root; baseline remains one start. Other cursor values require
+  exact prior-next provenance or leave qualification open.
+  Evidence: placeholder-discovery-starts.json; independent design review.
+
+
+- Placeholder docs truth passes 23 tests; formatting and diff checks pass.
+  Independent final review approves typed/trimmed cursor-start semantics and
+  the explicit provenance requirement for all other cursor records.
+
+
+- Immutable integrated source b937a2b7 passes 2,304 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  AB2 production behavior is unchanged by the qualified AB1/environment and
+  scope-query integration. Matched prompt/catalog/search performance stays open.

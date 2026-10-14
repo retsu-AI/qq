@@ -433,6 +433,17 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
         #[serde(default)]
         cwd: Option<String>,
     }
+    #[derive(Deserialize)]
+    struct RequestedEnvironment {
+        #[serde(default)]
+        env: Vec<serde::de::IgnoredAny>,
+    }
+    // Keep command/cwd parsing authoritative for approval. This extra view
+    // only disqualifies read candidates, including malformed/duplicate env.
+    let environment_is_empty = || match serde_json::from_str::<RequestedEnvironment>(arguments) {
+        Ok(environment) => environment.env.is_empty(),
+        Err(_) => false,
+    };
     if name == "exec" {
         return match serde_json::from_str::<ExecArguments>(arguments) {
             Ok(arguments) => ToolClass::Shell {
@@ -450,6 +461,7 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
                             *slot = arg;
                         }
                         read_only_argv(&arguments.program, &args[..arguments.args.len()])
+                            && environment_is_empty()
                     },
                 command: exec_command_line(&arguments.program, &arguments.args),
                 cwd: arguments.cwd,
@@ -463,7 +475,7 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
-            read_only: read_only_shell_command(&arguments.command),
+            read_only: read_only_shell_command(&arguments.command) && environment_is_empty(),
             command: arguments.command,
             cwd: arguments.cwd,
         },
@@ -578,6 +590,7 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
     let mut index = 0;
     let mut quote = None;
     let mut first = true;
+    let mut last_connector = 0;
     while index < bytes.len() {
         let byte = bytes[index];
         match quote {
@@ -600,6 +613,7 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                     return false;
                 }
                 first = false;
+                last_connector = byte;
                 index +=
                     usize::from(matches!(byte, b'|' | b'&') && bytes.get(index + 1) == Some(&byte));
                 start = index + 1;
@@ -608,7 +622,110 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
         }
         index += 1;
     }
-    quote.is_none() && reads(command[start..].trim(), first, 0)
+    quote.is_none()
+        && if command[start..].trim().is_empty() {
+            last_connector == b';'
+        } else {
+            reads(command[start..].trim(), first, 0)
+        }
+}
+
+/// A bounded, literal sed program containing only addresses, printing and
+/// pattern-space substitutions. Delimiters are parsed before command separators.
+fn read_only_sed_script(script: &str) -> bool {
+    fn field(bytes: &[u8], position: &mut usize, delimiter: u8) -> bool {
+        while let Some(&byte) = bytes.get(*position) {
+            *position += 1;
+            if byte == delimiter {
+                return true;
+            }
+            if byte == b'\\' {
+                if *position == bytes.len() {
+                    return false;
+                }
+                *position += 1;
+            }
+        }
+        false
+    }
+
+    let bytes = script.as_bytes();
+    let mut position = 0;
+    let mut seen = false;
+    loop {
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        if position == bytes.len() {
+            return seen;
+        }
+        for address in 0..2 {
+            match bytes.get(position) {
+                Some(b'0'..=b'9') => {
+                    while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+                        position += 1;
+                    }
+                }
+                Some(b'$') => position += 1,
+                Some(b'/') => {
+                    position += 1;
+                    if !field(bytes, &mut position, b'/') {
+                        return false;
+                    }
+                }
+                _ if address == 0 => break,
+                _ => return false,
+            }
+            while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                position += 1;
+            }
+            if address == 0 && bytes.get(position) == Some(&b',') {
+                position += 1;
+                while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                    position += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        match bytes.get(position) {
+            Some(b'p') => position += 1,
+            Some(b's') => {
+                position += 1;
+                let Some(&delimiter) = bytes.get(position) else {
+                    return false;
+                };
+                if !delimiter.is_ascii() || delimiter.is_ascii_whitespace() || delimiter == b'\\' {
+                    return false;
+                }
+                position += 1;
+                if !field(bytes, &mut position, delimiter)
+                    || !field(bytes, &mut position, delimiter)
+                {
+                    return false;
+                }
+                while let Some(&flag) = bytes.get(position) {
+                    if flag == b';' || flag.is_ascii_whitespace() {
+                        break;
+                    }
+                    if !matches!(flag, b'p' | b'g' | b'i' | b'I' | b'm' | b'M' | b'0'..=b'9') {
+                        return false;
+                    }
+                    position += 1;
+                }
+            }
+            _ => return false,
+        }
+        seen = true;
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        match bytes.get(position) {
+            None => return true,
+            Some(b';') => position += 1,
+            _ => return false,
+        }
+    }
 }
 
 fn read_only_argv(program: &str, args: &[&str]) -> bool {
@@ -742,33 +859,7 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
             let mut expect_script = false;
             for arg in args {
                 if expect_script || (!script && !arg.starts_with('-')) {
-                    // Understood print scripts: numeric addresses/ranges,
-                    // optionally several commands. Other scripts are work.
-                    if !arg.split(';').all(|part| {
-                        let part = part.trim();
-                        let Some(address) = part.strip_suffix('p') else {
-                            return false;
-                        };
-                        let mut position = 0;
-                        let bytes = address.as_bytes();
-                        while position < bytes.len() {
-                            if bytes[position] == b'/' {
-                                let Some(end) =
-                                    bytes[position + 1..].iter().position(|b| *b == b'/')
-                                else {
-                                    return false;
-                                };
-                                position += end + 2;
-                            } else if bytes[position].is_ascii_digit()
-                                || matches!(bytes[position], b',' | b' ' | b'$')
-                            {
-                                position += 1;
-                            } else {
-                                return false;
-                            }
-                        }
-                        true
-                    }) {
+                    if !read_only_sed_script(arg) {
                         return false;
                     }
                     script = true;
@@ -1211,6 +1302,109 @@ mod tests {
         ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
+    }
+
+    #[test]
+    fn ab1_trailing_separators_and_substitutions_preserve_read_verdicts() {
+        for command in [
+            "grep x f;",
+            "grep x f;  ",
+            "cat f; grep x f;",
+            "cd x; grep x f;",
+            "sed -n 's/foo/bar/p' f",
+            "sed -n 's#foo#bar#gp' f",
+            "sed -n '1,$s/foo/bar/p' f",
+            "sed -n 's/foo;bar/baz;p/p' f",
+            "sed -n 's/foo\\/bar/baz/p' f",
+            "sed -n -e 's/foo/bar/p' -e '2p' f",
+        ] {
+            assert_eq!(
+                super::read_only_shell_command(command),
+                !cfg!(windows) || !command.contains('\''),
+                "{command}"
+            );
+        }
+        for command in [
+            ";",
+            "grep x f;;",
+            "grep x f &&",
+            "grep x f |",
+            "grep x f ||",
+            "sed -n 's/foo/bar/ep' f",
+            "sed -n 's/foo/bar/pe' f",
+            "sed -n 's/foo/bar/w out' f",
+            "sed -n 's/foo/bar/p; e touch out' f",
+            "sed -n -e 's/foo/bar/p' -e 's/foo/bar/e' f",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_explicit_process_environments_are_work_without_changing_authority() {
+        for tool in ["shell", "exec"] {
+            for env in [
+                serde_json::json!(["LD_PRELOAD"]),
+                serde_json::json!(["LANG"]),
+                serde_json::json!(42),
+            ] {
+                let mut args = if tool == "shell" {
+                    serde_json::json!({"command":"pwd","cwd":"."})
+                } else {
+                    serde_json::json!({"program":"pwd","cwd":"."})
+                };
+                args["env"] = env;
+                let class = super::shell_class(tool, &args.to_string());
+                let super::ToolClass::Shell {
+                    read_only,
+                    command,
+                    cwd,
+                } = class
+                else {
+                    panic!("shell class");
+                };
+                assert!(!read_only, "{tool} {args}");
+                assert_eq!(command, "pwd", "approval preview must be unchanged");
+                assert_eq!(cwd.as_deref(), Some("."));
+            }
+            let args = if tool == "shell" {
+                r#"{"command":"pwd","env":[]}"#
+            } else {
+                r#"{"program":"pwd","env":[]}"#
+            };
+            assert!(matches!(
+                super::shell_class(tool, args),
+                super::ToolClass::Shell {
+                    read_only: true,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn ab1_duplicate_and_escaped_environment_fields_preserve_the_preview() {
+        for arguments in [
+            r#"{"command":"pwd","env":[],"env":["LD_PRELOAD"]}"#,
+            r#"{"command":"pwd","\u0065nv":["LD_PRELOAD"]}"#,
+        ] {
+            let super::ToolClass::Shell {
+                command, read_only, ..
+            } = super::shell_class("shell", arguments)
+            else {
+                panic!("shell class");
+            };
+            assert_eq!(command, "pwd");
+            assert!(!read_only);
+        }
+        let super::ToolClass::Shell {
+            command, read_only, ..
+        } = super::shell_class("exec", r#"{"program":"pwd","env":[],"env":["LD_PRELOAD"]}"#)
+        else {
+            panic!("shell class");
+        };
+        assert_eq!(command, "pwd");
+        assert!(!read_only);
     }
 
     #[test]
