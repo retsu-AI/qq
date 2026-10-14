@@ -538,3 +538,9 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
   Production search/walk behavior is unchanged. Runtime prompt tests stay
   in `runtime/prompt.rs`; existing prompt assertions in `lib.rs` are updated
   with v20, preserving historical compatibility evidence.
+
+### 2026-10-14 — AB2 headless prompt identity assertion
+
+AB2 owns the `src/headless.rs` JSONL regression's expected prompt version
+19 → 20. Workspace test exposed the additional public identity assertion;
+no headless production behavior changes.

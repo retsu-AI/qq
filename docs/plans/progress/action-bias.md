@@ -199,3 +199,11 @@ newest last.
 - Baseline plan compilation: 29,242 ns/iteration (2,000 iterations), digest
   2,562 ns/iteration (20,000); candidate and noise qualification remain open.
   Workspace gates are next; nothing in this slice has been pushed.
+- First workspace gate found one stale headless JSONL prompt-version
+  assertion (expected 19, observed 20); reserved its test-only path in the
+  root ledger and updated the expected identity. Gate rerun remains pending.
+- Corrected headless regression passes (1 test). Thirty alternating A/B
+  and same-binary A/A pairs recorded in `paired-plan-compile.json`: paired
+  compile median +2.16%, A/A +0.82% (pair range -4.54% to +7.64%). Concurrent
+  builds invalidate quiet-host qualification; these are diagnostic samples,
+  not a waived performance gate. Initial candidate 30,239 ns/iteration.
