@@ -668,6 +668,20 @@ mod tests {
 
     #[test]
     fn a_bare_ignore_is_reported_and_a_reasoned_one_is_not() {
+        for reason in ["", "   "] {
+            let source = format!("#[ignore = \"{reason}\"]\nfn skipped() {{}}\n");
+            assert!(
+                rules(
+                    &[Source {
+                        path: "tests/skipped.rs",
+                        text: Some(&source)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::IgnoreNeedsReason)
+            );
+        }
         let text = "#[test]\n#[ignore]\nfn a() {}\n#[ignore = \"soak\"]\nfn b() {}\n";
         let files = [Source {
             path: "crates/qq-x/tests/soak.rs",
