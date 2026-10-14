@@ -479,3 +479,8 @@ newest last.
   three ignored. The remaining failure was the second builtin declaration
   golden retaining the old description identity. Update it to measured
   f34eb03a…; schemas remain unchanged. Full immutable gates rerun next.
+
+- Immutable integrated sourcec7c0bc41 passes workspace gates:2,290 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab2-2026-10-14/discovery-qualified-gate-{0,1,2,3}.log.
+  Newer parent documentation integration and matched performance remain open.
