@@ -489,3 +489,13 @@ newest last.
 - Placeholder docs truth passes 23 tests; formatting and diff checks pass.
   Independent final review approves typed/trimmed cursor-start semantics and
   the explicit provenance requirement for all other cursor records.
+
+
+### 2026-10-14 — output-only shell reads and workspace temporaries
+
+- Focused regressions reproduce Work for sed line-number printing/uniq
+  stdout and Read for workspace sort temporary-directory options. Receipts
+  extra-output-red.log and sort-temporary-red.log. Accept output-only `=`
+  sed scripts and uniq's second-operand stdout sentinel; reject sort's
+  temporary-directory options, including clusters and long abbreviations.
+  Approval authority remains unchanged. Full integration/performance open.
