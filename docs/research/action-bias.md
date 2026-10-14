@@ -288,7 +288,7 @@ start="2026-09-13"
 end="2026-10-13"
 # Qualification is only valid after this fixed observation cutoff.
 q "SELECT datetime('$end', '+1 day') cutoff_utc, strftime('%s','now') >= strftime('%s','$end','+1 day') ready;"
-RR_STARTS="SELECT r.id, s.parent_id IS NOT NULL child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
+RR_STARTS="SELECT r.id, s.depth <> 0 child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
     WHERE r.kind = 'prompt' AND r.started_at_ms >= strftime('%s','$start') * 1000
       AND r.started_at_ms < strftime('%s','$end') * 1000"
 RR="$RR_STARTS AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000"
@@ -425,7 +425,7 @@ q "WITH rr AS ($RR), paths AS (
      GROUP BY p.run_id),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
-     WHERE t.name = 'search' AND t.state = 'completed' AND t.turn_ordinal < q.first_edit_turn
+     WHERE t.name = 'search' AND t.turn_ordinal < q.first_edit_turn
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
        AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
        AND json_type(t.arguments_json, '\$.regex') = 'true'
@@ -447,7 +447,9 @@ below the workspace. Targets deeper than 64 directory components additionally
 use justified target ancestors at each 64-component boundary, with
 include_ignored=true. These are the permitted discovery roots. Arbitrary
 per-directory paths do not qualify as distinct-root exceptions. Cursor
-pages continue one discovery; the scope query counts only new starts,
+pages continue one discovery; the scope query counts all matching new starts,
+including failed, denied or interrupted attempts. A completed pre-edit result
+and full applicable coverage remain separate requirements;
 while the raw diagnostic above retains physical call counts.
 
 Qualification shell-read shares must use AB6.1's bounded export/recount with
@@ -490,3 +492,13 @@ injected instructions require independent transcript evidence. A fixture
 rejects NOTAGENTS, literal and string-true regex fields, and continuation
 pages while accepting the exact anchored query with boolean regex=true.
 Evidence: target/qq-perf/ab-plan-2026-10-14/anchored-scope-query.json.
+
+
+The all-starts scope query includes failed discovery attempts. Its fixed-window
+schema-45 baseline remains 108 roots, one scope/start and zero repeats. A failed
+then successful start at `.`, plus a successful start at `sub`, records two
+scopes, three starts, one repeated scope and one affected run; the former
+completed-only query incorrectly returned two starts and zero repeats.
+Qualification uses persisted session depth for historical root/child role;
+there are no orphaned child runs in this fixed baseline window. Evidence:
+target/qq-perf/ab-plan-2026-10-14/failed-discovery-starts.json.

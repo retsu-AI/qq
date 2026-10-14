@@ -648,3 +648,44 @@ newest last.
   target/qq-perf/ab2-2026-10-14/long-cursor-final-gate-{0,1,2,3}.log.
   Nineteen focused AB2 fixtures pass; independent source and schema review
   approves. Matched performance and final hosted review remain open.
+### 2026-10-14 — trailing reads, substitutions and explicit environments
+
+- Hosted review identifies trailing-semicolon and print-substitution reads
+  wrongly treated as work, and explicit passthrough environments that can
+  mutate via process initialization. Test-first cases cover both shell/exec
+  environments, safe substitutions and incomplete/mutating script exclusions.
+- Nonempty requested environments must count as work without changing
+  execution authority; AB6 must retain that fact through export/recount.
+
+
+- Safe sed fields/flags and trailing separators are implemented without
+  accepting incomplete pipelines/conjunctions or write/execute flags. Ten
+  prior plus two new focused regressions pass; an additional duplicate/escaped
+  environment fixture preserves the original command preview. Both independent
+  source reviews approve; full integration gates follow.
+- Environment inspection runs only for read candidates and does not alter
+  approval input. The zero-sized ignored-element vector does not allocate
+  element storage. Parsing overhead still needs matched measurement.
+### 2026-10-14 — failed discovery starts and environment-aware reads
+
+- The repeated-root gate counts every matching start, including failed
+  attempts, while completed pre-edit coverage stays independent. A two-root
+  failed/retried fixture corrects 2 starts/0 repeats to 3 starts/1 repeat;
+  fixed-window baseline remains 108 roots, one scope/start, zero repeats.
+- Qualification derives historical root role from persisted depth; a
+  read-only check finds zero orphaned child runs in the fixed baseline.
+- AB1's narrow sed substitutions/trailing semicolons are reads; explicit
+  requested process environments disqualify reads without changing authority.
+  AB6 must preserve that status. Performance and deployed observation remain open.
+
+
+- Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
+  review approves. failed-discovery-starts.json records the executable SQL
+  fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Immutable integrated source 8f9c4253 passes 2,285 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
+  Thirteen focused classifier fixtures pass in the workspace run; independent
+  source reviews approve. Matched hot-path performance remains open.
