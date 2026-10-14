@@ -188,7 +188,14 @@ xtask/
   attention, refocus, snapshot request, draft submission, session removed)
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
-  the network, the clock, or rendering state. Surfaces supply a
+  the network, the clock, or rendering state.
+  Views retain the observed foreground run identity across idle summaries,
+  keeping late identified internal completions out of attention and draft
+  handoff. Body snapshots preserve observed timing and priced-turn ordinals;
+  replay charges each ordinal once. Terminal run cost comes from the run
+  snapshot, not the session total that also includes compaction spend.
+  Focused completion requests a body refresh; its terminal cost remains
+  unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
   pins the projection of every `event_*` wire fixture, natively and on

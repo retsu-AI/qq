@@ -392,6 +392,19 @@ impl SessionStore {
             .rev()
             .collect();
         if let Some(previous) = previous {
+            if view.foreground_run_id.is_none() {
+                view.foreground_run_id = previous.foreground_run_id;
+            }
+            for (run_id, observed) in &previous.runs {
+                if let Some(stats) = view.runs.get_mut(run_id) {
+                    stats.started_at_ms = observed.started_at_ms;
+                    stats.first_token_at_ms = observed.first_token_at_ms;
+                    stats.finished_at_ms = observed.finished_at_ms;
+                    stats.turns = observed.turns;
+                    stats.live_cost_usd_nanos = observed.live_cost_usd_nanos;
+                    stats.owned_step |= observed.owned_step;
+                }
+            }
             view.last_focused = previous.last_focused;
             view.drafts = previous.drafts;
             // Live tool output for calls this body no longer reports as
@@ -684,7 +697,7 @@ pub struct RunStats {
     /// Tool calls the run made, counted as their finished events arrive or
     /// from the loaded body.
     pub tool_calls: u32,
-    /// Estimated cost of the run, when the accounting delta was observable.
+    /// Authoritative aggregate cost from the run snapshot; unknown until loaded.
     pub cost_usd_nanos: Option<u64>,
     /// Highest model turn committed so far, from `ModelTurnCompleted`; zero
     /// for historical runs loaded from a snapshot.
@@ -696,7 +709,7 @@ pub struct RunStats {
     /// it. Shown only when it differs from the session's selected model.
     pub resolved_route: Option<String>,
     /// Cost accumulated from committed turns while the run is active. Shown
-    /// until `RunFinished` settles `cost_usd_nanos` from the session totals.
+    /// while active; never substituted for an unknown terminal aggregate.
     pub live_cost_usd_nanos: Option<u64>,
 }
 
@@ -797,6 +810,9 @@ pub struct ApprovalEscalation {
 pub struct SessionView {
     pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
+    /// The last foreground slot identity, retained across idle summaries so
+    /// late internal completions remain bookkeeping after summary-only load.
+    pub foreground_run_id: Option<RunId>,
     /// `Some` only while the body is warm; `None` means summary-only.
     pub messages: Option<Vec<MessageSnapshot>>,
     pub tool_calls: Option<Vec<ToolCallSnapshot>>,
@@ -875,9 +891,11 @@ impl SessionView {
         loaded_through: u64,
     ) -> Self {
         let activity = summary.active_run_id.zip(summary.activity);
+        let foreground_run_id = summary.active_run_id;
         Self {
             side_questions: Vec::new(),
             summary,
+            foreground_run_id,
             messages: None,
             tool_calls: None,
             context_window,
@@ -937,6 +955,9 @@ impl SessionView {
     /// summary carries it or the run changed; a live event already applied
     /// for the same run is kept when the summary is silent.
     pub fn set_summary(&mut self, summary: SessionSummary, context_window: Option<u32>) {
+        if let Some(run_id) = summary.active_run_id {
+            self.foreground_run_id = Some(run_id);
+        }
         match (summary.active_run_id, summary.activity) {
             (Some(run_id), Some(activity)) => self.activity = Some((run_id, activity)),
             (Some(run_id), None) => {
