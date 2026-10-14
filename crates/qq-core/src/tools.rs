@@ -177,6 +177,106 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn self_dev_search_native_arrays_preserve_literal_results() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("lib.rs"), "needle\n").unwrap();
+        fs::write(directory.path().join("notes.md"), "needle\n").unwrap();
+        let workspace = Workspace::open(&fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","include":["*.rs"],"exclude":["*.md"]}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert_eq!(
+            result.model_text,
+            "search \"needle\" mode=content matches=1/1 files=1 scanned=1\nlib.rs\nL1: needle\n"
+        );
+    }
+
+    #[test]
+    fn self_dev_search_stringified_arrays_find_the_same_source() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("lib.rs"), "needle\n").unwrap();
+        fs::write(directory.path().join("notes.md"), "needle\n").unwrap();
+        let workspace = Workspace::open(&fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","include":"[\"*.rs\"]","exclude":"[\"*.md\"]"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert_eq!(
+            result.model_text.split_once('\n').unwrap().1,
+            "lib.rs\nL1: needle\n"
+        );
+    }
+
+    #[test]
+    fn self_dev_search_invalid_input_keeps_existing_refusals() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("lib.rs"), "needle\n").unwrap();
+        let workspace = Workspace::open(&fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let state = FileState::default();
+        for arguments in [
+            r#"{"query":"needle","include":"["}"#,
+            r#"{"query":"needle","include":"[1]"}"#,
+            r#"{"query":"needle","include":"null"}"#,
+            r#"{"query":"needle","include":"\"*.rs\""}"#,
+            r#"{"query":"needle","include":[1]}"#,
+            r#"{"query":"needle","unexpected":true}"#,
+            r#"{"query":"needle","path":".."}"#,
+            r#"{"query":"needle","include":["["]}"#,
+        ] {
+            let result = run_tool(&workspace, &state, "search", arguments);
+            assert!(
+                result.is_error,
+                "unexpected success for {arguments}: {}",
+                result.model_text
+            );
+        }
+        let bounded = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","include":"[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\"]"}"#,
+        );
+        assert!(bounded.is_error, "{}", bounded.model_text);
+    }
+
+    #[test]
+    fn self_dev_search_bad_call_then_valid_call_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("lib.rs"), "needle\n").unwrap();
+        let workspace = Workspace::open(&fs::canonicalize(directory.path()).unwrap()).unwrap();
+        let state = FileState::default();
+        let bad = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","include":"[1]"}"#,
+        );
+        assert!(bad.is_error);
+        let valid = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"needle","include":["*.rs"]}"#,
+        );
+        assert!(!valid.is_error, "{}", valid.model_text);
+        assert_eq!(
+            valid.model_text,
+            "search \"needle\" mode=content matches=1/1 files=1 scanned=1\nlib.rs\nL1: needle\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("lib.rs")).unwrap(),
+            "needle\n"
+        );
+    }
+
     fn run_tool(
         workspace: &Workspace,
         state: &FileState,
