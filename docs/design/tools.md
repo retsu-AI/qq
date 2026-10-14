@@ -89,6 +89,13 @@ the empty-selection hash). Historical runs and runs that fail before
 preparation keep no identity. Nested instruction reads stay in the durable tool
 transcript and do not retroactively change the pre-provider identity.
 
+Names discovery includes exact `AGENTS.md` and `CLAUDE.md` basenames despite
+file-level ignores inside visible directories, including contained file links.
+Directory ignores remain in force unless an explicit discovery scope uses
+`include_ignored=true`. Completed-directory scan watermarks skip only fully
+visited subtrees; a depth-limited subtree cannot suppress watermarks in later
+completed directories. Depth exclusions remain explicit in the header.
+
 ### Explicit Commands And Skills
 
 Commands and skills are optional run guidance, not ambient policy. A leading

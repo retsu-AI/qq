@@ -528,3 +528,10 @@ newest last.
   reproduces unavailable prior-read guidance. Red receipts under AB2 target.
 - Repair preserves directory ignores and names-only safe-link handling; only
   fully visited directories may advance a scan watermark. Work in progress.
+
+- Initial repairs pass 14 focused fixtures. Independent review found a depth
+  skip could suppress later empty-directory watermarks; new public fixture
+  reproduces it (one failed). A per-subtree depth-skip counter now permits
+  only completed subtrees to advance. Ignored instruction links are covered
+  alongside regular files; write-only captured declarations name creation
+  and an independently known current hash, without unavailable prior reads.

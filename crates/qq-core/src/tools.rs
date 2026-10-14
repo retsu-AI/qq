@@ -1293,6 +1293,7 @@ mod tests {
         fs::create_dir(directory.path().join("shared")).unwrap();
         fs::write(directory.path().join("shared/rules"), "instructions\n").unwrap();
         symlink("../shared/rules", directory.path().join("src/AGENTS.md")).unwrap();
+        fs::write(directory.path().join(".gitignore"), "AGENTS.md\n").unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let arguments = r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true}"#;
         let result = run_tool(&workspace, &FileState::default(), "search", arguments);
@@ -1407,6 +1408,47 @@ mod tests {
     #[test]
     fn ab2_names_scan_budget_advances_past_empty_directories() {
         let directory = tempfile::tempdir().unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_depth_skip_does_not_block_later_directory_watermarks() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut deep = directory.path().join("a");
+        for _ in 0..66 {
+            fs::create_dir(&deep).unwrap();
+            deep.push("d");
+        }
         for index in 0..search::MAX_SCAN_ENTRIES {
             fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
         }
