@@ -523,3 +523,11 @@ newest last.
   qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
   change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
   current fixed-window recount retain the baseline above.
+
+
+- Fresh immutable source 2a59cfeb passes 2,287 workspace tests (0 failures,
+  14 ignored), fmt, all-target/all-feature Clippy and build after explicitly
+  cleaning every workspace package's debug artifacts. The source remained
+  clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
+  logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
+  supersedes earlier shared-cache qualification uncertainty. Performance open.
