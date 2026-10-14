@@ -6483,7 +6483,14 @@ fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(STORE_SCHEMA_VERSION, 45);
+    let version: u16 = connection
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, STORE_SCHEMA_VERSION);
     let count: u64 = connection
         .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
         .unwrap();

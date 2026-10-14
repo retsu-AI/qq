@@ -507,3 +507,8 @@ newest last.
 - Independent production-source review approves. Parent integration, full
   immutable workspace gates, final measurements and draft publication remain
   open; no readiness or rollout acceptance is claimed.
+
+- Initial immutable workspace gate found one stale schema45 constant assertion
+  in the side-question migration fixture (980 core tests passed, one failed).
+  Verify actual reopened metadata equals the current schema instead; rerun
+  workspace gates on the corrected commit.
