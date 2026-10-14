@@ -1322,6 +1322,88 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ab2_instruction_link_pages_resume_without_following_directory_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("rules"), "instructions\n").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::create_dir(directory.path().join(name)).unwrap();
+            symlink("../rules", directory.path().join(name).join("AGENTS.md")).unwrap();
+        }
+        symlink("a", directory.path().join("directory-link")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cursor = None;
+        for (page, path) in ["a/AGENTS.md", "b/AGENTS.md", "c/AGENTS.md"]
+            .iter()
+            .enumerate()
+        {
+            let mut arguments = serde_json::json!({"query":"AGENTS.md","mode":"names","limit":1});
+            if let Some(cursor) = cursor.take() {
+                arguments["cursor"] = serde_json::Value::String(cursor);
+            }
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                &arguments.to_string(),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            let shown = result
+                .model_text
+                .lines()
+                .filter(|line| line.ends_with("/AGENTS.md"))
+                .collect::<Vec<_>>();
+            assert_eq!(shown, [*path]);
+            assert!(!result.model_text.contains("directory-link/"));
+            cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next=").map(str::to_owned));
+            assert_eq!(cursor.is_some(), page < 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_names_scan_budget_advances_past_nonmatching_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            symlink("missing", directory.path().join(format!("s{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.contains("partial=scan"), "{header}");
+        let cursor = header
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("scan prefix must produce a resumable cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial=scan"));
+    }
+
     #[test]
     fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
         let directory = tempfile::tempdir().unwrap();
@@ -1363,6 +1445,17 @@ mod tests {
         for instruction in expected {
             assert!(discovered.contains(&instruction), "missing {instruction}");
         }
+        let hint = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"RULES","case":"sensitive"}"#,
+        );
+        assert!(
+            hint.model_text.contains("case_insensitive_matches=1+"),
+            "{}",
+            hint.model_text
+        );
     }
 
     #[test]
