@@ -381,3 +381,17 @@ newest last.
   target/qq-perf/ab1-2026-10-14/configured-git-exact-exec-gate-{0,1,2,3}.log.
   Independent final read-only review approves; eight focused regressions pass.
   Matched performance remains open; no readiness claim.
+
+### 2026-10-14 — eighth hosted plan review reconciliation
+
+- Corrected Goal scope baseline to 25 starts, seven repeated roots, five runs;
+  raw argument counts remain separate and coverage remains unqualified.
+- Candidate begins after pinned AB1–AB5 main deployment and prior-writer
+  retirement, with runtime source/binary and continuity proof. Merge dates
+  and prompt version alone cannot qualify treatment. No deployment performed.
+- Public uncompiled first-poll grant regression is qualified in AB4; AB1
+  helper/exec and AB2 ignored-file/empty-directory repairs are in progress.
+
+- Independent eighth plan review approves; docs truth 23 passed. Source
+  qualification remains attached to the respective slice receipts; no
+  performance or deployed observation gate is waived.
