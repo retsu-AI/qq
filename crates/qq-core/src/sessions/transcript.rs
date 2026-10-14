@@ -428,7 +428,12 @@ fn assemble_model_context(
     // `search_history`.
     let mut turns: HashMap<String, Vec<StoredTurn>> = HashMap::new();
     let mut statement = transaction.prepare_cached(
-        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice
+        "SELECT t.run_id, t.turn_ordinal, t.assistant_content_json, t.truncated, t.notice,
+                    CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
+                          AND json_extract(r.plan_descriptor_json,'$.version') IN (13,14)
+                          AND json_extract(r.plan_descriptor_json,'$.prompt_version') BETWEEN 1 AND 19
+                          AND json_extract(r.plan_identity_json,'$.descriptor_version') = json_extract(r.plan_descriptor_json,'$.version')
+                         THEN 1 ELSE 0 END
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -450,6 +455,7 @@ fn assemble_model_context(
         }
         remaining_turn_bytes -= raw.len();
         let turn = StoredTurn {
+            legacy_projection: row.get(5)?,
             ordinal: row.get::<_, u32>(1)?,
             content_json: raw.to_owned(),
             truncated: row.get::<_, bool>(3)?,
@@ -1421,6 +1427,7 @@ pub(super) fn assembled_context_bytes(
 
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
+    pub(super) legacy_projection: bool,
     pub(super) ordinal: u32,
     pub(super) content_json: String,
     /// The provider cut the turn at its output limit; the truncation notice
@@ -1502,6 +1509,7 @@ pub(super) fn append_run_turns(
         }
     }
     for StoredTurn {
+        legacy_projection,
         ordinal: turn_ordinal,
         content_json,
         truncated,
@@ -1543,6 +1551,8 @@ pub(super) fn append_run_turns(
         // instead of poisoning the session.
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
+        let mut legacy_output =
+            legacy_projection.then(crate::tools::output::LegacyTurnOutputBudget::new);
         let mut turn_output =
             crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
                 match block {
@@ -1582,7 +1592,11 @@ pub(super) fn append_run_turns(
                                     call: tool_call_id,
                                 },
                             };
-                            turn_output.admit(name, &mut content, recall);
+                            if let Some(legacy) = &mut legacy_output {
+                                legacy.admit(&mut content, recall);
+                            } else {
+                                turn_output.admit(name, &mut content, recall);
+                            }
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -1591,7 +1605,15 @@ pub(super) fn append_run_turns(
                         }
                         None => {
                             let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
-                            turn_output.admit(name, &mut content, crate::tools::ResultRecall::None);
+                            if let Some(legacy) = &mut legacy_output {
+                                legacy.admit(&mut content, crate::tools::ResultRecall::None);
+                            } else {
+                                turn_output.admit(
+                                    name,
+                                    &mut content,
+                                    crate::tools::ResultRecall::None,
+                                );
+                            }
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -1734,6 +1756,7 @@ mod action_bias_tests {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
+                legacy_projection: false,
                 ordinal: 1,
                 content_json: serde_json::to_string(&blocks).unwrap(),
                 truncated: false,
@@ -1798,6 +1821,7 @@ mod action_bias_tests {
             );
         }
         let turn = StoredTurn {
+            legacy_projection: false,
             ordinal: 1,
             content_json: serde_json::to_string(&blocks).unwrap(),
             truncated: false,

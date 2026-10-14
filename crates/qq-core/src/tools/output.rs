@@ -933,6 +933,64 @@ impl TurnOutputBudget {
     }
 }
 
+/// Original generic-floor projection for recorded pre-AB2 plan identities.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegacyTurnOutputBudget {
+    remaining: usize,
+}
+
+impl LegacyTurnOutputBudget {
+    pub(crate) const fn new() -> Self {
+        Self {
+            remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
+        }
+    }
+
+    /// Admits one result, shrinking it when the turn is nearly spent, and
+    /// charges what remains of it. A cut's marker points at `recall`.
+    ///
+    /// Deterministic: the same text and recall produce the same bytes, which
+    /// is what lets assembly reconstruct the projection instead of storing
+    /// it.
+    pub(crate) fn admit(&mut self, text: &mut String, recall: ResultRecall<'_>) -> bool {
+        let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
+        let mut cut = false;
+        if text.len() > allowed {
+            // The stored-result handle digests the row's text, which is the
+            // text before this cut; hashing happens only on this cold path.
+            let stored_result = match recall {
+                ResultRecall::StoredResult { tool, call } => Some(result_handle(
+                    tool,
+                    call,
+                    &crate::workspace::content_hash(text.as_bytes()),
+                )),
+                ResultRecall::None | ResultRecall::Spill(_) => None,
+            };
+            let bounds = Bounds::DEFAULT.with_max_bytes(allowed);
+            let bounded = bound_text(std::mem::take(text), &bounds, Some("turn budget reached"));
+            cut = bounded.truncated();
+            *text = bounded.text;
+            if bounded.omitted_bytes > 0 {
+                match recall {
+                    ResultRecall::None => {}
+                    ResultRecall::Spill(handle) => {
+                        finalize_spill_marker(text, Some(handle), None);
+                    }
+                    ResultRecall::StoredResult { .. } => {
+                        finalize_spill_marker(
+                            text,
+                            stored_result.as_deref(),
+                            Some(bounded.omitted_from_line),
+                        );
+                    }
+                }
+            }
+        }
+        self.remaining = self.remaining.saturating_sub(text.len());
+        cut
+    }
+}
+
 /// Entry points for the `tool_output` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {

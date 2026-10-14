@@ -963,3 +963,9 @@ newest last.
   near-12KiB pages; the original main projector retains its eighth page
   and later generic-floor recall markers, including after reopen. This
   test establishes the replay regression before persistence repair.
+
+- Historical descriptor-14/prompt-19 regression reproduces eighth-page
+  truncation at `97512db2`. Context assembly now selects the preserved
+  original-main generic-floor projector for recorded descriptor 13/14
+  prompt versions through 19. Newer ambiguous identities still require the
+  explicit projection-evidence repair before this wave can be published.
