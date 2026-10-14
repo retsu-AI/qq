@@ -1404,3 +1404,13 @@ newest last.
   descriptor 14/prompt 22 golden and parent receipt. Independent schema and
   notice integration review approves. Full child gates start against this
   immutable merge; schema-47 old-reader refusal probe follows its build.
+
+### 2026-10-14 — AB5 early-guard reopen correction
+
+- First immutable `4d66221a` workspace run failed root unclean-exit resume
+  at store reopen (`Persistence(Constraint)`); no push occurred. Focused
+  schema-47→48 structure/store-identity regression also reproduced rejection
+  on its second open. Red evidence: `schema48-reopen-red.log`.
+- Corrected the initial supported-version match and all earlier multiline
+  migration guards to include 48. Late receipt/accounting validators remain
+  intact. Focused migration/notice fixtures and full fresh gates rerun next.
