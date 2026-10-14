@@ -47,7 +47,7 @@ Raw evidence: `target/qq-perf/jev-{opt-in,effort,routing,full-stack}-2026-09-18/
 
 **RR3, 2026-09-21** (#117). Jev RED exhaustion and outage no longer fail the
 run; the verdict is recorded as evidence. Receipt:
-`progress/run-reliability.md`.
+[the RR3 receipt in Git history](https://github.com/retsu-AI/qq/blob/ce768bbc2fb7a25b227fe3405734a316adf020a1/docs/plans/progress/run-reliability.md#2026-09-21--rr3-jev-verdicts-are-evidence).
 
 **DA5, 2026-09-23** (#144, ADR-0041). `jev_approval` makes Jev the first
 approval delegate. Receipt: `progress/delegated-approval.md`.

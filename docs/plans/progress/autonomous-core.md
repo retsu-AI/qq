@@ -87,8 +87,8 @@ appended below, newest last.
 | AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
 | AC1 | `RunState` extraction by reset scope | Shipped (13d9c585) | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271) | Merged by lead; final qualification below: dispatch median +4.0% vs A/A +0.14%, open with the lead |
-| AC2 | Bounds reset at seams | In review | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | `fix/eng-1017-ac2-bounds-reset-at-seams` | ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
-| AC3 | No single-shot fatal faults | Planned | | | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
+| AC2 | Bounds reset at seams | Shipped (`9bae6937`) | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | [#278](https://github.com/retsu-AI/qq/pull/278) | Performance receipt remains outstanding; ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
+| AC3 | No single-shot fatal faults | In review | [ENG-1029](https://linear.app/retsu-ai/issue/ENG-1029) | [#279](https://github.com/retsu-AI/qq/pull/279) | ADR-0048 § 2; empty-checkpoint item moved to AP3a |
 | AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
@@ -102,6 +102,14 @@ appended below, newest last.
 | AC14 | Surfaces for new state (was MRC-4) | Planned | | | |
 | AC15 | Store write amplification | Planned | | | ADR if `synchronous` changes |
 | AC16 | Retention (ENG-803) | Planned | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) | | Evidence from AC0 |
+| AC17 | Tolerant read-only arguments (was RR10) | In review | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872) | [#294](https://github.com/retsu-AI/qq/pull/294) | T15 context clamp/unknown-tool result/MCP empty args already shipped; array, safe integer and unknown-field handling remain |
+| AC18 | Truncated-call recovery and honest exhaustion outcome (RR8 residuals) | Planned | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) | | Synthetic re-issue missing; exhaustion still fails; ADR-0048 outcome decision before implementation |
+| AC19 | Bounded stream repair (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | Normal completion, missing ids, reasoning display cap remain |
+| AC20 | Evidence-led latency diagnostics (was RR12) | Planned | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) | | No permanent stats or wire/schema work without a measured consumer |
+| RR11 baseline | Session read-hash persistence | Shipped (existing behavior) | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | Durable `session_files`, claim reload, restart/edit regression; obsolete hash-return acceptance superseded by ADR-0058 |
+| RR baseline | RR1–RR7, RR4.1/RR7.1, RR8.1–RR8.4, RR9 | Shipped | | | Receipt mapping below; RR8 residuals remain AC18 |
+| Goal 7 | Seven-day integrated reliability qualification | Planned | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | | Distinct from AP5; no live acceptance claimed |
+| Docs consolidation | Absorb reliability plan and remove stale ownership | In review | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | [#291](https://github.com/retsu-AI/qq/pull/291) (`docs/eng-1036-reliability-consolidation`) | Docs only; existing open performance/live gates preserved |
 
 ## Entries
 
@@ -1235,3 +1243,43 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Tests (each fails on `13d9c585` or under the old cutoff rule): soak `separated_empty_truncations_each_recover_with_a_fresh_retry`, `scripted_soak_completes_across_context_windows` (500 turns), `forty_in_run_compactions_complete_off_the_between_run_budget` (≥ 40), `forty_mib_of_streamed_text_across_windows_completes` (900 × 48 KiB); `an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live` (ENG-991); `the_between_run_fold_still_stops_at_its_step_budget`; reservation/step assertions added to `one_run_spanning_several_windows_compacts_its_own_turns_and_completes`. The single-window 4 MiB test is unchanged.
 - Gates: `cargo fmt --all -- --check`; workspace all-target/all-feature Clippy `-D warnings`; `cargo test -p qq-core --lib` 915 passed; qq-core integration/examples passed; `cargo test --workspace --exclude qq-core` 1,291 passed; ignored soak suite 6 passed; `cargo build --workspace`; `git diff --check`.
 - Hot path: two field moves and one `Vec<u32>` push per settled turn; `turn_overhead` not re-measured for this slice yet.
+
+### 2026-10-13 — Reliability consolidation baseline and ownership (ENG-1036)
+
+- User authorizes consolidation of run-reliability into this plan/ledger, deleting the superseded pair and repairing stale references in indexes, related plans/research, and tools design. Isolated `.worktrees/reliability-consolidation`; base main `ce768bbc`. AC3 remains owned by its open PR; no runtime files changed.
+- Completed baseline: RR1 #108, RR2 #116, RR3 #117, RR4 #120 (ADR-0040), RR5 #118, RR6 #126, RR7 #127, RR7.1 #195, RR4.1 #196, RR8.1–RR8.4 #198–#201, RR9 #150 (DA2). Full dated receipts remain in [Git history at the pre-consolidation ledger](https://github.com/retsu-AI/qq/blob/ce768bbc2fb7a25b227fe3405734a316adf020a1/docs/plans/progress/run-reliability.md); historical research remains evidence, not current status.
+- RR11 already persists hashes with results (`sessions/tool_calls.rs`), reloads on claim (`claim.rs`), and has `file_state_survives_restart_and_auto_mode_applies_the_edit_without_prompting`; no new schema/persistence implementation is scheduled. T19/ADR-0058 supersedes its unsafe current-hash-on-refusal requirement.
+- Open ownership: RR10 → AC17 (ENG-872); both RR8 residuals → AC18 (ENG-870); RR12 stream repair/stats → AC19/AC20 (ENG-874); repeated-call guard stays AC4; continuation stays AC5/AC6. AC20 requires a measured consumer; AC18's non-completed exhaustion outcome is a future ADR decision, not shipped behavior.
+- Reconciled source/tracker: AC2 shipped #278 (`9bae6937`), AC3 in review #279 (ENG-1029). AC1/AC2 performance qualification, AP5, AC0.2 and Goal 7 live evidence remain open; no historical test receipt establishes the live targets.
+- Docs-only: no new tests or performance measurement warranted; workspace gates and independent plan review run before push. No protocol/schema/descriptor change.
+- Validation: workspace fmt, all-target/all-feature Clippy `-D warnings`, build and tests pass (2,243 passed / 0 failed / 14 ignored; nested embedding child invocation excluded). RR11 restart/edit regression passes. Independent review: Approve after integer-scope/amplification corrections. 166 relative doc links resolve; no live references to retired files; `git diff --check` passes. Logs: `target/qq-perf/reliability-consolidation-2026-10-13/` (untracked).
+- Tracker reconciliation: ENG-870/872/874 now point here under ENG-978; stale attachments removed. ENG-873 Done as verified existing behavior; AC2 remains in review for outstanding performance evidence. ENG-1036 docs [PR #291](https://github.com/retsu-AI/qq/pull/291) is open; not merged.
+
+### 2026-10-13 — Full stack kickoff; AC17 argument repair (ENG-872)
+
+- User requests the entire autonomous-core document completed as stacked PRs with actual Codex bot thumbs-up on each opening message. Worktree `.worktrees/autonomous-core-stack`, initial reviewed parent #291 (`ee8bffa5`, bot +1 verified). AC3 source/review stays separately owned.
+- AC17 baseline capture started before code changes: `cargo bench -p qq-core --bench tool_dispatch`; evidence `target/qq-perf/ac17-2026-10-13/`. Host I/O pressure initially ~41%; record controls and do not qualify unstable tails.
+- Whole-plan audit includes goals G0/G2/G3/G4/G5, AC0.2/AC1/AC2 performance evidence, AC12.2/.3 embedding, continuation, retention, state surfaces and AP5/Goal7 live windows. No fixture substitutes for normal-use or paid-live evidence; no plan deletion until every acceptance item is proven.
+
+### 2026-10-13 — AC17 implementation and qualification in flight (ENG-872)
+
+- Strict typed decode remains the valid-call path. Failed read/tree/search shapes repair only stringified string arrays, neutral `cwd:"."` and search `offset:0`; deterministic notes are durable. Duplicate/authority fields, non-neutral values, containment and count bounds still refuse. No additional integer clamp without an observed call; existing context clamp stays.
+- Regression-first commit `33f402b8`; six focused argument-repair tests pass, including real spill integrity, usable two-page search, long-path note visibility and unchanged file hashes. The session regression proves one execution/settlement and matching persisted snapshot text. Independent read-only review: Approve. Deep-path search emits cursors above its existing 512-byte decode limit; AC17 preserves the original bytes and does not claim to repair that separate baseline limitation.
+- `tool_dispatch` release fixture, 1,000 iterations per sample: 30 alternating A/B pairs median 61,188 → 60,496.5 ns (−1.1%); 30 same-binary A/A pairs 64,929 → 61,330 ns (−5.5%). No measured regression; no speedup or tail qualification claimed. IO some avg10 18.63% before / 18.19% after pairs; raw samples/binaries/logs in root `target/qq-perf/ac17-2026-10-13/` (untracked). Workspace gates running; no implementation PR or push yet.
+
+#### AC17 local receipt — 2026-10-13
+
+- Commits: regression-first `33f402b8`, implementation `5f86e9f`. Six tools regressions and one session regression added. Workspace: **2,250 passed / 0 failed / 14 ignored** (one nested embedding child invocation excluded). Final focused repair suite: 6 passed.
+- Commands passed: `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo build --workspace`; `cargo test --workspace -- --test-threads=4`; `git diff --check`. Final fmt/Clippy/focused tests rerun after strengthening the complete-spill comparison. No provider files/features changed.
+- Performance and independent review receipts above. Protocol/descriptor/schema unchanged; tools design amended. AC17 ready to submit on reviewed consolidation parent #291. Full-plan gates remain open.
+
+- AC17 submitted as ready [PR #294](https://github.com/retsu-AI/qq/pull/294), base consolidation branch #291. ENG-872 In Review. Awaiting Codex opening-description thumbs-up; not merged.
+
+### 2026-10-13 — AC17 Codex review repairs in qualification
+
+- Codex raised four P2s on #294: observed read `include_ignored`, lost notes on execution errors, rebounding a line-clipped preview, and search notes exceeding the pruning header cap. Regression-first `c21d495` reproduced all four (6 existing passed / 4 new failed).
+- Private `ReadSideOutput` carries complete text and original per-path bounds to dispatch, which adds notes then masks/bounds once. Boolean read `include_ignored` drops with a note; other types remain rejected. Error status stays authoritative. Notes go below an unchanged search header when adding them would exceed `MAX_STUB_HEADER_BYTES` (512). File-state/UI payloads remain moved unchanged.
+- Ten focused repair regressions and the combined durable-session regression pass. Independent review: Approve; no remaining concrete findings. Fresh controlled dispatch measurement and workspace gates run before pushing the repair. Original raw evidence remains preserved.
+
+- Review-fix qualification on `1191d3d`: workspace fmt/all-target-all-feature Clippy/build/test pass, **2,254 passed / 0 failed / 14 ignored** (nested embedding child excluded). Focused repairs 10 passed; combined session fixture 1 passed. No provider files/features changed.
+- Fresh 30 alternating A/B + 30 same-binary A/A dispatch pairs, 1,000 iterations: baseline → repaired median 62,924.5 → 65,246.5 ns (+3.7%); A/A 65,893.5 → 73,559 ns (+11.6%). Candidate difference is within observed control variation; I/O some avg10 54.88% → 39.27%. No quiet-host or tail qualification, performance waiver or speedup claimed. No concurrent compiler/build/test/review during recording. Original and review raw logs retained under `target/qq-perf/ac17-2026-10-13/`.

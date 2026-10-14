@@ -49,7 +49,7 @@ date and the plan that acts on it.
   adapter placement, acceptance criteria.
 - [`run-reliability.md`](research/run-reliability.md) (2026-09-21) — why
   sessions do not finish: failure taxonomy from the live session store,
-  findings R01–R12. Acted on by [`plans/run-reliability.md`](plans/run-reliability.md).
+  findings R01–R12. Acted on by [`plans/autonomous-core.md`](plans/autonomous-core.md).
 - [`onboarding.md`](research/onboarding.md) (2026-09-22) — first-run and
   configuration UX, findings O01–O20. The onboarding plan that acted on it
   has closed.
