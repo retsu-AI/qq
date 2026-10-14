@@ -647,3 +647,7 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 
 - AB2 owns root `src/runtime.rs` error translation for the new unresolved replay
   error, preserving its actionable recovery message in server responses.
+
+- AB2 additionally owns `sessions/{claim,compaction,settlement}.rs` constructor
+  integration to isolate unresolved replay to its reservation, rather than failing
+  the shared scheduler. Existing fatal persistence/codec handling stays intact.

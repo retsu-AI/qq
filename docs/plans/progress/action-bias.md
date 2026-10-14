@@ -1033,3 +1033,10 @@ newest last.
   and poisoning the shared scheduler. That failure must settle only the affected run
   before publication; fresh sessions must remain usable without provider polling
   on the ambiguous history. Test-first repair follows, then all gates rerun.
+
+- Intermediate1963a389 workspace totals:2381passed,0failed,14ignored (38blocks),
+  fmt/Clippy/build0. The newly reproduced scheduler-isolation case then failed red
+  withruntimeUnavailable and passed green aftertypedper-reservation handling.
+  Independent source review approves cancellation-before-failure, preloader settlement,
+  preservation andfresh-session usability. Evidence copied to`target/qq-perf/ab2-2026-10-14/`.
+  Full gates rerun onthe finalcode below; nointermediatequalificationispublished.

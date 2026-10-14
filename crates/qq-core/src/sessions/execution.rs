@@ -831,6 +831,23 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
+    if let Some(run) = claimed.unresolved_tool_projection {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: SessionRuntimeError::ToolProjectionUnavailable {
+                        run: run.to_string(),
+                    }
+                    .to_string(),
+                },
+            },
+        )
+        .await;
+        return;
+    }
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {

@@ -1543,6 +1543,9 @@ projection. Per-call rows remain authoritative for actual outcomes and effects;
 the projection preserves the ordered text, flags and correction notice seen by
 the next request. Descriptor15 identifies the strict policy for partial turns,
 and schema49 stores the bounded projection independently of those per-call rows.
+An unresolved historical projection settles only its queued reservation before
+runtime loading or provider polling. It preserves that history, releases the
+preparation slot, and leaves fresh sessions usable; other store faults remain fatal.
 
 ## Concurrency And Multiple Agents
 

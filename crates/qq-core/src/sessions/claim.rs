@@ -89,6 +89,8 @@ pub(super) struct ClaimedRun {
     /// The stored effect of each tool result in `messages`, in block order,
     /// so the run's live prune classifies them as assembly did.
     pub(super) message_effects: ResultEffects,
+    /// A known unresolved history blocks only this reservation, before loading.
+    pub(super) unresolved_tool_projection: Option<RunId>,
     /// Summarizer steps already spent admitting this prompt. Zero until the
     /// first automatic compaction starts.
     pub(super) context_compaction_attempted: u32,
@@ -164,6 +166,7 @@ impl ClaimedRun {
             model: self.model.clone(),
             messages: Vec::new(),
             message_effects: Vec::new(),
+            unresolved_tool_projection: None,
             context_compaction_attempted: self.context_compaction_attempted,
             context_compaction_failed: self.context_compaction_failed,
             context_compaction_remaining: self.context_compaction_remaining,
@@ -646,6 +649,7 @@ pub(super) fn reserve_next_run_recoverable(
     if reserved != 1 {
         return Ok(None);
     }
+    let mut unresolved_tool_projection = None;
     let (messages, message_effects) = match kind {
         RunKind::Prompt => {
             let user_ordinal: u64 = transaction.query_row(
@@ -658,11 +662,18 @@ pub(super) fn reserve_next_run_recoverable(
                 [user_message_id.to_string()],
                 |row| row.get(0),
             )?;
-            let (mut context, effects) = load_model_context_with_effects(
+            let (mut context, effects) = match load_model_context_with_effects(
                 &transaction,
                 session_id,
                 user_ordinal.saturating_sub(1),
-            )?;
+            ) {
+                Ok(context) => context,
+                Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
+                    unresolved_tool_projection = Some(parse_id(&run)?);
+                    (Vec::new(), Vec::new())
+                }
+                Err(error) => return Err(error),
+            };
             context.push(Message::user(prompt));
             (context, effects)
         }
@@ -672,7 +683,14 @@ pub(super) fn reserve_next_run_recoverable(
             // the fixed instruction as the final user message. A prior
             // summary therefore folds into the next one naturally.
             let (mut context, effects) =
-                load_model_context_with_effects(&transaction, session_id, u64::MAX)?;
+                match load_model_context_with_effects(&transaction, session_id, u64::MAX) {
+                    Ok(context) => context,
+                    Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
+                        unresolved_tool_projection = Some(parse_id(&run)?);
+                        (Vec::new(), Vec::new())
+                    }
+                    Err(error) => return Err(error),
+                };
             context.push(Message::user(COMPACTION_INSTRUCTION.to_owned()));
             (context, effects)
         }
@@ -754,6 +772,7 @@ pub(super) fn reserve_next_run_recoverable(
         model,
         messages,
         message_effects,
+        unresolved_tool_projection,
         context_compaction_attempted,
         context_compaction_failed,
         context_compaction_remaining,
