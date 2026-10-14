@@ -1547,3 +1547,14 @@ newest last.
 - Integrated qualified AB3bb6bc776 with both new parent checkpoint repairs.
   Authority declarations, immutable manifests and15/prompt22 identity remain
   unchanged. Both AB4 documentation fixes are included; all gates rerun before push.
+
+### 2026-10-14 — AB4 final checkpoint integration qualification
+
+- Immutablee1a41b1fa943f7251f7315b2dc0fc96bc8b97df6 integrates qualifiedbb6bc776.
+  Fresh workspace2,409passed,0failed,14ignored (38blocks); fmt/Clippy/build exit0.
+  Evidence: `target/qq-perf/ab4-2026-10-14/checkpoint-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Authority/manifest/projection integration remains independently approved; parent
+  checkpoint fixes are inherited.15/prompt22 and historical13/14 goldens stay pinned.
+- Prompt history explicitly records21→22; the architecture restriction now omits
+  all external tools in read-only runs. This commit adds only the receipt.
+  Fresh hosted/Codex, dependent propagation and named performance gates remain open.
