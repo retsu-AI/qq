@@ -499,3 +499,10 @@ newest last.
   sed scripts and uniq's second-operand stdout sentinel; reject sort's
   temporary-directory options, including clusters and long abbreviations.
   Approval authority remains unchanged. Full integration/performance open.
+
+
+- Immutable source 218cb185 passes 2,287 workspace tests, zero failures,
+  14 ignored; fmt, Clippy and build exit 0. Fifteen focused classifiers pass.
+  Logs: target/qq-perf/ab1-2026-10-14/output-temporary-gate-{0,1,2,3}.log.
+  Latest shell-read repairs retain authority and preview behavior. Matched
+  performance remains open; downstream integration is pending.
