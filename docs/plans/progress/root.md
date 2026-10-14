@@ -551,3 +551,8 @@ AB2 additionally owns test-only golden prompt identity in `plan.rs` and
 role-contract assertions in `sessions/tests/delegation.rs`. No descriptor
 encoding or session production behavior changes; prompt version 20 changes
 its digest, and write/read child assertions must pin the new action bullet.
+
+### 2026-10-14 — AB3 public read regression fixture ownership
+
+AB3 owns `tools.rs` focused read-window and turn-budget projection tests,
+using the existing dispatch helper; production scope remains read.rs/specs.rs.

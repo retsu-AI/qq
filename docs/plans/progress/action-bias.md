@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB1–AB4 + 7 days |
@@ -211,3 +211,16 @@ newest last.
   digest, tool-schema digest and two delegation prompts. Updated their
   expected v20 identities/text, including the negative read-child assertion;
   no production behavior was changed to satisfy them. Requalification next.
+
+### 2026-10-14 — AB3 test-first start
+
+- Isolated `perf/eng-1040-ab3-read-window` stacks on AB2 `ad32760e`.
+  Pre-change benchmarks recorded in AB2 worktree `ab3-2026-10-14`: dispatch
+  94,369 ns/iteration, output fits 2,153 ns/iteration, shell bound 24,414.
+  Shared-host diagnostic; final matched qualification remains required.
+- Added public read-window, 4,000-line contiguous continuation and six-result
+  turn-budget fixtures before production changes. Red run pending.
+- Pre-change focused tests: 1 passed, 2 failed (default stops at 200 and
+  line-stop has no offset marker). Six-result fixture baseline: 30 reads,
+  0 turn-budget cuts, mean 7,079 bytes per read. This is deterministic output
+  projection characterization, not timing or live parallel execution.

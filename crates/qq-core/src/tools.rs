@@ -694,6 +694,159 @@ mod tests {
     }
 
     #[test]
+    fn ab3_default_reads_fill_the_budget_and_explicit_limits_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, lines, content) in [
+            ("small", 300, "x\n"),
+            ("short", 3_000, "x\n"),
+            ("large", 3_000, "012345678901234567890123456789\n"),
+        ] {
+            fs::write(directory.path().join(path), content.repeat(lines)).unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for (path, expected) in [("small", 300), ("short", 3_000)] {
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"{path}"}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(result.model_text.lines().skip(1).count(), expected);
+            assert!(!result.model_text.contains(MARKER_PREFIX));
+        }
+        let large = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"large"}"#,
+        );
+        let rows = large
+            .model_text
+            .lines()
+            .skip(1)
+            .filter(|row| !row.starts_with(MARKER_PREFIX))
+            .count();
+        assert!(rows > 200 && rows < 3_000, "{rows}");
+        assert!(
+            large
+                .model_text
+                .contains(&format!("continue from offset={}", rows + 1))
+        );
+        let limited = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","limit":20}"#,
+        );
+        assert!(
+            limited
+                .model_text
+                .ends_with("…[qq: 280 more lines; continue from offset=21]…\n"),
+            "{}",
+            limited.model_text
+        );
+        let ranged = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","ranges":["1-20"]}"#,
+        );
+        assert!(!ranged.model_text.contains(MARKER_PREFIX));
+    }
+
+    #[test]
+    fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("empty"), "\n".repeat(4_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut calls = 0;
+        while offset <= 4_000 {
+            calls += 1;
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"empty","offset":{offset}}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(result.model_text.lines().count() <= 4_000);
+            assert!(!result.model_text.contains("not stored"));
+            let rows: Vec<_> = result
+                .model_text
+                .lines()
+                .skip(1)
+                .filter(|row| !row.starts_with(MARKER_PREFIX))
+                .collect();
+            assert!(!rows.is_empty());
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.trim().parse::<usize>().unwrap(), offset + index);
+            }
+            offset += rows.len();
+            if offset <= 4_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+                assert!(rows.len() > 200);
+            } else {
+                assert!(!result.model_text.contains(MARKER_PREFIX));
+            }
+        }
+        assert_eq!(offset, 4_001);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
+        use super::output::{ResultRecall, TurnOutputBudget};
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("batch"),
+            "012345678901234567890123456789\n".repeat(1_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut reads = 0;
+        let mut cuts = 0;
+        let mut bytes = 0;
+        while offset <= 1_000 {
+            let mut budget = TurnOutputBudget::new();
+            let mut shown = 0;
+            for _ in 0..6 {
+                let result = run_tool(
+                    &workspace,
+                    &FileState::default(),
+                    "read_file",
+                    &format!(r#"{{"path":"batch","offset":{offset}}}"#),
+                );
+                assert!(!result.is_error);
+                shown = result
+                    .model_text
+                    .lines()
+                    .skip(1)
+                    .filter(|row| !row.starts_with(MARKER_PREFIX))
+                    .count();
+                bytes += result.model_text.len();
+                let mut projected = result.model_text;
+                cuts += usize::from(budget.admit(&mut projected, ResultRecall::None));
+                reads += 1;
+            }
+            assert!(shown > 0);
+            offset += shown;
+        }
+        eprintln!(
+            "AB3 six-result batches: reads={reads} turn_budget_cuts={cuts} mean_read_bytes={}",
+            bytes / reads
+        );
+        assert!(reads <= 30);
+        assert!(cuts == 0 || reads < 30, "cuts must buy fewer read calls");
+    }
+
+    #[test]
     fn read_file_stops_at_its_byte_budget_and_names_the_resume_offset() {
         let directory = tempfile::tempdir().unwrap();
         // 200 lines of 1 KiB: within the line limit, over the 32 KiB default.
