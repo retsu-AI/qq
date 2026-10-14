@@ -65,7 +65,15 @@ separate durable side-question snapshots, and replayable side projection updates
 Cancelling a question that already settled returns
 `side_question_already_finished` with its effective state and changes
 nothing; an unknown side-question id is a client error. These do not alter
-the main session transcript or accounting.
+the main session transcript or accounting. Version 32 also adds
+`delegated: true` to `tool_approval_requested` when an approval delegate
+decides the hold before any human; it is omitted (false) otherwise, so
+every earlier hold encodes unchanged. Session summaries gain
+`pending_holds` (the active run's held calls, each with `delegated` when a
+delegate decides first) and `running_side_question`, both exact at the
+summary's cursor and omitted when empty, so a client knows a session is
+waiting or answering without loading its body or having seen the request
+event.
 
 Golden fixtures for the current version live under
 `crates/qq-protocol/tests/fixtures/v32/`; the `v17`–`v31` directories are
@@ -250,6 +258,9 @@ answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 `prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
 `side_questions`, the isolated side-question rows behind protocol 32.
+Schema 45 adds `tool_calls.approval_delegated`, behind
+`SessionSummary.pending_holds`; holds written before it read as waiting for
+a human.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -983,7 +994,9 @@ omits it for every other resolution. A reviewer `escalate` leaves the hold
 open for a client, whose wait starts at the escalation. The hold
 (`tool_approval_requested`) is always published before the reviewer is
 consulted, so a client may still answer first; the first durable resolution
-wins. Reviewer spend is charged to the reviewed run.
+wins. It carries `delegated: true` when the reviewer is consulted (protocol
+32): a client then knows the human is asked only after
+`tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
 
 Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
 `full`. `supervised` is never advertised for root sessions and cannot be set by
@@ -1479,7 +1492,7 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch` | Policy needs a human decision, or (`question`) the model asked one |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch`, optional `delegated` | Policy needs a decision, or (`question`) the model asked one; `delegated` means an approval delegate decides first |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
 | `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
@@ -1550,6 +1563,15 @@ activity.
 session. It is absent when unknown. A successful compaction or a model change
 clears it until another prompt turn reports usage; clients must not reconstruct
 it from cumulative run billing.
+
+`pending_holds` lists the active run's calls still awaiting a decision, at
+most 16, calls a human is asked ordered first: `{ "tool_call_id": "...",
+"delegated": true }`, where `delegated` (omitted when false) means an
+approval delegate decides before any human. `running_side_question` is the
+id of the session's running side question. Both are exact at the summary's
+cursor; `tool_approval_*`, `tool_call_*`, `run_finished`, and
+`side_question_updated` events move them on. A client that never loaded the
+session's body uses them to tell idle, working, and waiting apart.
 
 **`RunSnapshot`**
 

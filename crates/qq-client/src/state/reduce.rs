@@ -7,8 +7,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use qq_protocol::{
     AuditOutcome, MessageRole, MessageState, RunOutcome, ServerCapabilities, SessionEvent,
-    SessionEventEnvelope, SessionId, SnapshotRequest, TextChannel, ToolCallState,
-    WorkspaceGrantOutcome, WorkspaceId,
+    SessionEventEnvelope, SessionId, SideQuestionState, SnapshotRequest, TextChannel,
+    ToolCallState, WorkspaceGrantOutcome, WorkspaceId,
 };
 
 use super::{
@@ -116,6 +116,18 @@ impl SessionStore {
         let session_id = envelope.session_id;
         match &envelope.event {
             SessionEvent::SideQuestionUpdated { side_question } => {
+                // Whether one runs is summary state, kept for every session
+                // so the aggregate sees cold sessions too.
+                if let Some(view) = self.body_mut(&session_id) {
+                    let running = side_question.state == SideQuestionState::Running;
+                    match view.summary.running_side_question {
+                        _ if running => view.summary.running_side_question = Some(side_question.id),
+                        Some(id) if id == side_question.id => {
+                            view.summary.running_side_question = None;
+                        }
+                        Some(_) | None => {}
+                    }
+                }
                 // Side bodies follow the transcript body: a summary-only view
                 // holds none, so cold sessions cannot accumulate them.
                 if let Some(view) = self.get_mut(&session_id)
@@ -270,8 +282,12 @@ impl SessionStore {
                 edit,
                 question,
                 fetch,
+                delegated,
             } => {
                 if let Some(session) = self.get_mut(&session_id) {
+                    if tool_call.state == ToolCallState::AwaitingApproval && *delegated {
+                        session.live.with_delegate.insert(tool_call.id);
+                    }
                     if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
                         effects.push(StateEffect::Attention(Attention::ApprovalRequested {
                             session_title: session.summary.title.clone(),
@@ -295,7 +311,8 @@ impl SessionStore {
             }
             // A delegate handed the hold to the human: keep why beside the
             // preview so the prompt can say so. Advisory; the hold itself is
-            // unchanged, and a preview-less hold gets one to carry it.
+            // unchanged, and a preview-less hold gets one to carry it. A late
+            // escalation for a call already answered changes nothing.
             SessionEvent::ToolApprovalEscalated {
                 tool_call_id,
                 delegate,
@@ -304,6 +321,7 @@ impl SessionStore {
                 if let Some(session) = self.get_mut(&session_id)
                     && session.live.awaiting_approval.contains(tool_call_id)
                 {
+                    session.live.with_delegate.remove(tool_call_id);
                     session
                         .approval_previews
                         .entry(*tool_call_id)
@@ -672,6 +690,7 @@ impl SessionStore {
                 }
                 view.live.active_tool = None;
                 view.live.awaiting_approval.clear();
+                view.live.with_delegate.clear();
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {
                     reasoning.streaming = false;
                 }
