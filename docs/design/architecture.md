@@ -1051,6 +1051,11 @@ A read-only session is not offered the mutating, shell, or non-read external
 schemas its policy would deny, and a spawned child's approval mode can be
 lowered but never raised by a client command.
 
+Base prompt identity 21 includes the authority wording for read-only,
+unattended and inspection-only tool sets. Ordinary actionable interactive
+wording is unchanged from version 20, but the version distinguishes the
+changed restricted prompts in otherwise identical plan descriptors.
+
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
 task-completion signal. Before a bounded provider turn could push a slice past

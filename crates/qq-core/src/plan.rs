@@ -1677,6 +1677,18 @@ mod tests {
     }
 
     #[test]
+    fn ab4_inspection_only_descriptor_differs_from_prompt20_identity() {
+        let workspace = canonical_temp();
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        let mut predecessor = plan.descriptor().as_ref().clone();
+        predecessor.prompt_version = PromptVersion::new(20).unwrap();
+        assert_ne!(plan.digest(), predecessor.digest().unwrap());
+    }
+
+    #[test]
     fn canonical_encoding_and_digest_are_stable() {
         let descriptor = golden_descriptor();
         let bytes = descriptor.canonical_bytes().unwrap();
@@ -1689,9 +1701,15 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 13 and prompt 20: action contract, AB2).
+        // changing the encoding (descriptor 13 and prompt 21: authority contract, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
+            "6ac21a27f741953eb66c4e8f4d92c2ff8d32e46ca23058a2b7d4a5835facaded"
+        );
+        let mut prompt20 = descriptor.clone();
+        prompt20.prompt_version = PromptVersion::new(20).unwrap();
+        assert_eq!(
+            prompt20.digest().unwrap().to_string(),
             "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
         );
         let round_trip: AgentPlanDescriptor =

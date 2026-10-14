@@ -280,7 +280,7 @@ observation to `end + 24 hours` for both windows; wait until `ready=1`.
 that cutoff. Later completion never becomes completed-by-cutoff. Use explicit UTC
 `start` and `end` dates, not a rolling relative date. The historical window
 is `[2026-09-13, 2026-10-13)`; the candidate window is seven full days after
-all AB1–AB5 merge commits. Keep the store open read-only and record its
+the pinned AB1–AB5 runtime is deployed and earlier writers are retired. Keep the store open read-only and record its
 schema. The following redefines `RR` for **all** queries above as well.
 
 ```sh
@@ -288,7 +288,7 @@ start="2026-09-13"
 end="2026-10-13"
 # Qualification is only valid after this fixed observation cutoff.
 q "SELECT datetime('$end', '+1 day') cutoff_utc, strftime('%s','now') >= strftime('%s','$end','+1 day') ready;"
-RR_STARTS="SELECT r.id, s.parent_id IS NOT NULL child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
+RR_STARTS="SELECT r.id, s.depth <> 0 child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
     WHERE r.kind = 'prompt' AND r.started_at_ms >= strftime('%s','$start') * 1000
       AND r.started_at_ms < strftime('%s','$end') * 1000"
 RR="$RR_STARTS AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000"
@@ -423,13 +423,18 @@ q "WITH rr AS ($RR), paths AS (
      FROM paths p
      WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
      GROUP BY p.run_id),
+   cursor_space AS (SELECT char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288) ws),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
-     FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
-     WHERE t.name = 'search' AND t.state = 'completed' AND t.turn_ordinal < q.first_edit_turn
+     FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id CROSS JOIN cursor_space
+     WHERE t.name = 'search' AND t.turn_ordinal < q.first_edit_turn
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
-       AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
-       AND (instr(json_extract(t.arguments_json, '\$.query'), 'AGENTS') > 0
-         OR instr(json_extract(t.arguments_json, '\$.query'), 'CLAUDE') > 0)
+       AND (json_type(t.arguments_json, '\$.cursor') IS NULL
+         OR json_type(t.arguments_json, '\$.cursor') = 'null'
+         OR (json_type(t.arguments_json, '\$.cursor') = 'text'
+           AND lower(trim(json_extract(t.arguments_json, '\$.cursor'), ws))
+             IN ('','initial','start','first','0','.','/','null','none')))
+       AND json_type(t.arguments_json, '\$.regex') = 'true'
+       AND json_extract(t.arguments_json, '\$.query') = '(^|/)(AGENTS|CLAUDE)\\.md\$'
      GROUP BY 1, 2),
    per_run AS (SELECT q.run_id, count(d.path) roots, coalesce(sum(d.n),0) searches,
      coalesce(sum(d.n > 1),0) repeated_roots FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1)
@@ -447,8 +452,15 @@ below the workspace. Targets deeper than 64 directory components additionally
 use justified target ancestors at each 64-component boundary, with
 include_ignored=true. These are the permitted discovery roots. Arbitrary
 per-directory paths do not qualify as distinct-root exceptions. Cursor
-pages continue one discovery; the scope query counts only new starts,
+pages continue one discovery; the scope query counts all matching new starts,
+including failed, denied or interrupted attempts. A completed pre-edit result
+and full applicable coverage remain separate requirements;
 while the raw diagnostic above retains physical call counts.
+Omitted/null cursors and trimmed, ASCII-case-insensitive first-page placeholders
+are starts, matching runtime repair semantics. Other cursor values are not
+proof of continuation: validate each against an exact prior next= for the
+same discovery scope. Nonstring, malformed or unverifiable cursor records
+leave qualification open rather than silently establishing continuation.
 
 Qualification shell-read shares must use AB6.1's bounded export/recount with
 one pinned AB1 classifier binary for both windows. The program-name SQL above
@@ -473,7 +485,30 @@ array with correctly typed dry_run=true, remain in numerator and denominator.
 The prior 205/1,222 receipt used the earlier typed-preview filter; the corrected
 fixed-window recount is 211/1,228. The root-level edit at turn 1, successful
 discovery at turn 2, then below-root edit at turn 3 fixture records one valid
-early discovery. Below-root baseline scope counts remain 108 roots, 18 scopes,
-25 starts, 7 repeated scopes across 5 runs, maximum 5 scopes. These counts remain
-unqualified for canonical path, completed-page and instruction-read coverage.
+early discovery. The historical substring-query proxy records 108 roots, 18 scopes,
+25 starts, 7 repeated scopes across 5 runs, maximum 5 scopes. It accepts
+unrelated queries such as NOTAGENTS and is not the qualification baseline.
+The scope query now requires the exact anchored instruction-basename regex
+and JSON boolean regex=true. Canonical path, completed-page and
+instruction-read coverage still require separate qualification.
 Evidence: target/qq-perf/ab-plan-2026-10-14/completed-preview-below-root.json.
+
+
+The revised fixed-window scope query on schema 45 records **108 qualifying
+roots, one distinct discovery scope, one start, zero repeated scopes or
+affected runs, maximum one scope**. This accepted-query count does not prove
+coverage: 107 roots have no accepted early discovery start, and retained or
+injected instructions require independent transcript evidence. A fixture
+rejects NOTAGENTS, literal and string-true regex fields, and continuation
+pages while accepting the exact anchored query with boolean regex=true.
+Evidence: target/qq-perf/ab-plan-2026-10-14/anchored-scope-query.json.
+
+
+The all-starts scope query includes failed discovery attempts. Its fixed-window
+schema-45 baseline remains 108 roots, one scope/start and zero repeats. A failed
+then successful start at `.`, plus a successful start at `sub`, records two
+scopes, three starts, one repeated scope and one affected run; the former
+completed-only query incorrectly returned two starts and zero repeats.
+Qualification uses persisted session depth for historical root/child role;
+there are no orphaned child runs in this fixed baseline window. Evidence:
+target/qq-perf/ab-plan-2026-10-14/failed-discovery-starts.json.

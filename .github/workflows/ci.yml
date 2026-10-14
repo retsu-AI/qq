@@ -71,6 +71,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-teardown
+      - name: Unicode read headers preserve repaired contiguous windows
+        run: bash .github/scripts/test-exact.sh tools::tests::ab3_native_unicode_header_preserves_repaired_read_windows
       - name: Dropped waiter drains its owned process
         run: bash .github/scripts/test-exact.sh tools::tests::dropped_windows_shell_waiter_kills_the_owned_process_before_drain
       - name: Timeout confirms owned process exit

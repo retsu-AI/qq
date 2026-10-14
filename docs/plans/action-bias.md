@@ -30,8 +30,10 @@ reports, without reading the same material repeatedly first. Specifically:
   names search per permitted discovery root (workspace root plus applicable
   highest ignored subtrees, plus justified target ancestors at 64-component
   boundaries for deeper targets); cursor pages continue that search. The historical
-  271 physical probes remain context; the corrected fixed-window scope baseline records 25 starts,
-  seven repeated roots across five runs. Path/page/read coverage remains
+  271 physical probes and the substring proxy (25 starts, seven repeated
+  roots across five runs) remain context. The anchored boolean-regex query
+  records one discovery start across 108 qualifying roots, no repeated roots.
+  Path/page/read coverage remains
   unqualified; the historical raw argument counts are separate context.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
   receives a stall report. Today `cd … && grep` and `sed -n` count as work,
@@ -121,9 +123,13 @@ The rule:
    The current list is kept with these narrowings, which close shapes that
    pass today and write:
    - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*`, `-fls` and execution-action abbreviations;
-   - Git reads use canonical `git [-C DIR] -c core.fsmonitor=false <read>`.
+   - Git reads use canonical `git [-C DIR] --no-lazy-fetch -c core.fsmonitor=false <read>`.
      Working-tree status, diff and blame remain work because configured
-     clean/process filters may execute helpers even with fsmonitor disabled;
+     clean/process filters may execute helpers even with fsmonitor disabled.
+     The explicit no-lazy-fetch switch prevents partial-clone object reads
+     from fetching and writing packs; older Git without this switch remains work.
+     rev-parse and worktree list accept only their closed inspection forms,
+     excluding help switches that can launch configured viewers;
    - branch reads require explicit `--sort=refname`, no custom format or
      other sort and listing/filter operands only. Signature atoms in formats,
      explicit sorts or configured default sorting may invoke GPG helpers;
@@ -139,15 +145,21 @@ The rule:
      search (`-z`, short clusters containing `z`, `--search-zip`);
    - `fd` excludes `-x`/`-X` (including short clusters), `--exec` and
      `--exec-batch`, detailed listings (`-l`/`--list-details`, including short clusters); `tree` excludes `-o` (including attached operands) and
-     output-option spellings; `file` excludes `-C`/`--compile`, decompression (`-z`/`-Z`, including clusters, and uncompress forms) and accepted long-option abbreviations;
-   - JJ reads use only canonical `jj --ignore-working-copy --no-pager status`
-     (global switches may swap order); bare commands may snapshot the working
-     copy and diff-producing commands may execute configured formatters.
-5. Additions:
-   - `sed` when `-n` is present, no flag contains `i` or is
+     output-option spellings; `file` excludes `-p`/`--preserve-date` (including short clusters and accepted long abbreviations), `-C`/`--compile`, decompression (`-z`/`-Z`, including clusters, and uncompress forms) and accepted long-option abbreviations;
+   - JJ commands remain work: even ignoring working-copy snapshots can merge
+     concurrent operation heads, and disabling integration still creates
+     operations. Diff-producing commands can also invoke configured formatters.
+5. A valid trailing semicolon retains the read verdict; incomplete pipelines
+   and conjunctions remain work. Any explicit nonempty requested shell/exec
+   environment is work: process initialization and helpers may change behavior.
+   Malformed or duplicate environment metadata also disqualifies reads without
+   altering the command/cwd used for approval.
+6. Additions:
+   - `sed` print and pattern-space substitution scripts when `-n` is present, no flag contains `i` or is
      `--in-place`, no file-supplied program (`-f`/`--file`, joined or
      abbreviated forms), and every literal script has no `w`, `W` or `e`
-     command or substitution `w`/`e` flag;
+     command or substitution `w`/`e` flag. Parse field delimiters/escapes before
+     separators, so literal semicolons inside patterns/replacements are data;
    - `nl`, `cut`;
    - `sort` without `-o` (including attached `-oFILE`), `--output`,
      `--compress-program` or accepted abbreviations such as `--o=FILE` and
@@ -161,7 +173,7 @@ The rule:
 | `cd crates/x; sed -n 1,80p y.rs` | yes |
 | `sed -n 1,80p f.rs \| nl` | yes |
 | `git -C .worktrees/a -c core.fsmonitor=false diff --stat` | no (configured filters) |
-| `git -c core.fsmonitor=false branch --list --sort=refname` | yes |
+| `git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname` | yes |
 | `git status`, `git diff --stat`, `rg needle f`, `fd -l`, `file -Sz sample.Z` | no |
 | `rg --no-config 'foo(bar)' f.rs` | yes on Unix |
 | `echo 'x & cargo fmt & echo x'`, `sort input.txt /o output.txt` | no on Windows |
@@ -431,7 +443,7 @@ seven full UTC days beginning at the next UTC midnight after AB1–AB5 are
 merged, one pinned runtime build is installed and prior writers are retired.
 Record merge SHAs, runtime source SHA and executable hash, startup time and
 exclusive-writer continuity (or equivalent per-run runtime provenance), window
-boundaries, store schema and prompt versions. Prompt 20 or merge dates alone
+boundaries, store schema and prompt versions. Prompt version or merge dates alone
 do not establish treatment. Mixed or unverifiable builds leave the candidate
 cohort unqualified. Installation and retirement are deployment prerequisites,
 not actions authorized by this plan. Fix observation
@@ -450,7 +462,8 @@ non-spawning root mean wall time must not rise. Any miss or inadequate
 sample becomes an open slice or an explicit decision; do not call it a pass.
 The instruction gate counts distinct search roots per qualifying run and
 permits at most one new names-search discovery per root; cursor pages are continuation,
-not a repeated discovery. Ordinary single-root runs still
+not a repeated discovery. Failed, denied and interrupted matching starts still
+count toward repetition; completed pre-edit result/coverage is a separate gate. Ordinary single-root runs still
 allow one; multi-root runs must cover every target scope. Record per-run
 roots/discovery starts, physical calls and every repeated root; an average cannot hide repeated
 probes. Exclude only completed edit_file calls whose dry_run is JSON boolean
@@ -464,7 +477,8 @@ prompt versions; it must keep doing so for ordinary comparisons. The
 prerequisite slice adds an explicit AB2-treatment mode. Build both arms
 from the same accepted AB1–AB5 runtime source; a reviewed counterfactual
 patch changes only AB2's prompt treatment and four descriptions, retaining
-identical AB3 schemas/behavior and AB4/AB5 authority/notice behavior. Label
+identical AB3 schemas/behavior and AB4/AB5 authority/notice behavior, including
+base prompt version 21. Label
 this prompt-19-versus-20 treatment on a fixed runtime, not a comparison to
 the historical released prompt-19 runtime. Record the exact expected pairs
 for source revision, binary hash, prompt/system hashes, tool-schema hash and
@@ -484,7 +498,7 @@ bypass is authorized by this plan.
 | --- | --- | --- |
 | `autonomous-core.md` ledger | AB1 and AB5 touch the AP3b progress path (`progress.rs`, notice set). Run AB1 after AP5's window closes (2026-10-13 17:42 UTC) so AP5's evidence is not mixed | Owner of ADR-0054 |
 | `autonomous-core.md` AC4 | Count novelty over AB1's read classification; no change requested | One definition of a read |
-| `tool-layer.md` | AB2 and AB3 edit built-in descriptions and `read_file` defaults; T13's arms should include prompt 20 | Owner of built-in contracts |
+| `tool-layer.md` | AB2 and AB3 edit built-in descriptions and `read_file` defaults; T13's arms use the accepted runtime's current identity; historical 19/20 label only the AB2 treatment | Owner of built-in contracts |
 | `token-efficiency.md` TE3, `supervised-delegation.md` D6b | Research § Delegation dominates wall time: 145 vs 24 min and 73 % of reads in children. Use as TE3 input; this plan does not change delegation defaults | Owners of delegation economics |
 | `progress/root.md` | ADR-0059 reservation; `docs/README.md`, `docs/plans/README.md`, `docs/plans/progress/README.md` rows; at AB5, store schema 45 → 46 (version-only) | Shared files |
 
