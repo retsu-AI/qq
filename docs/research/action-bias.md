@@ -279,7 +279,7 @@ observation to `end + 24 hours` for both windows; wait until `ready=1`.
 that cutoff. Later completion never becomes completed-by-cutoff. Use explicit UTC
 `start` and `end` dates, not a rolling relative date. The historical window
 is `[2026-09-13, 2026-10-13)`; the candidate window is seven full days after
-all AB1–AB4 merge commits. Keep the store open read-only and record its
+all AB1–AB5 merge commits. Keep the store open read-only and record its
 schema. The following redefines `RR` for **all** queries above as well.
 
 ```sh
@@ -430,3 +430,9 @@ below the workspace. These are the permitted discovery roots. Arbitrary
 per-directory paths do not qualify as distinct-root exceptions. Cursor
 pages continue one discovery; the scope query counts only new starts,
 while the raw diagnostic above retains physical call counts.
+
+Qualification shell-read shares must use AB6.1's bounded export/recount with
+one pinned AB1 classifier binary for both windows. The program-name SQL above
+is a historical proxy: it misses git -C, cut, sort and uniq and does not
+model the classifier's write exclusions. Its 725/1,886 figure is context,
+not the corrected baseline; classifier baseline recount remains open.

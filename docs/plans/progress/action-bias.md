@@ -15,7 +15,7 @@ newest last.
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
-| AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB1–AB4 + 7 days |
+| AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
 
@@ -333,3 +333,27 @@ newest last.
   suppress signature helpers for log/show, and test separators/overrides.
   Cargo's lock guard is a leading switch, with config overrides rejected.
   All five focused regressions pass; final independent re-review requested.
+### 2026-10-14 — fourth hosted plan review corrections
+
+- Six concrete contract gaps: sed substitution flags, sort abbreviations,
+  classifier-mismatched shell metric, unattended prompt authority, mixed AB5
+  measurement window and custom-subset tool conventions. Plan corrections
+  require shared-classifier recount, fixed AB1–AB5 candidate window, direct
+  authority wording and captured arbitrary-subset prompts. Source followups
+  are test-first; no findings or performance gates are waived.
+- AB6.1 is a concrete prerequisite: consistent read-only cohort export and
+  bounded streamed recount with the actual AB1 classifier. Both windows use
+  one pinned binary; old shell-program SQL figures stay historical proxies.
+  Baseline recount and candidate qualification remain open.
+- Independent final review approved the corrections and fixed-runtime paid
+  comparator contract. Docs truth: 23 passed; fmt/diff checks passed.
+  Production source unchanged from the previously qualified parent.
+
+### 2026-10-14 — AB1 helper fix qualification
+
+- Independent final source review approved. Workspace tests: 2,277 passed,
+  0 failed, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0.
+  Logs: `target/qq-perf/ab1-2026-10-14/helper-final-gate-{0,1,2,3}.log`.
+  Integrated parent docs only; production source remains qualified.
+- Matched performance qualification remains open; prior candidate binary
+  predates the helper fix and cannot qualify this head.
