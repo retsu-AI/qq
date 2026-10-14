@@ -1469,3 +1469,15 @@ newest last.
   Both historical14/prompt20,22 and13/prompt20–22 fixtures pass unchanged.
   Independent authority/projection integration review approves; golden updated
   and source frozen for all workspace gates before publication.
+
+### 2026-10-14 — AB4 integrated local qualification; parent review pending
+
+- Immutable8aac1a62:2,405workspacepassed,0failed,14ignored (38blocks);
+  formatting, all-target/all-feature Clippy and build exit0. Evidence:
+  `target/qq-perf/ab4-2026-10-14/durable-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Independent integration review approves authority/manifest/projection boundaries.
+  Current15/prompt22 digestd8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683;
+  historical13/prompt20–22 and14/prompt20,22 are preserved.
+- Publication awaits the new parent302 checkpoint feedback/crash review fixes;
+  these are real parent findings, and inherited source will requalify after repair.
+  The two AB4 documentation threads remain open until qualified publication.
