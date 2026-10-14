@@ -817,19 +817,8 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     .iter()
                     .any(|prefix| arg.starts_with(prefix))
         }),
-        "sort" => {
-            !cfg!(windows)
-                && !args.iter().any(|arg| {
-                    let option = arg.split('=').next().unwrap_or(arg);
-                    (arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && (arg.contains('o') || arg.contains('T')))
-                        || (option.len() > 2
-                            && ["--output", "--compress-program", "--temporary-directory"]
-                                .iter()
-                                .any(|name| name.starts_with(option)))
-                })
-        }
+        // Spills can write inside the workspace through inherited TMPDIR.
+        "sort" => false,
         "uniq" => {
             let mut operands = 0;
             let mut stdout = false;
@@ -872,6 +861,17 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     match *arg {
                         "-n" | "--quiet" | "--silent" => quiet = true,
                         "-e" | "--expression" => expect_script = true,
+                        "-E" | "-r" | "--regexp-extended" => {}
+                        option
+                            if option.starts_with('-')
+                                && !option.starts_with("--")
+                                && option.len() > 1
+                                && option[1..]
+                                    .bytes()
+                                    .all(|flag| matches!(flag, b'n' | b'E' | b'r')) =>
+                        {
+                            quiet |= option.contains('n');
+                        }
                         _ => return false,
                     }
                 }
@@ -880,13 +880,12 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
         }
         // Repository loading may reconcile and persist divergent operation heads.
         "jj" => false,
-        // Locked metadata/tree still invoke configured compiler wrappers.
-        "cargo" => args == ["--version"],
-        "rustc" => args.first() == Some(&"--version"),
+        // Compiler queries invoke wrappers; rustup proxies can install toolchains.
+        "cargo" | "rustc" => false,
         "tree" => !args.iter().any(|arg| {
             (arg.starts_with('-')
                 && !arg.starts_with("--")
-                && (arg.contains('o') || arg.contains('T')))
+                && (arg.contains('o') || arg.contains('R')))
                 || arg.starts_with("--out")
         }),
         "fd" => !args.iter().any(|arg| {
@@ -1115,7 +1114,7 @@ mod tests {
                 "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
                 true,
             ),
-            ("cut -f 1 f.rs | sort | uniq", !cfg!(windows)),
+            ("cut -f 1 f.rs | sort | uniq", false),
             ("grep 'a;b' f | wc -l", !cfg!(windows)),
             ("sed -n '/write/p' f", !cfg!(windows)),
             (
@@ -1347,6 +1346,36 @@ mod tests {
     }
 
     #[test]
+    fn ab1_sed_extended_regex_is_read_without_write_options() {
+        for options in [
+            vec!["-E", "-n"],
+            vec!["-r", "-n"],
+            vec!["--regexp-extended", "-n"],
+            vec!["-En"],
+            vec!["-nE"],
+            vec!["-rn"],
+        ] {
+            let mut args = vec!["sed"];
+            args.extend(options);
+            args.extend(["/foo+/p", "f"]);
+            assert!(super::read_only_argv(args[0], &args[1..]), "{args:?}");
+        }
+        for args in [
+            ["sed", "-Eni", "/foo+/p", "f"],
+            ["sed", "-En", "s/foo/bar/e", "f"],
+        ] {
+            assert!(!super::read_only_argv(args[0], &args[1..]), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn ab1_tree_recursive_html_output_is_work() {
+        for command in ["tree -L 2 -R .", "tree -RL2 .", "tree -aR ."] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
     fn ab1_output_only_sed_and_uniq_are_reads() {
         for script in ["=", "1,3=", "=; p"] {
             assert!(super::read_only_sed_script(script), "{script}");
@@ -1355,6 +1384,18 @@ mod tests {
             assert!(super::read_only_shell_command(command), "{command}");
         }
         for command in ["uniq input out", "uniq input - extra"] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_inherited_sort_spills_and_rustup_installation_are_work() {
+        for command in [
+            "sort -S1K huge-input",
+            "sort input",
+            "cargo --version",
+            "rustc --version",
+        ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
     }

@@ -1636,6 +1636,28 @@ mod action_bias_tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     #[test]
+    fn ab2_pruning_preserves_long_search_cursor_and_is_idempotent() {
+        let path = format!("{}/file.txt", "a".repeat(4_000));
+        let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
+        let header = format!("search . mode=names next={cursor}");
+        let page = format!("{header}\n{}\n", "row\n".repeat(2_000));
+        let calls = HashMap::from([(
+            "search-call".to_owned(),
+            ("search".to_owned(), "{}".to_owned()),
+        )]);
+        let stub =
+            prunable_stub(&calls, Some(EffectClass::ReadOnly), "search-call", &page).unwrap();
+        assert_eq!(stub.lines().next(), Some(header.as_str()));
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(stub.split("next=").nth(1).unwrap().lines().next().unwrap())
+                .unwrap(),
+            format!("{path}\0{}", 0).as_bytes()
+        );
+        assert!(prunable_stub(&calls, Some(EffectClass::ReadOnly), "search-call", &stub).is_none());
+    }
+
+    #[test]
     fn ab2_replay_preserves_complete_late_search_pages() {
         let path = format!("{}/file.txt", "a".repeat(2_000));
         let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
