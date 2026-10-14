@@ -1281,3 +1281,10 @@ newest last.
   This fresh receipt supersedes earlier cache uncertainty. Final pinned
   baseline export/recount, matched performance, final hosted review and the
   deployed seven-day candidate cohort remain open. No paid calls or deployment.
+
+- 2026-10-14 AB6 receipt semantics follow-up: rename read_share to
+  lexical_read_share and emit execution_effects_qualified=false. Historical
+  inherited PATH/TMPDIR and executable identity are unavailable, so command
+  shape counts cannot prove nonmutation. Fixture assertions pin the JSON field
+  names and the unavailable actual-effect qualification; runbook is explicit.
+  Existing provisional pinned baseline must be regenerated after this wave.

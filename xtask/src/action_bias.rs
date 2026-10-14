@@ -150,7 +150,8 @@ struct Recount {
     classifier_rejected: u64,
     malformed_commands: u64,
     environment_disqualified: u64,
-    read_share: f64,
+    lexical_read_share: f64,
+    execution_effects_qualified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,7 +508,8 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                     classifier_rejected: rejected,
                     malformed_commands: malformed,
                     environment_disqualified,
-                    read_share: reads as f64 / total as f64,
+                    lexical_read_share: reads as f64 / total as f64,
+                    execution_effects_qualified: false,
                 });
             }
             _ => return Err(ActionBiasError::Unqualified(Validation::Framing)),
@@ -656,6 +658,13 @@ mod tests {
             (11, 7, 2, 1)
         );
         assert_eq!(result.header.schema, 45);
+        let receipt = serde_json::to_value(&result).unwrap();
+        assert_eq!(receipt["execution_effects_qualified"], false);
+        assert_eq!(
+            receipt["lexical_read_share"],
+            result.read_calls as f64 / result.total_calls as f64
+        );
+        assert!(receipt.get("read_share").is_none());
         assert!(
             export(
                 &test_identity(),

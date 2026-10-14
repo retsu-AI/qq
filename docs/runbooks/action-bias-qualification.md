@@ -66,8 +66,12 @@ out-of-order call IDs, missing/extra records, altered footer digests, mismatched
 counts, unsupported schemas and zero denominators. Any such error leaves the
 result unqualified.
 
-The recount reports a read share; it does not prove a treatment cohort or mark
-AB6 accepted. The candidate observation window requires AB1–AB5 on main,
+The recount reports `lexical_read_share` and sets
+`execution_effects_qualified=false`. This measures pinned command shape; inherited
+PATH/TMPDIR and executable identity are unavailable. A replacement `grep` or
+`sort -S1K` spilling inside inherited TMPDIR can write despite a recognized shape.
+Actual nonmutation remains unqualified. This receipt does not prove a treatment
+cohort or mark AB6 accepted. The candidate observation window requires AB1–AB5 on main,
 installation of one pinned runtime build, retirement of prior writers and
 verifiable build provenance for every included run. A merge date or prompt version
 alone cannot prove the treatment. Mixed or unverifiable runtime builds leave
