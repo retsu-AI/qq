@@ -847,3 +847,9 @@ newest last.
   ceiling; the new real long-cursor idempotency regression covers headers
   inside the accepted search bound. All other 994 core tests passed; rerun
   the corrected fixture and full workspace gates before any push.
+
+- AB2 final review wave immutable source b7399a86426ea596b66aa34ac0ff94f385b5fccc: fresh
+  workspace package-clean qualification 2315 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab2-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
