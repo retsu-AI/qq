@@ -10437,6 +10437,7 @@ mod tests {
             Vec::new(),
             vec!["read_file".to_owned()],
             vec!["shell".to_owned()],
+            vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -10489,6 +10490,14 @@ mod tests {
                 assert!(
                     !prompt.contains("with ranges"),
                     "absent read_file ranges guidance: {prompt}"
+                );
+            }
+            if expected == ["exec"] {
+                assert!(
+                    !requests[0].tools()[0]
+                        .description()
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .any(|token| token == "shell")
                 );
             }
             if expected == ["shell"] {

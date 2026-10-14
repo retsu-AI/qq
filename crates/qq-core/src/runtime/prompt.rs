@@ -607,9 +607,16 @@ mod ab2_contract {
     fn ab2_read_child_keeps_its_brief_and_omits_the_action_obligation() {
         let prompt = render(Some(SubagentAuthority::Read), &crate::tools::specs());
         assert!(!prompt.contains("Do the work."));
+        assert!(!prompt.contains("Once you can name the file and the change, make the change"));
         assert!(prompt.contains("Sub-agent:"));
         assert!(prompt.contains("Stop as soon as you can answer the brief"));
         assert!(prompt.contains("You cannot change files or run commands"));
+    }
+
+    #[test]
+    fn ab2_ignored_walk_guidance_requires_the_explicit_override() {
+        let prompt = render(None, &crate::tools::specs());
+        assert!(prompt.contains("pass path and include_ignored=true"));
     }
 
     #[test]
