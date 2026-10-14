@@ -1,0 +1,37 @@
+# A workspace of its own: Tauri needs platform webview libraries (WebKitGTK
+# on Linux) that the engine's workspace, CI, and `cargo build --workspace`
+# must not depend on. QQ crates are path dependencies, so the app always
+# builds against the engine in this checkout.
+[workspace]
+
+[package]
+name = "qq-desktop"
+description = "QQ desktop app: a Tauri shell over the QQ server protocol"
+version = "0.1.6"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/retsu-AI/qq"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+qq-auth = { path = "../../../crates/qq-auth" }
+qq-client = { path = "../../../crates/qq-client" }
+qq-config = { path = "../../../crates/qq-config" }
+qq-protocol = { path = "../../../crates/qq-protocol" }
+qq-server = { path = "../../../crates/qq-server" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+
+# Mirrors the engine's release profile (see the root Cargo.toml).
+[profile.release]
+strip = "symbols"
+codegen-units = 1
+lto = "thin"
