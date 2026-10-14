@@ -845,6 +845,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn ab3_native_zero_row_window_returns_a_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for _ in 0..110 {
+            let name = "界".repeat(95);
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", format!("{}\n", "x".repeat(2_000)))
+            .unwrap();
+        drop(dir);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let args = serde_json::json!({"path":format!("{}/f.txt",components.join("/"))}).to_string();
+        let result = run_tool(&workspace, &state, "read_file", &args);
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("output_limit:"));
+        assert!(!result.model_text.contains("offset=0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn ab3_native_unicode_header_preserves_repaired_read_windows() {
         let directory = tempfile::tempdir().unwrap();
         let mut dir =
@@ -1045,7 +1071,7 @@ mod tests {
                     .count();
                 bytes += result.model_text.len();
                 let mut projected = result.model_text;
-                cuts += usize::from(budget.admit(&mut projected, ResultRecall::None));
+                cuts += usize::from(budget.admit("read_file", &mut projected, ResultRecall::None));
                 reads += 1;
             }
             assert!(shown > 0);
@@ -1848,6 +1874,23 @@ mod tests {
             assert!(!result.is_error, "{}", result.model_text);
             assert!(!result.model_text.contains("…+"), "{}", result.model_text);
             assert!(output::escaped_len(&result.model_text) <= 12 * 1024);
+            for recall in [
+                ResultRecall::None,
+                ResultRecall::StoredResult {
+                    tool: "search",
+                    call: qq_protocol::ToolCallId::from_bytes([0x31; 16]),
+                },
+            ] {
+                let mut budget = TurnOutputBudget::new();
+                let mut prior = "x".repeat(93 * 1024);
+                budget.admit("other", &mut prior, ResultRecall::None);
+                let mut projected = result.model_text.clone();
+                assert!(!budget.admit("search", &mut projected, recall));
+                assert_eq!(
+                    projected, result.model_text,
+                    "search pages cannot lose rows before their continuation"
+                );
+            }
             for path in result.model_text.lines().skip(1) {
                 assert!(found.insert(path.to_owned()), "duplicate path");
             }

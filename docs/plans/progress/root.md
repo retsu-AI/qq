@@ -616,3 +616,12 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   for the native Unicode-path contiguous-window regression. The existing job
   selected teardown tests only. A test-only read/output hook exercises the
   actual dispatch mask/bound pipeline using valid Windows metadata on Linux.
+
+- 2026-10-14 AB2 reserves tools/output.rs and live/replay turn-projection
+  call sites in runtime/run_loop.rs and sessions/{transcript,tests}.rs.
+  Actual tool identity preserves complete bounded search pages so cursors
+  never advance beyond omitted matches; root remains the sole writer.
+
+- AB2 additionally reserves tools/walk.rs for search-specific cancellable,
+  deadline-aware entry/name-byte enumeration ceilings before sorting. Existing
+  callers retain their listing API; incomplete search listings are errors.

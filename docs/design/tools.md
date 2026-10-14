@@ -1802,3 +1802,16 @@ A read continuation never suggests a start offset above 100,000. If the next
 unread line exceeds that bound, the result carries a terminal start-offset
 limit marker instead; no later starting offset is supported. Existing
 explicit ranges beginning within the bound retain their behavior.
+
+A read whose header leaves insufficient room for its first requested row returns
+an explicit output-limit error, recommending a nearer workspace root. It emits
+no continuation for a window that admitted no rows.
+Search pages retain their complete bounded content during per-turn projection.
+Their cursor advances past every emitted match, so a second generic head/tail
+cut would skip matches on continuation. The turn charges the complete page.
+
+Before ordered search traversal, each directory listing admits at most 100,000
+entries and 32MiB of retained name/path bytes. Cancellation and the search
+deadline are checked during enumeration and after sorting. An incomplete listing
+returns an explicit search-listing-limit error with nearer-root advice and no
+continuation cursor; an unsorted prefix cannot prove an ordered frontier.

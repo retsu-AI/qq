@@ -71,6 +71,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-teardown
+      - name: Oversized first rows return a read budget error
+        run: bash .github/scripts/test-exact.sh tools::tests::ab3_native_zero_row_window_returns_a_budget_error
       - name: Unicode read headers preserve repaired contiguous windows
         run: bash .github/scripts/test-exact.sh tools::tests::ab3_native_unicode_header_preserves_repaired_read_windows
       - name: Dropped waiter drains its owned process
