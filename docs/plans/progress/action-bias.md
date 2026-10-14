@@ -1017,3 +1017,8 @@ newest last.
   Historical10–14 rows survive47→49 migration; writer rejects wrong session/turn,
   unfinished/mismatched calls and limits, preserving first commit. Stored retry JSON
   is also bounded in SQL before copying. Source is being frozen for fresh workspace gates.
+
+- First frozen workspace run atc457630a failed root compilation on the new
+  `SessionRuntimeError::ToolProjectionUnavailable` exhaustive match; no tests ran.
+  Root maps it to an actionable request error with a regression fixture. All gates
+  will rerun at the repaired immutable head; the failed receipt is retained.

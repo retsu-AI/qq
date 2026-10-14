@@ -644,3 +644,6 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - AB2 also owns the synthetic seed in `sessions.rs` and context/replay test
   fixtures so they explicitly identify the projector under test. These fixture
   identities are not evidence assigning a policy to unversioned stored history.
+
+- AB2 owns root `src/runtime.rs` error translation for the new unresolved replay
+  error, preserving its actionable recovery message in server responses.

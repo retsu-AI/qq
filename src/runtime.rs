@@ -3265,7 +3265,8 @@ impl ServerHandler for RuntimeHandler {
 
 fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
     match error {
-        error @ (SessionRuntimeError::EmptyWorkspace
+        error @ (SessionRuntimeError::ToolProjectionUnavailable { .. }
+        | SessionRuntimeError::EmptyWorkspace
         | SessionRuntimeError::InvalidWorkspace
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
@@ -4049,6 +4050,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn ab2_unresolved_projection_keeps_the_server_recovery_message() {
+        let error = SessionRuntimeError::ToolProjectionUnavailable {
+            run: "historical-run".to_owned(),
+        };
+        let expected = error.to_string();
+        assert!(
+            matches!(map_session_runtime_error(error), ServerHandlerError::InvalidRequest(message) if message == expected && message.contains("start a new session"))
+        );
+    }
+
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::stream;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
