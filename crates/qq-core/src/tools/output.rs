@@ -1044,6 +1044,25 @@ mod tests {
     }
 
     #[test]
+    fn ab2_sixteen_search_pages_cannot_bypass_the_turn_cap() {
+        let page = format!(
+            "search mode=content rows=128 next=cursor\n{}",
+            "path:1:needle\n".repeat(940)
+        );
+        let mut budget = TurnOutputBudget::new();
+        let mut total = 0;
+        for _ in 0..16 {
+            let mut projected = page.clone();
+            budget.admit("search", &mut projected, ResultRecall::None);
+            total += projected.len();
+        }
+        assert!(
+            total <= MAX_TURN_TOOL_OUTPUT_BYTES,
+            "{total} bytes exceeds the turn cap"
+        );
+    }
+
+    #[test]
     fn the_turn_budget_marker_points_at_the_spill_when_one_exists() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
