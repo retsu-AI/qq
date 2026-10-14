@@ -182,7 +182,12 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                 previous = line;
                 continue;
             }
-            if code.starts_with("#[ignore]") {
+            let ignore_reason_empty = code.starts_with("#[ignore")
+                && line
+                    .split_once('=')
+                    .and_then(|(_, value)| value.split_once(']'))
+                    .is_some_and(|(value, _)| value.trim().trim_matches('"').trim().is_empty());
+            if code.starts_with("#[ignore]") || ignore_reason_empty {
                 findings.push(Finding {
                     rule: Rule::IgnoreNeedsReason,
                     path: path.to_owned(),
@@ -663,6 +668,20 @@ mod tests {
 
     #[test]
     fn a_bare_ignore_is_reported_and_a_reasoned_one_is_not() {
+        for reason in ["", "   "] {
+            let source = format!("#[ignore = \"{reason}\"]\nfn skipped() {{}}\n");
+            assert!(
+                rules(
+                    &[Source {
+                        path: "tests/skipped.rs",
+                        text: Some(&source)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::IgnoreNeedsReason)
+            );
+        }
         let text = "#[test]\n#[ignore]\nfn a() {}\n#[ignore = \"soak\"]\nfn b() {}\n";
         let files = [Source {
             path: "crates/qq-x/tests/soak.rs",
