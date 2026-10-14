@@ -97,6 +97,12 @@ newest last.
   integrated source with task-owned tmpfs test stores; disk latency remains
   unqualified by that correctness run.
 
+- Integrated source workspace gates passed with isolated tmpfs test stores:
+  2,272 passed, 0 failed, 14 ignored (35 test-report blocks); formatting,
+  all-target/all-feature Clippy with `-D warnings`, and workspace build all
+  exit 0. Logs: `target/qq-perf/ab1-2026-10-14/integrated-gate-{0,1,2,3}.log`.
+  This qualifies correctness on tmpfs, not persistence latency on disk.
+
 
 ### 2026-10-14 — AB1 regression start
 
@@ -144,3 +150,4 @@ newest last.
   but review changed the source during it; it is superseded evidence, not
   final qualification. Re-run gates on the committed final candidate before
   push. Matched benchmark baseline is the integrated plan head `f7b0457e`.
+
