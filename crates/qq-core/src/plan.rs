@@ -961,6 +961,9 @@ impl CompiledAgentPlan {
                     .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
                     .replace("; reserve shell for pipelines", "")
                     .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
+                "write_file" if !has_read_file => Some(
+                    "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
+                ),
                 "edit_file" if !has_read_file => Some(tool.spec.description().replace(
                     "hash from its current read_file header",
                     "current content hash",

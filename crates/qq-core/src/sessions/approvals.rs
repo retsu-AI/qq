@@ -145,7 +145,7 @@ impl ToolGate for SessionToolGate {
                         _ => None,
                     };
                     let shell = match class {
-                        approval::ToolClass::Shell { command, cwd } => {
+                        approval::ToolClass::Shell { command, cwd, .. } => {
                             // Why the gate is asking, so the client can say so.
                             let verdict = approval::classify_command(&command, None);
                             Some(ShellCommandPreview {
