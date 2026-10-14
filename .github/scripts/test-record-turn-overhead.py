@@ -10,6 +10,7 @@ import time
 import unittest
 
 RECORDER = Path(__file__).with_name("record-turn-overhead.py")
+FIXTURE_DIGEST = "c" * 64
 
 
 class RecorderTests(unittest.TestCase):
@@ -20,24 +21,56 @@ class RecorderTests(unittest.TestCase):
         self.baseline = self.binary("baseline", 10)
         self.candidate = self.binary("candidate", 12)
 
-    def binary(self, name, value, malformed=False):
+    def binary(self, name, value, malformed=False, fixture_digest=FIXTURE_DIGEST):
         path = self.root / name
         path.write_text("#!/usr/bin/env python3\n" +
             "import json, os\n" +
             f"with open(os.environ['ORDER_LOG'], 'a') as log: log.write('{name}\\n')\n" +
             "for milestone in [10,100,1000]:\n" +
-            f" print(json.dumps({{'metric':f'turn_overhead_{{milestone}}_ns_per_turn','milestone':milestone,'unit':'ns/turn','iterations':1,'median':{str(malformed) if malformed else value},'samples':[{value}],'boundary':'fixed fixture','h0_registered':False}}))\n")
+            f" print(json.dumps({{'metric':f'turn_overhead_{{milestone}}_ns_per_turn','milestone':milestone,'unit':'ns/turn','iterations':1,'median':{str(malformed) if malformed else value},'samples':[{value}],'boundary':'fixed fixture','h0_registered':False,'fixture_sha256':{fixture_digest!r}}}))\n")
         path.chmod(0o755)
         return path
 
-    def run_recorder(self, *extra, baseline=None, candidate=None):
+    def run_recorder(self, *extra, baseline=None, candidate=None, fixture_identity=True):
         return subprocess.run([sys.executable, str(RECORDER),
             "--baseline", str(baseline or self.baseline),
             "--candidate", str(candidate or self.candidate),
             "--baseline-sha", "a" * 40, "--candidate-sha", "b" * 40,
-            "--output", str(self.root / "result"), *extra],
+            "--output", str(self.root / "result"),
+            *(["--baseline-fixture-sha256", FIXTURE_DIGEST,
+               "--candidate-fixture-sha256", FIXTURE_DIGEST] if fixture_identity else []), *extra],
             env=dict(os.environ, ORDER_LOG=str(self.root / "order")),
             text=True, capture_output=True, timeout=30)
+
+    def test_fixture_identity_is_required_before_execution(self):
+        result = self.run_recorder(fixture_identity=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixture", result.stderr)
+        self.assertFalse((self.root / "order").exists())
+        self.assertFalse((self.root / "result").exists())
+
+    def test_changed_fixture_digests_refuse_before_execution(self):
+        result = self.run_recorder("--candidate-fixture-sha256", "d" * 64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixtures differ", result.stderr)
+        self.assertFalse((self.root / "order").exists())
+        self.assertFalse((self.root / "result").exists())
+
+    def test_malformed_fixture_identity_refuses_before_execution(self):
+        result = self.run_recorder("--baseline-fixture-sha256", "not-a-digest")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sixty-four-hex", result.stderr)
+        self.assertFalse((self.root / "order").exists())
+
+    def test_sample_fixture_mismatch_preserves_failed_evidence(self):
+        candidate = self.binary("changed-fixture", 12, fixture_digest="d" * 64)
+        result = self.run_recorder(candidate=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixture", result.stderr)
+        raw = json.loads((self.root / "result" / "raw.json").read_text())
+        self.assertFalse(raw["complete"])
+        self.assertEqual(len(raw["runs"]), 2)
+        self.assertFalse((self.root / "result" / "summary.json").exists())
 
     def test_complete_recording_keeps_all_alternating_and_control_samples(self):
         result = self.run_recorder()
