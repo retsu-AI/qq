@@ -237,8 +237,8 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.turn_ordinal * 10
      FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0),
    f AS (SELECT run_id, min(k) fe FROM t WHERE name IN ('edit_file','write_file') AND state = 'completed' GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe AND t.name IN ('read_file','search','tree')) n FROM f)
-   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
-          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) * 9 / 10 FROM c)) FROM c;"
+   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) - 1) / 2) FROM c)),
+          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) * 9 - 1) / 10) FROM c)) FROM c;"
 
 # Root shell reading: calls, cd-prefixed, read program after an optional leading `cd DIR &&` / `cd DIR;`, of those cd-prefixed
 q "WITH rr AS ($RR), c AS (SELECT json_extract(t.arguments_json, '\$.command') cmd FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0 AND t.name = 'shell'),
@@ -293,7 +293,8 @@ RR_STARTS="SELECT r.id, s.depth <> 0 child, r.status FROM runs r JOIN sessions s
       AND r.started_at_ms < strftime('%s','$end') * 1000"
 RR="$RR_STARTS AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000"
 
-# Qualification reads before first actual edit (root): runs, median, p90.
+# Qualification reads before first actual edit (root): runs, nearest-rank median, p90.
+# A zero cohort returns NULL statistics and is unqualified.
 # The historical query above included previews; use this corrected query
 # for both baseline and candidate qualification.
 q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
@@ -303,8 +304,8 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
      AND state = 'completed' AND (name <> 'edit_file' OR coalesce(CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json, '\$.dry_run') END, '') <> 'true') GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe
      AND t.name IN ('read_file','search','tree')) n FROM f)
-   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
-          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) * 9 / 10 FROM c)) FROM c;"
+   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) - 1) / 2) FROM c)),
+          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT max(0,(count(*) * 9 - 1) / 10) FROM c)) FROM c;"
 
 # Root edit calls: failed, executed terminal calls, failure share.
 # Denied/interrupted calls are reported separately and excluded from this
@@ -410,7 +411,7 @@ per-run-over-one diagnostic alongside scope counts rather than relabelling
 all such runs as passing.
 
 ```sh
-# Scope counts: runs, distinct roots, searches, repeated roots, affected runs, maximum roots in one run.
+# Built-in nested-edit diagnostic: runs, roots, starts, repeated roots, affected runs, max roots, invalid scopes, unproven mutation runs.
 q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, t.turn_ordinal, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
@@ -425,7 +426,8 @@ q "WITH rr AS ($RR), paths AS (
      WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
      GROUP BY p.run_id),
    cursor_space AS (SELECT char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288) ws),
-   discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
+   discovery AS (SELECT t.run_id, CASE WHEN coalesce(json_type(t.arguments_json, '\$.path'),'null') IN ('null','text')
+       THEN coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') END path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id CROSS JOIN cursor_space
      WHERE t.name = 'search'
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
@@ -438,14 +440,32 @@ q "WITH rr AS ($RR), paths AS (
        AND json_extract(t.arguments_json, '\$.query') = '(^|/)(AGENTS|CLAUDE)\\.md\$'
      GROUP BY 1, 2),
    per_run AS (SELECT q.run_id, count(d.path) roots, coalesce(sum(d.n),0) searches,
-     coalesce(sum(d.n > 1),0) repeated_roots FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1)
-   SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots) FROM per_run;"
+     coalesce(sum(d.n > 1),0) repeated_roots,
+     coalesce(sum(d.path IS NULL AND d.n IS NOT NULL),0) invalid_scopes
+     FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1),
+   unproven_mutations AS (SELECT DISTINCT t.run_id FROM tool_calls t JOIN rr ON rr.id=t.run_id
+     WHERE rr.child=0 AND t.state IN ('completed','failed','interrupted')
+       AND (t.name IN ('shell','exec') OR t.name GLOB 'ext__*' OR t.name GLOB 'mcp__*'))
+   SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots),
+     sum(invalid_scopes), (SELECT count(*) FROM unproven_mutations) FROM per_run;"
 ```
 
-Paths with `./`, doubled separators or symlink aliases require canonical
-normalization against the run workspace before qualification. The query
-normalizes absent paths and trailing slashes only; record unresolved
-normalization as unqualified, never as a distinct-root allowance.
+The first six columns describe only observed built-in nested edits, not the
+whole editing cohort. A nonzero invalid-scope count leaves qualification open:
+nonstring roots cannot become permitted roots through SQLite coercion. A
+nonzero unproven-mutation count also leaves qualification open. Shell, exec and
+external calls may edit without a built-in path; establish their actual affected
+paths and ordering from immutable execution evidence before applying discovery
+and first-edit gates. Lexical read status cannot prove those effects absent.
+Do not exclude shell-only editing runs and report the remaining subset as passing.
+
+Paths with `./` or doubled separators require lexical normalization before
+qualification. Resolve symlink aliases only from
+immutable call-time evidence identifying the resolved discovery root. Current
+filesystem state cannot establish historical identity: missing, retargeted,
+masked or ambiguous evidence leaves qualification unqualified. The query
+normalizes absent paths and trailing slashes only; unresolved identity never
+becomes a distinct-root allowance.
 
 Workspace-root discovery covers nonignored ancestors for every target.
 Ignored targets also require discovery from their highest ignored ancestor
@@ -513,3 +533,9 @@ completed-only query incorrectly returned two starts and zero repeats.
 Qualification uses persisted session depth for historical root/child role;
 there are no orphaned child runs in this fixed baseline window. Evidence:
 target/qq-perf/ab-plan-2026-10-14/failed-discovery-starts.json.
+
+The AB6 shell statistic is `lexical_read_share`: exact pinned command-shape
+recognition. It does not establish actual nonmutation. Historical records lack
+inherited PATH/TMPDIR and executable identity; a replaced `grep` or sort spill
+inside inherited TMPDIR can write despite a recognized lexical shape. Keep
+actual-effect qualification unavailable without immutable execution evidence.

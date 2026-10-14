@@ -786,3 +786,51 @@ newest last.
   retain their existing floor. Focused green: 25 pass, 0 fail. This preserves
   identical supplied page text; it does not change the preexisting timing of
   persisted tool results versus later checkpoint annotation.
+- 2026-10-14 AB1 extended-regex/tree follow-up: reproduced both verdict bugs
+  (15 pass, 2 fail), then admitted sed -E/-r/--regexp-extended and closed n/E/r
+  short clusters while preserving write/execute rejection. tree -R is Work;
+  restored ordinary -T title handling. Final focused AB1 run: 17 pass, 0 fail.
+  Inherited PATH/TMPDIR effects remain outside lexical progress classification
+  and do not grant approval authority. Full immutable qualification follows.
+- 2026-10-14 review follow-up: corrected nearest-rank offsets for both first-edit
+  queries. Deterministic empty/singleton/even/odd/duplicate fixtures pass;
+  the actual-edit baseline remains 109 roots, median 9, p90 57. Alias grouping
+  now requires immutable call-time evidence; current filesystem resolution
+  cannot qualify historical discovery identity. Shell qualification is explicitly
+  lexical_read_share; inherited executable/environment effects remain unqualified.
+  Updated the sort temporary-directory and uniq stdout contracts to match AB1.
+
+- AB1 immutable follow-up source 5f989e64dc5d12850599d00b19dd2d5753e8c18b:
+  fresh workspace package-clean qualification passed 2,289 tests, 0 failures,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace build
+  exit 0. Receipts fresh-regex-tree-integrated-{0..4}.log and receipt.json.
+  Performance qualification remains open; shared-host pressure is not waived.
+
+- AB1 inherited-effect regression: exact sort -S1K huge-input reproduced Read
+  before the fix. All sort and Cargo/rustc forms now count as Work because
+  inherited temporary storage and rustup installation cannot be neutralized
+  by this lexical predicate. Focused run: 18 pass, 0 fail. Retain PATH identity
+  as an explicit lexical limitation; no approval authority is expanded.
+- 2026-10-14 qualification follow-up: typed discovery paths cannot become
+  scopes through SQLite coercion. The diagnostic now exposes invalid scopes
+  and executed shell/exec/external runs with unproven mutation paths. Fixtures
+  cover numeric/array/object roots and a shell-only sed edit. Historical scope
+  diagnostic is 108/1/1/0/0/1, invalid scopes 0, unproven mutation runs 208;
+  the whole editing cohort remains unqualified. First-edit ordering has the
+  same immutable mutation-evidence requirement.
+
+- AB1 scope correction: sort remains Work because ordinary spills can write
+  through inherited TMPDIR; explicit -T rejection alone is insufficient.
+  Cargo/rustc version queries are Work because rustup proxies can install
+  missing workspace-selected toolchains. These are known program semantics,
+  distinct from unqualified arbitrary executable identity.
+
+- Independent parent review caught the separate mcp__ external prefix; include
+  it alongside ext__ in unproven mutation evidence. A completed MCP-only
+  mutation fixture now leaves the cohort unqualified too.
+
+- AB1 final review wave immutable source 087b705d7e0847f06e6c4c8f4f28031264258955: fresh
+  workspace package-clean qualification 2290 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab1-2026-10-14/fresh-final-review-wave-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
