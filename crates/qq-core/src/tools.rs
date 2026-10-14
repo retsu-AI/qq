@@ -877,6 +877,39 @@ mod tests {
     }
 
     #[test]
+    fn ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("capped"),
+            format!("{}\n", "x".repeat(99)).repeat(52_429),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for path in ["capped", "single"] {
+            let mut offset = 1;
+            for call in 0..256 {
+                let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
+                let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
+                assert!(!result.is_error, "offset={offset}: {}", result.model_text);
+                let marker = result.model_text.lines().last().unwrap();
+                if let Some((_, next)) = marker.split_once("continue from offset=") {
+                    let next = next.split(']').next().unwrap().parse::<usize>().unwrap();
+                    assert!(next > offset);
+                    offset = next;
+                } else {
+                    assert!(
+                        marker.contains("file continues past the 4 MiB scan cap"),
+                        "{marker}"
+                    );
+                    break;
+                }
+                assert!(call < 255, "scan prefix did not terminate");
+            }
+        }
+    }
+
+    #[test]
     fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
         use super::output::{ResultRecall, TurnOutputBudget};
         let directory = tempfile::tempdir().unwrap();

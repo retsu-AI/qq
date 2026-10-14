@@ -474,3 +474,9 @@ newest last.
   Seven focused AB3 regressions and the exact replay fixture pass; independent
   final review approves this compatibility adjustment. Full workspace rerun
   remains open, along with fresh scan-cap review and matched performance.
+
+- Fresh hosted scan-cap claim checked against current source: the exhaustive
+  5 MiB fixture follows every advertised offset successfully until the
+  existing terminal scan-cap marker. A single over-cap line is also terminal.
+  Regression passes without a production change; the older draft contract
+  needs to state this existing terminal behavior explicitly.
