@@ -1463,3 +1463,9 @@ newest last.
   digests while refreshing the current15/prompt22 fixture from the real encoder.
 - Fresh prompt-history and restricted external-tool documentation fixes are included.
   Current golden refresh, independent integration review and full gates precede push.
+
+- Focused encoder check atd77352c9:18passed and the current15/prompt22 golden
+  fails against the inherited20 digest, producingd8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683.
+  Both historical14/prompt20,22 and13/prompt20–22 fixtures pass unchanged.
+  Independent authority/projection integration review approves; golden updated
+  and source frozen for all workspace gates before publication.

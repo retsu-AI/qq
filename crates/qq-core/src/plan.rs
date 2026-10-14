@@ -1727,7 +1727,7 @@ mod tests {
         // changing the encoding (descriptor 15 and prompt 22: strict projection identity and read-only authority, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "c884d5651634f28914923f54e284b3d6c14e54d747910dd51cf525fdfafd3608"
+            "d8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
