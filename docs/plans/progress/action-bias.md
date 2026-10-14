@@ -360,3 +360,12 @@ newest last.
 - Independent final plan review approves. Docs truth23 passed; fmt and diff
   checks passed. Parent production source is unchanged from its qualified
   source; no acceptance or performance gate is waived.
+
+### 2026-10-14 — configured Git helpers and literal exec regressions
+
+- New hosted findings reproduced test-first: working-tree filters, signature
+  branch formatting/default sort and remerge helpers must count as work.
+- Exact exec argv containing spaces, quotes and shell metacharacters is a
+  literal read, independent of native shell quoting. Focused red run: six
+  pass, two fail; configured-git-exact-exec-red.log in AB1 receipts.
+- Repair and independent read-only review in progress; performance remains open.

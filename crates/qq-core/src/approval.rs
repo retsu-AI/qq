@@ -1107,6 +1107,49 @@ mod tests {
             "wrong shell read verdicts: {failures:?}"
         );
     }
+    #[test]
+    fn ab1_git_filters_and_signature_helpers_are_work() {
+        for command in [
+            "git -c core.fsmonitor=false status",
+            "git -c core.fsmonitor=false diff --stat",
+            "git -c core.fsmonitor=false blame --no-textconv f.rs",
+            "git -c core.fsmonitor=false branch --list --format='%(signature:grade)'",
+            "git -c core.fsmonitor=false branch --list --sort=signature:grade",
+            "git -c core.fsmonitor=false branch --list",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --remerge-diff -1",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --diff-merges=remerge -1",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert!(super::read_only_shell_command(
+            "git -c core.fsmonitor=false branch --list --sort=refname"
+        ));
+    }
+
+    #[test]
+    fn ab1_literal_exec_arguments_remain_reads() {
+        for args in [
+            r#"{"program":"rg","args":["--no-config","foo bar","f.rs"]}"#,
+            r#"{"program":"rg","args":["--no-config","it's $HOME!^%","f.rs"]}"#,
+        ] {
+            let call = crate::runtime::RuntimeToolCall {
+                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+                turn_ordinal: 0,
+                call_ordinal: 0,
+                provider_call_id: "exec-read".to_owned(),
+                rejection: None,
+                name: "exec".to_owned(),
+                arguments: args.to_owned(),
+                effect: crate::catalog::EffectClass::Shell,
+            };
+            let result = crate::tools::bounded_result("exec exit=0\nmatch".to_owned(), false);
+            assert!(
+                !crate::runtime::is_progress(&call, None, &result),
+                "{args}"
+            );
+        }
+    }
+
     #[cfg(feature = "tool-fetch")]
     use std::sync::Arc;
 
