@@ -751,3 +751,10 @@ newest last.
 - Bump AB4's base prompt identity to 21, preserving ordinary actionable auto
   prompt bytes. Retain historical version-20 digest coverage; AB6 must pin
   the deployed version-21 runtime, not infer treatment from prompt 20.
+
+
+- Authority-sensitive prompt behavior now carries base version 21. The
+  read-only descriptor regression distinguishes the old prompt-20 identity;
+  canonical prompt-20 bytes remain a historical golden. Sixty-two prompt
+  focused tests pass; independent source review approves. Full integrated
+  qualification follows upstream repair integration.

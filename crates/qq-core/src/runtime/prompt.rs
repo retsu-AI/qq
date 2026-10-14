@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(20) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(21) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 20. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 21. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -31,6 +31,7 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// file takes a unique exact edit, and how to recover from a refusal (T19).
 /// 19 → 20 adds action and exploration conventions, built-in mapping, nested
 /// instruction discovery and a header naming present read tools (AB2).
+/// 20 → 21 states actual read-only, unattended and declared-tool authority (AB4).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -627,7 +628,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 20);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 21);
     }
 
     #[test]
