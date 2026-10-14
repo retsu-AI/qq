@@ -701,3 +701,10 @@ newest last.
 - Placeholder docs truth passes 23 tests; formatting and diff checks pass.
   Independent final review approves typed/trimmed cursor-start semantics and
   the explicit provenance requirement for all other cursor records.
+
+
+- Immutable integrated source b937a2b7 passes 2,304 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  AB2 production behavior is unchanged by the qualified AB1/environment and
+  scope-query integration. Matched prompt/catalog/search performance stays open.
