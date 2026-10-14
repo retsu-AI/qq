@@ -6661,6 +6661,23 @@ async fn prompt_terminal_receipt_waits_for_abandoned_owned_summary() {
                     RunOutcome::Cancelled
                 }
             );
+            let owner_id = parent.identity.run_id;
+            let summary_id = summary.identity.run_id;
+            let visible = store
+                .call(Priority::Control, move |connection| {
+                    connection.execute(
+                        "UPDATE runs SET finished_at_ms = 100 WHERE id IN (?1, ?2)",
+                        params![owner_id.to_string(), summary_id.to_string()],
+                    )?;
+                    crate::sessions::load_session_summary(connection, session_id)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                visible.last_outcome,
+                Some(outcome.clone()),
+                "owner must win equal millisecond timestamps"
+            );
             assert_eq!(spend.cost_usd_nanos, None);
             assert!(
                 store
