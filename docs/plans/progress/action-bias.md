@@ -241,3 +241,8 @@ newest last.
 - #301 raised ripgrep hostname helpers, Git external diff/textconv helpers,
   and Cargo lockfile-generating queries. Added exact verdict regressions
   before changing the recognizer; independent investigation requested.
+- Independent review caught Git disabling flags used as path/value operands
+  and default blame textconv. Require canonical leading disable switches,
+  suppress signature helpers for log/show, and test separators/overrides.
+  Cargo's lock guard is a leading switch, with config overrides rejected.
+  All five focused regressions pass; final independent re-review requested.
