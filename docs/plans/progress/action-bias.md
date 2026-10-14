@@ -695,3 +695,14 @@ newest last.
   retained). These are correctness gates, not performance measurements.
 - Integrated AB4 draft304 parent receipt with no production change. Matched
   performance and hosted review remain open; publish AB5 as draft.
+
+### 2026-10-14 — AB6.1 reproducible recount start
+
+- Isolated feat/eng-1043-ab6-qualification starts at AB5 a06fb868. ENG-1043
+  In Progress covers tooling now and seven-day qualification later. No named
+  runtime performance gate changes: hidden predicate wrapper plus explicit
+  xtask-only export/recount; provider/runtime paths remain inactive.
+- CLI test-first fixture precedes implementation. Ownership reserved in root
+  ledger, including the actual existing CLI router and manifest/lockfile.
+  Implementation, deterministic fixtures, independent review and all final
+  workspace gates remain open.

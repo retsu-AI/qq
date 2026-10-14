@@ -600,3 +600,15 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 - Depth-limited discovery uses only justified target ancestors at64-component
   boundaries; parent contract and research qualification must account for
   these scopes before claiming instruction coverage.
+
+### 2026-10-14 — AB6.1 qualification tooling ownership
+
+- Reserve xtask/src/main.rs, existing CLI routing in xtask/src/providers.rs,
+  new xtask/src/action_bias.rs, xtask/Cargo.toml and Cargo.lock for the existing
+  workspace rusqlite dependency. The qq-core hidden classification support
+  wrapper in approval.rs exposes the actual progress-read predicate; ordinary
+  runtime requests add no work. Research/runbook and action-bias ledger owned.
+- Export reads SQLite in one read-only snapshot and never opens SessionRuntime
+  or applies migrations. Header binds schema/store/window/cutoff/cohort count.
+  Recount bounds input, rejects incomplete/duplicate/malformed exports and
+  leaves unclassified overflow unqualified. No paid or post-merge run claimed.
