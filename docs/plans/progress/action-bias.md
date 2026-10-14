@@ -283,3 +283,22 @@ newest last.
 - Placeholder docs truth passes 23 tests; formatting and diff checks pass.
   Independent final review approves typed/trimmed cursor-start semantics and
   the explicit provenance requirement for all other cursor records.
+
+
+### 2026-10-14 — whole-run discovery repetition and export inputs
+
+- Repetition counts now include starts after the first below-root edit;
+  coverage retains separate successful pre-edit/per-target requirements.
+  Executable fixture adds successful and failed placeholder starts after
+  edits: [1,2,16,1,1,2]. Fixed baseline remains [108,1,1,0,0,1].
+  Receipt: post-edit-discovery-starts.json. Independent query review agrees.
+- AB6 contract requires exact runtime-envelope parsing, typed requested-env
+  status and pinned exporter/recount identity. AB4 explicitly tests feature-
+  enabled fetch exclusion; current unattended Network filtering already
+  excludes it, so the hosted exposure claim is stale. AB2 acceptance bounds
+  pre-budget directory enumeration and rejects incomplete sorted-page proof.
+
+- Fresh parent docs-truth verification passes 23 tests after invalidating
+  qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
+  change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
+  current fixed-window recount retain the baseline above.

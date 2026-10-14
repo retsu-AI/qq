@@ -400,8 +400,9 @@ than once. A multi-root exception is valid only when the searches cover
 every edited target and its instruction ancestors. Only successful discovery
 results available to the model before the relevant below-root edit qualify; same-turn
 parallel search/edit calls do not prove the model had instruction evidence.
-The query conservatively counts starts in turns earlier than the first
-below-root edit; an earlier root-level edit does not move that cutoff. Later-discovered new
+The repetition query counts every matching first-page start throughout the
+editing run, including starts after an edit. Pre-edit and per-target ordering
+apply only to the separate instruction-coverage proof. Later-discovered new
 targets require separate per-target ordering evidence rather than automatic
 qualification. Coverage is reviewed separately, including completed cursor
 pages and applicable instruction reads before each affected target's edit; fewer searches cannot prove compliance. Keep the original
@@ -426,7 +427,7 @@ q "WITH rr AS ($RR), paths AS (
    cursor_space AS (SELECT char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288) ws),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id CROSS JOIN cursor_space
-     WHERE t.name = 'search' AND t.turn_ordinal < q.first_edit_turn
+     WHERE t.name = 'search'
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
        AND (json_type(t.arguments_json, '\$.cursor') IS NULL
          OR json_type(t.arguments_json, '\$.cursor') = 'null'
