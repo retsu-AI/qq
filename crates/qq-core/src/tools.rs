@@ -1464,6 +1464,7 @@ mod tests {
         fs::write(root.join(".gitignore"), "/.worktrees/\n/src/vendor/\n").unwrap();
         fs::create_dir_all(root.join("src/vendor")).unwrap();
         fs::write(root.join("src/AGENTS.md"), "source ancestor policy\n").unwrap();
+        fs::write(root.join("src/NOTAGENTS.md"), "not instructions\n").unwrap();
         fs::write(root.join("src/vendor/AGENTS.md"), "vendor policy\n").unwrap();
         fs::write(root.join("src/vendor/x.rs"), "// target\n").unwrap();
         fs::create_dir_all(root.join(".worktrees/x/nested")).unwrap();
@@ -1484,7 +1485,7 @@ mod tests {
         let workspace = Workspace::open(root).unwrap();
         for (arguments, expected) in [
             (
-                r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees","include_ignored":true}"#,
+                r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees","include_ignored":true}"#,
                 ".worktrees/x/nested/CLAUDE.md",
             ),
             (
@@ -1512,7 +1513,7 @@ mod tests {
             &workspace,
             &FileState::default(),
             "search",
-            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"target","include_ignored":true}"#,
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"target","include_ignored":true}"#,
         );
         assert!(!second.is_error, "{}", second.model_text);
         assert!(second.model_text.contains("target/CLAUDE.md"));
@@ -1522,16 +1523,17 @@ mod tests {
             &workspace,
             &FileState::default(),
             "search",
-            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"."}"#,
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"."}"#,
         );
         assert!(!ancestors.is_error, "{}", ancestors.model_text);
         assert!(ancestors.model_text.contains("src/AGENTS.md"));
+        assert!(!ancestors.model_text.contains("NOTAGENTS.md"));
         assert!(!ancestors.model_text.contains("src/vendor/AGENTS.md"));
         let ignored = run_tool(
             &workspace,
             &FileState::default(),
             "search",
-            r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"src/vendor","include_ignored":true}"#,
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"src/vendor","include_ignored":true}"#,
         );
         assert!(!ignored.is_error, "{}", ignored.model_text);
         assert!(ignored.model_text.contains("src/vendor/AGENTS.md"));

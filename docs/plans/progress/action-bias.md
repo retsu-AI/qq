@@ -239,3 +239,74 @@ newest last.
 - Independent code/spec review approved. Schema hash changes to
   `d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f`.
   Workspace and final benchmark gates remain open; no implementation pushed.
+
+
+- Third workspace attempt passed core behavior but failed five TUI ANSI
+  assertions under inherited `NO_COLOR=1`. The same compiled binary passes
+  all render tests (6) and highlighted-frame test (1) with NO_COLOR removed.
+  Re-run full gates with that test environment; no TUI code change needed.
+- Final v20 source before basename follow-up: 2,282 passed, 0 failed,
+  14 ignored; fmt/Clippy/build exit 0. Independent review approved identities
+  and child contracts. Third hosted plan review requires exact-basename
+  instruction search; added NOTAGENTS.md rejection, requalification next.
+- Basename full gate hit unchanged MCP cancellation timing: 49.56 ms
+  against 45 ms fixture bound during concurrent builds. Same compiled test
+  passes alone in 20 ms; no MCP code or threshold changed. Full rerun next.
+
+
+### 2026-10-14 — second hosted plan review corrections
+
+- Fresh #295 findings: retained Git output writers, absent ask_user prompt
+  text, multiple ignored instruction roots, rendered-line continuation,
+  completion censoring, progressive selection eligibility and dry-run cohorts.
+  Verified against code; each receives concrete acceptance rather than a waiver.
+- Instruction discovery uses the highest ignored ancestor, not only its
+  worktree child; host loading supplies only workspace-root instructions.
+  One search per distinct discovery root covers multi-root edits without
+  a per-directory walk. Preserve raw per-run counts and audit scope coverage.
+- Completion now fixes observation at end + 24 h; later finishes never
+  become completed-by-cutoff. Activity metrics use terminal-by-cutoff runs.
+  Exclude dry-run previews from mutation and instruction cohorts.
+
+- Independent review added the nonignored-parent case: every below-root
+  edit uses workspace-root discovery, plus each applicable highest ignored
+  subtree. The AB2 fixture covers `src/AGENTS.md` above ignored `src/vendor`.
+- Added a corrected first-actual-edit qualification query excluding dry-run
+  previews. The original historical query remains documented as a preview-
+  inclusive proxy; its 9/57 result must be reconciled before qualification.
+- Executed the corrected query on schema 45: 109 editing roots, median 9,
+  p90 57; original thresholds remain valid. Exact-query SQLite fixture
+  measures 42 reads across a preview and excludes preview-only runs.
+  Evidence: `target/qq-perf/ab-plan-2026-10-14/first-actual-edit.json`.
+- Second independent review approved these corrections. `cargo test -p qq
+  docs_truth -- --nocapture`: 23 passed; `git diff --check` passed. Production
+  source is unchanged from the integrated head with all four workspace
+  gates green; these corrections change plan/research/ledger only.
+
+- AB1 exact `git show --output=written.txt HEAD` verdict regression passes
+  with all five focused AB1 tests. Merged the reviewed parent corrections;
+  production source unchanged from the locally qualified classifier.
+
+### 2026-10-14 — AB4 execution eligibility investigation
+
+- Independent source investigation confirms external read-only hints grant
+  nothing. Strict ReadOnly denies all External calls, including granted ones;
+  unattended Ask allows only configuration-granted externals. Clarified the
+  plan to preserve that gate behavior, avoid request-time grant resolution,
+  and filter progressive index/selection with the declaration predicate.
+
+### 2026-10-14 — third hosted plan review corrections
+
+- Five fresh concrete findings: goal still capped all scopes at one search,
+  sed file-supplied programs, direct-run guide omitted granted externals,
+  suffix regex matched NOTAGENTS.md, and scan-cap remainder counts unknown.
+  Aligned goals/contracts and added exact regression acceptance; no waiver.
+- Independent review approved all five corrections and the external-hints
+  eligibility clarification. Docs truth 23 passed; fmt/diff checks passed.
+  AB1 exact file-supplied sed regressions pass (existing classifier rejects
+  them); AB2 exact-basename fixture passes; AB3 unknown-count fixture passes.
+
+- Exact-basename AB2 source workspace gates passed: 2,282 tests, 0 failed,
+  14 ignored; fmt, all-target/all-feature Clippy and build exit 0. Logs:
+  `target/qq-perf/ab2-2026-10-14/candidate-basename-final-gate-{0,1,2,3}.log`.
+  Integrated latest AB1 and reviewed parent docs; final publication gates next.
