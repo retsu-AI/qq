@@ -883,3 +883,12 @@ newest last.
   missing command and orphaned depth-one children. Export/recount must share
   the execution parser and immutable identity; format-one evidence is retired.
 - Final source integration, qualification and observation remain in progress.
+
+
+- Exact execution parser, persisted depth-zero cohort and format-2 exporter
+  identity are implemented. Twelve focused AB6 tests pass; two independent
+  source reviews approve. Red receipts: execution-root-red.log and
+  export-identity-red.log; green: export-identity-green.log.
+- Read-only schema-45 fixed-window check finds zero orphaned child runs;
+  the historical counts are not changed by this specific cohort correction.
+  Full integrated gates, final pinned export/recount and observation remain open.

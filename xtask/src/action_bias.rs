@@ -13,12 +13,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
 
-const FORMAT: u16 = 1;
+const FORMAT: u16 = 2;
 const DAY_MS: i64 = 86_400_000;
 const MAX_RECORD_BYTES: usize = 128 * 1024;
 const MAX_ARGUMENT_BYTES: u64 = 256 * 1024;
 const MAX_RECORDS: u64 = 1_000_000;
-const COHORT: &str = "FROM tool_calls t JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id WHERE s.parent_id IS NULL AND r.kind='prompt' AND r.started_at_ms>=?1 AND r.started_at_ms<?2 AND r.finished_at_ms<?3 AND t.name='shell'";
+const COHORT: &str = "FROM tool_calls t JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id WHERE s.depth = 0 AND r.kind='prompt' AND r.started_at_ms>=?1 AND r.started_at_ms<?2 AND r.finished_at_ms<?3 AND t.name='shell'";
 
 #[derive(Debug, Args)]
 pub(crate) struct ActionBiasArgs {
@@ -94,6 +94,8 @@ pub(crate) enum Validation {
     CommandBound,
     #[error("build with QQ_ACTION_BIAS_SOURCE_SHA set to the immutable source commit")]
     BuildIdentity,
+    #[error("exporter identity differs from this pinned recount executable")]
+    ExportIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +108,7 @@ struct Header {
     end_ms: i64,
     cutoff_ms: i64,
     expected_records: u64,
+    exporter: BuildIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,17 +147,69 @@ struct Recount {
     read_share: f64,
 }
 
-#[derive(Serialize)]
-struct Receipt {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildIdentity {
     source_commit: String,
     classifier_source_sha256: String,
     executable_sha256: String,
-    classifier_platform: &'static str,
-    classifier_arch: &'static str,
+    classifier_platform: String,
+    classifier_arch: String,
+}
+
+#[derive(Serialize)]
+struct Receipt {
+    #[serde(flatten)]
+    identity: BuildIdentity,
     recount: Recount,
 }
 
+fn compiled_identity() -> Result<BuildIdentity, ActionBiasError> {
+    let source = option_env!("QQ_ACTION_BIAS_SOURCE_SHA")
+        .ok_or(ActionBiasError::Unqualified(Validation::BuildIdentity))?;
+    if !matches!(source.len(), 40 | 64)
+        || !source
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ActionBiasError::Unqualified(Validation::BuildIdentity));
+    }
+    let mut classifier = Sha256::new();
+    for source in [
+        include_str!("../../crates/qq-core/src/approval.rs"),
+        include_str!("../../crates/qq-core/src/approval/rules.rs"),
+        include_str!("../../crates/qq-core/src/approval/classify.rs"),
+        include_str!("../../crates/qq-core/src/tools/shell.rs"),
+        include_str!("../../crates/qq-core/src/tools.rs"),
+    ] {
+        classifier.update((source.len() as u64).to_le_bytes());
+        classifier.update(source.as_bytes());
+    }
+    #[cfg(target_os = "linux")]
+    let executable = PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let executable = std::env::current_exe()?;
+    let mut file = File::open(executable)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes = file.read(&mut buffer)?;
+        if bytes == 0 {
+            break;
+        }
+        digest.update(&buffer[..bytes]);
+    }
+    Ok(BuildIdentity {
+        source_commit: source.to_owned(),
+        classifier_source_sha256: format!("{:x}", classifier.finalize()),
+        executable_sha256: format!("{:x}", digest.finalize()),
+        classifier_platform: std::env::consts::OS.to_owned(),
+        classifier_arch: std::env::consts::ARCH.to_owned(),
+    })
+}
+
 pub(crate) fn run(args: ActionBiasArgs) -> Result<(), ActionBiasError> {
+    let identity = compiled_identity()?;
     match args.command {
         ActionBiasCommand::Export {
             store,
@@ -167,50 +222,11 @@ pub(crate) fn run(args: ActionBiasArgs) -> Result<(), ActionBiasError> {
             let end_ms = midnight(&end)?;
             let cutoff_ms = midnight(&cutoff)?;
             validate_window(start_ms, end_ms, cutoff_ms)?;
-            export(&store, start_ms, end_ms, cutoff_ms, &output)
+            export(&identity, &store, start_ms, end_ms, cutoff_ms, &output)
         }
         ActionBiasCommand::Recount { input, output } => {
-            let source = option_env!("QQ_ACTION_BIAS_SOURCE_SHA")
-                .ok_or(ActionBiasError::Unqualified(Validation::BuildIdentity))?;
-            if !matches!(source.len(), 40 | 64)
-                || !source
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            {
-                return Err(ActionBiasError::Unqualified(Validation::BuildIdentity));
-            }
-            let recount = recount(&input)?;
-            let mut classifier = Sha256::new();
-            for source in [
-                include_str!("../../crates/qq-core/src/approval.rs"),
-                include_str!("../../crates/qq-core/src/approval/rules.rs"),
-                include_str!("../../crates/qq-core/src/approval/classify.rs"),
-            ] {
-                classifier.update((source.len() as u64).to_le_bytes());
-                classifier.update(source.as_bytes());
-            }
-            #[cfg(target_os = "linux")]
-            let executable = PathBuf::from("/proc/self/exe");
-            #[cfg(not(target_os = "linux"))]
-            let executable = std::env::current_exe()?;
-            let mut file = File::open(executable)?;
-            let mut digest = Sha256::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let bytes = file.read(&mut buffer)?;
-                if bytes == 0 {
-                    break;
-                }
-                digest.update(&buffer[..bytes]);
-            }
-            let receipt = Receipt {
-                source_commit: source.to_owned(),
-                classifier_source_sha256: format!("{:x}", classifier.finalize()),
-                executable_sha256: format!("{:x}", digest.finalize()),
-                classifier_platform: std::env::consts::OS,
-                classifier_arch: std::env::consts::ARCH,
-                recount,
-            };
+            let recount = recount(&identity, &input)?;
+            let receipt = Receipt { identity, recount };
             let mut out = temporary_output(&output)?;
             serde_json::to_writer_pretty(out.as_file_mut(), &receipt)?;
             out.as_file_mut().write_all(b"\n")?;
@@ -270,6 +286,7 @@ fn write_line(
 }
 
 fn export(
+    identity: &BuildIdentity,
     store: &Path,
     start_ms: i64,
     end_ms: i64,
@@ -311,6 +328,7 @@ fn export(
         end_ms,
         cutoff_ms,
         expected_records,
+        exporter: identity.clone(),
     };
     let mut out = temporary_output(output)?;
     let mut digest = Sha256::new();
@@ -384,7 +402,7 @@ fn export(
     publish(out, output)
 }
 
-fn recount(input: &Path) -> Result<Recount, ActionBiasError> {
+fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBiasError> {
     let mut reader = BufReader::new(File::open(input)?);
     let mut bytes = Vec::new();
     let mut header = None;
@@ -413,6 +431,9 @@ fn recount(input: &Path) -> Result<Recount, ActionBiasError> {
             ExportLine::Header(value) if header.is_none() && total == 0 => {
                 if value.format != FORMAT || !matches!(value.schema, 45 | 46) {
                     return Err(ActionBiasError::Unqualified(Validation::Metadata));
+                }
+                if value.exporter != *identity {
+                    return Err(ActionBiasError::Unqualified(Validation::ExportIdentity));
                 }
                 validate_window(value.start_ms, value.end_ms, value.cutoff_ms)?;
                 if value.expected_records == 0 || value.expected_records > MAX_RECORDS {
@@ -484,6 +505,16 @@ fn recount(input: &Path) -> Result<Recount, ActionBiasError> {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn test_identity() -> BuildIdentity {
+        BuildIdentity {
+            source_commit: "1".repeat(40),
+            classifier_source_sha256: "2".repeat(64),
+            executable_sha256: "3".repeat(64),
+            classifier_platform: "linux".to_owned(),
+            classifier_arch: "x86_64".to_owned(),
+        }
+    }
 
     fn fixture(directory: &Path) -> (PathBuf, Connection) {
         let path = directory.join("store.sqlite");
@@ -585,13 +616,21 @@ mod tests {
         call(&connection, 11, 1, "failed", &oversized);
         let before = fs::read(&store).unwrap();
         let export_path = directory.path().join("cohort.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &export_path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &export_path,
+        )
+        .unwrap();
         assert_eq!(
             fs::read(&store).unwrap(),
             before,
             "export must not migrate or modify the database"
         );
-        let result = recount(&export_path).unwrap();
+        let result = recount(&test_identity(), &export_path).unwrap();
         assert_eq!(
             (
                 result.total_calls,
@@ -603,11 +642,21 @@ mod tests {
         );
         assert_eq!(result.header.schema, 45);
         assert!(
-            export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &export_path).is_err(),
+            export(
+                &test_identity(),
+                &store,
+                DAY_MS,
+                2 * DAY_MS,
+                3 * DAY_MS,
+                &export_path
+            )
+            .is_err(),
             "existing exports must not be overwritten"
         );
         assert_eq!(
-            recount(&export_path).unwrap().snapshot_sha256,
+            recount(&test_identity(), &export_path)
+                .unwrap()
+                .snapshot_sha256,
             result.snapshot_sha256
         );
     }
@@ -632,8 +681,16 @@ mod tests {
             call(&connection, index as u8 + 1, 1, "failed", arguments);
         }
         let path = directory.path().join("cohort.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
-        let result = recount(&path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        let result = recount(&test_identity(), &path).unwrap();
         assert_eq!(
             (
                 result.total_calls,
@@ -672,8 +729,16 @@ mod tests {
             call(&connection, id, id, "completed", r#"{"command":"cat f"}"#);
         }
         let path = directory.path().join("cohort.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
-        assert_eq!(recount(&path).unwrap().total_calls, 1);
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(recount(&test_identity(), &path).unwrap().total_calls, 1);
     }
 
     #[test]
@@ -699,8 +764,16 @@ mod tests {
             .execute("UPDATE sessions SET parent_id=NULL WHERE id='child'", [])
             .unwrap();
         let path = directory.path().join("cohort.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
-        let result = recount(&path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        let result = recount(&test_identity(), &path).unwrap();
         assert_eq!((result.total_calls, result.read_calls), (1, 0));
     }
 
@@ -710,7 +783,15 @@ mod tests {
         let (store, connection) = fixture(directory.path());
         call(&connection, 1, 1, "completed", r#"{"command":"pwd"}"#);
         let path = directory.path().join("cohort.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(header["format"], 2);
@@ -754,6 +835,75 @@ mod tests {
     }
 
     #[test]
+    fn ab6_recount_rejects_other_exporters_and_identityless_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        call(
+            &connection,
+            1,
+            1,
+            "completed",
+            r#"{"command":"pwd","timeout_seconds":1,"env":["LANG"],"cwd":"."}"#,
+        );
+        let path = directory.path().join("cohort.jsonl");
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(recount(&test_identity(), &path).unwrap().read_calls, 1);
+        let original = fs::read_to_string(&path).unwrap();
+        for field in [
+            "source_commit",
+            "classifier_source_sha256",
+            "executable_sha256",
+            "classifier_platform",
+            "classifier_arch",
+            "missing",
+            "format",
+        ] {
+            let mut lines = original
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            match field {
+                "missing" => {
+                    lines[0].as_object_mut().unwrap().remove("exporter");
+                }
+                "format" => lines[0]["format"] = 1.into(),
+                _ => lines[0]["exporter"][field] = "other-build".into(),
+            }
+            let mut bytes = Vec::new();
+            for line in &lines[..lines.len() - 1] {
+                serde_json::to_writer(&mut bytes, line).unwrap();
+                bytes.push(b'\n');
+            }
+            let last = lines.last_mut().unwrap();
+            last["snapshot_sha256"] = format!("{:x}", Sha256::digest(&bytes)).into();
+            serde_json::to_writer(&mut bytes, last).unwrap();
+            bytes.push(b'\n');
+            let bad = directory.path().join(format!("{field}.jsonl"));
+            fs::write(&bad, bytes).unwrap();
+            let error = recount(&test_identity(), &bad).unwrap_err();
+            match field {
+                "missing" => assert!(matches!(error, ActionBiasError::Json(_))),
+                "format" => assert!(matches!(
+                    error,
+                    ActionBiasError::Unqualified(Validation::Metadata)
+                )),
+                _ => assert!(matches!(
+                    error,
+                    ActionBiasError::Unqualified(Validation::ExportIdentity)
+                )),
+            }
+        }
+    }
+
+    #[test]
     fn ab6_envelope_overflow_is_unqualified_and_exact_command_bound_is_retained() {
         let directory = tempfile::tempdir().unwrap();
         let (store, connection) = fixture(directory.path());
@@ -766,8 +916,16 @@ mod tests {
             &serde_json::json!({"command":command}).to_string(),
         );
         let path = directory.path().join("exact.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
-        let counted = recount(&path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        let counted = recount(&test_identity(), &path).unwrap();
         assert_eq!((counted.read_calls, counted.classifier_rejected), (1, 0));
         call(
             &connection,
@@ -779,7 +937,14 @@ mod tests {
         );
         let overflow = directory.path().join("overflow.jsonl");
         assert!(matches!(
-            export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &overflow),
+            export(
+                &test_identity(),
+                &store,
+                DAY_MS,
+                2 * DAY_MS,
+                3 * DAY_MS,
+                &overflow
+            ),
             Err(ActionBiasError::Unqualified(Validation::Envelope))
         ));
         assert!(!overflow.exists());
@@ -798,7 +963,15 @@ mod tests {
             r#"{"command":"cargo test"}"#,
         );
         let path = directory.path().join("good.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
         let original = fs::read_to_string(&path).unwrap();
         let lines = original.lines().collect::<Vec<_>>();
         for (name, bad) in [
@@ -813,12 +986,15 @@ mod tests {
         ] {
             let bad_path = directory.path().join(name);
             fs::write(&bad_path, bad).unwrap();
-            assert!(recount(&bad_path).is_err(), "accepted {name}");
+            assert!(
+                recount(&test_identity(), &bad_path).is_err(),
+                "accepted {name}"
+            );
         }
         let huge = directory.path().join("huge");
         fs::write(&huge, vec![b'x'; MAX_RECORD_BYTES + 1]).unwrap();
         assert!(matches!(
-            recount(&huge),
+            recount(&test_identity(), &huge),
             Err(ActionBiasError::Unqualified(Validation::RecordBound))
         ));
     }
@@ -835,13 +1011,21 @@ mod tests {
             &serde_json::json!({"command":"\u{1}".repeat(MAX_READ_COMMAND_BYTES)}).to_string(),
         );
         let path = directory.path().join("escaped.jsonl");
-        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
         assert!(
             fs::read(&path)
                 .unwrap()
                 .split(|byte| *byte == b'\n')
                 .all(|line| line.len() < MAX_RECORD_BYTES)
         );
-        assert_eq!(recount(&path).unwrap().total_calls, 1);
+        assert_eq!(recount(&test_identity(), &path).unwrap().total_calls, 1);
     }
 }

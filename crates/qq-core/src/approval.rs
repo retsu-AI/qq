@@ -26,10 +26,7 @@ pub mod bench_support {
     /// The runtime's typed shell envelope parser, including duplicate-field checks.
     #[must_use]
     pub fn parsed_shell_command(arguments: &str) -> Option<String> {
-        match serde_json::from_str::<super::ShellArguments>(arguments) {
-            Ok(arguments) => Some(arguments.command),
-            Err(_) => None, // Invalid envelopes count as malformed, without exposing their text.
-        }
+        crate::tools::parsed_shell_command(arguments)
     }
 
     /// Classifies `command` and returns the decision's name.
