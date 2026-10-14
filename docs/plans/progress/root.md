@@ -758,3 +758,15 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 
 - AB6 owns the tools/design cwd-contract amendment alongside shared Launch
   root-underflow validation and the export/recount aggregate-byte budget repair.
+
+### 2026-10-14 — ENG-834 inherited performance gate repair
+
+- User authorizes a nondraft follow-up after merging AB6 (#306, `9868038c`).
+  Root owns `fix/eng-834-performance-gates` in its isolated worktree. Shared
+  requests cover release profile settings in root `Cargo.toml`, performance
+  budget/CI contract repairs, focused xtask regression tests and performance
+  recording documentation. Preserve features and the existing 48/41 MB size
+  ceilings; measure speed before accepting a compiler/profile change.
+- Existing size failures are tracked by ENG-834. ADR-0040 already specifies
+  six sends per exhausted turn; repair the stale 1.05-send external budget.
+  Retain failures and controls. Ledger: `performance-gates.md`.

@@ -7,11 +7,11 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | Merged (`62c65930`) | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Merged by user; final published Codex review cleared; named performance carried to AB6 |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | Merged (`62c65930`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Merged (`62c65930`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
-| AB5 | Root stall report asks for the next change | Merged (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
-| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; V2 context evidence/format3 implemented; hosted review and performance gates pending |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | Shipped (`8b799771`) | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | Shipped (`6bfd9e29`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Shipped (`bba99abd`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB5 | Root stall report asks for the next change | Shipped (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB6.1 | Bounded snapshot export and pinned-classifier recount | Shipped (`9868038c`) | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Merged by user; exact-head Codex and correctness gates clear; unresolved H0 carried to ENG-834 by explicit user instruction |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
@@ -2071,3 +2071,20 @@ newest last.
 - Pinned928 baseline completed:4,086calls(1,886shell/2,200exec),214lexicalreads(11.35%),all4,086contexts unqualified. Private artifacts at format3-baseline-928c1a63; a new pinned recount must supersede it after parser repair. Hosted928workspace/turn/Windows/wasm passed; H0 remains recording.
 - Focused green: all17 export/recount cases pass after cap/traversal fixes; safe cwd parent normalization remains accepted. Green log /tmp/qq-ab6-cwd-and-aggregate-green.log. Full gates and independent review remain required before push.
 - Immutable3587eee1 passes fresh workspace-package clean/rebuild: 2441 passed/0 failed/14 ignored;fmt/all-target-all-featureClippy/build pass. Receipt aggregate-and-cwd-integrated-gate-receipt.json. Independent review approves cap/publication/stream-growth and cwd traversal coverage. Latest hosted review/performance and superseding pinned baseline remain pending.
+
+### 2026-10-14 — AB1–AB6.1 merged; performance follow-up authorized
+
+- Git first-parent history confirms #301–#306 merged at the commits in the
+  table. AB6.1 merge is `9868038c994cc0c0b64795731d1402ca21ff6348`.
+  Published source `e0d0fb94` has a clear Codex review and no unresolved threads;
+  hosted workspace/fmt/Clippy, Windows, wasm and controlled turn recording pass.
+- Pinned historical format3 recount at `e0d0fb94` retains 4,086 calls, including
+  1,886 shell calls and 214 lexical reads (11.35%). All contexts remain
+  unqualified. Private artifact/receipt location:
+  `target/qq-perf/ab6-2026-10-14/format3-baseline-e0d0fb94/` in the AB6 worktree.
+- User merges #306 while current H0 run `38649895250` is active and explicitly
+  authorizes a nondraft performance follow-up. Earlier H0 absolute size/retry
+  failures and A/A tail failures remain unwaived; ENG-834 and
+  `performance-gates.md` own remediation. The deployed seven-day observation
+  and any authorized paid comparison remain pending; merge alone does not
+  establish deployment, treatment continuity or research acceptance.
