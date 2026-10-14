@@ -151,3 +151,18 @@ newest last.
   final qualification. Re-run gates on the committed final candidate before
   push. Matched benchmark baseline is the integrated plan head `f7b0457e`.
 
+
+
+### 2026-10-14 — AB1 final local correctness qualification
+
+- Code/spec independent re-review: Approve on immutable `f9fb94d6`, after
+  concrete alias and glob-expansion findings were reproduced and fixed.
+- Final-source workspace gates: 2,277 passed, 0 failed, 14 ignored (35
+  report blocks); fmt, all-target/all-feature Clippy `-D warnings`, build
+  all exit 0. Test stores used task-owned tmpfs. Raw logs under AB1 worktree
+  `target/qq-perf/ab1-2026-10-14/final-candidate-gate-{0,1,2,3}.log`.
+- Matched integrated baseline build from detached `f7b0457e` is live.
+  Performance gate remains open: concurrent cargo/nextest work and I/O
+  pressure (some avg10 24.95%, full 23.91%) prevent quiet-host acceptance.
+  No runtime regression test or performance gate is waived. AB1 is local;
+  no implementation PR or hosted Codex approval claimed yet.
