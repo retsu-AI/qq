@@ -777,3 +777,12 @@ newest last.
   review approves. Logs: fresh-complete-page-final-{0,1,2,3,4}.log; receipt
   fresh-complete-page-final-receipt.json under AB2 target/qq-perf. This fresh
   source-specific receipt supersedes earlier cache uncertainty. Performance open.
+
+- 2026-10-14 AB2 pruning/checkpoint follow-up: focused red run reproduced lost
+  long next cursors and cut annotated search bodies (23 pass, 2 fail). Search
+  pruning now retains a bounded 12KiB header, with exact cursor decoding and
+  repeated-pruning idempotency coverage. Turn projection reserves 12KiB page
+  plus bounded 24KiB checkpoint feedback and 512 bytes framing; other tools
+  retain their existing floor. Focused green: 25 pass, 0 fail. This preserves
+  identical supplied page text; it does not change the preexisting timing of
+  persisted tool results versus later checkpoint annotation.

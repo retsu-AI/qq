@@ -29,7 +29,7 @@ pub(crate) const MAX_SPILL_ITEM_BYTES: usize = 8 * 1024 * 1024;
 /// The marker's provisional tail; [`finalize_spill_marker`] replaces it once
 /// the runtime knows whether (and under which handle) the text was stored.
 const NOT_STORED: &str = "; not stored]…\n";
-/// Longest header line a pruning stub preserves.
+/// Longest ordinary header line a pruning stub preserves; search keeps its bounded page header.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
 /// Every marker line qq inserts into model text starts with this, so clients
 /// can tell a marker from content with one prefix check.
@@ -436,7 +436,12 @@ impl Header {
 pub(crate) fn header_line<'a>(tool: &str, text: &'a str) -> Option<&'a str> {
     let first = text.lines().next()?;
     let rest = first.strip_prefix(tool)?;
-    (rest.starts_with(' ') && first.len() <= MAX_STUB_HEADER_BYTES).then_some(first)
+    let limit = if tool == "search" {
+        super::search::SEARCH_BOUNDS.max_bytes
+    } else {
+        MAX_STUB_HEADER_BYTES
+    };
+    (rest.starts_with(' ') && first.len() <= limit).then_some(first)
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +823,9 @@ impl TurnOutputBudget {
         // A search cursor advances past every row in its already-bounded page.
         // Dropping page rows would make continuation lose matches without recall.
         let floor = if tool == "search" {
-            super::search::SEARCH_BOUNDS.max_bytes
+            // One bounded checkpoint annotation follows the page before projection.
+            // Reserve its fixed label/framing and UTF-8 truncation suffix too.
+            super::search::SEARCH_BOUNDS.max_bytes + crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 512
         } else {
             MIN_MODEL_TEXT_BYTES
         };
@@ -1265,6 +1272,37 @@ mod tests {
         let pointer = clean.as_ptr();
         let masked = mask_secrets(clean);
         assert_eq!(masked.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn ab2_checkpoint_annotated_search_pages_survive_a_spent_turn() {
+        for feedback_size in [
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES,
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 1,
+        ] {
+            let header = "search . mode=names next=YWJjADA\n";
+            let mut page = header.to_owned();
+            page.push_str(
+                &"match\n"
+                    .repeat((super::super::search::SEARCH_BOUNDS.max_bytes - header.len()) / 6),
+            );
+            let feedback = crate::runtime::bounded_checkpoint_text(&"x".repeat(feedback_size));
+            let annotated = format!("{page}\n\n[JEV RED checkpoint: {feedback}]");
+            for recall in [
+                ResultRecall::None,
+                ResultRecall::StoredResult {
+                    tool: "search",
+                    call: ToolCallId::from_bytes([7; 16]),
+                },
+            ] {
+                let mut budget = TurnOutputBudget::new();
+                let mut spent = "x".repeat(MAX_TURN_TOOL_OUTPUT_BYTES);
+                budget.admit("other", &mut spent, ResultRecall::None);
+                let mut actual = annotated.clone();
+                assert!(!budget.admit("search", &mut actual, recall));
+                assert_eq!(actual, annotated);
+            }
+        }
     }
 
     #[test]
