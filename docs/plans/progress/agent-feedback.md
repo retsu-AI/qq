@@ -77,3 +77,11 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - Corrected sleep baseline to 78: one compound-cfg sleep and three test-function
   sleeps previously missed, plus four existing sleeps from main; no new sleeps.
   Real verify-home fake/ask/stop passed. Windows and macOS not run locally.
+
+- GitHub CI correctly rejected a retried-pass in the 50,000-directory
+  depth-watermark fixture. Removed that duplicate stress-shaped test: the
+  existing search::tests::ab2_depth_excluded_siblings_advance_the_scan_frontier
+  covers depth exclusions, directory watermarks, cursor encode/decode, strict
+  progress and final discovery over three pages with a deterministic 70-entry
+  budget and a tiny tree. No production bounds or assertions were relaxed.
+  Added parsing of nextest's actual FLKY-FL status observed in CI.
