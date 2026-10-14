@@ -299,7 +299,7 @@ q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
      t.turn_ordinal * 100000 + t.call_ordinal k
      FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0),
    f AS (SELECT run_id, min(k) fe FROM t WHERE name IN ('edit_file','write_file')
-     AND state = 'completed' AND coalesce(json_extract(arguments_json, '\$.dry_run'), 0) = 0 GROUP BY 1),
+     AND state = 'completed' AND coalesce(CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json, '\$.dry_run') END, '') <> 'true' GROUP BY 1),
    c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe
      AND t.name IN ('read_file','search','tree')) n FROM f)
    SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
@@ -314,7 +314,7 @@ q "WITH rr AS ($RR) SELECT sum(t.state = 'failed'),
      sum(t.state = 'denied'), sum(t.state = 'interrupted')
    FROM tool_calls t JOIN rr ON rr.id = t.run_id
    WHERE rr.child = 0 AND t.name IN ('edit_file','write_file')
-     AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0;"
+     AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true';"
 
 # Root completion by the fixed cutoff: completed, all started roots,
 # completed share, not terminal by cutoff (including later completions).
@@ -332,7 +332,7 @@ q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
-       AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0
+       AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true'
      UNION ALL
      SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id
@@ -400,7 +400,7 @@ q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
-       AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0
+       AND coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true'
      UNION ALL
      SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id

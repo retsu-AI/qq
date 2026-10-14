@@ -282,3 +282,23 @@ newest last.
   is required; no read verdict or approval authority is inferred from hints.
 - Independent final review approved helper narrowing; all five focused
   regressions pass. Workspace requalification and fresh candidate build next.
+
+### 2026-10-14 — fifth hosted plan review corrections
+
+- Added explicit find file-list output and sort compressor exclusions,
+  inspection-only interactive authority, and terminal read offset bounds.
+  AB1/AB3/AB4 source regressions reproduce the corresponding cases.
+- Preview exclusion now tests JSON boolean true only and handles malformed
+  JSON explicitly. Exact-query fixture retains four failures/five calls
+  while excluding the actual preview; corrected fixed-window baseline remains
+  205/1,222. Evidence `target/qq-perf/ab-plan-2026-10-14/malformed-preview.json`.
+- Updated concrete helper rules from fresh AB1 review; independent final
+  review and documentation checks pending. No gates waived.
+- Independent review approved all five plan corrections. Docs truth 23
+  passed; exact malformed-preview fixture and baseline recount passed.
+  Production parent remains unchanged from its qualified source.
+
+
+- Latest helper source workspace gates pass: 2,277 tests, 0 failed,
+  14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
+  logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
