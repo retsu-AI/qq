@@ -270,3 +270,13 @@ newest last.
   Integrated parent docs only; production source remains qualified.
 - Matched performance qualification remains open; prior candidate binary
   predates the helper fix and cannot qualify this head.
+
+### 2026-10-14 — fresh AB1 helper regressions
+
+- Latest hosted source review supplied signature-format verification,
+  compressed ripgrep helpers, configured Cargo compilers, repeated sed
+  expressions and JJ external formatters. Exact test-first table fails
+  before fixes; independent investigation confirms configuration defaults
+  can execute helpers, and bare JJ commands snapshot the working copy.
+- Narrowing canonical safe Git/JJ forms and treating Cargo queries as work
+  is required; no read verdict or approval authority is inferred from hints.

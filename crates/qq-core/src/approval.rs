@@ -878,6 +878,17 @@ mod tests {
     #[test]
     fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
         let cases = [
+            ("git log --no-ext-diff --no-textconv --no-show-signature --format=%GG", false),
+            ("git log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?", false),
+            ("git show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD", true),
+            ("rg -z needle f.gz", false),
+            ("rg --search-zip needle f.gz", false),
+            ("rg -nz needle f.gz", false),
+            ("sed -n -e 1p -e 3p f.rs", true),
+            ("sed -n -e 1p -e 's/x/y/e' f.rs", false),
+            ("jj diff --tool ./mutate", false),
+            ("jj status", false),
+            ("jj --ignore-working-copy --no-pager status", true),
             ("cd crates/x && grep -n foo y.rs", true),
             ("cd crates/x; sed -n 1,80p y.rs", true),
             ("sed -n 1,80p f.rs | nl", true),
@@ -913,7 +924,7 @@ mod tests {
             ("git diff --no-ext-diff --no-textconv", true),
             (
                 "git show --no-ext-diff --no-textconv --no-show-signature HEAD",
-                true,
+                false,
             ),
             ("git diff --no-ext-diff --no-textconv --ext-diff", false),
             ("git diff --ext-diff --no-ext-diff --no-textconv", false),
@@ -938,8 +949,8 @@ mod tests {
                 false,
             ),
             ("rg --hostname-bin=./mutate x f", false),
-            ("cargo metadata --locked --format-version=1", true),
-            ("cargo tree --frozen", true),
+            ("cargo metadata --locked --format-version=1", false),
+            ("cargo tree --frozen", false),
             ("file -C", false),
             ("file --comp -m magic", false),
             ("find . -de*", false),
