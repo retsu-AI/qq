@@ -717,3 +717,10 @@ newest last.
   exports, immutable build labels/hashes and treatment-cohort limitations.
   Full immutable workspace gates and actual pinned baseline recount remain
   open; post-deployment observation and paid evaluation are not performed.
+
+- AB6.1 immutable source 96afed7e passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Receipts:
+  target/qq-perf/ab6-2026-10-14/tooling-gate-{0,1,2,3}.log.
+- Export/recount source review approves; seven focused fixtures cover snapshot
+  cohorts, all shell states, bounds, tamper/truncation and exact UTC cutoff.
+  Final classifier recount and deployed seven-day candidate cohort remain open.
