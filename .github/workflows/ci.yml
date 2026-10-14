@@ -260,7 +260,6 @@ jobs:
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           diff -u baseline/rust-toolchain.toml candidate/rust-toolchain.toml
           diff -u baseline/xtask/src/perf.rs candidate/xtask/src/perf.rs
-          diff -r baseline/xtask/src/perf candidate/xtask/src/perf
           diff -u baseline/benchmarks/perf/budgets-v1.json candidate/benchmarks/perf/budgets-v1.json
           mkdir -p "$RUNNER_TEMP/h0-recording"
       - name: Record baseline, candidate and same-binary control

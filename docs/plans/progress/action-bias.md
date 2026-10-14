@@ -2031,3 +2031,7 @@ newest last.
 - Independent read-only review approves the final producer/CI repair. Actionlint passes with pre-existing SC2129 style warning excluded; recorder/fixture Python tests pass16+4. Accepted main62c65930 is an ancestor of this head and remains the live remote main.
 - Publication, fresh hosted Codex/CI and performance qualification remain pending. Historical execution context and the deployed seven-day research cohort remain unavailable; no observational or performance completion is claimed.
 - Five clean merged AB1–AB5 worktrees removed after exact-head checks; performance evidence preserved under root target/qq-perf/merged-worktrees-2026-10-14T204742Z. Unrelated worktrees retained.
+
+### 2026-10-14 — hosted H0 fixture guard repair
+
+- Hosted job116122591431 failed before measurement because the guard compared nonexistent xtask/src/perf directories; the implemented H0 fixture is the single xtask/src/perf.rs file. Remove only that nonexistent-directory comparison, retaining exact source, toolchain and budget equality guards. No measurement/gate pass is inferred from this failure.
