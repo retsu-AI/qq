@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after AB1–AB5 have been on `main` for seven days |
+| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after seven full UTC days on a deployed pinned AB1–AB5 main build |
 | Research | [`../research/action-bias.md`](../research/action-bias.md): live store, 30 days to 2026-10-13, findings AB-F1–AB-F7; reference prompts and tools from Codex, OpenCode, Pi, fx |
 | Ledger | [`progress/action-bias.md`](./progress/action-bias.md) |
 | Linear | [ENG-1037](https://linear.app/retsu-ai/issue/ENG-1037) (program), milestone `Action Bias`; AB1–AB6 are ENG-1038–ENG-1043 |
@@ -30,8 +30,9 @@ reports, without reading the same material repeatedly first. Specifically:
   names search per permitted discovery root (workspace root plus applicable
   highest ignored subtrees, plus justified target ancestors at 64-component
   boundaries for deeper targets); cursor pages continue that search. The historical
-  271 physical probes remain context; the scope baseline records 40 starts,
-  10 repeated roots across seven runs, before path normalization and coverage audit.
+  271 physical probes remain context; the corrected fixed-window scope baseline records 25 starts,
+  seven repeated roots across five runs. Path/page/read coverage remains
+  unqualified; the historical raw argument counts are separate context.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
   receives a stall report. Today `cd … && grep` and `sed -n` count as work,
   so this never happened in the window: 0 root stall reports in 30 days
@@ -79,15 +80,15 @@ described in AB6.
 
 | ID | Goal | Finding | Size | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand or compressor helper) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (`read_only_shell_command` only), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
+| AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand or compressor helper) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (bounded shell/argv read recognition), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
 | AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`/`exec`, `tools/search.rs` bounded names discovery and depth reporting, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; exact basename matching excludes NOTAGENTS.md; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
 | AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit carries an admissible continuation or a terminal offset-bound marker; ordinarily `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a 3,000-line short-line file fitting the byte and rendered-line bounds returns whole; a 4,000-empty-line file gets contiguous offset continuation before generic bounding; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
-| AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
+| AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass; public `Runtime::run_messages` grant changes between stream construction and first poll use the newly compiled snapshot for declarations and execution |
 | AB5 | A root's stall report asks for the next action, not a status summary: a new `TurnNotice::RootStallReport` with its own wording; children keep `StallReport` | AB-F1 | S | AB1 | `crates/qq-core/src/lib.rs` (notice constant), `runtime/events.rs` (`TurnNotice`, `from_stored`), `runtime/run_loop.rs` (choose by `StallPolicy`), `sessions/store/schema` (`STORE_SCHEMA_VERSION` 45 → 46, version-only migration; root request), `docs/design/protocol.md` store schema history, guide `troubleshooting.md` and `providers.md` schema mentions (checked by `docs_truth`) | A root fixture gets `root_stall_report` on request 65 and its continuation; a replayed pre-AB5 root run still renders `stall_report` byte-identically; live/replayed read-only roots receive the same authority-neutral notice; a child fixture is unchanged; a schema-45 binary refuses a schema-46 store at open instead of failing per session with `CODEC` |
 | AB6.1 | Reproducible shell-read qualification export and classifier recount | AB-F1 | S | AB1 | `xtask/src/{main,action_bias}.rs`, `xtask/Cargo.toml` if SQLite access is needed, existing hidden `approval.rs` support wrapper, research export/recount instructions, ledger | Read-only consistent snapshot with fixed root terminal-by-cutoff cohort; versioned bounded JSONL with schema/window/cutoff/expected count and every shell call ID/run/state/command status; same pinned AB1 classifier binary recounts both windows; malformed/incomplete/duplicate/oversized export tests; accepted and mutating command cases; immutable classifier SHA and binary hash recorded |
-| AB6 | Qualification: re-run the research queries after seven days of AB1–AB5 on `main`; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB6.1 accepted; AB1–AB5 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
+| AB6 | Qualification: re-run the research queries after seven full UTC days on the deployed pinned AB1–AB5 main build; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB6.1 accepted; AB1–AB5 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
 
-Order: AB1 and AB2 in parallel, then AB3, AB4, AB5, and AB6 after seven days.
+Order: AB1 and AB2 in parallel, then AB3, AB4, AB5, and AB6 after its deployed seven-day window.
 AB2 and AB4 both edit `prompt.rs`, so AB4 rebases on AB2. AB1 and AB5 both
 touch the progress path and land in that order.
 
@@ -120,20 +121,17 @@ The rule:
    The current list is kept with these narrowings, which close shapes that
    pass today and write:
    - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*`, `-fls` and execution-action abbreviations;
-   - Git reads use canonical `git [-C DIR] -c core.fsmonitor=false <read>`;
-     bare working-tree commands may run configured filesystem-monitor hooks.
-     `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, or their long aliases
-     `--delete`, `--move`, `--copy`, `--force`; creation/reset operands
-     also count as work (only listing/filter operands are reads);
-   - `git diff`, `git log` and `git show` reject output/helper/signature
-     enabling options and accepted abbreviations. Canonical read forms start
-     their subcommand arguments with `--no-ext-diff --no-textconv` (either
-     order); `log`/`show` then use `--no-show-signature`. These disabling flags
-     must be options, never operands after `--` or values of another option.
-     `log`/`show` additionally use explicit `--format=oneline`, rejecting later
-     format overrides and signature-verification placeholders. A configured
-     default pretty format is not trusted. Exact `git -c core.fsmonitor=false diff --stat` also reads; its mode skips diff/textconv drivers;
-   - `git blame` starts with `--no-textconv`, with no enabling aliases;
+   - Git reads use canonical `git [-C DIR] -c core.fsmonitor=false <read>`.
+     Working-tree status, diff and blame remain work because configured
+     clean/process filters may execute helpers even with fsmonitor disabled;
+   - branch reads require explicit `--sort=refname`, no custom format or
+     other sort and listing/filter operands only. Signature atoms in formats,
+     explicit sorts or configured default sorting may invoke GPG helpers;
+   - history-only `log`/`show` reads start with `--no-ext-diff --no-textconv
+     --no-patch --diff-merges=off --no-show-signature --format=oneline`, then
+     only supported history/count flags, revisions and literal paths after
+     `--`. Unknown switches and patch/stat/raw/remerge/format overrides count
+     as work. Explicit disables also prevent configured merge-diff behavior;
    - `cargo metadata`/`cargo tree` are work even with `--locked`/`--frozen`:
      configured compiler wrappers may execute. Only exact `cargo --version`
      is a read;
@@ -162,7 +160,8 @@ The rule:
 | `cd crates/x && grep -n foo y.rs` | yes |
 | `cd crates/x; sed -n 1,80p y.rs` | yes |
 | `sed -n 1,80p f.rs \| nl` | yes |
-| `git -C .worktrees/a -c core.fsmonitor=false diff --stat` | yes |
+| `git -C .worktrees/a -c core.fsmonitor=false diff --stat` | no (configured filters) |
+| `git -c core.fsmonitor=false branch --list --sort=refname` | yes |
 | `git status`, `git diff --stat`, `rg needle f`, `fd -l`, `file -Sz sample.Z` | no |
 | `rg --no-config 'foo(bar)' f.rs` | yes on Unix |
 | `echo 'x & cargo fmt & echo x'`, `sort input.txt /o output.txt` | no on Windows |
@@ -235,10 +234,13 @@ is reviewed in the PR; these bullets are the contract.
   discovery root once, covering every edit target; read only applicable
   instruction files. Targets deeper than 64 directory components also use
   target-ancestor roots at each 64-component boundary, with path and
-  include_ignored=true. Names discovery reports safe instruction-file links;
+  include_ignored=true. Names discovery includes exact instruction basenames despite file-level
+  ignores in visible directories; ignored directories still require the
+  explicit applicable-root override. It reports safe instruction-file links;
   broken, escaping or nonfile instruction links block editing. partial=depth
   or depth_limited requires these bounded scopes, not a cursor into skipped
-  directories. Cursor continuations belong to that discovery; do not
+  directories. Scan/time stops after completed empty directories also return
+  a watermark cursor that skips those fully visited subtrees. Cursor continuations belong to that discovery; do not
   restart it unchanged. The host supplies workspace-root instructions."
 - **Shorten** "mode=outline to see a file's shape before reading it" to "mode=outline
   for the shape of a long file". The rest of the T19 bullet is unchanged.
@@ -425,8 +427,14 @@ remains context; requery its baseline with this shared classifier.
 
 Use the research appendix's explicit start/end parameters for both windows.
 The historical baseline is 30 days ending 2026-10-13 UTC; the candidate is
-seven full UTC days starting after the last AB1–AB5 merge. Record merge
-SHAs, window boundaries, store schema and prompt versions. Fix observation
+seven full UTC days beginning at the next UTC midnight after AB1–AB5 are
+merged, one pinned runtime build is installed and prior writers are retired.
+Record merge SHAs, runtime source SHA and executable hash, startup time and
+exclusive-writer continuity (or equivalent per-run runtime provenance), window
+boundaries, store schema and prompt versions. Prompt 20 or merge dates alone
+do not establish treatment. Mixed or unverifiable builds leave the candidate
+cohort unqualified. Installation and retirement are deployment prerequisites,
+not actions authorized by this plan. Fix observation
 to end + 24 hours for both windows and do not query before that cutoff.
 Completion counts every started root in the denominator and only roots
 completed before the cutoff in the numerator; later completion cannot
