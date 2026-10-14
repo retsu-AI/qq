@@ -558,3 +558,13 @@ its digest, and write/read child assertions must pin the new action bullet.
   recommendations name only present companion tools; edit-only profiles
   refer to a content hash without naming unavailable read_file. Descriptions
   are adjusted once after catalog-input policy filtering, off requests.
+
+### 2026-10-14 — AB2 instruction discovery completion ownership
+
+- AB2 additionally owns tools/search.rs and tools/walk.rs for bounded names
+  discovery of safe instruction-file symlinks and truthful depth omissions,
+  with public fixtures in tools.rs. Preserve content-search link exclusion
+  and directory-link exclusion; emit blockers for unsafe instruction links.
+- Depth-limited discovery uses only justified target ancestors at64-component
+  boundaries; parent contract and research qualification must account for
+  these scopes before claiming instruction coverage.

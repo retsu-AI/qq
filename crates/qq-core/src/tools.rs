@@ -1284,6 +1284,87 @@ mod tests {
         assert!(!result.model_text.contains("blob.bin"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ab2_names_discovery_reports_safe_instruction_links_and_blocks_bad_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::create_dir(directory.path().join("shared")).unwrap();
+        fs::write(directory.path().join("shared/rules"), "instructions\n").unwrap();
+        symlink("../shared/rules", directory.path().join("src/AGENTS.md")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let arguments = r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true}"#;
+        let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("src/AGENTS.md"),
+            "{}",
+            result.model_text
+        );
+        let content = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"instructions"}"#,
+        );
+        assert!(!content.model_text.contains("src/AGENTS.md"));
+        for target in ["../../outside", "../missing", "../shared"] {
+            fs::remove_file(directory.path().join("src/AGENTS.md")).unwrap();
+            symlink(target, directory.path().join("src/AGENTS.md")).unwrap();
+            let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+            assert!(result.is_error, "target={target}: {}", result.model_text);
+            assert!(
+                result.model_text.contains("src/AGENTS.md"),
+                "{}",
+                result.model_text
+            );
+        }
+    }
+
+    #[test]
+    fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut path = String::new();
+        let mut roots = vec![".".to_owned()];
+        let mut expected = Vec::new();
+        for depth in 1..=130 {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(&format!("d{depth:03}"));
+            fs::create_dir(directory.path().join(&path)).unwrap();
+            if matches!(depth, 64 | 65 | 128 | 130) {
+                let instruction = format!("{path}/AGENTS.md");
+                fs::write(directory.path().join(&instruction), "rules\n").unwrap();
+                expected.push(instruction);
+            }
+            if depth % 64 == 0 {
+                roots.push(path.clone());
+            }
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut discovered = String::new();
+        for (index, root) in roots.iter().enumerate() {
+            let arguments = serde_json::json!({"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":root,"include_ignored":true}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), "search", &arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            if index < 2 {
+                assert!(
+                    result.model_text.contains("partial=depth"),
+                    "{}",
+                    result.model_text
+                );
+            } else {
+                assert!(!result.model_text.contains("partial=depth"));
+            }
+            discovered.push_str(&result.model_text);
+        }
+        for instruction in expected {
+            assert!(discovered.contains(&instruction), "missing {instruction}");
+        }
+    }
+
     #[test]
     fn ab2_names_and_content_search_reach_an_explicit_ignored_worktree() {
         let directory = tempfile::tempdir().unwrap();
