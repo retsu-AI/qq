@@ -427,3 +427,70 @@ fn push_tokens(text: &mut String, tokens: u32) {
         let _ = write!(text, "{tokens}");
     }
 }
+
+#[cfg(test)]
+mod ab2_contract {
+    use super::*;
+
+    const ACTION: &str = "Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.";
+    const EXPLORE: &str = "Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.";
+    const REREAD: &str = "Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.";
+    const BUILTINS: &str = "Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd.";
+    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per run with search mode=names regex=true query="(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. For a target inside an ignored directory, pass that worktree root as path; include applicable ancestor instructions already supplied by the host."#;
+
+    fn render(subagent: Option<SubagentAuthority>, specs: &[ToolSpec]) -> String {
+        agent_system_prompt(
+            Path::new("/tmp/qq-prompt-test"),
+            specs,
+            PromptSections {
+                subagent,
+                ..PromptSections::default()
+            },
+            &WorkspaceInstructions::empty(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn ab2_root_contract_preserves_analysis_scope_and_names_next_action() {
+        let specs = crate::tools::specs();
+        let prompt = render(None, &specs);
+        eprintln!(
+            "AB2 fixture prefix_bytes={} schema_hash={}",
+            prompt.len(),
+            crate::runtime::tool_schema_measurement(&specs).hash
+        );
+        for bullet in [
+            ACTION,
+            EXPLORE,
+            REREAD,
+            BUILTINS,
+            INSTRUCTIONS,
+            "Preserve unrelated work in the files you change.",
+        ] {
+            assert!(prompt.contains(bullet), "missing contract: {bullet}");
+        }
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 20);
+    }
+
+    #[test]
+    fn ab2_read_child_keeps_its_brief_and_omits_the_action_obligation() {
+        let prompt = render(Some(SubagentAuthority::Read), &crate::tools::specs());
+        assert!(!prompt.contains("Do the work."));
+        assert!(prompt.contains("Sub-agent:"));
+        assert!(prompt.contains("Stop as soon as you can answer the brief"));
+        assert!(prompt.contains("You cannot change files or run commands"));
+    }
+
+    #[test]
+    fn ab2_header_omits_absent_recall_and_spill_tools() {
+        let prompt = render(None, &crate::tools::specs());
+        let header = prompt
+            .lines()
+            .find(|line| line.starts_with("Available tools:"))
+            .unwrap();
+        assert!(!header.contains("search_history"));
+        assert!(!header.contains("read_tool_result"));
+    }
+}

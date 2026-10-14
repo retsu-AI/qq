@@ -7,7 +7,7 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | Planned | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -166,3 +166,23 @@ newest last.
   pressure (some avg10 24.95%, full 23.91%) prevent quiet-host acceptance.
   No runtime regression test or performance gate is waived. AB1 is local;
   no implementation PR or hosted Codex approval claimed yet.
+
+
+### 2026-10-14 — AB2 baseline and regression start
+
+- Branch `feat/eng-1039-ab2-action-prompt` stacks on AB1 `2d0bfa4f`.
+  Pre-change `cargo bench -p qq-core --bench plan_compile`: 29,242 ns per
+  compile (2,000 iterations), descriptor digest 2,562 ns (20,000), estimated
+  plan bytes 34,963, canonical descriptor bytes 1,408. Fixture stores on
+  tmpfs, shared host; final paired/noise qualification remains open. Raw
+  baseline: AB1 worktree `target/qq-perf/ab2-2026-10-14/baseline.log`.
+- Added root contract, read-child and absent-tool header regressions before
+  production changes, plus explicit ignored-worktree names/content searches.
+  Fixed-path fixture prints prefix bytes and schema hash for before/after.
+
+- Test-first baseline: four focused AB2 tests, 2 passed / 2 failed. Root
+  action contract and absent-tool header reproduce the intended defects;
+  read-child section and explicit ignored-worktree names/content searches
+  already pass. Fixed prompt fixture: 4,214 bytes; built-in schema hash
+  `9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb`.
+  Raw test evidence: `target/qq-perf/ab2-2026-10-14/red-compiled.log`.

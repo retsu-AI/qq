@@ -1285,6 +1285,39 @@ mod tests {
     }
 
     #[test]
+    fn ab2_names_and_content_search_reach_an_explicit_ignored_worktree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join(".gitignore"), "/.worktrees/\n").unwrap();
+        fs::create_dir_all(root.join(".worktrees/x/nested")).unwrap();
+        fs::write(root.join(".worktrees/x/AGENTS.md"), "worktree policy\n").unwrap();
+        fs::write(
+            root.join(".worktrees/x/nested/CLAUDE.md"),
+            "nested policy\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        for (arguments, expected) in [
+            (
+                r#"{"query":"(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees/x"}"#,
+                ".worktrees/x/nested/CLAUDE.md",
+            ),
+            (
+                r#"{"query":"worktree policy","path":".worktrees/x"}"#,
+                "L1: worktree policy",
+            ),
+        ] {
+            let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result.model_text.contains(expected),
+                "{}",
+                result.model_text
+            );
+        }
+    }
+
+    #[test]
     fn search_honours_gitignore_generated_directories_and_include_ignored() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();

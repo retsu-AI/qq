@@ -529,3 +529,12 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
   predicate; its verdicts do not change, and no approval authority is used
   by progress. This extends AB1 ownership by one visibility line rather
   than duplicating Git option-order and value parsing.
+
+
+### 2026-10-14 — AB2 ignored-worktree regression ownership
+
+- Add tests in `crates/qq-core/src/tools.rs`, the existing built-in behavior
+  harness, for AB2's explicit ignored-root names/content search acceptance.
+  Production search/walk behavior is unchanged. Runtime prompt tests stay
+  in `runtime/prompt.rs`; existing prompt assertions in `lib.rs` are updated
+  with v20, preserving historical compatibility evidence.
