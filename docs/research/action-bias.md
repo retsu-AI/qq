@@ -280,7 +280,7 @@ observation to `end + 24 hours` for both windows; wait until `ready=1`.
 that cutoff. Later completion never becomes completed-by-cutoff. Use explicit UTC
 `start` and `end` dates, not a rolling relative date. The historical window
 is `[2026-09-13, 2026-10-13)`; the candidate window is seven full days after
-all AB1–AB5 merge commits. Keep the store open read-only and record its
+the pinned AB1–AB5 runtime is deployed and earlier writers are retired. Keep the store open read-only and record its
 schema. The following redefines `RR` for **all** queries above as well.
 
 ```sh
@@ -428,8 +428,8 @@ q "WITH rr AS ($RR), paths AS (
      WHERE t.name = 'search' AND t.state = 'completed' AND t.turn_ordinal < q.first_edit_turn
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
        AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
-       AND (instr(json_extract(t.arguments_json, '\$.query'), 'AGENTS') > 0
-         OR instr(json_extract(t.arguments_json, '\$.query'), 'CLAUDE') > 0)
+       AND json_type(t.arguments_json, '\$.regex') = 'true'
+       AND json_extract(t.arguments_json, '\$.query') = '(^|/)(AGENTS|CLAUDE)\\.md\$'
      GROUP BY 1, 2),
    per_run AS (SELECT q.run_id, count(d.path) roots, coalesce(sum(d.n),0) searches,
      coalesce(sum(d.n > 1),0) repeated_roots FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1)
@@ -473,7 +473,20 @@ array with correctly typed dry_run=true, remain in numerator and denominator.
 The prior 205/1,222 receipt used the earlier typed-preview filter; the corrected
 fixed-window recount is 211/1,228. The root-level edit at turn 1, successful
 discovery at turn 2, then below-root edit at turn 3 fixture records one valid
-early discovery. Below-root baseline scope counts remain 108 roots, 18 scopes,
-25 starts, 7 repeated scopes across 5 runs, maximum 5 scopes. These counts remain
-unqualified for canonical path, completed-page and instruction-read coverage.
+early discovery. The historical substring-query proxy records 108 roots, 18 scopes,
+25 starts, 7 repeated scopes across 5 runs, maximum 5 scopes. It accepts
+unrelated queries such as NOTAGENTS and is not the qualification baseline.
+The scope query now requires the exact anchored instruction-basename regex
+and JSON boolean regex=true. Canonical path, completed-page and
+instruction-read coverage still require separate qualification.
 Evidence: target/qq-perf/ab-plan-2026-10-14/completed-preview-below-root.json.
+
+
+The revised fixed-window scope query on schema 45 records **108 qualifying
+roots, one distinct discovery scope, one start, zero repeated scopes or
+affected runs, maximum one scope**. This accepted-query count does not prove
+coverage: 107 roots have no accepted early discovery start, and retained or
+injected instructions require independent transcript evidence. A fixture
+rejects NOTAGENTS, literal and string-true regex fields, and continuation
+pages while accepting the exact anchored query with boolean regex=true.
+Evidence: target/qq-perf/ab-plan-2026-10-14/anchored-scope-query.json.
