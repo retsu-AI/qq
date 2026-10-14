@@ -81,12 +81,13 @@ pub use hosts::{
     ToolHints,
 };
 pub use runtime::{
-    AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
-    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
-    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
+    AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, CheckpointFuture,
+    CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
+    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract,
+    ReadImageFamily, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
@@ -526,6 +527,13 @@ fn note_audited_action(
     result: &tools::ToolOutput,
 ) {
     triggers.tool_calls = triggers.tool_calls.saturating_add(1);
+    if result
+        .execution_context
+        .as_ref()
+        .is_some_and(|receipt| receipt.is_work())
+    {
+        triggers.non_read_shell = true;
+    }
     // Classification here only asks "was it a mutation or a non-read shell";
     // the network policy is irrelevant to that, so the default is enough.
     match approval::classify(
@@ -535,13 +543,6 @@ fn note_audited_action(
         &tools::network::NetworkPolicy::default(),
     ) {
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
-        // Read-only shell (allowlisted VCS reads and the like) does not by
-        // itself make a run worth auditing; anything else does.
-        approval::ToolClass::Shell {
-            read_only: false, ..
-        } if !result.is_error => {
-            triggers.non_read_shell = true;
-        }
         _ => {}
     }
     if call.name == tools::SPAWN_AGENT_TOOL && !result.is_error {
@@ -1033,6 +1034,7 @@ pub struct Runtime {
     pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
+    pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
@@ -1089,6 +1091,7 @@ impl Runtime {
             task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
+            approved_read_images: Arc::new(runtime::ApprovedReadImages::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
@@ -1130,18 +1133,24 @@ impl Runtime {
     /// that calls tools gets a rejection result for each call and is asked
     /// again once, dropping what it wrote; a second such turn, a refusal, a
     /// protocol violation, or a transport failure is an error naming it, and
-    /// the caller settles the compaction run failed. Returns the joined text
-    /// and the summed usage. The provider owns retries as for any request.
-    pub(crate) async fn summarize(
+    /// the caller settles the compaction run failed. A provider fault the run
+    /// loop would retry for a model turn, or a stream that ends without a
+    /// terminal event, is `Transient`; everything else is `Rejected`. Returns
+    /// the joined text and the summed usage. The provider owns retries before
+    /// the stream starts, as for any request.
+    pub(crate) fn summarize(
         &self,
         messages: Vec<Message>,
         system: Arc<str>,
         tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
-    ) -> Result<(String, Option<TokenUsage>), String> {
+    ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
+    {
+        stream! {
         let mut messages = messages;
         let mut summary = String::new();
-        let mut total_usage: Option<TokenUsage> = None;
+        let mut total_usage = Some(TokenUsage::default());
+        let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
         // One turn of calls is answered with rejections so the model can
         // still write the summary; a second fails the step.
@@ -1161,10 +1170,11 @@ impl Runtime {
                 Some(effort) => request.with_reasoning_effort(effort),
                 None => request,
             };
+            yield Ok(runtime::SummarizeStep::RequestStarting);
             let mut events = self.provider.stream(request);
             let mut text = String::new();
             let mut truncated = None;
-            let mut usage = None;
+            let usage;
             // Calls in this turn, in order, and the turn's replay data: a
             // rejected-call turn is sent back exactly as it was produced.
             struct SummarizerCall {
@@ -1176,7 +1186,10 @@ impl Runtime {
             let mut replay = None;
             loop {
                 let Some(event) = events.next().await else {
-                    return Err("summarizer stream ended without completing".to_owned());
+                    yield Err(runtime::SummarizeError::Transient {
+                        kind: RunFailureKind::ProviderTransport,
+                        message: "summarizer stream ended without completing".to_owned(),
+                    }); return;
                 };
                 match event {
                     Ok(ProviderEvent::Replay { data }) => replay = Some(data),
@@ -1187,7 +1200,9 @@ impl Runtime {
                             .saturating_add(delta.len())
                             > MAX_RUN_MODEL_TEXT_BYTES
                         {
-                            return Err("summarizer output exceeded the run text bound".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer output exceeded the run text bound".to_owned(),
+                            )); return;
                         }
                         text.push_str(&delta);
                     }
@@ -1197,11 +1212,15 @@ impl Runtime {
                         | ProviderEvent::ReasoningCompleted { .. },
                     ) => {}
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
-                        return Err("summarizer refused".to_owned());
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer refused".to_owned(),
+                        )); return;
                     }
                     Ok(ProviderEvent::ToolCallStarted { id, name }) => {
                         if rejected_call_turn {
-                            return Err("summarizer called a tool on two turns".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer called a tool on two turns".to_owned(),
+                            )); return;
                         }
                         if calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN
                             || id.is_empty()
@@ -1210,7 +1229,9 @@ impl Runtime {
                             || name.len() > MAX_TOOL_NAME_BYTES
                             || calls.iter().any(|call| call.id == id)
                         {
-                            return Err("summarizer streamed a malformed tool call".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed a malformed tool call".to_owned(),
+                            )); return;
                         }
                         calls.push(SummarizerCall {
                             id,
@@ -1220,13 +1241,15 @@ impl Runtime {
                     }
                     Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
                         let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
-                            return Err(
-                                "summarizer streamed arguments for an unknown call".to_owned()
-                            );
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed arguments for an unknown call".to_owned(),
+                            )); return;
                         };
                         if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES
                         {
-                            return Err("summarizer tool arguments exceeded their bound".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer tool arguments exceeded their bound".to_owned(),
+                            )); return;
                         }
                         call.arguments.push_str(&json);
                     }
@@ -1235,29 +1258,72 @@ impl Runtime {
                         usage = reported.map(provider_usage);
                         break;
                     }
-                    Ok(ProviderEvent::Incomplete { reason, .. }) => {
+                    Ok(ProviderEvent::Incomplete { reason, usage: reported }) => {
+                        usage = reported.map(provider_usage);
                         truncated = Some(reason);
                         break;
                     }
-                    Err(error) => return Err(error.to_string()),
+                    // A transient fault (overload, rate limit, transport loss)
+                    // is the provider's moment; the run loop retries the
+                    // summarizer like a model turn (ADR-0048 § 2).
+                    Err(error) => {
+                        let kind = run_failure_kind(error.kind());
+                        let message = error.to_string();
+                        yield Err(if recoverable_turn_fault(kind) {
+                            runtime::SummarizeError::Transient { kind, message }
+                        } else {
+                            runtime::SummarizeError::Rejected(message)
+                        }); return;
+                    }
                 }
             }
+            ordinal += 1;
+            let mut completed_blocks = Vec::with_capacity(calls.len() + 1);
+            if !text.is_empty() {
+                completed_blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+            for call in &calls {
+                let encoded = if call.arguments.trim().is_empty() { "{}" } else { &call.arguments };
+                match serde_json::value::RawValue::from_string(encoded.to_owned()) {
+                    Ok(arguments) => completed_blocks.push(ContentBlock::ToolCall {
+                        id: call.id.clone(), name: call.name.clone(), arguments,
+                    }),
+                    // Preserve measured spend even when malformed arguments
+                    // make this turn unusable; these calls are never executed.
+                    Err(_) => completed_blocks.push(ContentBlock::Text {
+                        text: format!("[Malformed summarizer call {} {}: {}]", call.id, call.name, call.arguments),
+                    }),
+                }
+            }
+            let completed = Message::new(Role::Assistant, completed_blocks);
+            let completed = match &replay {
+                Some(data) => completed.with_replay(data.clone()),
+                None => completed,
+            };
+            yield Ok(runtime::SummarizeStep::TurnCompleted {
+                ordinal, message: completed, usage, truncated: truncated.is_some(),
+            });
             // Overflowing the sum is a provider protocol fault; fail the
             // compaction rather than persist an understated total.
             total_usage = match (total_usage, usage) {
                 (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
                     Some(sum) => Some(sum),
-                    None => return Err("summarizer usage overflowed".to_owned()),
+                    None => {
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer usage overflowed".to_owned(),
+                        )); return;
+                    }
                 },
-                (Some(total), None) | (None, Some(total)) => Some(total),
-                (None, None) => None,
+                (Some(_), None) | (None, Some(_)) | (None, None) => None,
             };
             if !calls.is_empty() {
                 // Answer each call with a rejection and ask again. The model
                 // abandoned its reply, so nothing written so far is kept. A
                 // cut turn's calls are incomplete and cannot be answered.
                 if truncated.is_some() {
-                    return Err("summarizer called a tool and was cut off".to_owned());
+                    yield Err(runtime::SummarizeError::Rejected(
+                        "summarizer called a tool and was cut off".to_owned(),
+                    )); return;
                 }
                 rejected_call_turn = true;
                 summary.clear();
@@ -1279,9 +1345,9 @@ impl Runtime {
                         arguments
                     };
                     let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
-                        return Err(
-                            "summarizer streamed tool arguments that are not JSON".to_owned()
-                        );
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer streamed tool arguments that are not JSON".to_owned(),
+                        )); return;
                     };
                     blocks.push(ContentBlock::ToolCall {
                         id: id.clone(),
@@ -1306,25 +1372,26 @@ impl Runtime {
             }
             summary.push_str(&text);
             let Some(reason) = truncated else {
-                return Ok((summary, total_usage));
+                yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
             if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
                 // Nothing visible: the cap went to hidden reasoning. A
                 // continuation would resend the same request. (A provider
                 // pause with no text is resent as the provider requires.)
-                return Err(format!(
+                yield Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
-                ));
+                ))); return;
             }
             if continuations >= MAX_OUTPUT_CONTINUATIONS {
-                return Err(format!(
+                yield Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
                     u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
-                ));
+                ))); return;
             }
             continuations += 1;
             messages.push(Message::assistant(text));
             messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+        }
         }
     }
 
@@ -1453,6 +1520,13 @@ impl Runtime {
 
     /// Sets the shell environment allowlist and built-in preference.
     #[must_use]
+    /// Approve exact self-contained native read implementations for this host.
+    /// Empty by default; this trust must never come from tool or workspace input.
+    pub fn with_approved_read_images(mut self, images: runtime::ApprovedReadImages) -> Self {
+        self.approved_read_images = Arc::new(images);
+        self
+    }
+
     pub fn with_shell_policy(mut self, shell: runtime::ShellPolicy) -> Self {
         self.shell = Arc::new(shell);
         self
@@ -2409,15 +2483,27 @@ mod tests {
             "read",
             serde_json::json!({"type": "object"}),
         )]);
-        let result = runtime
-            .summarize(
-                vec![Message::user("summarize")],
-                Arc::from("system"),
-                tools,
-                256,
-            )
-            .await
-            .map(|(summary, _)| summary);
+        let steps = runtime.summarize(
+            vec![Message::user("summarize")],
+            Arc::from("system"),
+            tools,
+            256,
+        );
+        tokio::pin!(steps);
+        let mut result = Err("summarizer ended without a summary".to_owned());
+        while let Some(step) = steps.next().await {
+            match step {
+                Ok(runtime::SummarizeStep::Summary(summary)) => {
+                    result = Ok(summary);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    result = Err(error.to_string());
+                    break;
+                }
+            }
+        }
         let requests = requests.lock().unwrap().clone();
         (result, requests)
     }
@@ -4161,6 +4247,129 @@ mod tests {
             "AB3 parallel runtime: calls={} turn_budget_cuts={}",
             state.calls, state.cuts
         );
+    }
+
+    #[tokio::test]
+    async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
+        for count in [16, 64] {
+            let directory = tempfile::tempdir().unwrap();
+            // Long names fill a page and force an actual continuation cursor.
+            for index in 0..100 {
+                std::fs::write(
+                    directory
+                        .path()
+                        .join(format!("{index:03}{}", "x".repeat(220))),
+                    "",
+                )
+                .unwrap();
+            }
+            let arguments = serde_json::json!({"query":"x","mode":"names"}).to_string();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![
+                        vec![("search", arguments.clone()); count],
+                        vec![("search", arguments.clone())],
+                    ],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requested = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::AssistantTurnCompleted { calls, .. } if !calls.is_empty() => {
+                        Some(calls)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
+                - count * tools::output::result_reserve_bytes("search"))
+                / tools::output::search_reservation_bytes(false);
+            assert_eq!(requested[0].len(), count);
+            for (index, call) in requested[0].iter().enumerate() {
+                assert_eq!(call.arguments, arguments);
+                if index >= MAX_TOOL_CALLS_PER_TURN {
+                    assert!(matches!(
+                        call.rejection,
+                        Some(runtime::CallRejection::Runtime(_))
+                    ));
+                } else {
+                    assert_eq!(
+                        call.rejection,
+                        (index >= admitted).then_some(runtime::CallRejection::OutputBudget)
+                    );
+                }
+            }
+            assert!(requested[1][0].rejection.is_none());
+            let completed = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        result, is_error, ..
+                    } => Some((result, *is_error)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(completed.len(), count + 1);
+            let pages = completed
+                .iter()
+                .filter(|(_, error)| !error)
+                .map(|(text, _)| *text)
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), admitted + 1);
+            assert!(pages[0].len() > 10 * 1024);
+            assert!(pages[0].lines().next().unwrap().contains("next="));
+            assert!(pages.iter().all(|page| *page == pages[0]));
+            assert!(
+                completed
+                    .iter()
+                    .filter(|(_, error)| *error)
+                    .all(|(text, _)| text.starts_with("turn_output_budget:")
+                        || text.contains("not executed"))
+            );
+            let requests = requests.lock().unwrap();
+            for request in requests.iter().skip(1) {
+                for message in request.messages() {
+                    let total = message
+                        .content()
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                            _ => None,
+                        })
+                        .sum::<usize>();
+                    assert!(
+                        total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
+                        "{total}"
+                    );
+                    for block in message.content() {
+                        if let ContentBlock::ToolResult {
+                            content,
+                            is_error: false,
+                            ..
+                        } = block
+                        {
+                            assert_eq!(content, pages[0], "admitted page must remain whole");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -8963,6 +9172,81 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("QQ_CONTEXT_SHADOW_WORKER").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let bin = directory.path().join("bin");
+            let workspace = directory.path().join("workspace");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::create_dir(&workspace).unwrap();
+            let program = bin.join("grep");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\nprintf changed > written.txt\nprintf 'match\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                    "--nocapture",
+                ])
+                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
+                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                .env("PATH", &bin)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "shadowed executable classification worker failed"
+            );
+            return;
+        }
+        let path = std::path::PathBuf::from(std::env::var_os("QQ_CONTEXT_SHADOW_ROOT").unwrap());
+        let arguments = r#"{"program":"grep","args":["-n","x","f"]}"#.to_owned();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tools::execute(
+                workspace::Workspace::open(&path).unwrap(),
+                Arc::new(workspace::FileState::default()),
+                "exec".to_owned(),
+                arguments.clone(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::new(tools::network::NetworkPolicy::default()),
+            ));
+        assert!(!output.is_error, "{}", output.model_text);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        let call = RuntimeToolCall {
+            id: ToolCallId::from_bytes([42; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "shadow".to_owned(),
+            name: "exec".to_owned(),
+            arguments,
+            effect: catalog::EffectClass::Shell,
+            rejection: None,
+        };
+        assert!(
+            runtime::is_progress(&call, None, &output),
+            "unverified executable must count as work"
+        );
+        let mut triggers = runtime::AuditTriggers::default();
+        note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &output);
+        assert!(
+            triggers.non_read_shell,
+            "unverified mutation must not suppress audit"
+        );
+    }
+
     /// Scripts one `spawn_agent` call on the first turn, then completes.
     struct SpawnCallProvider {
         turn: Mutex<usize>,
@@ -11680,22 +11964,39 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod ab1_audit_regression {
-    #[test]
-    fn an_in_place_sed_write_triggers_a_short_run_heuristic_audit() {
-        let mut triggers = crate::runtime::AuditTriggers::default();
+    #[tokio::test]
+    async fn a_failed_command_that_wrote_still_triggers_audit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(directory.path()).unwrap();
+        let arguments = r#"{"command":"printf changed > written.txt; exit 3"}"#.to_owned();
         let call = crate::runtime::RuntimeToolCall {
             id: qq_protocol::ToolCallId::from_bytes([1; 16]),
-            turn_ordinal: 0,
-            call_ordinal: 0,
+            turn_ordinal: 1,
+            call_ordinal: 1,
             provider_call_id: "ab1-write".to_owned(),
             rejection: None,
             name: "shell".to_owned(),
-            arguments: r#"{"command":"sed -ni s/a/b/ f.rs"}"#.to_owned(),
+            arguments: arguments.clone(),
             effect: crate::catalog::EffectClass::Shell,
         };
-        let result = crate::tools::bounded_result("shell exit=0\n".to_owned(), false);
+        let result = crate::tools::execute(
+            crate::workspace::Workspace::open(&path).unwrap(),
+            std::sync::Arc::default(),
+            "shell".to_owned(),
+            arguments,
+            crate::RunCancellation::new(),
+            None,
+            crate::tools::ToolTasks::default(),
+            std::sync::Arc::default(),
+            std::sync::Arc::default(),
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        assert!(crate::runtime::is_progress(&call, None, &result));
+        let mut triggers = crate::runtime::AuditTriggers::default();
         crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
         assert!(triggers.fires(crate::runtime::AuditMode::Heuristic));
     }

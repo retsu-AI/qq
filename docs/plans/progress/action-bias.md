@@ -6,12 +6,12 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) (draft) | Latest parent integration checks in progress; performance open |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) (draft) | After AB2; ADR-0059 reserved |
-| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) (draft) | Latest parent integration and notice docs in progress; performance open |
-| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) (draft) | Tooling qualified; upstream repairs, final recount and review open |
+| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Nondraft; verified context qualified, performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Nondraft; batched-search cap repair in progress, performance open |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
+| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Latest parent integration and notice docs in progress; performance open |
+| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; context evidence and provenance format 3 in progress |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and seven deployed/provenance-qualified UTC days |
 
 ## Entries
@@ -1395,3 +1395,114 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab6-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+- AB1 execution-context test-first: a child test process captures PATH with a
+  workspace-local executable named grep that actually writes written.txt.
+  Existing literal exec classification calls it Read, so progress and audit
+  assertions fail. The real helper execution and side effect are checked before
+  the verdict. context-shadow-red.log retains the failing worker/parent result.
+
+### 2026-10-14 — expanded context implementation in progress
+
+- Inherited-PATH executable spoof reproduced red and now passes with execution-derived Work accounting. Prepared launch captures environment once, holds cwd, binds explicitly approved self-contained static Linux exec images with sealed bytes, and produces typed atomic store receipts. CLI approvals propagate through immutable factories; existing-server attachment rejects nonempty flags.
+- Local source remains unqualified: focused tests identified a store-fixture table typo (fixed), broader tests exposed old heuristic assumptions and partial-migration fixtures (fixed); descriptor golden awaits refresh. No new source pushed. Integrating newly merged main #295/#296/#297 and preserving its schema46 before the next qualification.
+
+### 2026-10-14 — current-main integration and focused context evidence
+
+- Local merge `24653324` includes main `f87d5d9d` (#295/#296/#297). Resolved schema conflict by preserving AC3's46 and appending receipt47; AB5 must move its notice to48. GitHub still has the older head until qualified source is pushed.
+- Focused AB1 run:25 tests pass,0 fail; CLI/factory run:3 pass,0 fail. Real static-image worker proves64 verified exec calls reach the stall report, replacement image/cwd paths cannot replace held inputs, and failed writes trigger audits. Receipt rollback/bounds/reopen and historical NULL fixtures pass.
+- Independent read-only reviews approved host flag propagation and receipt transaction/migration wiring; executable review found and fixed unreadable-PATH skipping and unbounded sealed readback. Full workspace checks and matched performance remain open. Logs `/tmp/qq-context-{focused,root-tests}.log` (will copy into task-owned evidence before qualification).
+
+- First fresh expanded-source workspace attempt on `1f48e28d` stopped in root tests:268 passed,2 failed,2 ignored; new CLI flag lacked its guide entry and the current descriptor assertion still expected13. Both corrected; no later gates ran. Failed logs retained under `target/qq-perf/ab1-2026-10-14/expanded-context-first-gates-*`. Independent final read-only reviews approved executable binding and receipt/ADR wiring on1f48.
+
+- Fresh source `ea6482b7`: workspace tests2341 passed,0 failed,14 ignored; fmt passed. Clippy failed2 large-enum checks because inline process receipts enlarged `TurnStep`/`RunInput`; build not run. Receipts now allocate one boxed payload only for started processes, preserving ordinary/default event size. Cwd capability stays owned on unsupported platforms too. Failed logs retained as `expanded-context-final-gates-*`; fresh requalification follows.
+
+### 2026-10-14 — expanded AB1 qualification and conflict repair published
+
+- Qualified immutable source `9cbbaa7d7dcb989756ddaff970974601b24d3cab` includes main `f87d5d9d`:2341 passed,0 failed,14 ignored (38 report blocks); fmt, all-target/all-feature Clippy `-D warnings` and workspace build exit0. Logs/receipt `target/qq-perf/ab1-2026-10-14/expanded-context-final2-gates-*`.
+- Three independent read-only reviews approved launch binding, startup manifest propagation and atomic receipts/docs. Clippy-driven boxing changes only optional process payload ownership; ordinary events stay small. Unsupported/historical contexts remain unqualified.
+- All PRs stay out of draft. Publishing this source removes the old main conflict on301; fresh Codex review and current-head hosted CI follow. Matched default/process/turn/persistence measurements remain open, so merge acceptance is not yet claimed.
+
+### 2026-10-14 — AB2 strict batched-search admission
+
+- Integrated published AB1 execution-context verification and current main,
+  including AC3 schema 46 followed by receipt schema 47. PR remains nondraft.
+- Reproduced the sixteen-page overflow before the repair; admission now
+  reserves full search pages and short replies before execution. Live and
+  replay projection share the strict 96 KiB calculation.
+- Focused AB2 tests passed before adding sixteen/sixty-four-call runtime
+  retry coverage. Independent review and fresh workspace gates remain open;
+  no unqualified changes have been pushed.
+
+- Final core qualification: 1,019 passed, zero failed, three ignored; logs
+  `/tmp/qq-ab2-cap-core-final.log`. Actual sixteen/sixty-four-call deferrals,
+  exact retry, mixed maximum-length recall names, complete pages, stored
+  replay parity, and historical descriptor 13/prompt 20 digest pass.
+- Independent cursor/admission and output/replay reviews approve production
+  behavior. The child-compaction fixture now grants two million tokens so
+  both scripted 48-turn children finish under the longer prompt; exact
+  inherited spend assertions remain intact. Full workspace gates follow.
+
+### 2026-10-14 — AB2 strict-cap workspace qualification
+
+- Immutable source `91c05c81d1b2d5e4c78eddc36203fea937ec69cf`: fresh
+  workspace qualification passes 2,371 tests, zero failures, 14 ignored
+  across 38 report blocks; formatting, Clippy/all targets/all features with
+  warnings denied, and workspace build all exit zero.
+- Evidence: `target/qq-perf/ab2-2026-10-14/strict-cap-workspace-{0..4}.log`
+  and `strict-cap-workspace-receipt.json`; source stayed clean and unchanged
+  throughout qualification. Independent admission and projection reviews
+  approve. Current descriptor 14/prompt 20 golden is `fde8f5629db25add...`;
+  historical descriptor 13/prompt 20 remains `61a6c7e80a481d54...`.
+- This publication resolves the actual batched-search output overflow and
+  integrates current main/AB1. Hosted checks, fresh Codex review, and named
+  performance gates remain open; this receipt does not waive them.
+
+### 2026-10-14 — AB3 verified-context and strict-cap integration
+
+- Integrated qualified AB2 `e4342a5c` and current main, retaining both the
+  parallel read-window runtime regression and batched-search retry coverage.
+- Receipt schema 47 follows AC3 schema 46; descriptor 14/prompt 20 and
+  historical descriptor 13 identity are inherited unchanged.
+- PR remains nondraft. Fresh source qualification and independent integration
+  review follow; hosted and named performance gates remain open.
+
+### 2026-10-14 — AB4 verified-context and bounded-output integration
+
+- Integrated AB3 source `b2a727bc` with actual main AC3/schema 46, receipt
+  schema 47, and strict search admission. Parent qualification is running;
+  this child will not be pushed until parent and child gates pass.
+- Preserved frozen read-only child authority and historical descriptor 13
+  prompt 20–22 identities; current descriptor 14/prompt 22 golden refresh
+  follows a focused encoding check. PR remains nondraft.
+
+### 2026-10-14 — AB5 schema sequencing and verified-read integration
+
+- Integrated AB4/current-main sources: AC3 owns schema 46; AB1 receipts own
+  schema 47; the root-stall replay-value migration now follows as schema 48.
+  All prior migration guards skip 48 and retain their structural validators.
+- Reconciled progress tests with executor receipts: unverified shell calls
+  count as Work; genuinely verified exec reads retain the root stall boundary
+  and now receive RootStallReport. Legacy child wording remains unchanged.
+- PR remains nondraft. Parent/child gates, old-reader refusal proof and fresh
+  hosted/Codex review follow; no unqualified source is being pushed.
+
+- Added schema-47→48 structure/store-identity idempotency regression and
+  schema-48 missing-receipt-column rejection. Updated the plan's shared-file
+  schema boundary to 47→48, matching its acceptance row. These fixtures still
+  await execution after parent qualification.
+
+- Corrected the inherited receipt-reopen fixture's current-schema assertion
+  from 47 to 48; its historical NULL and malformed claimed-47 rejection
+  fixtures remain unchanged. AB5 qualification still awaits the parent.
+
+### 2026-10-14 — AB6 verified-context implementation preparation
+
+- Integrated AB5 source `3ce24f3d` and actual main schema sequencing through
+  schema 48. Parent qualification and descriptor golden propagation remain
+  in flight; this unqualified child is not being pushed.
+- User-approved scope expands this slice to retained process context,
+  semantic argument validation, accepted policy identity, manifest binding
+  and producer provenance with bounded shell/exec export/recount.
+- V1/NULL history remains unavailable without independent immutable mapping;
+  Work is not mutation proof. Format 3 generation and coverage counters
+  still need implementation and qualification. PR remains nondraft.

@@ -940,10 +940,11 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<CompactedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, run, window, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, .. } = env;
+                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let model_max_output_tokens = *model_max_output_tokens;
-
+                    let deadline = *deadline;
+                    let turn_recovery = plan.runtime.turn_recovery;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
                         let estimate_input_tokens = |chain: Option<(u64, u64, u64, u64)>, reducible: u64, irreducible: u64| -> u64 {
                             let message_bytes = reducible.saturating_add(irreducible);
@@ -1117,9 +1118,9 @@ impl RunState {
                                             <= u64::from(context_window)
                                     });
                                 let transcript = if summarizer_fits {
-                                    messages[..cut].to_vec()
+                                    &messages[..cut]
                                 } else {
-                                    messages[reducible_messages..cut].to_vec()
+                                    &messages[reducible_messages..cut]
                                 };
                                 // What the next request carries besides the
                                 // summary; the store adds the summary and
@@ -1134,17 +1135,92 @@ impl RunState {
                                 yield TurnStep::Emit(RuntimeEvent::ActivityChanged {
                                     activity: RunActivity::Compacting,
                                 });
-                                match compactor
-                                    .compact(runtime::InRunCompactionRequest {
-                                        transcript,
-                                        turn_cutoff,
-                                        system: Arc::clone(system),
-                                        tools: Arc::clone(&run.tool_specs),
-                                        retained_bytes,
-                                    })
-                                    .await
+                                // The summarizer is a provider turn under the same
+                                // recovery as a model turn (ADR-0048 § 2): a transient
+                                // fault is retried after the policy's backoff, and
+                                // when `MAX_TURN_RETRIES` is spent the run pauses with
+                                // every earlier turn durable. Nothing in the live
+                                // transcript changed, so each attempt sends the same
+                                // request. A rejected summary fails closed.
+                                let mut summarizer_retries: u16 = 0;
+                                let compacted = loop {
+                                    let allowance = match run.budget.child_budget(tokio::time::Instant::now()) {
+                                        Ok(allowance) => allowance,
+                                        Err(kind) => {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                    };
+                                    let attempt = compactor
+                                        .compact(runtime::InRunCompactionRequest {
+                                            transcript: transcript.to_vec(),
+                                            turn_cutoff,
+                                            system: Arc::clone(system),
+                                            tools: Arc::clone(&run.tool_specs),
+                                            retained_bytes,
+                                            budget: allowance,
+                                        })
+                                        .await;
+                                    let (kind, message) = match attempt {
+                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message, usage, estimated_cost_usd_nanos }) => {
+                                            run.budget.charge_child(usage, estimated_cost_usd_nanos);
+                                            if let Err(limit) = run.budget.remaining(tokio::time::Instant::now()) {
+                                                yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                    exhaustion: run.budget.exhaustion(limit, false, tokio::time::Instant::now()),
+                                                });
+                                                yield TurnStep::Stop; return;
+                                            }
+                                            (kind, message)
+                                        }
+                                        Err(runtime::InRunCompactionError::BudgetExhausted { kind, usage, estimated_cost_usd_nanos }) => {
+                                            run.budget.charge_child(usage, estimated_cost_usd_nanos);
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                        settled => break settled,
+                                    };
+                                    if summarizer_retries >= MAX_TURN_RETRIES {
+                                        yield TurnStep::Emit(RuntimeEvent::Paused {
+                                            pause: Box::new(qq_protocol::RunPause {
+                                                kind,
+                                                message: format!("in-run compaction summarizer: {message}"),
+                                                turn_ordinal,
+                                                attempts: summarizer_retries,
+                                            }),
+                                        });
+                                        yield TurnStep::Stop; return;
+                                    }
+                                    summarizer_retries += 1;
+                                    let delay = turn_recovery.delay(summarizer_retries);
+                                    yield TurnStep::Emit(RuntimeEvent::TurnRetrying {
+                                        turn_ordinal,
+                                        attempt: summarizer_retries,
+                                        delay,
+                                        kind,
+                                        message: format!("in-run compaction summarizer: {message}"),
+                                    });
+                                    let sleep = tokio::time::sleep(delay);
+                                    tokio::pin!(sleep);
+                                    tokio::select! {
+                                        biased;
+                                        () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
+                                        () = runtime::RunDeadline::wait(deadline) => {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: deadline.expect("only a finite deadline wakes").exhaustion(),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                        () = &mut sleep => {}
+                                    }
+                                };
+                                match compacted
                                 {
                                     Ok(summary) => {
+                                        run.budget.charge_child(summary.usage, summary.estimated_cost_usd_nanos);
                                         let summary = Message::user(format!(
                                             "{}\n\n{}",
                                             sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
@@ -1160,6 +1236,12 @@ impl RunState {
                                         window.model_text_bytes = 0;
                                         window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
+                                        if let Err(kind) = run.budget.remaining(tokio::time::Instant::now()) {
+                                            yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                                exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()),
+                                            });
+                                            yield TurnStep::Stop; return;
+                                        }
                                     }
                                     Err(error) => {
                                         yield TurnStep::Emit(match error {
@@ -1168,6 +1250,10 @@ impl RunState {
                                                 message: format!("in-run compaction failed: {error}"),
                                             },
                                             runtime::InRunCompactionError::SummarizerFailed(_)
+                                            // Unreachable after the retry loop above, which
+                                            // pauses instead; kept for exhaustiveness.
+                                            | runtime::InRunCompactionError::SummarizerUnavailable { .. }
+                                            | runtime::InRunCompactionError::BudgetExhausted { .. }
                                             | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
                                                 kind: RunFailureKind::Policy,
                                                 message: format!(
@@ -1771,10 +1857,10 @@ impl RunState {
                             #[cfg(test)]
                             let known = known.or_else(|| tools::test_tool_effect(&pending.name));
                             let (effect, rejection) = match known {
-                                Some(effect) => (effect, pending.rejection),
+                                Some(effect) => (effect, pending.rejection.map(runtime::CallRejection::Runtime)),
                                 None => (
                                     catalog::EffectClass::ReadOnly,
-                                    Some(format!("unknown tool {:?}", pending.name)),
+                                    Some(runtime::CallRejection::Runtime(format!("unknown tool {:?}", pending.name))),
                                 ),
                             };
                             if rejection.is_none() {
@@ -1804,10 +1890,26 @@ impl RunState {
                         {
                             for call in &mut calls {
                                 if call.rejection.is_none() {
-                                    call.rejection = Some(
-                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone"
-                                            .to_owned(),
-                                    );
+                                    call.rejection = Some(runtime::CallRejection::Runtime(
+                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone".to_owned()));
+                                }
+                            }
+                        }
+                        // Reserve complete search pages before execution. A cursor may
+                        // advance only when its whole page can enter this turn's context.
+                        let reviews_tools = checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools());
+                        let mut search_space = tools::output::MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(
+                            calls.iter().map(|call| tools::output::result_reserve_bytes(&call.name)).sum::<usize>());
+                        let page_reserve = tools::output::search_reservation_bytes(reviews_tools);
+                        for call in &mut calls {
+                            if call.name == "search" && call.rejection.is_none() {
+                                if search_space >= page_reserve {
+                                    search_space -= page_reserve;
+                                } else {
+                                    // Tool-checkpoint enforcement admitted at most one
+                                    // executable call above, which always fits this bound.
+                                    debug_assert!(!reviews_tools);
+                                    call.rejection = Some(runtime::CallRejection::OutputBudget);
                                 }
                             }
                         }
@@ -2634,6 +2736,7 @@ impl RunState {
                     let hosts = &plan.hosts;
                     let delegation = &plan.runtime.delegation;
                     let shell_policy = &plan.runtime.shell;
+                    let approved_read_images = &plan.runtime.approved_read_images;
                     let network_policy = &plan.runtime.network;
                     let reasoning_effort = plan.runtime.reasoning_effort;
 
@@ -2746,6 +2849,7 @@ impl RunState {
                                 file_states: Vec::new(),
                                 display: result.ui_payload,
                                 spill: None,
+                                    execution_context: None,
                             });
                         }
                         if tool_scope.pins_changed {
@@ -2783,6 +2887,7 @@ impl RunState {
                             let spills = spills.clone();
                             let delegation = Arc::clone(delegation);
                             let shell_policy = Arc::clone(shell_policy);
+                            let approved_read_images = Arc::clone(approved_read_images);
                             let network_policy = Arc::clone(network_policy);
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
@@ -2816,8 +2921,8 @@ impl RunState {
                                             alternative.program, alternative.builtin
                                         )
                                     });
-                                let result = match call.rejection.clone().or(strict_refusal) {
-                                    Some(error) => tools::ToolOutput::verbatim_error(error),
+                                let result = match call.rejection.clone().or_else(|| strict_refusal.map(runtime::CallRejection::Runtime)) {
+                                    Some(error) => tools::ToolOutput::verbatim_error(error.into_message()),
                                     // spawn_agent dispatches to the session layer. A
                                     // run without a spawner rejects the call outright:
                                     // the declaration is already absent there, but a
@@ -3075,7 +3180,7 @@ impl RunState {
                                         }
                                     }
                                     None => {
-                                        tools::execute(
+                                        tools::execute_with_images(
                                             workspace,
                                             file_state,
                                             call.name.clone(),
@@ -3085,6 +3190,7 @@ impl RunState {
                                             tool_tasks,
                                             shell_policy,
                                             network_policy,
+                                            approved_read_images,
                                         )
                                         .await
                                     }
@@ -3178,6 +3284,7 @@ impl RunState {
                                     file_states: result.file_states,
                                     display: result.ui_payload,
                                     spill: result.spill,
+                                    execution_context: result.execution_context,
                                 });
                             }
                         }
@@ -3267,6 +3374,7 @@ impl RunState {
                                     file_states: result.file_states,
                                     display: result.ui_payload,
                                     spill: result.spill,
+                                    execution_context: result.execution_context,
                                 });
                                 if interrupted_here {
                                     tool_scope.interrupted = true;
@@ -3303,6 +3411,7 @@ impl RunState {
                                         file_states: Vec::new(),
                                         display: None,
                                         spill: None,
+                                    execution_context: None,
                                     });
                                 }
                             }
@@ -3461,7 +3570,8 @@ impl RunState {
                         // replayed turn is byte-identical to what the model saw here.
                         // A cut names its recall path: the spill when the call
                         // spilled, else the stored result row itself in a session run.
-                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::new() };
+                        let mut output_scope = ResultScope { budget: tools::TurnOutputBudget::for_results(
+                            calls.iter().zip(results.iter()).map(|(call, result)| (call.name.as_str(), result.as_ref().expect("all outcomes retained").model_text.as_str()))) };
                         let stored = spills.is_some();
                         let result_blocks = calls
                             .iter()

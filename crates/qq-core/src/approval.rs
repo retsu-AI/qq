@@ -575,7 +575,8 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                         } else {
                             word
                         };
-                        if argv[count].contains(['\'', '"'])
+                        if ((!quoted && argv[count].contains(['\'', '"']))
+                            || (quoted && argv[count].as_bytes().contains(&word.as_bytes()[0])))
                             || (!quoted && argv[count].contains(['*', '?', '[', ']', '~']))
                         {
                             return false;
@@ -706,6 +707,15 @@ fn read_only_sed_script(script: &str) -> bool {
         }
         match bytes.get(position) {
             Some(b'p' | b'=') => position += 1,
+            Some(b'l') => {
+                position += 1;
+                while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                    position += 1;
+                }
+                while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+                    position += 1;
+                }
+            }
             Some(b's') => {
                 position += 1;
                 let Some(&delimiter) = bytes.get(position) else {
@@ -744,7 +754,7 @@ fn read_only_sed_script(script: &str) -> bool {
     }
 }
 
-fn read_only_argv(program: &str, args: &[&str]) -> bool {
+pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     match program {
         "git" => {
             let args = if args.first() == Some(&"-C") {
@@ -877,6 +887,12 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     match *arg {
                         "-n" | "--quiet" | "--silent" => quiet = true,
                         "-e" | "--expression" => expect_script = true,
+                        option if option.starts_with("--expression=") => {
+                            if !read_only_sed_script(&option[13..]) {
+                                return false;
+                            }
+                            script = true;
+                        }
                         "-E" | "-r" | "--regexp-extended" => {}
                         option
                             if option.starts_with('-')
@@ -1387,6 +1403,28 @@ mod tests {
     #[test]
     fn ab1_tree_recursive_html_output_is_work() {
         for command in ["tree -L 2 -R .", "tree -RL2 .", "tree -aR ."] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_joined_sed_printing_and_literal_opposite_quotes_are_reads() {
+        for command in [
+            "sed -n --expression=1p f",
+            "sed -n l f",
+            "sed -n 'l 80' f",
+            "sed -n 'l;1p' f",
+            r#"grep '"foo"' f"#,
+        ] {
+            assert!(super::read_only_shell_command(command), "{command}");
+        }
+        for command in [
+            "sed -n --expression= f",
+            "sed -n --expression=wout f",
+            "sed -n 'l -1' f",
+            "sed -n 'l;w out' f",
+            "grep 'a'b f",
+        ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
     }

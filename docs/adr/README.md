@@ -61,6 +61,8 @@ written.
 | 0056 | [A compaction summary is a short model narrative plus an exact record that QQ renders from the store](0056-compaction-narrative-and-record.md) | Proposed (compaction CX0–CX5); amends how ADR-0039 § 3's summarizer request is built |
 | 0058 | [Edit freshness: a unique exact match proves the region was seen](0058-edit-freshness-by-exact-match.md) | Accepted (tool-layer T19, ENG-1030); amends `tools.md` § Optimistic Concurrency step 2 |
 
+| 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
+
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet
 written, or were released unused:

@@ -8,8 +8,28 @@
 mod support;
 
 use qq_protocol::RunOutcome;
+use sha2::{Digest, Sha256};
 
 fn main() {
+    // Hash every directly compiled fixture source before the timed workload.
+    let mut fixture = Sha256::new();
+    fixture.update(b"qq-turn-fixture-v1\0");
+    for (path, source) in [
+        (
+            "crates/qq-core/benches/turn_overhead.rs",
+            include_bytes!("turn_overhead.rs").as_slice(),
+        ),
+        (
+            "crates/qq-core/tests/support/soak.rs",
+            include_bytes!("../tests/support/soak.rs").as_slice(),
+        ),
+    ] {
+        fixture.update((path.len() as u64).to_be_bytes());
+        fixture.update(path.as_bytes());
+        fixture.update((source.len() as u64).to_be_bytes());
+        fixture.update(Sha256::digest(source));
+    }
+    let fixture_sha256 = format!("{:x}", fixture.finalize());
     let iterations = match std::env::var("QQ_BENCH_ITERATIONS") {
         Ok(value) => value
             .parse::<usize>()
@@ -54,6 +74,7 @@ fn main() {
             "{}",
             serde_json::json!({
                 "metric":format!("turn_overhead_{milestone}_ns_per_turn"),
+                "fixture_sha256":fixture_sha256,
                 "unit":"ns/turn", "milestone":milestone, "iterations":iterations,
                 "median":values[values.len() / 2], "samples":values,
                 "boundary":"five completed work-turn gaps; fake-provider entry to next work entry, durable store included",

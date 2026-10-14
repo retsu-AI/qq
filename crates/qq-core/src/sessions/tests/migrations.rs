@@ -977,6 +977,9 @@ fn version_seventeen_migration_adds_preparation_and_exact_compaction_ownership()
         )
         .unwrap();
     connection
+        .execute("DROP INDEX runs_owned_compaction", [])
+        .unwrap();
+    connection
         .execute(
             "ALTER TABLE runs DROP COLUMN auto_compaction_for_run_id",
             [],
@@ -2104,6 +2107,9 @@ fn partially_applied_version_seventeen_migration_completes_atomically() {
             "UPDATE metadata SET value = '16' WHERE key = 'schema_version'",
             [],
         )
+        .unwrap();
+    connection
+        .execute("DROP INDEX runs_owned_compaction", [])
         .unwrap();
     connection
         .execute(
@@ -3404,16 +3410,17 @@ fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
 /// build never recorded a delegate. A column with the wrong shape is refused.
 #[test]
 fn version_forty_four_reads_existing_holds_as_waiting_for_a_human() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    let session_id = SessionId::from_bytes([0x46; 16]);
-    let workspace = WorkspaceId::from_bytes([0x45; 16]).to_string();
-    let session = session_id.to_string();
-    let run = RunId::from_bytes([0x47; 16]).to_string();
-    let message = MessageId::from_bytes([0x48; 16]).to_string();
-    let call = ToolCallId::from_bytes([0x49; 16]);
-    for (statement, values) in [
+    for (previous, delegated) in [("44", false), ("45", true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        let session_id = SessionId::from_bytes([0x46; 16]);
+        let workspace = WorkspaceId::from_bytes([0x45; 16]).to_string();
+        let session = session_id.to_string();
+        let run = RunId::from_bytes([0x47; 16]).to_string();
+        let message = MessageId::from_bytes([0x48; 16]).to_string();
+        let call = ToolCallId::from_bytes([0x49; 16]);
+        for (statement, values) in [
         (
             "INSERT INTO workspaces(id, path) VALUES (?1, '/v44-holds')",
             vec![workspace.clone()],
@@ -3439,45 +3446,59 @@ fn version_forty_four_reads_existing_holds_as_waiting_for_a_human() {
              VALUES (?1, ?2, 1, 1, 'call_1', 'shell', '{}', 'awaiting_approval', 1)",
             vec![call.to_string(), run],
         ),
-        (
-            "ALTER TABLE tool_calls DROP COLUMN approval_delegated",
-            vec![],
-        ),
-        (
-            "UPDATE metadata SET value = '44' WHERE key = 'schema_version'",
-            vec![],
-        ),
     ] {
         connection
             .execute(statement, rusqlite::params_from_iter(values))
             .unwrap();
     }
-    drop(connection);
+        connection
+            .execute("DROP INDEX runs_owned_compaction", [])
+            .unwrap();
+        if previous == "44" {
+            connection
+                .execute("ALTER TABLE tool_calls DROP COLUMN approval_delegated", [])
+                .unwrap();
+        } else {
+            connection
+                .execute(
+                    "UPDATE tool_calls SET approval_delegated = 1 WHERE id = ?1",
+                    [call.to_string()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+                [previous],
+            )
+            .unwrap();
+        drop(connection);
 
-    let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(
-        load_session_summary(&connection, session_id)
-            .unwrap()
-            .pending_holds,
-        [qq_protocol::PendingHold {
-            tool_call_id: call,
-            delegated: false,
-        }]
-    );
-    drop(connection);
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            load_session_summary(&connection, session_id)
+                .unwrap()
+                .pending_holds,
+            [qq_protocol::PendingHold {
+                tool_call_id: call,
+                delegated,
+            }]
+        );
+        drop(connection);
 
-    let (connection, _) = open_database(&path).unwrap();
-    for statement in [
-        "ALTER TABLE tool_calls DROP COLUMN approval_delegated",
-        "ALTER TABLE tool_calls ADD COLUMN approval_delegated TEXT",
-    ] {
-        connection.execute(statement, []).unwrap();
+        let (connection, _) = open_database(&path).unwrap();
+        for statement in [
+            "ALTER TABLE tool_calls DROP COLUMN approval_delegated",
+            "ALTER TABLE tool_calls ADD COLUMN approval_delegated TEXT",
+        ] {
+            connection.execute(statement, []).unwrap();
+        }
+        drop(connection);
+        assert!(matches!(
+            open_database(&path),
+            Err(SessionRuntimeError::CONSTRAINT)
+        ));
     }
-    drop(connection);
-    assert!(matches!(
-        open_database(&path),
-        Err(SessionRuntimeError::CONSTRAINT)
-    ));
 }
 
 #[test]
@@ -3511,7 +3532,7 @@ fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
 }
 
 #[test]
-fn ab5_schema_forty_five_migrates_once_to_forty_six() {
+fn ab5_schema_forty_five_migrates_once_to_forty_eight() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -3532,7 +3553,92 @@ fn ab5_schema_forty_five_migrates_once_to_forty_six() {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "46"
+            "48"
         );
     }
+}
+
+#[test]
+fn ab5_schema_forty_seven_notice_migration_preserves_structure_and_store_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, store_id) = open_database(&path).unwrap();
+    let structure = connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value='47' WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, reopened_id) = open_database(&path).unwrap();
+        assert_eq!(reopened_id, store_id);
+        let current = connection
+            .prepare(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            current, structure,
+            "notice migration must not change receipt or accounting structure"
+        );
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "48");
+    }
+}
+
+#[test]
+fn ab5_schema_forty_eight_cannot_hide_a_missing_execution_receipt_column() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE tool_calls DROP COLUMN execution_context_json",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "48");
 }

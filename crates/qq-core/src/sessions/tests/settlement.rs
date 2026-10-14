@@ -407,6 +407,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
             Vec::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2730,6 +2731,9 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
             "ALTER TABLE runs DROP COLUMN context_compaction_attempted",
             [],
         )
+        .unwrap();
+    connection
+        .execute("DROP INDEX runs_owned_compaction", [])
         .unwrap();
     connection
         .execute(
