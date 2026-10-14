@@ -12,7 +12,7 @@ newest last.
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
 | AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Schema50 atomic migration qualified at c3618e8b; fresh parent grant repair, hosted review and performance open |
 | AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; context evidence and provenance format 3 in progress |
-| AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and seven deployed/provenance-qualified UTC days |
+| AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
 
@@ -1925,3 +1925,58 @@ newest last.
   evidence and actual47/48/49/50 binaries under main target/qq-perf/
   merged-worktrees-2026-10-14T204742Z (manifest records original heads/paths).
   Freed approximately65GiB; active306/performance and unrelated worktrees remain.
+### 2026-10-14 — AB4 host grant provenance regression
+
+- Fresh Codex review identifies a later duplicate host grant authorizing the
+  surviving first host. Independent investigation confirms both unattended
+  exposure and the effective descriptor must retain declaring-host provenance.
+  Add a regression covering all owner/later grant combinations and host dispatch
+  counters before changing admission. The original grant union predates AB4.
+
+- The owner regression fails against329c569c: a later-only grant appears in
+  the descriptor. Grants now travel with each host contribution and attach only
+  to admitted entries; the descriptor derives effective grants from those
+  surviving entries. Thirteen AB4 focused cases pass. Extend the regression to
+  normal Ask gates as well as unattended declarations and dispatch.
+
+### 2026-10-14 — AB4 declaring-host grant qualification
+
+- Immutable ef4403b1aefdad70cac00262b0fd01672034fe3a passes fresh workspace
+  2,410 tests, zero failed,14 ignored; formatting, all-target/all-feature Clippy
+  with warnings denied and workspace build pass. Thirteen focused AB4 cases pass.
+- Independent review approves declaring-host grants at admission and descriptor
+  derivation from surviving entries. Duplicate regression covers normalAsk and
+  unattended paths, all owner/later grant combinations and host call counters.
+  Historical descriptors and explicit human session grants remain authoritative.
+- Red/green and immutable gate evidence retained under
+  target/qq-perf/ab4-2026-10-14/host-grant-final-gate-*.
+  This publication adds only the receipt. Fresh hosted/Codex, child propagation
+  and named performance gates remain open.
+
+### 2026-10-14 — AB5 declaring-host parent propagation
+
+- Integrated qualified parent26bf4763: grants stay with the admitted declaring
+  host, and effective descriptor grants match normalAsk/unattended eligibility.
+  Schema50 atomic migration remains unchanged. Fresh integrated gates follow.
+- Actual retained experimental48 binary created an isolated store; qualified
+  schema50 upgrades it, adds projection storage and preserves store identity
+  across reopen. Evidence: actual48-upgrade50-receipt.json; zero model calls.
+
+### 2026-10-14 — AB5 declaring-host integration qualification
+
+- Immutable b004300474c96c5470e79876b925832414dcd972 passes fresh workspace
+  2,417 tests, zero failures,14 ignored; formatting, all-target/all-feature
+  Clippy with warnings denied and workspace build pass. Source remained frozen.
+  Receipt: host-grant-integrated-final-gate-receipt.json.
+- Includes qualified304 owner-bound grant fix and schema50 atomic notice
+  migration. This commit adds only the receipt; fresh hosted/Codex,306
+  propagation and named performance gates remain open.
+
+### 2026-10-14 — AB6 merged-main integration
+
+- Integrated actual origin/main62c65930 after user merged through305. Retained
+  qualified owner-bound catalog/descriptor grants and complete regression suite
+  alongside V2 producer propagation and call binding. Only bookkeeping conflicts
+  concatenate receipts; code selects qualified main grant admission.
+- PR306 already targets main. Final source qualification precedes push and
+  hosted conflict verification; current remote head still predates this merge.
