@@ -5007,7 +5007,9 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
         served: StdMutex::new(0),
         script: AutoCompactScript::Measured {
             script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
-                turns: 24,
+                // The smaller minimal-profile tool catalog must also cross
+                // a compaction boundary before this child finishes.
+                turns: 48,
                 text: "child done".to_owned(),
                 summary: valid_summary("child work"),
             }),
