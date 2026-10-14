@@ -1572,3 +1572,17 @@ newest last.
   to admitted entries; the descriptor derives effective grants from those
   surviving entries. Thirteen AB4 focused cases pass. Extend the regression to
   normal Ask gates as well as unattended declarations and dispatch.
+
+### 2026-10-14 — AB4 declaring-host grant qualification
+
+- Immutable ef4403b1aefdad70cac00262b0fd01672034fe3a passes fresh workspace
+  2,410 tests, zero failed,14 ignored; formatting, all-target/all-feature Clippy
+  with warnings denied and workspace build pass. Thirteen focused AB4 cases pass.
+- Independent review approves declaring-host grants at admission and descriptor
+  derivation from surviving entries. Duplicate regression covers normalAsk and
+  unattended paths, all owner/later grant combinations and host call counters.
+  Historical descriptors and explicit human session grants remain authoritative.
+- Red/green and immutable gate evidence retained under
+  target/qq-perf/ab4-2026-10-14/host-grant-final-gate-*.
+  This publication adds only the receipt. Fresh hosted/Codex, child propagation
+  and named performance gates remain open.
