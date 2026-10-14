@@ -1034,9 +1034,25 @@ newest last.
   before publication; fresh sessions must remain usable without provider polling
   on the ambiguous history. Test-first repair follows, then all gates rerun.
 
-- Intermediate1963a389 workspace totals:2381passed,0failed,14ignored (38blocks),
-  fmt/Clippy/build0. The newly reproduced scheduler-isolation case then failed red
-  withruntimeUnavailable and passed green aftertypedper-reservation handling.
-  Independent source review approves cancellation-before-failure, preloader settlement,
-  preservation andfresh-session usability. Evidence copied to`target/qq-perf/ab2-2026-10-14/`.
-  Full gates rerun onthe finalcode below; nointermediatequalificationispublished.
+- Intermediate source1963a389: 2,381 passed, zero failed, 14 ignored (38 blocks);
+  fmt/Clippy/build passed. The scheduler-isolation regression then failed with
+  runtimeUnavailable and passed after per-reservation handling. Independent review
+  approves cancellation precedence, settlement before loading, history preservation
+  and fresh-session usability. Evidence is under `target/qq-perf/ab2-2026-10-14/`.
+  This intermediate receipt is superseded by the final qualification below.
+
+### 2026-10-14 — AB2 durable projection final qualification
+
+- Immutable source `fb2296aa21c5f8163f3eb8e2869391e52f4e1da9` integrates merged
+  main `007adcda`. Fresh workspace: 2,382 passed, zero failed, 14 ignored (38 blocks);
+  formatting, all-target/all-feature Clippy with `-D warnings`, and build exit0.
+- Logs: `target/qq-perf/ab2-2026-10-14/durable-projection-final-gate-{0,1,2,3,4}.log`.
+  Independent writer/barrier, replay and reservation-failure reviews approve.
+- Descriptor15/schema49 commit exact projected replies and correction notice before
+  another provider request. Known descriptor10–14/pre20 histories retain the legacy
+  projector; ambiguous history fails only its reservation with a recovery message.
+- Real isolated schema49 store is refused by retained schema47 and experimental48
+  binaries, exit1, metadata/structure unchanged, zero sessions and no model calls.
+  Receipts: `schema{47,48}-refusal-receipt.json`; new binary SHA350db0ae9ae9d49fb2e45d1f13aa12e03e220ce3af4a474f0b8d596fe1ccc7a3.
+- This commit adds only the qualification ledger. Fresh hosted/Codex review, child
+  propagation and named performance gates remain open; no performance gate is waived.
