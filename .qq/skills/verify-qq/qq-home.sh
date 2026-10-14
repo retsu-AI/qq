@@ -102,7 +102,7 @@ case $cmd in
     mkdir -p "$home"/{config,data,state,runtime,workspace,evidence}
     chmod 700 "$home/runtime"
     printf 'pub struct Widget;\npub struct Gadget;\n' > "$home/workspace/inventory.rs"
-    git -C "$home/workspace" init -q
+    env -i PATH="$PATH" HOME="$home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c init.templateDir= -C "$home/workspace" init -q --template=
     echo '{"text": "verify fake reply"}' > "$home/script.jsonl"
     port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
     echo "$port" > "$home/port"
