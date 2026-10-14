@@ -1287,3 +1287,10 @@ newest last.
   manifest propagation and frozen read-only child declarations.
 - Nondraft publication follows; fresh hosted/Codex and named performance
   gates remain open and are not waived by local qualification.
+
+### 2026-10-14 — AB4 fresh review documentation repairs
+
+- Addressed prompt22 history and the architecture paragraph that still described
+  the earlier non-read-only external filter. Read-only declarations omit all external
+  tools. These source edits await the AB2 projection integration and fresh gates;
+  neither fresh review thread is resolved before publication.

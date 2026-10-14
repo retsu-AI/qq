@@ -1084,9 +1084,10 @@ sessions. Unknown usage or cost stays unknown and refuses a new child when the
 corresponding bound is imposed. Descendant history cannot be deleted until every
 owning ancestor run settles. Auditors store their direct spend on their own run;
 the parent meter and inclusive accounting each include that spend once.
-A read-only session is not offered the mutating, shell, or non-read external
-schemas its policy would deny, and a spawned child's approval mode can be
-lowered but never raised by a client command.
+A read-only session exposes built-in inspection and permitted read-child
+delegation. It omits mutation, shell, and all external tool schemas; external
+effect labels do not grant read-only authority. A spawned child's approval mode
+can be lowered but never raised by a client command.
 
 Base prompt identity 22 includes the authority wording for read-only,
 unattended and inspection-only tool sets. Ordinary actionable interactive
