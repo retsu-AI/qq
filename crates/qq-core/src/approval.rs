@@ -861,6 +861,8 @@ mod tests {
             ("sed -n '1p;w out' f", false),
             ("git log --output=out", false),
             ("git show --output=written.txt HEAD", false),
+            ("sed -n -f write.sed input.txt", false),
+            ("sed -n --file=write.sed input.txt", false),
             ("tree -o out", false),
             ("fd -x cargo fmt", false),
             ("rg --pre 'touch out' x f", false),
