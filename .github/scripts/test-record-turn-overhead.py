@@ -54,6 +54,13 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("distinct", result.stderr)
         self.assertFalse((self.root / "order").exists())
 
+    def test_equal_commit_shas_are_rejected_before_running(self):
+        result = self.run_recorder("--candidate-sha", "a" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("distinct commits", result.stderr)
+        self.assertFalse((self.root / "order").exists())
+        self.assertFalse((self.root / "result").exists())
+
     def test_malformed_row_keeps_failed_run_evidence(self):
         malformed = self.binary("malformed", 12, True)
         result = self.run_recorder(candidate=malformed)
@@ -103,6 +110,8 @@ class RecorderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         raw = json.loads((self.root / "result" / "raw.json").read_text())
         self.assertEqual(raw["runs"][-1]["error"], "benchmark output exceeds 1MiB")
+        self.assertLessEqual((self.root / "result" / raw["runs"][-1]["log"]).stat().st_size,
+                             1024 * 1024)
         self.assertFalse(raw["complete"])
         self.assertFalse((self.root / "result" / "summary.json").exists())
 
