@@ -424,3 +424,9 @@ newest last.
   Full fixture prefix5342bytes. Historical prompt14 golden remains unchanged.
 - New symlink/depth discovery findings and upstream integration remain open;
   workspace qualification and matched performance follow immutable final source.
+
+- Correction to the prior prompt-filter receipt:61 passed before updating
+  the two ignored-walk declarations. The next run was60 passed,one failed:
+  its canonical tool-identity assertion retained the old description hash.
+  Update that assertion to the measured f34eb03a… identity; historical
+  prompt14 digest itself still passed unchanged. Final rerun follows.
