@@ -119,3 +119,28 @@ newest last.
   82,124,330 / 81,953,505 / 101,346,859 ns per turn at 10/100/1,000.
   Heavy storage contention and the pre-integration build make this
   characterization only; matched integrated-source qualification stays open.
+
+
+### 2026-10-14 — AB1 classifier implementation
+
+- Implemented a bounded, allocation-free lexical read classifier: one
+  leading literal cd, quote-aware segments, read argv checks, shared exact
+  Git branch listing predicate. Rejects dynamic/uncertain syntax and known
+  write/execute flags; approval decisions are unchanged.
+- Five focused tests pass, including request 65 after 64 shell reads,
+  a failing cd-prefixed cargo test restarting the count, short sed write
+  audit preservation, command aliases and lexical/resource limits.
+- Independent first review found quoted-option concatenation, retained
+  programs' output/execute flags and slash-addressed sed prints. Added
+  reproductions and fixed these; final independent re-review requested.
+  Workspace gates and matched performance qualification remain pending.
+
+- Final alias follow-up: test-first `file --comp -m magic` and unquoted
+  `find . -de*` reproduced wrong read verdicts. Guard abbreviated compile
+  flags and all unquoted glob expansions while keeping quoted find patterns.
+  Five AB1 tests pass again (`ab1-green.log`). Input/argv-bound tests include
+  exactly 128 words, overflow, malformed quotes and concatenated options.
+- First candidate workspace pipeline exited 0 for test/fmt/Clippy/build,
+  but review changed the source during it; it is superseded evidence, not
+  final qualification. Re-run gates on the committed final candidate before
+  push. Matched benchmark baseline is the integrated plan head `f7b0457e`.

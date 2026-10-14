@@ -1023,3 +1023,19 @@ async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
         ]
     );
 }
+
+#[tokio::test]
+async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
+    let read = ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
+    let mut script = vec![read; 63];
+    script.push(("shell", r#"{"command":"cd sub && cargo test -p y"}"#));
+    script.extend(vec![read; 63]);
+    let mut provider = Scripted::new(script);
+    provider.calls_per_turn = 1;
+    let (events, _requests) = run(provider, RunCapabilities::user(None)).await;
+    assert_eq!(completed_text(&events).as_deref(), Some("done"));
+    assert!(
+        notices(&events).is_empty(),
+        "the executed test restarts the count"
+    );
+}

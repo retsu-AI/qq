@@ -487,65 +487,239 @@ pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
     out
 }
 
-/// Whether a shell command is interrogative: a version-control or filesystem
-/// read whose worst outcome is output. Used only by the audit heuristic to
-/// decide whether a run did anything worth checking; it grants nothing.
+/// Recognized shell reads for the stall counter and heuristic audit only.
+/// This grants no execution authority; build/test commands remain work even
+/// when the independent approval classifier allows them.
 pub(crate) fn read_only_shell_command(command: &str) -> bool {
-    const READ_ONLY: &[&str] = &[
-        "git blame",
-        "git diff",
-        "git log",
-        "git show",
-        "git status",
-        "git branch",
-        "git rev-parse",
-        "jj diff",
-        "jj log",
-        "jj op log",
-        "jj show",
-        "jj status",
-        "ls",
-        "cat",
-        "head",
-        "tail",
-        "wc",
-        "find",
-        "grep",
-        "rg",
-        "fd",
-        "tree",
-        "pwd",
-        "echo",
-        "which",
-        "file",
-        "stat",
-        "du",
-        "df",
-        "cargo metadata",
-        "cargo tree",
-        "cargo --version",
-        "rustc --version",
-    ];
+    if command.len() > classify::MAX_CLASSIFIED_BYTES
+        || command.contains([
+            '\n', '\r', '>', '<', '$', '`', '\\', '(', ')', '{', '}', '#',
+        ])
+    {
+        return false;
+    }
     let command = command.trim();
     if command.is_empty() {
         return true;
     }
-    // Every pipeline segment must be read-only; redirections write.
-    if command.contains('>') {
-        return false;
+    // A bounded argv view preserves quoted filenames/scripts without a shell
+    // parser or allocation. Unknown syntax counts as work, never as authority.
+    let reads = |segment: &str, first: bool, connector: u8| {
+        let mut argv = [""; 128];
+        let mut count = 0;
+        let mut start = None;
+        let mut quote = None;
+        for (index, byte) in segment.bytes().chain(std::iter::once(b' ')).enumerate() {
+            match quote {
+                Some(delimiter) if byte == delimiter => quote = None,
+                Some(_) => {}
+                None if matches!(byte, b'\'' | b'"') => {
+                    start.get_or_insert(index);
+                    quote = Some(byte);
+                }
+                None if byte.is_ascii_whitespace() => {
+                    if let Some(begin) = start.take() {
+                        if count == argv.len() {
+                            return false;
+                        }
+                        let word = &segment[begin..index];
+                        let quoted = word.starts_with(['\'', '"'])
+                            && word.as_bytes().last() == word.as_bytes().first();
+                        argv[count] = if quoted {
+                            &word[1..word.len() - 1]
+                        } else {
+                            word
+                        };
+                        if argv[count].contains(['\'', '"'])
+                            || (!quoted && argv[count].contains(['*', '?', '[', ']', '~']))
+                        {
+                            return false;
+                        }
+                        count += 1;
+                    }
+                }
+                None => {
+                    start.get_or_insert(index);
+                }
+            }
+        }
+        if quote.is_some() || count == 0 {
+            return false;
+        }
+        let words = &argv[..count];
+        if first && words[0] == "cd" {
+            return count == 2
+                && matches!(connector, b'&' | b';')
+                && !segment.contains(['\'', '"'])
+                && !words[1].contains(['*', '?', '[', ']', '!', '~'])
+                && !words[1].starts_with('-');
+        }
+        let (program, args) = (words[0], &words[1..]);
+        match program {
+            "git" => {
+                let args = if args.first() == Some(&"-C") {
+                    match args.get(2..) {
+                        Some(args) => args,
+                        None => return false,
+                    }
+                } else {
+                    args
+                };
+                let Some((subcommand, args)) = args.split_first() else {
+                    return false;
+                };
+                match *subcommand {
+                    "branch" => rules::branch_lists(args),
+                    "diff" | "log" | "show" => !args.iter().any(|arg| {
+                        let option = arg.split('=').next().unwrap_or(arg);
+                        option.len() > 2 && "--output".starts_with(option)
+                    }),
+                    "blame" | "status" | "rev-parse" => true,
+                    "worktree" => args.first() == Some(&"list"),
+                    _ => false,
+                }
+            }
+            "find" => !args.iter().any(|arg| {
+                *arg == "-delete"
+                    || *arg == "-fls"
+                    || ["-exec", "-ok", "-fprint"]
+                        .iter()
+                        .any(|prefix| arg.starts_with(prefix))
+            }),
+            "sort" => !args.iter().any(|arg| {
+                let option = arg.split('=').next().unwrap_or(arg);
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                    || (option.len() > 2
+                        && ["--output", "--compress-program"]
+                            .iter()
+                            .any(|name| name.starts_with(option)))
+            }),
+            "uniq" => {
+                let mut operands = 0;
+                let mut value = false;
+                let mut options = true;
+                for arg in args {
+                    if std::mem::take(&mut value) {
+                        continue;
+                    }
+                    if options && *arg == "--" {
+                        options = false;
+                        continue;
+                    }
+                    if options
+                        && matches!(
+                            *arg,
+                            "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
+                        )
+                    {
+                        value = true;
+                    } else if !options || !arg.starts_with('-') || *arg == "-" {
+                        operands += 1;
+                    }
+                }
+                operands <= 1
+            }
+            "sed" => {
+                let mut quiet = false;
+                let mut script = false;
+                let mut expect_script = false;
+                for arg in args {
+                    if !script && (expect_script || !arg.starts_with('-')) {
+                        // Understood print scripts: numeric addresses/ranges,
+                        // optionally several commands. Other scripts are work.
+                        if !arg.split(';').all(|part| {
+                            let part = part.trim();
+                            let Some(address) = part.strip_suffix('p') else {
+                                return false;
+                            };
+                            let mut position = 0;
+                            let bytes = address.as_bytes();
+                            while position < bytes.len() {
+                                if bytes[position] == b'/' {
+                                    let Some(end) =
+                                        bytes[position + 1..].iter().position(|b| *b == b'/')
+                                    else {
+                                        return false;
+                                    };
+                                    position += end + 2;
+                                } else if bytes[position].is_ascii_digit()
+                                    || matches!(bytes[position], b',' | b' ')
+                                {
+                                    position += 1;
+                                } else {
+                                    return false;
+                                }
+                            }
+                            true
+                        }) {
+                            return false;
+                        }
+                        script = true;
+                        expect_script = false;
+                    } else if arg.starts_with('-') {
+                        match *arg {
+                            "-n" | "--quiet" | "--silent" => quiet = true,
+                            "-e" | "--expression" if !script => expect_script = true,
+                            _ => return false,
+                        }
+                    }
+                }
+                quiet && script && !expect_script
+            }
+            "jj" => {
+                matches!(args.first(), Some(&("diff" | "log" | "show" | "status")))
+                    || args.starts_with(&["op", "log"])
+            }
+            "cargo" => matches!(args.first(), Some(&("metadata" | "tree" | "--version"))),
+            "rustc" => args.first() == Some(&"--version"),
+            "tree" => !args.iter().any(|arg| {
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                    || arg.starts_with("--out")
+            }),
+            "fd" => !args.iter().any(|arg| {
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
+                    || arg.starts_with("--exec")
+            }),
+            "rg" => !args.iter().any(|arg| arg.starts_with("--pre")),
+            "file" => !args.iter().any(|arg| {
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')) || {
+                    let option = arg.split('=').next().unwrap_or(arg);
+                    option.len() > 2 && "--compile".starts_with(option)
+                }
+            }),
+            "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
+            | "du" | "df" | "nl" | "cut" => true,
+            _ => false,
+        }
+    };
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    let mut quote = None;
+    let mut first = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if matches!(byte, b'|' | b';' | b'&') => {
+                if byte == b'&' && bytes.get(index + 1) != Some(&b'&') {
+                    return false;
+                }
+                if !reads(command[start..index].trim(), first, byte) {
+                    return false;
+                }
+                first = false;
+                index +=
+                    usize::from(matches!(byte, b'|' | b'&') && bytes.get(index + 1) == Some(&byte));
+                start = index + 1;
+            }
+            None => {}
+        }
+        index += 1;
     }
-    command
-        .split(['|', ';', '&'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .all(|segment| {
-            READ_ONLY.iter().any(|prefix| {
-                segment == *prefix
-                    || segment
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with(' '))
-            })
-        })
+    quote.is_none() && reads(command[start..].trim(), first, 0)
 }
 
 /// Decides whether one classified tool call executes, waits for approval, or
@@ -644,6 +818,32 @@ pub(crate) fn evaluate(
 mod tests {
 
     #[test]
+    fn ab1_read_scan_bounds_and_uncertain_shell_syntax() {
+        assert!(super::read_only_shell_command(&format!(
+            "echo {}",
+            "x ".repeat(127)
+        )));
+        assert!(!super::read_only_shell_command(&format!(
+            "echo {}",
+            "x ".repeat(128)
+        )));
+        assert!(!super::read_only_shell_command(&format!(
+            "cat {}",
+            "x".repeat(super::classify::MAX_CLASSIFIED_BYTES)
+        )));
+        for command in [
+            "cat 'unterminated",
+            "cat f &&",
+            "cd x && cd y && cat f",
+            "sort --out\"put\"=out f",
+            "find . -ex\"ec\" touch out ';'",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert!(super::read_only_shell_command("cd x; grep\tx\tf | wc -l"));
+    }
+
+    #[test]
     fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
         let cases = [
             ("cd crates/x && grep -n foo y.rs", true),
@@ -652,6 +852,21 @@ mod tests {
             ("git -C .worktrees/a diff --stat", true),
             ("git worktree list", true),
             ("cut -f 1 f.rs | sort | uniq", true),
+            ("grep 'a;b' f | wc -l", true),
+            ("sed -n '/write/p' f", true),
+            ("git branch --list 'topic*'", true),
+            ("find . -de\"lete\"", false),
+            ("grep x f &&", false),
+            ("grep x f &", false),
+            ("sed -n '1p;w out' f", false),
+            ("git log --output=out", false),
+            ("tree -o out", false),
+            ("fd -x cargo fmt", false),
+            ("rg --pre 'touch out' x f", false),
+            ("file -C", false),
+            ("file --comp -m magic", false),
+            ("find . -de*", false),
+            ("find . -name '*.rs'", true),
             ("cd x && cargo test -p y", false),
             ("sed -i s/a/b/ f.rs", false),
             ("cd x && grep foo f > out", false),

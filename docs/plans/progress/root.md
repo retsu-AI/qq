@@ -523,3 +523,9 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
   ownership to `crates/qq-core/src/tests/progress.rs` for a fixture knob,
   deterministic subdirectory input and the request-65 regression. The
   production classifier remains limited to `read_only_shell_command`.
+
+- Share `approval/rules.rs::branch_lists` with the progress classifier via
+  `pub(super)` visibility only. It is already the closed Git listing
+  predicate; its verdicts do not change, and no approval authority is used
+  by progress. This extends AB1 ownership by one visibility line rather
+  than duplicating Git option-order and value parsing.

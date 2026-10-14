@@ -79,6 +79,14 @@ without producing anything.
    - a *report* (decision 2) that contains text;
    - a goal checklist change, once ADR-0049's `update_goal` exists.
 
+   Shell read classification treats one leading unquoted `cd DIR &&` or
+   `cd DIR;` as transparent. Recognized print-only `sed -n`, `nl`, `cut`,
+   stream-only `sort`/`uniq` and `git -C DIR` reads remain reads. Known
+   write/execute options, substitutions, redirections and unknown shell
+   syntax count as work. Classification is bounded to 16 KiB and 128 words
+   per segment. It is used only by progress and audit, never as an approval
+   grant; permission decisions remain independent.
+
    Reads, searches, listings, history searches, spill reads and fetches are
    never progress, whether or not they are novel. Every run keeps
    `calls_since_progress`. It counts every settled call except runtime

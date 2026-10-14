@@ -654,7 +654,7 @@ fn prompt(
 /// and pattern words appear only in list mode. An allowlist, because git's
 /// last-option-wins parsing (`--list --no-list name` creates `name`) and its
 /// abbreviated long options make any denylist incomplete.
-fn branch_lists(args: &[&str]) -> bool {
+pub(super) fn branch_lists(args: &[&str]) -> bool {
     let mut list_mode = false;
     let mut expect_value = false;
     let mut patterns = false;
