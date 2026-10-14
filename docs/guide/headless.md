@@ -10,9 +10,11 @@ qq ask "Explain what src/parser.rs does in three sentences"
 qq ask --model openai/gpt-5.4-mini "Reply with pong"
 ```
 
-Streams one model response to stdout. No tools, no session, nothing
-persisted. Use it to check a credential or for quick questions from a
-script. Exit `0` on success, `1` otherwise.
+Streams an answer to stdout using workspace read tools and configuration-granted
+external tools. It cannot ask approval questions: built-in edits, commands,
+questions and ungranted external/network tools are omitted. No session is
+persisted. Use it to check a credential or for quick questions from a script.
+Exit `0` on success, `1` otherwise.
 
 ## `qq run` — the agent, unattended
 

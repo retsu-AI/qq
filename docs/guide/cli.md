@@ -25,7 +25,8 @@ Requires a terminal on stdin and stdout; in a pipe use `qq ask` or `qq run`.
 
 ## `qq ask PROMPT`
 
-One streamed answer, no tools, no session. [Headless](headless.md#qq-ask--one-answer).
+One streamed answer with workspace read tools and configuration-granted external
+tools; no approval questions or persisted session. [Headless](headless.md#qq-ask--one-answer).
 
 ## `qq run [FLAGS] PROMPT`
 

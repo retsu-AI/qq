@@ -397,3 +397,17 @@ newest last.
   strict ReadOnly retains a hinted external tool. Test-first log under
   this worktree `target/qq-perf/ab4-2026-10-14/test-first.log`.
 - Snapshot eligibility/gates and prefix authority implementation next.
+
+### 2026-10-14 — AB4 implementation review
+
+- Shared immutable grant eligibility now filters declarations, recovered
+  pins, progressive indexes and selector reports. Direct gates use the
+  compiler snapshot; strict ReadOnly omits all externals. Root authority
+  follows read-only/unattended flags and derived callable mutation capability.
+- Eight focused AB4 tests pass; independent source review approved after
+  fixing an inherited recall fast-path omission (test-first reproduced).
+  Core library: 975 passed, 0 failed, 3 ignored. An earlier run stalled in
+  overflow recovery; that exact fixture passes alone and the full immutable
+  rerun passes. Logs `target/qq-perf/ab4-2026-10-14/core-immutable-retry.log`.
+- ADR-0059 proposed, design/guide corrected. Integrate newest parent fixes
+  before workspace/performance qualification and draft publication.

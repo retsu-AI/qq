@@ -337,7 +337,8 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
     assert!(!spawned_system.contains("- Do the work."));
     let follow_up_system = child_reqs[2].system().unwrap();
     assert!(!follow_up_system.contains("Sub-agent:"));
-    assert!(follow_up_system.contains("- Do the work."));
+    assert!(!follow_up_system.contains("- Do the work."));
+    assert!(follow_up_system.contains("This run cannot change files or run commands"));
     assert!(
         !child_reqs[2]
             .tools()

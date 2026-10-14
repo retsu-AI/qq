@@ -51,6 +51,8 @@ pub(crate) struct PromptSections<'a> {
     /// Set for a model-spawned child run: it answers a waiting parent, not a
     /// user. `None` for roots and for a user's own prompt in a child session.
     pub(crate) subagent: Option<SubagentAuthority>,
+    pub(crate) read_only: bool,
+    pub(crate) unattended: bool,
 }
 
 /// What a sub-agent may do, as far as its prompt is concerned. A read child
@@ -145,6 +147,8 @@ fn agent_prompt_prefix(
         roster: roster_text,
         skill_index,
         subagent,
+        read_only,
+        unattended,
     } = sections;
     let mut tool_names = String::new();
     let mut has_external = tool_index.is_some();
@@ -185,6 +189,12 @@ fn agent_prompt_prefix(
         format!("{read_tools} are read-only; ")
     };
     let has = |name: &str| specs.iter().any(|spec| spec.name() == name);
+    let can_act = has_external
+        || write_children
+        || has("edit_file")
+        || has("write_file")
+        || has("shell")
+        || has("exec");
     let edit_description = match (has("edit_file"), has("write_file")) {
         (true, true) => {
             "edit_file and write_file modify workspace files and may require user approval; "
@@ -296,8 +306,19 @@ fn agent_prompt_prefix(
     // A read child answers its brief; the root action contract would keep it reading.
     let action = if subagent == Some(SubagentAuthority::Read) {
         ""
+    } else if read_only {
+        "- This run cannot change files or run commands. When the request is a change, give it as exact edits (path, old, new) or commands, and stop.\n"
+    } else if unattended {
+        "- This unattended run cannot ask questions. For an analysis-only or review request, deliver the findings. Use only declared tools; configured external grants may let them act. If no declared tool can perform the requested change, give exact caller-applied edits (path, old, new) or commands, and stop.\n"
+    } else if !can_act {
+        "- No tool capable of making the requested change is declared. For a change request, give exact caller-applied edits (path, old, new) or commands, and stop. For an analysis-only or review request, deliver the findings.\n"
     } else {
         "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n"
+    };
+    let exploration_action = if read_only || unattended || !can_act {
+        "take the next permitted action"
+    } else {
+        "make the change"
     };
     let read_file_guidance = if has("read_file") {
         "- Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline for the shape of a long file.\n"
@@ -382,7 +403,7 @@ fn agent_prompt_prefix(
          \n\
          Working conventions:\n\
          {action}\
-         - Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n\
+         - Explore only as far as your next action needs. Once you can name the file and the change, {exploration_action}. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n\
          - Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n\
          {read_file_guidance}\
          {edit_file_guidance}\

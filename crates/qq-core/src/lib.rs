@@ -622,6 +622,7 @@ fn select_tools(
     catalog: &catalog::ToolCatalog,
     pins: &mut catalog::PinSet,
     arguments: &str,
+    filter: &catalog::StaticFilter,
 ) -> (tools::ToolOutput, bool) {
     let arguments = match serde_json::from_str::<catalog::SelectToolsArgs>(arguments) {
         Ok(arguments) if arguments.query.trim().is_empty() => {
@@ -645,7 +646,7 @@ fn select_tools(
         );
     }
     let limit = arguments.limit.clamp(1, catalog::MAX_SELECT_MATCHES);
-    let matches = catalog.rank(&arguments.query, pins, limit);
+    let matches = catalog.rank(&arguments.query, pins, limit, filter);
     let mut pinned = Vec::new();
     let mut refused = Vec::new();
     for entry in matches {
@@ -662,6 +663,12 @@ fn select_tools(
             .names()
             .iter()
             .filter(|name| {
+                if !catalog
+                    .lookup(name)
+                    .is_some_and(|entry| filter.allows(entry))
+                {
+                    return false;
+                }
                 let lower = arguments.query.to_ascii_lowercase();
                 name.to_ascii_lowercase().contains(lower.trim())
             })
@@ -677,7 +684,12 @@ fn select_tools(
 /// Re-pins every tool an earlier `select_tools` result in `messages` pinned,
 /// so a recovered run offers the schemas the model already selected. Only
 /// names the catalog still holds are pinned.
-fn recover_pins(messages: &[Message], catalog: &catalog::ToolCatalog, pins: &mut catalog::PinSet) {
+fn recover_pins(
+    messages: &[Message],
+    catalog: &catalog::ToolCatalog,
+    pins: &mut catalog::PinSet,
+    filter: &catalog::StaticFilter,
+) {
     let mut select_call_ids = std::collections::HashSet::new();
     for message in messages {
         for block in message.content() {
@@ -695,6 +707,7 @@ fn recover_pins(messages: &[Message], catalog: &catalog::ToolCatalog, pins: &mut
                         for name in result.pinned {
                             if catalog.lookup(&name).is_some_and(|entry| {
                                 matches!(entry.host, catalog::ToolHost::External { .. })
+                                    && filter.allows(entry)
                             }) {
                                 pins.pin(&name);
                             }
@@ -729,6 +742,7 @@ pub(crate) struct RunCapabilities {
     /// external schemas are withheld from the request instead of offered and
     /// denied. Policy still evaluates every call; this only saves the tokens.
     read_only: bool,
+    unattended: bool,
     max_output_tokens: Option<u32>,
     /// Caller-imposed budgets and the pricing that makes the cost bound
     /// measurable. Admission rejects a cost cap without pricing before this
@@ -785,6 +799,7 @@ impl RunCapabilities {
             slash_is_literal: false,
             allow_tools: true,
             read_only: false,
+            unattended: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
             routing_spend: None,
@@ -921,6 +936,7 @@ impl RunCapabilities {
             slash_is_literal: false,
             allow_tools: true,
             read_only: false,
+            unattended: false,
             max_output_tokens: None,
             limits: RunLimits {
                 max_duration_ms: None,
@@ -1404,13 +1420,6 @@ impl Runtime {
         self
     }
 
-    fn config_grants(&self) -> std::collections::HashSet<String> {
-        self.hosts
-            .iter()
-            .flat_map(|host| host.config_grants())
-            .collect()
-    }
-
     /// Restricts model-visible sub-agent overrides to authenticated canonical
     /// routes supplied by the embedding application. Omission still resolves
     /// through the configured worker model and persisted parent selection.
@@ -1497,27 +1506,23 @@ impl Runtime {
         workspace: PathBuf,
         cancelled: RunCancellation,
     ) -> RuntimeStream {
-        // Configuration allowlists are the only grants a gate-less run has;
-        // read-only mode still denies them inside `evaluate`.
-        let grants = approval::SessionGrants {
-            tools: self.config_grants(),
-            shell_prefixes: Vec::new(),
-            hosts: Vec::new(),
-            delegate: approval::DelegateGrants::default(),
-        };
-        self.run_loop(
+        let mut capabilities = RunCapabilities::user(None);
+        capabilities.unattended = true;
+        self.run_loop_with_spawner(
             messages,
             workspace,
             cancelled,
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Ask,
-                grants,
+                grants: approval::SessionGrants::default(),
                 network: Arc::clone(&self.network),
             }),
             Arc::new(workspace::FileState::default()),
+            capabilities,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn run_loop(
         &self,
         messages: Vec<Message>,
@@ -1631,6 +1636,16 @@ impl Runtime {
                 }
             };
             drop(opened);
+            let gate = if capabilities.unattended {
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Ask,
+                    grants: approval::SessionGrants {
+                        tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
+                        ..approval::SessionGrants::default()
+                    },
+                    network: Arc::clone(&compiled.runtime.network),
+                }) as Arc<dyn ToolGate>
+            } else { gate };
             let mut events = compiled.execute(messages, cancelled, gate, file_state, capabilities);
             while let Some(event) = events.next().await {
                 match event {
@@ -1648,8 +1663,16 @@ impl plan::CompiledAgentPlan {
     /// plan's workspace, the direct (non-durable) counterpart of a session
     /// run. Configuration allowlists are the only grants.
     pub fn run(self: &Arc<Self>, command: RunCommand) -> RunStream {
+        let mut capabilities = RunCapabilities::user(None);
+        capabilities.unattended = true;
         let grants = approval::SessionGrants {
-            tools: self.runtime.config_grants(),
+            tools: self
+                .descriptor()
+                .tools
+                .config_grants
+                .iter()
+                .cloned()
+                .collect(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
             delegate: approval::DelegateGrants::default(),
@@ -1664,7 +1687,7 @@ impl plan::CompiledAgentPlan {
                     network: Arc::clone(&self.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None),
+                capabilities,
             ),
             self.runtime.context_window,
         )
@@ -2309,12 +2332,14 @@ mod tests {
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             runtime::PromptSections {
                 tool_index: plan.catalog.index_text().map(Arc::as_ref),
                 roster: plan.roster_text.as_deref(),
                 skill_index: plan.skills.disclosure_text(),
                 subagent: None,
+                ..runtime::PromptSections::default()
             },
             &plan.instructions,
             plan.persona.as_deref(),
@@ -2552,6 +2577,7 @@ mod tests {
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             guidance: true,
             subagent: None,
@@ -2666,7 +2692,8 @@ mod tests {
             .expect("the provider request must carry a system prompt");
         assert!(system.contains("Workspace instructions from AGENTS.md"));
         assert!(system.contains("Run the repository's focused checks"));
-        assert!(system.contains("Do the work. Decide what done looks like"));
+        assert!(system.contains("This unattended run"));
+        assert!(!system.contains("Do the work. Decide what done looks like"));
         assert!(system.contains("Preserve unrelated work"));
         assert!(system.contains("analysis-only"));
         assert!(system.contains("failed tools and tests as evidence"));
@@ -3864,14 +3891,11 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].tools().len(),
-            8 + usize::from(cfg!(feature = "tool-fetch"))
-        );
+        assert_eq!(tool_names(&requests[0]), ["read_file", "tree", "search"]);
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
-        assert!(system.contains("edit_file"));
+        assert!(!system.contains("edit_file"));
         assert!(system.contains(directory.path().to_str().unwrap()));
         let result_message = &requests[1].messages()[2];
         assert!(matches!(
@@ -8660,10 +8684,7 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(
-            requests[0].tools().len(),
-            9 + usize::from(cfg!(feature = "tool-fetch"))
-        );
+        assert_eq!(names, ["read_file", "tree", "search", "mcp__srv__ping"]);
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -9821,7 +9842,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_root_keeps_the_implement_line_and_has_no_subagent_section() {
+    fn ab4_read_only_root_states_authority_and_has_no_action_obligation() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         // The schemas a ReadOnly root is offered: the mutating, shell and
@@ -9834,12 +9855,17 @@ mod tests {
         let prompt = runtime::agent_system_prompt(
             workspace,
             &read_only,
-            runtime::PromptSections::default(),
+            runtime::PromptSections {
+                read_only: true,
+                ..runtime::PromptSections::default()
+            },
             &instructions,
             None,
             None,
         );
-        assert!(prompt.contains("- Do the work. Decide what done looks like"));
+        assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+        assert!(prompt.contains("This run cannot change files or run commands"));
+        assert!(!prompt.contains("make the change. Search an exact name once"));
         assert!(!prompt.contains("Sub-agent:"));
     }
 
@@ -10553,6 +10579,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_interactive_inspection_only_profiles_have_no_action_obligation() {
+        for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .execute(
+                    vec![Message::user("make the requested change")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::clone(&plan.runtime.network),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            let system = requests[0].system().unwrap();
+            assert!(
+                !system.contains("- Do the work. Decide what done looks like"),
+                "{system}"
+            );
+            assert!(!system.contains("make the change. Search an exact name once"));
+            assert!(system.contains("caller-applied"), "{system}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_direct_external_grants_control_declaration_and_execution() {
+        for granted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            host.granted = granted;
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                    &runtime, workspace,
+                ))
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .run(RunCommand::new("perform the requested operation"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10926,6 +11051,80 @@ mod tests {
         deduped.sort();
         deduped.dedup();
         assert_eq!(deduped.len(), fourth.len());
+    }
+
+    #[tokio::test]
+    async fn ab4_read_only_recovery_omits_granted_external_pins_and_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![Vec::new()],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap()
+        .with_tool_host(Arc::new(WideHost::new(40)));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let prior = serde_json::to_string(&catalog::SelectToolsResult {
+            pinned: vec!["ext__wide__tool03".to_owned()],
+            already_pinned: Vec::new(),
+            refused: Vec::new(),
+            remaining_pin_slots: 31,
+        })
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![
+                    Message::user("continue"),
+                    Message::new(
+                        Role::Assistant,
+                        vec![ContentBlock::tool_call(
+                            "c1".to_owned(),
+                            catalog::SELECT_TOOLS_TOOL.to_owned(),
+                            &serde_json::json!({"query":"widgets"}),
+                        )],
+                    ),
+                    Message::tool_results(vec![ContentBlock::ToolResult {
+                        call_id: "c1".to_owned(),
+                        content: prior,
+                        is_error: false,
+                    }]),
+                ],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::clone(&plan.runtime.network),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).read_only(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            !tool_names(&requests[0])
+                .iter()
+                .any(|name| name.starts_with("ext__"))
+        );
+        let system = requests[0].system().unwrap();
+        assert!(!system.contains("ext__wide__tool03"));
+        assert!(system.contains("This run cannot change files or run commands"));
     }
 
     #[tokio::test]

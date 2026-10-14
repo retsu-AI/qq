@@ -79,6 +79,8 @@ written, or were released unused:
 ADR-0030–0034 predate the template and use a short form (status, date,
 prose); later ADRs follow [the template](0000-template.md).
 
+| 0059 | [Declare executable tools and state immutable run authority](0059-run-authority-in-tool-declarations.md) | Proposed (AB4) |
+
 ## When to write one
 
 Write an ADR when a change:

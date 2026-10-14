@@ -515,8 +515,8 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values: 2⁵ tool filters plus none, times
-    /// guidance, times three sub-agent states (198). In practice a plan sees a
+    /// number of `PromptPrefixKey` values: 2⁶ tool filters plus none, times
+    /// guidance, times three sub-agent states (390). In practice a plan sees a
     /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
@@ -564,7 +564,11 @@ impl CompiledAgentPlan {
             self.workspace.path(),
             base_specs,
             crate::runtime::PromptSections {
-                tool_index: self.catalog.index_text().map(Arc::as_ref),
+                tool_index: key
+                    .tools
+                    .as_ref()
+                    .and_then(|filter| self.catalog.eligible_index_text(filter))
+                    .map(Arc::as_ref),
                 roster: self.roster_text.as_deref(),
                 // Disclosure follows the guidance capability: restricted runs
                 // (compaction, model-authored child tasks) neither list nor
@@ -575,6 +579,8 @@ impl CompiledAgentPlan {
                     None
                 },
                 subagent: key.subagent,
+                read_only: key.tools.is_some_and(|filter| filter.read_only),
+                unattended: key.tools.is_some_and(|filter| filter.unattended),
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -920,7 +926,7 @@ impl CompiledAgentPlan {
         {
             static_tools.retain(|tool| !follows_spawn(tool));
         }
-        let catalog = ToolCatalog::compile(static_tools, contributions);
+        let catalog = ToolCatalog::compile(static_tools, contributions, &config_grants);
 
         let descriptor = AgentPlanDescriptor {
             version: DESCRIPTOR_VERSION,
@@ -991,6 +997,7 @@ impl CompiledAgentPlan {
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             guidance: true,
             subagent: None,
@@ -1003,6 +1010,8 @@ impl CompiledAgentPlan {
                 roster: roster_text.as_deref(),
                 skill_index: skills.disclosure_text(),
                 subagent: None,
+                read_only: false,
+                unattended: false,
             },
             &instructions,
             persona.as_deref(),

@@ -569,3 +569,6 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   propagation in addition to plan/catalog/prompt/direct entrypoints. Reserve
   `docs/design/architecture.md`, `docs/design/protocol.md`, ADR-0059 and its
   index amendment for shipped behavior; no mutable approval mode in cache keys.
+- AB4 additionally owns the read-only child user-follow-up assertion in
+  `sessions/tests/delegation.rs`: it has root framing but retains ReadOnly
+  authority. This updates expected wording, without weakening child policy.

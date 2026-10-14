@@ -88,6 +88,7 @@ fn session_prompt_prefix_key(
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
+            unattended: false,
         }),
         guidance: user,
         subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
