@@ -1027,3 +1027,9 @@ newest last.
   The failure pins the former v14 canonical-domain prefix; update it to v15 while
   retaining secret-exclusion checks and both historical core digest fixtures.
   Fresh workspace gates rerun after this test identity update.
+
+- All four workspace gates pass at1963a389. This is intermediate qualification:
+  a new public continuation fixture covers unresolved history escaping reservation
+  and poisoning the shared scheduler. That failure must settle only the affected run
+  before publication; fresh sessions must remain usable without provider polling
+  on the ambiguous history. Test-first repair follows, then all gates rerun.

@@ -572,3 +572,57 @@ async fn ab2_ambiguous_history_is_not_assigned_the_current_projection() {
     ));
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usable() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::ReadOnly,
+        vec![
+            vec![("read_file", r#"{"path":"note.txt"}"#.to_owned())],
+            vec![],
+        ],
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
+    submit_prompt(&harness, "read the note").await;
+    collect_through_finished(&mut harness.events).await;
+    let before = harness.requests.lock().unwrap().len();
+    assert_eq!(before, 2);
+    harness.runtime.inner.store.call(Priority::Control, |connection| {
+        connection.execute_batch("UPDATE model_turns SET tool_results_projection_json=NULL; UPDATE runs SET plan_descriptor_json=json_remove(json_set(plan_descriptor_json,'$.version',14,'$.prompt_version',20),'$.tool_output_projection'),plan_identity_json=json_set(plan_identity_json,'$.descriptor_version',14)")?;
+        Ok(())
+    }).await.unwrap();
+    submit_prompt(&harness, "continue").await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(5),
+        collect_through_finished(&mut harness.events),
+    )
+    .await
+    .unwrap();
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
+        if failure.message.contains("start a new session"))));
+    assert_eq!(harness.requests.lock().unwrap().len(), before);
+    assert!(!*harness.runtime.inner.failed.borrow());
+    let created = create_session_with_mode(
+        &harness.runtime,
+        harness.workspace_id,
+        None,
+        ApprovalMode::ReadOnly,
+    )
+    .await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session receipt")
+    };
+    queue_prompt(&harness.runtime, session_id, "fresh context".to_owned()).await;
+    let fresh = collect_through_finished(&mut harness.events).await;
+    assert!(fresh.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    )));
+    assert_eq!(harness.requests.lock().unwrap().len(), before + 1);
+    harness.runtime.close().await.unwrap();
+}
