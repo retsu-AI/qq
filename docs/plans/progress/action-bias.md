@@ -430,3 +430,24 @@ newest last.
   its canonical tool-identity assertion retained the old description hash.
   Update that assertion to the measured f34eb03a… identity; historical
   prompt14 digest itself still passed unchanged. Final rerun follows.
+
+### 2026-10-14 — AB2 bounded instruction discovery completion
+
+- Test-first safe-link and depth fixtures reproduced omission; names searches
+  now report regular-file symlinks resolved inside the workspace. Content
+  searches and directory traversal retain link exclusion. Matching broken,
+  escaping or nonfile instruction links return a blocker.
+- Depth omissions are explicit (partial=depth, or depth_limited=64 alongside
+  another stop); targeted ancestor roots at each64-component boundary cover
+  deep edits. No unusable depth cursor is emitted.
+- Independent review caught a charged nonmatching-link cursor gap. The public
+  50,000-link fixture reproduced it; every considered link now advances the
+  scan watermark. Paginated matching links, cancellation and incomplete hint
+  counts retain their contracts.
+- Twelve focused AB2 tests pass; independent final review approves. Fixture
+  prefix5728bytes; canonical full schema identity remains f34eb03a… after
+  the earlier declaration corrections. Historical prompt14 remains pinned.
+  Logs instruction-discovery-{red,final}.log, symlink-budget-red.log and
+  depth-hint-red.log under target/qq-perf/ab2-2026-10-14.
+- Full workspace gates, upstream integration and fresh matched performance
+  remain open. Parent plan qualification corrections are being reconciled.

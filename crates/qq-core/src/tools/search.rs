@@ -216,6 +216,20 @@ enum Stop {
     Cancelled,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum SearchWalkError {
+    #[error(transparent)]
+    List(#[from] ListError),
+    #[error("could not resolve {path} inside the workspace: {source}")]
+    Resolve {
+        path: String,
+        #[source]
+        source: crate::workspace::WorkspacePathError,
+    },
+    #[error("instruction link {path} does not resolve to a regular file")]
+    InstructionNotAFile { path: String },
+}
+
 struct Walker<'a> {
     workspace: &'a Workspace,
     cancelled: &'a ToolCancellation,
@@ -238,12 +252,13 @@ struct Walker<'a> {
     last_emitted: Option<Cursor>,
     last_scanned: Option<String>,
     stop: Option<Stop>,
+    depth_limited: bool,
     buffer: Vec<u8>,
     scratch: String,
 }
 
 impl Walker<'_> {
-    fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<(), ListError> {
+    fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<(), SearchWalkError> {
         if self.cancelled.is_cancelled() {
             self.stop = Some(Stop::Cancelled);
             return Ok(());
@@ -261,7 +276,6 @@ impl Walker<'_> {
             match child.kind {
                 EntryKind::Dir => {
                     if child.ignored
-                        || depth >= MAX_WALK_DEPTH
                         || self
                             .cursor
                             .is_some_and(|cursor| cursor.skips_dir(&child.path))
@@ -271,6 +285,10 @@ impl Walker<'_> {
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
                         break;
+                    }
+                    if depth >= MAX_WALK_DEPTH {
+                        self.depth_limited = true;
+                        continue;
                     }
                     self.visit_dir(&child.path, depth + 1)?;
                 }
@@ -289,7 +307,62 @@ impl Walker<'_> {
                     }
                     self.scan(child, size)?;
                 }
-                EntryKind::Symlink | EntryKind::Other => {}
+                EntryKind::Symlink => {
+                    if self.cancelled.is_cancelled() {
+                        self.stop = Some(Stop::Cancelled);
+                        break;
+                    }
+                    let Matcher::Names(regex) = self.matcher else {
+                        continue;
+                    };
+                    if child.ignored
+                        || !self.filter.admits_file(&child.path)
+                        || self
+                            .cursor
+                            .is_some_and(|cursor| cursor.skips_file(&child.path))
+                    {
+                        continue;
+                    }
+                    if let Some(reason) = self.budget.charge_entry() {
+                        self.stop = Some(Stop::Scan(reason));
+                        break;
+                    }
+                    self.last_scanned = Some(child.path.clone());
+                    if !regex.is_match(child.path.as_bytes()) {
+                        continue;
+                    }
+                    let instruction = matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md");
+                    let resolved = match self.workspace.contained_path(&child.path) {
+                        Ok(path) => path,
+                        Err(source) if instruction => {
+                            return Err(SearchWalkError::Resolve {
+                                path: child.path.clone(),
+                                source,
+                            });
+                        }
+                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                    };
+                    let metadata = match self.workspace.root().metadata(&resolved) {
+                        Ok(metadata) => metadata,
+                        Err(source) if instruction => {
+                            return Err(ListError::Inspect {
+                                path: child.path.clone(),
+                                source,
+                            }
+                            .into());
+                        }
+                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                    };
+                    if metadata.is_file() {
+                        self.scanned_files += 1;
+                        self.emit_name(&child.path);
+                    } else if instruction {
+                        return Err(SearchWalkError::InstructionNotAFile {
+                            path: child.path.clone(),
+                        });
+                    }
+                }
+                EntryKind::Other => {}
             }
         }
         self.stack.leave();
@@ -734,6 +807,7 @@ pub(super) fn search(
         last_emitted: None,
         last_scanned: None,
         stop: None,
+        depth_limited: false,
         buffer: Vec::new(),
         scratch: String::new(),
     };
@@ -777,11 +851,15 @@ pub(super) fn search(
             last_emitted: None,
             last_scanned: None,
             stop: None,
+            depth_limited: false,
             buffer: std::mem::take(&mut walker.buffer),
             scratch: String::new(),
         };
         if run(&mut counter, &root).is_ok() && counter.total > 0 {
-            hint_insensitive = Some((counter.total, counter.stop.is_some()));
+            hint_insensitive = Some((
+                counter.total,
+                counter.stop.is_some() || counter.depth_limited,
+            ));
         }
     }
 
@@ -813,7 +891,11 @@ pub(super) fn search(
                 "{}/{}{}",
                 walker.shown,
                 walker.total,
-                if walker.stop.is_some() { "+" } else { "" }
+                if walker.stop.is_some() || walker.depth_limited {
+                    "+"
+                } else {
+                    ""
+                }
             ),
         )
         .field("files", walker.files_with_matches)
@@ -835,6 +917,13 @@ pub(super) fn search(
         }
         (false, true) => header = header.field("note", "empty_glob_ignored"),
         (false, false) => {}
+    }
+    if walker.depth_limited {
+        header = if walker.stop.is_none() {
+            header.field("partial", "depth")
+        } else {
+            header.field("depth_limited", MAX_WALK_DEPTH)
+        };
     }
     let next = match walker.stop {
         None | Some(Stop::Cancelled) => None,
@@ -904,7 +993,9 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
                     },
                     ignored: false,
                 };
-                walker.scan(&child, metadata.len())
+                walker
+                    .scan(&child, metadata.len())
+                    .map_err(SearchWalkError::List)
             }
             Ok(_) => return Err("path_not_found: not a file or directory".to_owned()),
             Err(error) => return Err(format!("path_not_found: {error}")),
