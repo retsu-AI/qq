@@ -311,18 +311,24 @@ impl SessionStore {
     /// hold waiting for a human, else any session running, queued, or
     /// answering a side question, else idle. Holds an approval delegate is
     /// still deciding count as work. Reads only summary-level state, which
-    /// the server projects for every session, so cold sessions count too.
+    /// the server projects for every session, and every stored session,
+    /// including children whose parent is not loaded. A block names the most
+    /// recently updated blocked session, so the message is deterministic.
     #[must_use]
     pub fn activity(&self) -> StoreActivity {
         let mut working = false;
-        for id in self.thread_order() {
-            let view = &self.sessions[id];
+        let mut blocked: Option<&SessionView> = None;
+        for view in self.sessions.values() {
             let live = &view.live;
             // `with_delegate` is a subset of `awaiting_approval`.
             if live.awaiting_approval.len() > live.with_delegate.len() {
-                return StoreActivity::Blocked {
-                    session_title: view.summary.title.clone(),
-                };
+                if blocked.is_none_or(|current| {
+                    (view.summary.updated_at_ms, view.summary.id)
+                        > (current.summary.updated_at_ms, current.summary.id)
+                }) {
+                    blocked = Some(view);
+                }
+                continue;
             }
             working |= !live.awaiting_approval.is_empty()
                 || view.summary.running_side_question.is_some()
@@ -330,6 +336,11 @@ impl SessionStore {
                     view.summary.status,
                     SessionStatus::Running | SessionStatus::Queued
                 );
+        }
+        if let Some(view) = blocked {
+            return StoreActivity::Blocked {
+                session_title: view.summary.title.clone(),
+            };
         }
         if working {
             StoreActivity::Working

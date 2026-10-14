@@ -131,6 +131,14 @@ impl Reporter {
 pub(crate) struct ReportSink(watch::Sender<Option<Report>>);
 
 impl ReportSink {
+    /// A sink with no reporter behind it, and the receiver that sees what
+    /// the loop publishes.
+    #[cfg(test)]
+    pub(crate) fn detached() -> (Self, watch::Receiver<Option<Report>>) {
+        let (sender, receiver) = watch::channel(None);
+        (Self(sender), receiver)
+    }
+
     /// Publish `report` if it differs from the last one.
     pub(crate) fn update(&self, report: Report) {
         self.0.send_if_modified(|current| {

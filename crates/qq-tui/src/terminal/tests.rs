@@ -124,13 +124,22 @@ impl Harness {
     /// sends with [`Harness::settle`] so ordering is explicit rather than a
     /// consequence of `select!` bias.
     fn spawn(&mut self, app: App) -> tokio::task::JoinHandle<Result<App, TuiError>> {
-        self.spawn_with_trust(app, None)
+        self.spawn_with(app, None, None)
     }
 
     fn spawn_with_trust(
         &mut self,
         app: App,
         trust: Option<TrustResolver>,
+    ) -> tokio::task::JoinHandle<Result<App, TuiError>> {
+        self.spawn_with(app, trust, None)
+    }
+
+    fn spawn_with(
+        &mut self,
+        app: App,
+        trust: Option<TrustResolver>,
+        herdr: Option<crate::herdr::ReportSink>,
     ) -> tokio::task::JoinHandle<Result<App, TuiError>> {
         let port = self.port.take().expect("harness runs once");
         let events = self.event_stream.take().expect("harness runs once");
@@ -153,7 +162,7 @@ impl Harness {
                     })
                 },
                 trust,
-                herdr: None,
+                herdr,
             },
         ))
     }
@@ -252,6 +261,32 @@ async fn loop_draws_first_frame_then_only_when_state_changes() {
     harness.quit();
     let app = task.await.expect("loop task").expect("loop exits cleanly");
     assert_eq!(app.connection, ConnectionState::Live);
+}
+
+#[tokio::test(start_paused = true)]
+async fn herdr_hears_nothing_until_the_first_snapshot_then_the_loaded_state() {
+    // Regression (PR #289 review): `Connecting` arrives before bootstrap;
+    // an empty store then reads as idle, which `herdr agent wait` would
+    // accept while the workspace is actually running or waiting.
+    let mut harness = Harness::new(64);
+    let (sink, reports) = crate::herdr::ReportSink::detached();
+    let task = harness.spawn_with(App::new(TuiOptions::default()), None, Some(sink));
+    harness.update(ClientUpdate::Connection(ConnectionState::Connecting));
+    harness.key(KeyCode::Char('x'), KeyModifiers::NONE);
+    harness.settle().await;
+    assert_eq!(*reports.borrow(), None, "no report before the snapshot");
+
+    let snapshot = snapshot(1, Vec::new());
+    let focused = snapshot.focused.as_ref().expect("focused").summary.id;
+    harness.update(ClientUpdate::Snapshot(snapshot));
+    harness.settle().await;
+    let report = reports
+        .borrow()
+        .clone()
+        .expect("reported after the snapshot");
+    assert_eq!(report.session, Some(focused));
+    harness.quit();
+    task.await.expect("loop task").expect("loop result");
 }
 
 #[tokio::test(start_paused = true)]

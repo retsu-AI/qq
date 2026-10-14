@@ -893,6 +893,15 @@ impl App {
         }
 
         let snapshot_sequence = snapshot.cursor.sequence;
+        // Every body this snapshot installs replaces live state with a view
+        // as of its cursor; events after it that already reached the store
+        // are replayed below so a stale body never wins over them.
+        let installed: std::collections::HashSet<SessionId> = snapshot
+            .included
+            .iter()
+            .chain(snapshot.focused.as_ref())
+            .map(|body| body.summary.id)
+            .collect();
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
             self.workspace_path = snapshot.workspace.path;
@@ -936,8 +945,7 @@ impl App {
             .recent_events
             .iter()
             .filter(|event| {
-                event.cursor.sequence > snapshot_sequence
-                    && snapshot_focus.is_some_and(|focused| event.session_id == focused)
+                event.cursor.sequence > snapshot_sequence && installed.contains(&event.session_id)
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -709,6 +709,31 @@ fn a_child_resolves_to_its_root_and_an_unknown_parent_resolves_to_none() {
 }
 
 #[test]
+fn store_activity_counts_a_child_whose_parent_is_not_loaded() {
+    // Regression (PR #289 review): the snapshot's bounded session list is
+    // chosen by recency, not ancestry, so a child can arrive without its
+    // parent. Tree order starts from loaded roots and would skip it.
+    let orphan = SessionId::from_bytes([9; 16]);
+    let mut store = SessionStore::default();
+    store.upsert_summary(
+        SessionSummary {
+            parent_id: Some(SessionId::from_bytes([1; 16])),
+            status: SessionStatus::Running,
+            active_run_id: Some(RunId::from_bytes([4; 16])),
+            pending_holds: vec![qq_protocol::PendingHold {
+                tool_call_id: ToolCallId::from_bytes([7; 16]),
+                delegated: false,
+            }],
+            ..summary(orphan)
+        },
+        &[],
+        0,
+    );
+    assert!(store.thread_order().is_empty());
+    assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
+}
+
+#[test]
 fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);

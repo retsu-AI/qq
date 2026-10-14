@@ -342,7 +342,7 @@ impl ToolGate for SessionToolGate {
                                         // not decide; a failed write changes
                                         // nothing about the hold.
                                         ReviewDecision::Escalate { reason } => {
-                                            let _ = inner
+                                            if let Err(error) = inner
                                                 .store
                                                 .escalate_tool_approval(
                                                     &claimed,
@@ -350,11 +350,18 @@ impl ToolGate for SessionToolGate {
                                                     Some(verdict.delegate),
                                                     truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
                                                 )
-                                                .await;
+                                                .await
+                                            {
+                                                inner.remove_approval(call.id);
+                                                return reviewed(
+                                                    approval_persistence_failure(error),
+                                                    review_spend,
+                                                );
+                                            }
                                             deadline = human_deadline(inner.approval_timeout);
                                         }
                                         ReviewDecision::Deny { reason } => {
-                                            let _ = inner
+                                            if let Err(error) = inner
                                                 .store
                                                 .escalate_tool_approval(
                                                     &claimed,
@@ -366,7 +373,14 @@ impl ToolGate for SessionToolGate {
                                                         truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
                                                     ),
                                                 )
-                                                .await;
+                                                .await
+                                            {
+                                                inner.remove_approval(call.id);
+                                                return reviewed(
+                                                    approval_persistence_failure(error),
+                                                    review_spend,
+                                                );
+                                            }
                                             deadline = human_deadline(inner.approval_timeout);
                                         }
                                     }
@@ -376,7 +390,7 @@ impl ToolGate for SessionToolGate {
                                 // asked, exactly as for an `Escalate`.
                                 () = tokio::time::sleep_until(delegate_deadline) => {
                                     review = None;
-                                    let _ = inner
+                                    if let Err(error) = inner
                                         .store
                                         .escalate_tool_approval(
                                             &claimed,
@@ -384,7 +398,11 @@ impl ToolGate for SessionToolGate {
                                             None,
                                             approval::DELEGATE_TIMED_OUT_REASON.to_owned(),
                                         )
-                                        .await;
+                                        .await
+                                    {
+                                        inner.remove_approval(call.id);
+                                        return approval_persistence_failure(error);
+                                    }
                                     deadline = human_deadline(inner.approval_timeout);
                                 }
                             }

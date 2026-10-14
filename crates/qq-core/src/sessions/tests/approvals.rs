@@ -1822,6 +1822,58 @@ async fn the_session_summary_says_who_a_hold_waits_on_until_it_settles() {
 }
 
 #[tokio::test]
+async fn a_failed_escalation_write_fails_the_run_instead_of_waiting_unannounced() {
+    // Regression (PR #289 review): the human-wait phase starts only once the
+    // escalation is durable. If its write fails, the row still says the
+    // delegate decides and no client hears otherwise, so waiting on would
+    // leave every surface showing work while QQ waits for a human.
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "unsure".to_owned(),
+    }));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    collect_until_approval_requested(&mut harness.events).await;
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            connection
+                .execute_batch(
+                    r#"CREATE TRIGGER reject_escalation BEFORE INSERT ON events
+                       WHEN NEW.envelope_json LIKE '%"type":"tool_approval_escalated"%'
+                       BEGIN SELECT RAISE(ABORT, 'injected escalation failure'); END;"#,
+                )
+                .map_err(|_| SessionRuntimeError::CODEC)
+        })
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalEscalated { .. }))
+    );
+    assert!(matches!(
+        &observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Failed { .. },
+            session,
+            ..
+        } if session.pending_holds.is_empty()
+    ));
+}
+
+#[tokio::test]
 async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
     // DA1: the reviewer is the configured delegate for the calls `auto`
     // holds. Its Deny settles the call as a tool error that names the

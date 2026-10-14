@@ -357,8 +357,13 @@ where
         }
         // After input or a state-bearing client update, so a focus change or
         // a new session also moves herdr's resume target; frame and animation
-        // ticks change nothing herdr shows. Deduplicated in the sink.
-        if state_may_change && let Some(herdr) = &herdr {
+        // ticks change nothing herdr shows. Deduplicated in the sink. Nothing
+        // is reported before the first snapshot: an empty store would read as
+        // idle while the workspace may be running or waiting.
+        if state_may_change
+            && app.workspace_id.is_some()
+            && let Some(herdr) = &herdr
+        {
             state_may_change = false;
             herdr.update(crate::herdr::Report {
                 activity: app.sessions.activity(),
