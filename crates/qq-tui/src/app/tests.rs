@@ -2765,7 +2765,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
         .into_requests();
     assert!(matches!(
         requests.as_slice(),
-        [ClientRequest::Command(CommandRequest {
+        [ClientRequest::Snapshot(_), ClientRequest::Command(CommandRequest {
             command: SessionCommand::SubmitPrompt { input, .. },
             ..
         })] if input.as_slice() == [qq_protocol::InputPart::text("follow up")]

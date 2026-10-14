@@ -161,17 +161,11 @@ impl SessionStore {
             } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if let Some(view) = self.get_mut(&session_id) {
-                    let cost_before = view
-                        .summary
-                        .accounting
-                        .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                        .unwrap_or(view.summary.estimated_cost_usd_nanos);
                     let stats = view.runs.entry(*run_id).or_default();
                     stats.started_at_ms = Some(envelope.occurred_at_ms);
                     stats.owned_step = session
                         .active_run_id
                         .is_some_and(|active| active != *run_id);
-                    stats.cost_usd_nanos = cost_before;
                     stats.plan = plan.as_deref().map(plan_label);
                     if let Some(messages) = view.messages.as_mut() {
                         for message in messages.iter_mut().filter(|message| {
@@ -615,11 +609,13 @@ impl SessionStore {
                     if let Some(route) = &model.model {
                         stats.resolved_route = Some(route.clone());
                     }
-                    stats.turns = stats.turns.max(*turn_ordinal);
-                    if let Some(cost) = estimated_cost_usd_nanos {
+                    if *turn_ordinal > stats.turns
+                        && let Some(cost) = estimated_cost_usd_nanos
+                    {
                         stats.live_cost_usd_nanos =
                             Some(stats.live_cost_usd_nanos.unwrap_or(0).saturating_add(*cost));
                     }
+                    stats.turns = stats.turns.max(*turn_ordinal);
                 }
             }
             // The run-level context audit is not session state: old persisted
@@ -654,10 +650,11 @@ impl SessionStore {
                         .get(&session_id)
                         .and_then(|view| view.runs.get(run_id))
                         .is_some_and(|stats| stats.owned_step);
-                let cost_before = self
-                    .get(&session_id)
-                    .and_then(|view| view.runs.get(run_id))
-                    .and_then(|stats| stats.cost_usd_nanos);
+                let owned_step = owned_step
+                    || self.get(&session_id).is_some_and(|view| {
+                        view.foreground_run_id
+                            .is_some_and(|foreground| foreground != *run_id)
+                    });
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if !context.attentive && !owned_step {
                     effects.push(StateEffect::Attention(Attention::RunFinished {
@@ -671,18 +668,13 @@ impl SessionStore {
                     view.finished_unread = true;
                     view.unread += 1;
                 }
-                let cost_after = session
-                    .accounting
-                    .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                    .unwrap_or(session.estimated_cost_usd_nanos);
                 let stats = view.runs.entry(*run_id).or_default();
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
                 stats.usage = *usage;
-                stats.cost_usd_nanos = match (cost_before, cost_after) {
-                    (Some(before), Some(after)) => Some(after.saturating_sub(before)),
-                    _ => None,
-                };
+                // A session delta includes owned summaries and concurrent
+                // routing/review spend. Only the run snapshot is authoritative.
+                stats.cost_usd_nanos = None;
                 // An in-run compaction run finishes while its prompt run
                 // still holds the session; that run's activity stays.
                 if view.activity.is_some_and(|(active, _)| active == *run_id) {
@@ -732,15 +724,21 @@ impl SessionStore {
                         }
                     }
                 }
-                // One draft per run so each becomes its own run in order.
+                if owned_step {
+                    return effects;
+                }
+                if shown && let Some(workspace_id) = context.workspace_id {
+                    effects.push(StateEffect::RequestSnapshot(body_request(
+                        workspace_id,
+                        session_id,
+                    )));
+                }
+                // One draft per foreground run, in order.
                 if session.active_run_id.is_none()
                     && session.queued_prompts == 0
                     && let Some(text) = view.drafts.pop_front()
                 {
                     effects.push(StateEffect::SubmitDraft { session_id, text });
-                }
-                if owned_step {
-                    return effects;
                 }
                 match outcome {
                     RunOutcome::Failed { failure } => effects.push(StateEffect::Notice {

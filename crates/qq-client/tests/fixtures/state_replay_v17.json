@@ -102,7 +102,7 @@
       "reasoning": [],
       "runs": [
         {
-          "cost_usd_nanos": 42,
+          "cost_usd_nanos": null,
           "finished_at_ms": 1700000000000,
           "first_token_at_ms": null,
           "id": "04040404040404040404040404040404",
