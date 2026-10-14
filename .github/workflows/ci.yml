@@ -261,6 +261,9 @@ jobs:
           diff -u baseline/rust-toolchain.toml candidate/rust-toolchain.toml
           diff -u baseline/xtask/src/perf.rs candidate/xtask/src/perf.rs
           diff -u baseline/benchmarks/perf/budgets-v1.json candidate/benchmarks/perf/budgets-v1.json
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          # The recorder clears toolchain overrides before native builds.
+          rustup default "$channel"
           mkdir -p "$RUNNER_TEMP/h0-recording"
       - name: Record baseline, candidate and same-binary control
         shell: bash

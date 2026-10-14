@@ -2035,3 +2035,8 @@ newest last.
 ### 2026-10-14 — hosted H0 fixture guard repair
 
 - Hosted job116122591431 failed before measurement because the guard compared nonexistent xtask/src/perf directories; the implemented H0 fixture is the single xtask/src/perf.rs file. Remove only that nonexistent-directory comparison, retaining exact source, toolchain and budget equality guards. No measurement/gate pass is inferred from this failure.
+
+### 2026-10-14 — H0 compiler setup correction
+
+- Job116124285386 reached recording but the unchanged baseline build failed: dependency rustc proxies selected runner-default stable1.99 while cargo1.97.1 was used, and concurrent rust-src downloads collided. Artifact retained at target/qq-perf/ab6-2026-10-14/hosted-run-38643410247/h0-baseline-build-failure.zip. No performance result exists.
+- Set the runner default to the exact matching repository toolchain before recording; the existing recorder clears RUSTUP_TOOLCHAIN/RUSTC overrides, so the default must also be pinned for dependency build-script compiler proxies. Fixture and budgets stay unchanged. Windows/wasm hosted checks passed; latest Codex/other CI remain active.
