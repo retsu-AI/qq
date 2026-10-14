@@ -1471,3 +1471,8 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Full workspace/fmt/Clippy/build and publication remain before resolving the new thread. Final review will report completed AC3 scope and validated evidence, asking for concrete introduced regressions rather than speculative follow-up work. Whole-plan qualification remains open.
 
 - Final message-receipt repair4b9a108b qualifies: serial workspace2,292 passed/0failed/14ignored (nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, build. Raw `ac3-message-receipt-workspace-{fmt,tests,clippy,build}.log`; independent source review Approve. All existing timeouts unchanged; the previous stopped-child receipt timeout passes isolated and in the full run. Publish and resolve4266946985, with one final focused Codex review requested. Broader plan/performance gates remain separate.
+
+### 2026-10-13 — Final AC3 parent integration for recorder
+
+- AC3 head10f87482 opening Codex+1 verified at2026-10-14T05:55:45Z, all review threads resolved. Recorder integrates that parent at2ad11863; both ledger appendices retained, no runtime source conflict. Common fixture recording at3def2ab9 does not cover this newer source.
+- Serial workspace fmt/tests/all-target-all-feature Clippy/build qualification launched with unchanged timeouts; raw `ci-message-receipt-parent-{fmt,tests,clippy,build}.log` under root evidence directory. No push or final-head performance qualification is claimed while these checks are in flight. Earlier collector failure remains recorded.
