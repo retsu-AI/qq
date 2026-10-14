@@ -335,15 +335,20 @@ impl Walker<'_> {
                     {
                         continue;
                     }
-                    if !self.reserve_cursor(&child.path)? {
+                    let excluded_subtree =
+                        (depth >= MAX_WALK_DEPTH).then(|| format!("{}/", child.path));
+                    let frontier = excluded_subtree.as_deref().unwrap_or(&child.path);
+                    if !self.reserve_cursor(frontier)? {
                         break;
                     }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
                         break;
                     }
-                    if depth >= MAX_WALK_DEPTH {
+                    if let Some(frontier) = excluded_subtree {
                         self.depth_skipped += 1;
+                        // This policy-excluded subtree is terminal for this scope.
+                        self.last_scanned = Some(frontier);
                         continue;
                     }
                     self.visit_dir(&child.path, depth + 1)?;

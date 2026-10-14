@@ -951,3 +951,9 @@ newest last.
   requires advancing encoded cursors, at most four pages and one match.
 - Uses the same bounded walker without injecting production configuration;
   test-first reproduction precedes terminal-subtree cursor correction.
+
+- The depth-limit fixture reproduces `last_scanned=None` at immutable
+  `0b50ed0d`; red evidence `depth-frontier-red.log`. The walker now reserves
+  each excluded subtree's complete terminal cursor before charging/advancing
+  it. Eligible files at depth 64 are still inspected; ancestors are not
+  prematurely marked complete. Focused continuation check follows.
