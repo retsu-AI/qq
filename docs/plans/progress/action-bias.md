@@ -6,8 +6,8 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Nondraft; verified context qualified, performance open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Nondraft; batched-search cap repair in progress, performance open |
+| AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In review | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Published e93c4e8a; exact projection and review repairs qualified; fresh hosted/Codex and performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -1136,3 +1136,153 @@ newest last.
   retained byte-window/masking/repair reservations and live/replay bounds.
 - PR remains nondraft. Fresh hosted/Codex review and performance gates
   remain open; this local receipt does not qualify those gates.
+
+### 2026-10-14 — AB2 fresh review admission/replay/frontier findings
+
+- Fresh Codex review of published `e4342a5c` identified real gaps: deferred
+  searches were still counted against slices; historical turn projection
+  lacked policy evidence; depth-limited siblings could exhaust scanning
+  without advancing a cursor. Independent investigations confirm all three.
+- Added twenty sixteen-search-batch regression: 140 admitted executions must
+  not trigger a 256-execution slice checkpoint. Test-first reproduction
+  follows before correcting the final-admission counter.
+- Replay repair will retain explicit persisted projection identity or exact
+  bounded model-facing bytes; ambiguous old identities cannot be backfilled
+  from present code. Frontier repair must watermark only policy-skipped
+  child subtrees, preserving eligible depth-64 files. Nothing is waived.
+
+### 2026-10-14 — AB1 merged and AB2 current-main reconciliation
+
+- User merged #301 as `007adcda75454958ed48ccc81d4cc66d663c80e9`; GitHub
+  retargeted #302 to main. Integrated this actual main head locally, keeping
+  AB2's prompt-20 identity and owned discovery/output/replay repairs.
+- #302 has real fresh Codex findings in progress. #303–#305 currently report
+  mergeable against their parents and CI passes at #302–#304 published heads;
+  #306 still needs parent/context implementation integration. No draft PRs.
+
+- Slice regression now reproduces the premature checkpoint at immutable
+  `2dc01dff`; evidence `deferred-slice-red.log`. Final OutputBudget rejection
+  now removes only that previously counted request from slice accounting;
+  existing rejected/denied-call semantics remain unchanged. Focused check
+  follows; replay/frontier fixes and full qualification remain open.
+
+### 2026-10-14 — AB2 depth-exclusion continuation regression
+
+- Added deterministic actual-walker fixture: 64 ancestors, twelve policy-
+  excluded subtrees, later `z/AGENTS.md`, and a 70-entry scan limit. It
+  requires advancing encoded cursors, at most four pages and one match.
+- Uses the same bounded walker without injecting production configuration;
+  test-first reproduction precedes terminal-subtree cursor correction.
+
+- The depth-limit fixture reproduces `last_scanned=None` at immutable
+  `0b50ed0d`; red evidence `depth-frontier-red.log`. The walker now reserves
+  each excluded subtree's complete terminal cursor before charging/advancing
+  it. Eligible files at depth 64 are still inspected; ancestors are not
+  prematurely marked complete. Focused continuation check follows.
+
+- Admission/frontier source `30eb4e93` passes all 31 focused AB2 fixtures.
+  Added stored historical descriptor-14/prompt-19 regression with sixteen
+  near-12KiB pages; the original main projector retains its eighth page
+  and later generic-floor recall markers, including after reopen. This
+  test establishes the replay regression before persistence repair.
+
+- Historical descriptor-14/prompt-19 regression reproduces eighth-page
+  truncation at `97512db2`. Context assembly now selects the preserved
+  original-main generic-floor projector for recorded descriptor 13/14
+  prompt versions through 19. Newer ambiguous identities still require the
+  explicit projection-evidence repair before this wave can be published.
+
+- The first restoration run retained the eighth page but exposed a fixture
+  assumption: one 12KiB row takes the legacy long-line truncation path,
+  rather than the expected recall-marker path. The fixture now uses complete
+  <=200-byte rows at the same exact 12,000-byte page size. Production legacy
+  behavior remains the preserved original-main implementation.
+
+### 2026-10-14 — AB2 projection repair evidence and reserved boundary
+
+- Current `c9c0ba11` passes 32 focused AB2 fixtures, including known historical
+  descriptor-14/prompt-19 replay after close/reopen; logs
+  `historical-projection-focused-final.log`. Independent frontier review
+  approves exclusion watermarks and explicit trailing-slash path bounds.
+- Reserved ADR-0061 and shared ownership for exact projected reply/notice
+  persistence before the next request, descriptor 15 policy identity and
+  schema 48; the AB5 notice step must follow at 49. This is a proposed
+  boundary, not a claim that the barrier is implemented or qualified.
+- Fresh #304 review requires prompt-history/external-tool wording corrections;
+  #305 review requires the runbook/schema truth check to follow the rebased
+  notice boundary. These corrections join the next qualified propagation.
+- No new source pushed, and no fresh review thread resolved prematurely.
+
+### 2026-10-14 — AB2 exact projected-row replay regression
+
+- Added stored-row close/reopen fixture requiring exact projected replies,
+  post-checkpoint error flag and correction notice, independently of original
+  per-call text. The missing column/replay seam must fail before implementation.
+- Implements ADR-0061's accepted scope; root owns the new store barrier and
+  decoder. No source publication or review resolution precedes qualification.
+
+### 2026-10-14 — #301 merge and exact projection repair in progress
+
+- Actual main007adcda is integrated locally into AB2; no repair wave pushed yet.
+- Deferred slice accounting, depth-frontier continuation and known legacy replay
+  pass focused checks. Durable projection writer uses existing group-commit savepoints;
+  35 focused AB2 tests pass, including exact reopen and injected write failure before
+  a second provider request. Migration/ambiguity fixtures and full gates remain open.
+- Projection schema49/final notice50 avoid reusing published experimental48.
+
+- Full core repair check: 1,028passed,0failed,3ignored in
+  `/tmp/qq-ab2-projection-core-third.log`. Independent writer/barrier review approves;
+  independent replay review required descriptors10–12 and rejects prompt-only inference.
+  Final ownership/unfinished-result and47→49 historical-row checks are being qualified.
+
+- Final narrow repair checks:37AB2passed,0failed (`/tmp/qq-ab2-projection-final-focused.log`).
+  Historical10–14 rows survive47→49 migration; writer rejects wrong session/turn,
+  unfinished/mismatched calls and limits, preserving first commit. Stored retry JSON
+  is also bounded in SQL before copying. Source is being frozen for fresh workspace gates.
+
+- First frozen workspace run atc457630a failed root compilation on the new
+  `SessionRuntimeError::ToolProjectionUnavailable` exhaustive match; no tests ran.
+  Root maps it to an actionable request error with a regression fixture. All gates
+  will rerun at the repaired immutable head; the failed receipt is retained.
+
+- Repaired workspace runb9d38c60 reached root tests:270passed,1failed,2ignored.
+  The failure pins the former v14 canonical-domain prefix; update it to v15 while
+  retaining secret-exclusion checks and both historical core digest fixtures.
+  Fresh workspace gates rerun after this test identity update.
+
+- All four workspace gates pass at1963a389. This is intermediate qualification:
+  a new public continuation fixture covers unresolved history escaping reservation
+  and poisoning the shared scheduler. That failure must settle only the affected run
+  before publication; fresh sessions must remain usable without provider polling
+  on the ambiguous history. Test-first repair follows, then all gates rerun.
+
+- Intermediate source1963a389: 2,381 passed, zero failed, 14 ignored (38 blocks);
+  fmt/Clippy/build passed. The scheduler-isolation regression then failed with
+  runtimeUnavailable and passed after per-reservation handling. Independent review
+  approves cancellation precedence, settlement before loading, history preservation
+  and fresh-session usability. Evidence is under `target/qq-perf/ab2-2026-10-14/`.
+  This intermediate receipt is superseded by the final qualification below.
+
+### 2026-10-14 — AB2 durable projection final qualification
+
+- Immutable source `fb2296aa21c5f8163f3eb8e2869391e52f4e1da9` integrates merged
+  main `007adcda`. Fresh workspace: 2,382 passed, zero failed, 14 ignored (38 blocks);
+  formatting, all-target/all-feature Clippy with `-D warnings`, and build exit0.
+- Logs: `target/qq-perf/ab2-2026-10-14/durable-projection-final-gate-{0,1,2,3,4}.log`.
+  Independent writer/barrier, replay and reservation-failure reviews approve.
+- Descriptor15/schema49 commit exact projected replies and correction notice before
+  another provider request. Known descriptor10–14/pre20 histories retain the legacy
+  projector; ambiguous history fails only its reservation with a recovery message.
+- Real isolated schema49 store is refused by retained schema47 and experimental48
+  binaries, exit1, metadata/structure unchanged, zero sessions and no model calls.
+  Receipts: `schema{47,48}-refusal-receipt.json`; new binary SHA350db0ae9ae9d49fb2e45d1f13aa12e03e220ce3af4a474f0b8d596fe1ccc7a3.
+- This commit adds only the qualification ledger. Fresh hosted/Codex review, child
+  propagation and named performance gates remain open; no performance gate is waived.
+
+### 2026-10-14 — AB3 durable projection integration
+
+- Integrated qualified AB2e93c4e8a and merged main007adcda. Retained the complete
+  AB3 parallel-read fixture and AB2 deferred-search execution-slice fixture.
+- Descriptor15/schema49 and exact projection/legacy replay/reservation isolation
+  are inherited; window, masking and repair reservations remain the AB3 change.
+  Fresh source gates and independent integration review precede publication.

@@ -20,6 +20,7 @@ mod feeds;
 mod migrations;
 mod nonblocking;
 mod progress;
+mod projection;
 mod replay_identity;
 mod runs;
 mod settlement;
@@ -2183,6 +2184,7 @@ fn denial_capacity_fixture(
         model: ModelSelection::default(),
         messages: Vec::new(),
         message_effects: Vec::new(),
+        unresolved_tool_projection: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -7031,7 +7033,7 @@ fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(STORE_SCHEMA_VERSION, 47);
+    assert_eq!(STORE_SCHEMA_VERSION, 49);
     let count: u64 = connection
         .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
         .unwrap();

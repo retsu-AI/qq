@@ -59,6 +59,7 @@ mod events;
 mod execution;
 mod feed;
 mod in_run_compaction;
+mod projection;
 mod runtime;
 mod scheduler;
 mod settlement;
@@ -253,6 +254,23 @@ pub mod bench_support {
                 [session_id.to_string()],
             )
             .expect("prune watermark");
+        // These synthetic rows exercise the current strict projector, not
+        // unversioned historical reconstruction.
+        let identity = RunPlanIdentity {
+            profile: AgentProfileId::default(),
+            descriptor_version: crate::plan::DESCRIPTOR_VERSION,
+            digest: qq_protocol::AgentPlanDigest::from_hash(ContentHash::from_bytes([0; 32])),
+            credential_epoch: qq_protocol::CredentialEpoch::NONE,
+        };
+        transaction
+            .execute(
+                "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2",
+                params![
+                    r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+                    serde_json::to_string(&identity).expect("bench plan identity")
+                ],
+            )
+            .expect("bench projection policy");
         transaction.commit().expect("bench seed commits");
         (connection, session_id)
     }
