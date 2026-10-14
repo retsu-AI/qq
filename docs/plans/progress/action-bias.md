@@ -409,3 +409,10 @@ newest last.
   default output bounding 132,475 → 128,788 ns. Matched/noise performance
   qualification remains open; these samples do not establish a speedup.
 - Draft source publication next, stacked on AB2; no readiness claim.
+
+### 2026-10-14 — AB3 continuation start-offset boundary
+
+- Hosted plan review supplied a 100,000-line start-offset boundary. A
+  105,000-short-line fixture starting at 99,999 reproduces an unusable
+  next offset 103,227. Test-first fails before the correction. Preserve
+  the existing bound and emit a terminal marker naming it instead.

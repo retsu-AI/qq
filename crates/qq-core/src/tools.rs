@@ -759,6 +759,17 @@ mod tests {
     }
 
     #[test]
+    fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(&workspace, &FileState::default(), "read_file", r#"{"path":"many.txt","offset":99999}"#);
+        assert!(!output.is_error, "{}", output.model_text);
+        assert!(output.model_text.contains("start-offset limit 100000"), "{:?}", output.model_text.lines().last());
+        assert!(!output.model_text.contains("continue from offset="));
+    }
+
+    #[test]
     fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("empty"), "\n".repeat(4_000)).unwrap();
