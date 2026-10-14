@@ -1895,3 +1895,9 @@ newest last.
   tool replay, bounded checkpoint corrections and atomic experimental48 upgrade.
   Semantic shell-envelope regression remains test-first; provenance V2 and
   export format3 work remain open, without historical qualification claims.
+
+- Two initial narrow commands targeted qq-core filters and ran zero cases; they
+  are not evidence. The actual xtask malformed-envelope regression runs15
+  cases and fails with5 lexical reads/9 malformed before the fix. Qualification
+  parsing now requires the dispatcher's pure Launch validation through canonical
+  argument digest, so invalid timeout/cwd/env/command cannot become reads.
