@@ -1,10 +1,12 @@
 """Public CLI behavior of the isolated turn-overhead recorder; no Rust build."""
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 RECORDER = Path(__file__).with_name("record-turn-overhead.py")
@@ -120,6 +122,53 @@ class RecorderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SHA", result.stderr)
         self.assertFalse((self.root / "order").exists())
+
+    def test_unending_fast_output_is_killed_at_the_hard_log_cap(self):
+        self.candidate.write_text("#!/usr/bin/env python3\nimport os\n"
+            "while True: os.write(1, b'x' * 65536)\n")
+        result = self.run_recorder()
+        self.assertNotEqual(result.returncode, 0)
+        raw = json.loads((self.root / "result" / "raw.json").read_text())
+        failed = raw["runs"][-1]
+        self.assertEqual(failed["error"], "benchmark output exceeds 1MiB")
+        self.assertLessEqual((self.root / "result" / failed["log"]).stat().st_size, 1024 * 1024)
+        self.assertIsNotNone(failed["exit_code"])
+        self.assertFalse(raw["complete"])
+
+    def test_failed_sample_terminates_descendants_after_leader_exit(self):
+        for exit_code in (7, 0):
+            with self.subTest(exit_code=exit_code):
+                heartbeat = self.root / f"heartbeat-{exit_code}"
+                pid_file = self.root / f"pid-{exit_code}"
+                self.candidate.write_text("#!/usr/bin/env python3\nimport os, time\n"
+                    "pid = os.fork()\nif pid == 0:\n"
+                    " fd = os.open(os.devnull, os.O_WRONLY)\n"
+                    " os.dup2(fd, 1); os.dup2(fd, 2); os.close(fd)\n"
+                    " while True:\n"
+                    f"  with open({str(heartbeat)!r}, 'a') as log: log.write('alive\\n')\n"
+                    "  time.sleep(.01)\n"
+                    f"with open({str(pid_file)!r}, 'w') as log: log.write(str(pid))\n"
+                    f"while not os.path.exists({str(heartbeat)!r}): time.sleep(.01)\n"
+                    "print('invalid metrics', flush=True)\n"
+                    f"raise SystemExit({exit_code})\n")
+                try:
+                    result = self.run_recorder("--output", str(self.root / f"result-{exit_code}"))
+                    self.assertNotEqual(result.returncode, 0)
+                    raw = json.loads((self.root / f"result-{exit_code}" / "raw.json").read_text())
+                    self.assertFalse(raw["complete"])
+                    self.assertEqual(raw["runs"][-1]["exit_code"], exit_code)
+                    self.assertIn("invalid metrics", (self.root / f"result-{exit_code}" /
+                        raw["runs"][-1]["log"]).read_text())
+                    time.sleep(.1)
+                    size = heartbeat.stat().st_size
+                    time.sleep(.1)
+                    self.assertEqual(heartbeat.stat().st_size, size, "descendant survived recorder failure")
+                finally:
+                    if pid_file.exists():
+                        try:
+                            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
 
 if __name__ == "__main__":

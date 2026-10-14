@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import selectors
 import signal
 import statistics
 import subprocess
@@ -68,6 +69,8 @@ def main():
     for sha in (args.baseline_sha, args.candidate_sha):
         if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
             parser.error("each SHA must be immutable, lowercase, forty-hex")
+    if args.baseline_sha == args.candidate_sha:
+        parser.error("baseline and candidate must name distinct commits")
     baseline, candidate = args.baseline.resolve(strict=True), args.candidate.resolve(strict=True)
     if baseline.samefile(candidate):
         parser.error("baseline and candidate must be distinct files")
@@ -112,34 +115,48 @@ def main():
                 failure = None
                 try:
                     with (args.output / name).open("xb") as log:
-                        child = subprocess.Popen([str(paths[arm])], stdout=log, stderr=subprocess.STDOUT,
+                        child = subprocess.Popen([str(paths[arm])], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                  env=dict(os.environ, QQ_BENCH_ITERATIONS="1"), start_new_session=True)
-                        while child.poll() is None:
-                            if time.monotonic() - started > 180:
-                                failure = "benchmark timeout"
-                                break
-                            if log.tell() > 1024 * 1024:
-                                failure = "benchmark output exceeds 1MiB"
-                                break
-                            time.sleep(.02)
+                        with selectors.DefaultSelector() as selector:
+                            selector.register(child.stdout, selectors.EVENT_READ)
+                            eof = False
+                            while not eof or child.poll() is None:
+                                if time.monotonic() - started > 180:
+                                    failure = "benchmark timeout"
+                                    break
+                                if eof:
+                                    time.sleep(.02)
+                                    continue
+                                if not selector.select(timeout=.02):
+                                    continue
+                                remaining = 1024 * 1024 - log.tell()
+                                chunk = os.read(child.stdout.fileno(), min(64 * 1024, remaining + 1))
+                                if not chunk:
+                                    eof = True
+                                    selector.unregister(child.stdout)
+                                    continue
+                                log.write(chunk[:remaining])
+                                if len(chunk) > remaining:
+                                    failure = "benchmark output exceeds 1MiB"
+                                    break
                 except OSError as error:
                     failure = str(error)
                 finally:
                     if child is not None:
                         try:
-                            if child.poll() is None:
-                                try:
-                                    os.killpg(child.pid, signal.SIGKILL)
-                                except ProcessLookupError:
-                                    pass  # The child exited between poll and kill.
+                            # A terminal leader can leave descendants after closing stdout.
+                            # Every sample owns a fresh process group, including failed metrics.
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass  # The owned process group has already exited.
                             child.wait(timeout=5)
                         except (OSError, subprocess.TimeoutExpired) as error:
                             failure = f"{failure + '; ' if failure else ''}benchmark cleanup: {error}"
                         run["exit_code"] = child.returncode
+                        child.stdout.close()
                     run["wall_seconds"] = time.monotonic() - started
                     run["pressure_after"] = pressure()
-                if not failure and (args.output / name).stat().st_size > 1024 * 1024:
-                    failure = "benchmark output exceeds 1MiB"
                 try:
                     if failure or run["exit_code"]:
                         raise ValueError(failure or f"benchmark exit {run['exit_code']}")

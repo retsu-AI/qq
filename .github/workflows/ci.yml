@@ -133,6 +133,10 @@ jobs:
         run: |
           [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$BASELINE_SHA" == "$CANDIDATE_SHA" ]]; then
+            echo 'baseline and candidate must name distinct commits' >&2
+            exit 1
+          fi
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
