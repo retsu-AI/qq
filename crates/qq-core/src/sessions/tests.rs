@@ -6661,7 +6661,7 @@ async fn prompt_terminal_receipt_waits_for_abandoned_owned_summary() {
                     RunOutcome::Cancelled
                 }
             );
-            assert_eq!(spend.cost_usd_nanos, if sent { None } else { Some(0) });
+            assert_eq!(spend.cost_usd_nanos, None);
             assert!(
                 store
                     .finish_in_run_compaction_failed(&summary, RunOutcome::Cancelled)

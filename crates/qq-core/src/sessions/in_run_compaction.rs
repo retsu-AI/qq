@@ -384,7 +384,51 @@ impl Drop for SettleOnDrop {
     }
 }
 
+#[cfg(test)]
+struct DropSettlementHook {
+    run_id: RunId,
+    entered: tokio::sync::oneshot::Sender<()>,
+    held: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static DROP_SETTLEMENT_HOOKS: Mutex<Vec<DropSettlementHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn hold_drop_settlement(
+    run_id: RunId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    DROP_SETTLEMENT_HOOKS
+        .lock()
+        .unwrap()
+        .push(DropSettlementHook {
+            run_id,
+            entered,
+            held,
+        });
+    (observed, release)
+}
+
 async fn settle_cancelled(inner: &Arc<SessionRuntimeInner>, compaction: &ClaimedRun) {
+    #[cfg(test)]
+    {
+        let hook = {
+            let mut hooks = DROP_SETTLEMENT_HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|hook| hook.run_id == compaction.identity.run_id)
+                .map(|index| hooks.remove(index))
+        };
+        if let Some(hook) = hook {
+            let _ = hook.entered.send(());
+            let _ = hook.held.await;
+        }
+    }
     match inner
         .store
         .finish_in_run_compaction_failed(compaction, RunOutcome::Cancelled)

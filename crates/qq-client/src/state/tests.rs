@@ -918,10 +918,21 @@ fn last_queued_cancellation_releases_a_draft_without_run_started() {
             .iter()
             .any(|effect| matches!(effect, StateEffect::SubmitDraft { .. }))
     );
+    store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::CancellationRequested {
+                session: Box::new(running.clone()),
+                run_id: queued,
+            },
+        ),
+        context(&[]),
+    );
     running.queued_prompts = 0;
     let last = store.reduce_event(
         &envelope(
-            2,
+            3,
             session_id,
             SessionEvent::RunFinished {
                 session: Box::new(running),
@@ -1008,6 +1019,18 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
                 .filter(|effect| matches!(effect, StateEffect::RequestSnapshot(_)))
                 .count(),
             1
+        );
+        let request = effects
+            .iter()
+            .find_map(|effect| match effect {
+                StateEffect::RequestSnapshot(request) => Some(request),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(request.focused_session_id, shown.then_some(session_id));
+        assert_eq!(
+            request.include_sessions,
+            if shown { Vec::new() } else { vec![session_id] }
         );
         let snapshot = qq_protocol::SessionSnapshot {
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
