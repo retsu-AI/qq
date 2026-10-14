@@ -235,3 +235,9 @@ newest last.
 - Draft implementation PR [#301](https://github.com/retsu-AI/qq/pull/301)
   opened on `83f9621e`, base #295; requested hosted Codex review. Linear
   remains In Progress because matched performance qualification is open.
+
+### 2026-10-14 — AB1 hosted source review regressions
+
+- #301 raised ripgrep hostname helpers, Git external diff/textconv helpers,
+  and Cargo lockfile-generating queries. Added exact verdict regressions
+  before changing the recognizer; independent investigation requested.
