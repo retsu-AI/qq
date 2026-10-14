@@ -14,6 +14,15 @@ pub use rules::RuleId;
 /// Entry point for the `classify_command` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {
+    /// Original command-byte ceiling of the progress-read recognizer.
+    pub const MAX_READ_COMMAND_BYTES: usize = super::classify::MAX_CLASSIFIED_BYTES;
+
+    /// Progress/audit read predicate; this does not classify approval authority.
+    #[must_use]
+    pub fn read_only_shell_command(command: &str) -> bool {
+        super::read_only_shell_command(command)
+    }
+
     /// Classifies `command` and returns the decision's name.
     #[must_use]
     pub fn classify(command: &str) -> &'static str {

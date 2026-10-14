@@ -706,3 +706,14 @@ newest last.
   ledger, including the actual existing CLI router and manifest/lockfile.
   Implementation, deterministic fixtures, independent review and all final
   workspace gates remain open.
+
+- AB6.1 CLI red fixture reproduced absent command; explicit export/recount now
+  implements readonly snapshots, typed bounded JSONL and footer integrity,
+  all-state denominator preservation and pinned classifier-source/executable
+  identities. Six initial fixtures passed. Independent review caught arbitrary
+  cutoffs; a new fixture reproduced that gap, and export/recount now enforce
+  exact end+24hours and UTC-day alignment. Seven focused fixtures pass.
+- Independent final source review approves. New runbook documents local-only
+  exports, immutable build labels/hashes and treatment-cohort limitations.
+  Full immutable workspace gates and actual pinned baseline recount remain
+  open; post-deployment observation and paid evaluation are not performed.

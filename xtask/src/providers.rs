@@ -216,6 +216,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Task {
+    /// Export and recount fixed action-bias observation cohorts without model calls.
+    ActionBias(crate::action_bias::ActionBiasArgs),
     /// Run provider validation tasks.
     Providers(ProvidersArgs),
     /// Run and inspect reproducible Harbor evaluations.
@@ -421,6 +423,10 @@ enum SetupError {
 #[derive(Debug, Error)]
 enum XtaskError {
     #[error(transparent)]
+    ActionBias(#[from] crate::action_bias::ActionBiasError),
+    #[error("action-bias qualification task stopped unexpectedly")]
+    ActionBiasTask(#[source] tokio::task::JoinError),
+    #[error(transparent)]
     Eval(#[from] crate::eval::EvalError),
     #[error(transparent)]
     Perf(#[from] crate::perf::PerfError),
@@ -458,6 +464,12 @@ pub async fn run() -> ExitCode {
 
 async fn try_run(cli: Cli) -> Result<(), XtaskError> {
     match cli.command {
+        Task::ActionBias(args) => {
+            tokio::task::spawn_blocking(move || crate::action_bias::run(args))
+                .await
+                .map_err(XtaskError::ActionBiasTask)?
+                .map_err(Into::into)
+        }
         Task::Providers(args) => match args.command {
             ProvidersCommand::Check(args) => match args.mode {
                 CheckMode::Offline => run_offline().await,
