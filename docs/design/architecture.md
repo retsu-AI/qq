@@ -1509,6 +1509,31 @@ A remote server operates only on workspaces available on that server. A hosted
 coordinator with outbound-connected desktop workers is outside QQ (see
 "Hosting Boundary").
 
+Process progress accounting uses executor-produced context receipts (ADR-0060).
+A prepared launch captures the cleared child environment once, holds the cwd,
+and keeps any verified image alive through reap. Environment values stay
+private; receipts carry opaque identities and limited facts. Executed processes
+count as Work unless a trusted host explicitly approves their read behavior and
+binding is verified. Failures and timeouts of Work still trigger heuristic
+process audits; rejected and never-started calls have no receipt.
+
+Hosts may repeat `--approve-self-contained-read-image FAMILY:SHA256` when
+starting ask, run, serve or interactive execution. Approvals remain immutable
+in the runtime factory and core plan, outside workspace/configuration/session
+inputs; existing-server attachment rejects nonempty approvals. Descriptor 14
+records their public digest. Initial verification supports literal Linux exec
+calls to a bounded set of read families, a C/POSIX/unset locale, no requested
+environment names, a held contained cwd and at most 16 MiB of approved static
+native ELF bytes. A sealed memfd binds hashing and execution; scripts, dynamic
+images, shell compounds and unsupported platforms count as Work under ordinary
+approval. Image approval is a behavioral trust decision, not inferred from a
+hash, pathname ownership or ELF format.
+
+Store schema 47 saves bounded nullable process receipts atomically with their
+results, file state, spills and finished events. Historical rows remain NULL;
+saved command shape alone cannot qualify execution effects. These internal
+receipts do not change protocol envelopes or model-facing tool output.
+
 ## Concurrency And Multiple Agents
 
 Parallel model requests are mechanically simple; useful parallel agents are

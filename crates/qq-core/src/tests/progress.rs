@@ -26,6 +26,7 @@ struct Scripted {
     on_report: Reply,
     on_final: Reply,
     issued: Mutex<usize>,
+    calls_per_turn: usize,
     requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
@@ -36,6 +37,7 @@ impl Scripted {
             on_report: Reply::Text("report: nothing new yet"),
             on_final: Reply::Text("final answer: the brief's answer"),
             issued: Mutex::new(0),
+            calls_per_turn: MAX_TOOL_CALLS_PER_TURN,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -98,7 +100,7 @@ impl Provider for Scripted {
             .script
             .len()
             .saturating_sub(first)
-            .min(MAX_TOOL_CALLS_PER_TURN);
+            .min(self.calls_per_turn);
         *issued += count;
         drop(issued);
         if count == 0 {
@@ -160,6 +162,8 @@ async fn run(
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -355,15 +359,18 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
     );
 }
 
-/// A read-only shell command is a read: it never resets the count.
+/// Lexical read shape alone cannot qualify an executed program.
 #[tokio::test]
-async fn a_read_only_command_is_not_progress() {
+async fn an_unverified_read_shape_counts_as_work() {
     let mut script = reads(64);
-    script[59] = ("shell", r#"{"command":"git status"}"#);
+    script[59] = (
+        "shell",
+        r#"{"command":"git --no-lazy-fetch -c core.fsmonitor=false rev-parse HEAD"}"#,
+    );
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(
         calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),
-        1
+        0
     );
 }
 
@@ -563,6 +570,8 @@ async fn denied_calls_count_toward_the_report() {
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     struct DenyAll;
     impl ToolGate for DenyAll {
         fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
@@ -649,6 +658,8 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop(
             vec![Message::user("work")],
@@ -737,6 +748,8 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -840,6 +853,8 @@ async fn an_interrupted_final_answer_stays_final() {
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -956,6 +971,8 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
     let runtime = Runtime::new(CostlyFinal(Scripted::new(reads(400))), "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -987,5 +1004,118 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
         ),
         "{:?}",
         events.last()
+    );
+}
+
+#[tokio::test]
+async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
+    let mut provider = Scripted::new(vec![
+        ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
+        64
+    ]);
+    provider.calls_per_turn = 1;
+    let (events, requests) = run(provider, RunCapabilities::user(None)).await;
+    assert_eq!(completed_text(&events).as_deref(), Some("done"));
+    assert!(calls_before_reports(&requests, STALL_REPORT_NOTICE).is_empty());
+    assert!(notices(&events).is_empty());
+}
+
+#[tokio::test]
+async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
+    let read = ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
+    let mut script = vec![read; 63];
+    script.push(("shell", r#"{"command":"cd sub && cargo test -p y"}"#));
+    script.extend(vec![read; 63]);
+    let mut provider = Scripted::new(script);
+    provider.calls_per_turn = 1;
+    let (events, _requests) = run(provider, RunCapabilities::user(None)).await;
+    assert_eq!(completed_text(&events).as_deref(), Some("done"));
+    assert!(
+        notices(&events).is_empty(),
+        "the executed test restarts the count"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn ab1_verified_exec_reads_report_on_request_sixty_five() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    if std::env::var_os("QQ_CONTEXT_STALL_WORKER").is_none() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let image = crate::tools::process_context::test_read_image(0);
+        std::fs::write(root.join("grep"), image).unwrap();
+        std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+                "--nocapture",
+            ])
+            .env("QQ_CONTEXT_STALL_WORKER", "1")
+            .env("QQ_CONTEXT_STALL_ROOT", &root)
+            .env("PATH", &root)
+            .env("LANG", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_STALL_ROOT").unwrap());
+    let hash = qq_protocol::ContentHash::from_bytes(
+        sha2::Sha256::digest(crate::tools::process_context::test_read_image(0)).into(),
+    );
+    let images = crate::ApprovedReadImages::new(vec![crate::ApprovedReadImage {
+        family: crate::ReadImageFamily::Grep,
+        sha256: hash,
+        contract: crate::ReadImageContract::SelfContainedReadV1,
+    }])
+    .unwrap();
+    let mut provider = Scripted::new(vec![("exec", r#"{"program":"grep","args":["x","f"]}"#); 64]);
+    provider.calls_per_turn = 1;
+    let requests = provider.requests.clone();
+    let runtime = Runtime::new(provider, "gpt-test", 256)
+        .unwrap()
+        .with_approved_read_images(images);
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = tokio.block_on(async {
+        runtime
+            .run_loop_with_spawner(
+                vec![Message::user("work")],
+                root,
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::default(),
+                RunCapabilities::user(None),
+            )
+            .collect::<Vec<_>>()
+            .await
+    });
+    let requests = requests.lock().unwrap();
+    assert_eq!(last_notice(&requests[64]), Some(STALL_REPORT_NOTICE));
+    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
+    let receipts = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolCallFinished {
+                execution_context, ..
+            } => execution_context.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 64);
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.valid() && !receipt.is_work())
     );
 }

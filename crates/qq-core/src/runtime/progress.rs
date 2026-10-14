@@ -138,6 +138,12 @@ pub(crate) fn is_progress(
         }
         _ => {}
     }
+    if call.effect == catalog::EffectClass::Shell {
+        return result
+            .execution_context
+            .as_ref()
+            .is_some_and(|receipt| receipt.is_work());
+    }
     match approval::classify(
         call.effect,
         &call.name,
@@ -145,12 +151,10 @@ pub(crate) fn is_progress(
         &tools::network::NetworkPolicy::default(),
     ) {
         approval::ToolClass::Mutating | approval::ToolClass::External => !result.is_error,
-        approval::ToolClass::Shell { command, .. } => {
-            !approval::read_only_shell_command(&command)
-                && ["shell", "exec"]
-                    .into_iter()
-                    .any(|tool| tools::output::header_line(tool, &result.model_text).is_some())
-        }
+        approval::ToolClass::Shell { .. } => result
+            .execution_context
+            .as_ref()
+            .is_some_and(|receipt| receipt.is_work()),
         approval::ToolClass::ReadOnly
         | approval::ToolClass::Interactive { .. }
         | approval::ToolClass::Network { .. } => false,

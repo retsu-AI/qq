@@ -448,6 +448,27 @@ and keeps the schema for each tool in one place:
   to markdown and JSON formatted, gated by host grants and SSRF rules
   (§ Network Tools).
 
+Progress and heuristic audits share a bounded read recognizer distinct from
+execution approval. Shell strings undergo quote-aware syntax checks; `exec`
+arguments remain literal. The cached verdict avoids rendering literal arguments
+through a native shell to decide progress. Build/test commands and unknown
+forms count as work. Git working-tree status, diff and blame count as work
+because configured clean/process filters may execute helpers. Recognized Git
+history reads disable patch generation, merge diffs, external diff/textconv and
+signature display with a fixed oneline format and global `--no-lazy-fetch`;
+branch reads require explicit
+refname sorting and reject custom formats or alternative sorts. These verdicts
+never grant execution authority. A final semicolon after validated reads is
+accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
+only supported addresses, printing and pattern-space substitutions with safe
+flags; delimiter escapes and embedded semicolons are parsed before separators.
+Any nonempty requested shell/exec environment counts as work, including benign
+names conservatively. An additional environment view only disqualifies read
+candidates, preserving command/cwd parsing and approval previews even when the
+environment field is malformed or duplicated. JJ repository loading counts as work because
+operation reconciliation may persist state. File timestamp-restoring modes
+count as work; Unix sed supports a literal last-line print address.
+
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded at dispatch (§ Output Bounding).
 Read/tree/search carry their complete domain text and selected bounds to

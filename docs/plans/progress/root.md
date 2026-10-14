@@ -83,6 +83,7 @@ may append a **request** row; only root changes a request's status.
 | 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
+| 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -154,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0060. Reserve here before opening a PR that adds an ADR.
+Next free number: 0061. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -516,6 +517,31 @@ User-authorized docs-only slice owns autonomous-core plan/ledger, retirement of 
 
 User authorizes completing the entire autonomous-core plan as stacked PRs, including its referenced goal slices and review repairs until Codex bot approval on each opening description. Isolated `.worktrees/autonomous-core-stack` begins on consolidation #291 (`ee8bffa5`); this intentionally uses the reviewed parent branch rather than claiming it merged. AC17/ENG-872 starts first; source, safety caps and shipped fast-path behavior remain explicit gates. AC3 in `.worktrees/ac3` remains separately owned; coordinate its reviewed branch before dependent run-loop changes. Root/shared protocol, schema, CI and design changes belong to the respective documented stack slices, with reservations recorded before editing. Full goal retains resource/performance, live AP5/G5/Goal7 evidence and final design/doc collapse; no qualification is waived by source completion.
 
+
+### 2026-10-14 — AB1 regression harness ownership
+
+- AB1 acceptance needs a scripted one-call-per-turn root run. Extend test
+  ownership to `crates/qq-core/src/tests/progress.rs` for a fixture knob,
+  deterministic subdirectory input and the request-65 regression. The
+  production classifier remains limited to `read_only_shell_command`.
+
+- Share `approval/rules.rs::branch_lists` with the progress classifier via
+  `pub(super)` visibility only. It is already the closed Git listing
+  predicate; its verdicts do not change, and no approval authority is used
+  by progress. This extends AB1 ownership by one visibility line rather
+  than duplicating Git option-order and value parsing.
+
+### 2026-10-14 — AB1 exact argv classification
+
+- Extend AB1 to sessions/approvals.rs solely to ignore the new cached read
+  classification field in its existing shell preview pattern. Approval
+  authority and persisted/wire data remain unchanged. Literal exec arguments
+  share the command-effect predicate; shell syntax stays in the shell scanner.
+
+### 2026-10-14 — AB1 execution-context shared-path request
+
+- User authorized host execution-context capture/verification and required every PR to stay out of draft. AB1 owns the concrete process preparation/receipt seam, startup approval flags in `src/{cli,main,runtime}.rs`, descriptor v14, and nullable store receipt migration; AB5 must follow the current main schema with its notice-only migration. ADR-0060 is reserved in the parent follow-up.
+- Newly merged main includes #295/#296/#297. Integrating it before publishing AB1; migration numbering must preserve AC3's schema46 rather than reuse it. Historical process qualification stays unavailable.
 ### 2026-10-13 — AC3 dependent integration and spend repair ownership
 
 The full-stack executor owns `fix/eng-1029-ac3-durable-summary-spend` in `.worktrees/autonomous-core-stack`, based on qualified AC17 #294 (`10ad59a9`). Read-only audit of AC3 #279 (`455d3181`) approves adopting its three commits as inputs for repair, not submitting unchanged. No AC3 writing agent is live in this thread; its original worktree stays untouched and its draft remains open until replacement is qualified. Integration preserves newer consolidation/AC17 ledger receipts.

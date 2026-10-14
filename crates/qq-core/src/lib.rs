@@ -81,12 +81,13 @@ pub use hosts::{
     ToolHints,
 };
 pub use runtime::{
-    AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
-    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
-    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
+    AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, CheckpointFuture,
+    CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
+    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract,
+    ReadImageFamily, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
@@ -521,6 +522,13 @@ fn note_audited_action(
     result: &tools::ToolOutput,
 ) {
     triggers.tool_calls = triggers.tool_calls.saturating_add(1);
+    if result
+        .execution_context
+        .as_ref()
+        .is_some_and(|receipt| receipt.is_work())
+    {
+        triggers.non_read_shell = true;
+    }
     // Classification here only asks "was it a mutation or a non-read shell";
     // the network policy is irrelevant to that, so the default is enough.
     match approval::classify(
@@ -530,13 +538,6 @@ fn note_audited_action(
         &tools::network::NetworkPolicy::default(),
     ) {
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
-        // Read-only shell (allowlisted VCS reads and the like) does not by
-        // itself make a run worth auditing; anything else does.
-        approval::ToolClass::Shell { command, .. }
-            if !result.is_error && !approval::read_only_shell_command(&command) =>
-        {
-            triggers.non_read_shell = true;
-        }
         _ => {}
     }
     if call.name == tools::SPAWN_AGENT_TOOL && !result.is_error {
@@ -1012,6 +1013,7 @@ pub struct Runtime {
     pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
+    pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
@@ -1068,6 +1070,7 @@ impl Runtime {
             task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
+            approved_read_images: Arc::new(runtime::ApprovedReadImages::default()),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
@@ -1503,6 +1506,13 @@ impl Runtime {
 
     /// Sets the shell environment allowlist and built-in preference.
     #[must_use]
+    /// Approve exact self-contained native read implementations for this host.
+    /// Empty by default; this trust must never come from tool or workspace input.
+    pub fn with_approved_read_images(mut self, images: runtime::ApprovedReadImages) -> Self {
+        self.approved_read_images = Arc::new(images);
+        self
+    }
+
     pub fn with_shell_policy(mut self, shell: runtime::ShellPolicy) -> Self {
         self.shell = Arc::new(shell);
         self
@@ -8786,6 +8796,81 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("QQ_CONTEXT_SHADOW_WORKER").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let bin = directory.path().join("bin");
+            let workspace = directory.path().join("workspace");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::create_dir(&workspace).unwrap();
+            let program = bin.join("grep");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\nprintf changed > written.txt\nprintf 'match\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                    "--nocapture",
+                ])
+                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
+                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                .env("PATH", &bin)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "shadowed executable classification worker failed"
+            );
+            return;
+        }
+        let path = std::path::PathBuf::from(std::env::var_os("QQ_CONTEXT_SHADOW_ROOT").unwrap());
+        let arguments = r#"{"program":"grep","args":["-n","x","f"]}"#.to_owned();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tools::execute(
+                workspace::Workspace::open(&path).unwrap(),
+                Arc::new(workspace::FileState::default()),
+                "exec".to_owned(),
+                arguments.clone(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::new(tools::network::NetworkPolicy::default()),
+            ));
+        assert!(!output.is_error, "{}", output.model_text);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        let call = RuntimeToolCall {
+            id: ToolCallId::from_bytes([42; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "shadow".to_owned(),
+            name: "exec".to_owned(),
+            arguments,
+            effect: catalog::EffectClass::Shell,
+            rejection: None,
+        };
+        assert!(
+            runtime::is_progress(&call, None, &output),
+            "unverified executable must count as work"
+        );
+        let mut triggers = runtime::AuditTriggers::default();
+        note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &output);
+        assert!(
+            triggers.non_read_shell,
+            "unverified mutation must not suppress audit"
+        );
+    }
+
     /// Scripts one `spawn_agent` call on the first turn, then completes.
     struct SpawnCallProvider {
         turn: Mutex<usize>,
@@ -10975,5 +11060,43 @@ mod tests {
         assert!(!tool_names(&restricted_requests[0]).contains(&"load_skill"));
         assert_eq!(plan.descriptor().skills.disclosed, 1);
         assert_eq!(plan.descriptor().skills.indexed, 2);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ab1_audit_regression {
+    #[tokio::test]
+    async fn a_failed_command_that_wrote_still_triggers_audit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(directory.path()).unwrap();
+        let arguments = r#"{"command":"printf changed > written.txt; exit 3"}"#.to_owned();
+        let call = crate::runtime::RuntimeToolCall {
+            id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "ab1-write".to_owned(),
+            rejection: None,
+            name: "shell".to_owned(),
+            arguments: arguments.clone(),
+            effect: crate::catalog::EffectClass::Shell,
+        };
+        let result = crate::tools::execute(
+            crate::workspace::Workspace::open(&path).unwrap(),
+            std::sync::Arc::default(),
+            "shell".to_owned(),
+            arguments,
+            crate::RunCancellation::new(),
+            None,
+            crate::tools::ToolTasks::default(),
+            std::sync::Arc::default(),
+            std::sync::Arc::default(),
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        assert!(crate::runtime::is_progress(&call, None, &result));
+        let mut triggers = crate::runtime::AuditTriggers::default();
+        crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
+        assert!(triggers.fires(crate::runtime::AuditMode::Heuristic));
     }
 }

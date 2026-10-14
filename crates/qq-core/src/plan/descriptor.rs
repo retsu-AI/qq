@@ -11,10 +11,11 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 13;
+pub const DESCRIPTOR_VERSION: u16 = 14;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v13\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v14\0";
+const LEGACY_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v13\0";
 
 /// Where a credential comes from, without its value. Two plans that read the
 /// same environment variable or stored credential name share a reference and
@@ -189,6 +190,9 @@ pub struct AgentPlanDescriptor {
     pub delegation: DelegationRoster,
     /// When the root run's final answer is audited (version 4).
     pub audit: AuditDescriptor,
+    /// Public digest of immutable host-approved read images (version 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_read_images: Option<ContentHash>,
     /// Mandatory post-result/final reviewer identity; absent means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
@@ -274,7 +278,12 @@ impl AgentPlanDescriptor {
     /// The exact bytes the digest covers: the domain separator followed by
     /// compact JSON in declaration order.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, PlanCompileError> {
-        let mut bytes = DIGEST_DOMAIN.to_vec();
+        let mut bytes = if self.version == 13 {
+            LEGACY_DIGEST_DOMAIN
+        } else {
+            DIGEST_DOMAIN
+        }
+        .to_vec();
         serde_json::to_writer(&mut bytes, self).map_err(|error| PlanCompileError::Encode {
             message: error.to_string(),
         })?;

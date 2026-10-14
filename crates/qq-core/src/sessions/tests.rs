@@ -15,6 +15,7 @@ mod context_capacity;
 mod contract;
 mod deadlines;
 mod delegation;
+mod execution_context;
 mod feeds;
 mod migrations;
 mod nonblocking;
@@ -1828,6 +1829,7 @@ async fn spill_one_call(
                 digest: digest.clone(),
                 omitted_from_line: 2,
             }),
+            None,
         )
         .await
         .unwrap();
@@ -4180,6 +4182,7 @@ async fn project_terminal_run_with_tool_boundaries(
             "persisted result".to_owned(),
             false,
             Vec::new(),
+            None,
             None,
             None,
         )
@@ -6952,7 +6955,7 @@ fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(version, "46");
+            assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
         }
     }
 }
@@ -7017,7 +7020,7 @@ fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
-    assert_eq!(STORE_SCHEMA_VERSION, 46);
+    assert_eq!(STORE_SCHEMA_VERSION, 47);
     let count: u64 = connection
         .query_row("SELECT COUNT(*) FROM side_questions", [], |row| row.get(0))
         .unwrap();

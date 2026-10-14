@@ -50,7 +50,8 @@ adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 `approval_delegate`, the identity of the first delegate for held calls (Jev
 approval) when enabled (ADR-0052); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
-catalog (ADR-0054 § 4). None alters the wire envelope version or
+catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
+approved self-contained read images (ADR-0060). None alters the wire envelope version or
 requires a database migration; historical descriptor JSON remains historical
 evidence.
 
@@ -266,6 +267,11 @@ exact owner-run accounting of internal compaction attempts. Completed, failed
 and cancelled attempts enter their owner's child-spend receipt; manual and
 unrelated compactions do not. Unknown usage or cost remains unknown. Internal
 attempts do not consume the child-count or depth allowance. No wire shape changes.
+
+Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
+The process executor's receipt commits with its result and finished event;
+historical rows remain NULL and cannot qualify execution effects. No wire
+shape changes. Older binaries refuse the upgraded store at open.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

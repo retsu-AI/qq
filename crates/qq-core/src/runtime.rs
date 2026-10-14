@@ -58,7 +58,8 @@ pub(crate) use prompt::{
 };
 pub(crate) use shell_policy::builtin_alternative;
 pub use shell_policy::{
-    BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ShellPolicy,
+    ApprovedReadImage, ApprovedReadImages, BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_ALLOWLIST,
+    MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract, ReadImageFamily, ShellPolicy,
     valid_env_name,
 };
 pub(crate) use spill::{

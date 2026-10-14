@@ -98,6 +98,7 @@ pub(crate) enum ToolClass {
     Shell {
         command: String,
         cwd: Option<String>,
+        read_only: bool,
     },
     /// An MCP or embedded-host tool. Host hints never grant authority, so
     /// every external call is gated like a mutation.
@@ -413,9 +414,8 @@ fn spawn_class(arguments: &str) -> ToolClass {
 }
 
 /// The shell class for `shell` (a command string) or `exec` (an argv). An
-/// `exec` call is rendered as the equivalent command line — each argument
-/// single-quoted when it holds shell metacharacters — so the classifier,
-/// prefix grants, and the approval preview see one shape for both tools.
+/// `exec` uses literal argv for progress reads. Its command-line rendering
+/// remains the shared approval preview and prefix-grant shape.
 fn shell_class(name: &str, arguments: &str) -> ToolClass {
     #[derive(Deserialize)]
     struct ShellArguments {
@@ -433,26 +433,56 @@ fn shell_class(name: &str, arguments: &str) -> ToolClass {
         #[serde(default)]
         cwd: Option<String>,
     }
+    #[derive(Deserialize)]
+    struct RequestedEnvironment {
+        #[serde(default)]
+        env: Vec<serde::de::IgnoredAny>,
+    }
+    // Keep command/cwd parsing authoritative for approval. This extra view
+    // only disqualifies read candidates, including malformed/duplicate env.
+    let environment_is_empty = || match serde_json::from_str::<RequestedEnvironment>(arguments) {
+        Ok(environment) => environment.env.is_empty(),
+        Err(_) => false,
+    };
     if name == "exec" {
         return match serde_json::from_str::<ExecArguments>(arguments) {
             Ok(arguments) => ToolClass::Shell {
+                read_only: arguments.args.len() < 128
+                    && arguments.program.len().saturating_add(
+                        arguments
+                            .args
+                            .iter()
+                            .map(|arg| arg.len().saturating_add(1))
+                            .sum::<usize>(),
+                    ) <= classify::MAX_CLASSIFIED_BYTES
+                    && {
+                        let mut args = [""; 127];
+                        for (slot, arg) in args.iter_mut().zip(&arguments.args) {
+                            *slot = arg;
+                        }
+                        read_only_argv(&arguments.program, &args[..arguments.args.len()])
+                            && environment_is_empty()
+                    },
                 command: exec_command_line(&arguments.program, &arguments.args),
                 cwd: arguments.cwd,
             },
             Err(_) => ToolClass::Shell {
                 command: String::new(),
                 cwd: None,
+                read_only: false,
             },
         };
     }
     match serde_json::from_str::<ShellArguments>(arguments) {
         Ok(arguments) => ToolClass::Shell {
+            read_only: read_only_shell_command(&arguments.command) && environment_is_empty(),
             command: arguments.command,
             cwd: arguments.cwd,
         },
         Err(_) => ToolClass::Shell {
             command: String::new(),
             cwd: None,
+            read_only: false,
         },
     }
 }
@@ -487,65 +517,426 @@ pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
     out
 }
 
-/// Whether a shell command is interrogative: a version-control or filesystem
-/// read whose worst outcome is output. Used only by the audit heuristic to
-/// decide whether a run did anything worth checking; it grants nothing.
+/// Recognized shell reads for the stall counter and heuristic audit only.
+/// This grants no execution authority; build/test commands remain work even
+/// when the independent approval classifier allows them.
 pub(crate) fn read_only_shell_command(command: &str) -> bool {
-    const READ_ONLY: &[&str] = &[
-        "git blame",
-        "git diff",
-        "git log",
-        "git show",
-        "git status",
-        "git branch",
-        "git rev-parse",
-        "jj diff",
-        "jj log",
-        "jj op log",
-        "jj show",
-        "jj status",
-        "ls",
-        "cat",
-        "head",
-        "tail",
-        "wc",
-        "find",
-        "grep",
-        "rg",
-        "fd",
-        "tree",
-        "pwd",
-        "echo",
-        "which",
-        "file",
-        "stat",
-        "du",
-        "df",
-        "cargo metadata",
-        "cargo tree",
-        "cargo --version",
-        "rustc --version",
-    ];
+    if command.len() > classify::MAX_CLASSIFIED_BYTES
+        || command.contains(['\n', '\r'])
+        || (cfg!(windows) && command.contains(['\'', '^', '%', '!']))
+    {
+        return false;
+    }
     let command = command.trim();
     if command.is_empty() {
         return true;
     }
-    // Every pipeline segment must be read-only; redirections write.
-    if command.contains('>') {
-        return false;
+    // A bounded argv view preserves quoted filenames/scripts without a shell
+    // parser or allocation. Unknown syntax counts as work, never as authority.
+    let reads = |segment: &str, first: bool, connector: u8| {
+        let mut argv = [""; 128];
+        let mut count = 0;
+        let mut start = None;
+        let mut quote = None;
+        for (index, byte) in segment.bytes().chain(std::iter::once(b' ')).enumerate() {
+            match quote {
+                Some(delimiter) if byte == delimiter => quote = None,
+                Some(_) => {}
+                None if matches!(byte, b'\'' | b'"') => {
+                    start.get_or_insert(index);
+                    quote = Some(byte);
+                }
+                None if byte.is_ascii_whitespace() => {
+                    if let Some(begin) = start.take() {
+                        if count == argv.len() {
+                            return false;
+                        }
+                        let word = &segment[begin..index];
+                        let quoted = word.starts_with(['\'', '"'])
+                            && word.as_bytes().last() == word.as_bytes().first();
+                        argv[count] = if quoted {
+                            &word[1..word.len() - 1]
+                        } else {
+                            word
+                        };
+                        if ((!quoted && argv[count].contains(['\'', '"']))
+                            || (quoted && argv[count].as_bytes().contains(&word.as_bytes()[0])))
+                            || (!quoted && argv[count].contains(['*', '?', '[', ']', '~']))
+                        {
+                            return false;
+                        }
+                        count += 1;
+                    }
+                }
+                None => {
+                    start.get_or_insert(index);
+                }
+            }
+        }
+        if quote.is_some() || count == 0 {
+            return false;
+        }
+        let words = &argv[..count];
+        if first && words[0] == "cd" {
+            return count == 2
+                && matches!(connector, b'&' | b';')
+                && !segment.contains(['\'', '"'])
+                && !words[1].contains(['*', '?', '[', ']', '!', '~'])
+                && !words[1].starts_with('-');
+        }
+        read_only_argv(words[0], &words[1..])
+    };
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    let mut quote = None;
+    let mut first = true;
+    let mut last_connector = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(b'"') if matches!(byte, b'$' | b'`' | b'\\') => return false,
+            Some(_) => {}
+            None if matches!(
+                byte,
+                b'>' | b'<' | b'$' | b'`' | b'\\' | b'(' | b')' | b'{' | b'}' | b'#'
+            ) =>
+            {
+                return false;
+            }
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if matches!(byte, b'|' | b';' | b'&') => {
+                if byte == b'&' && bytes.get(index + 1) != Some(&b'&') {
+                    return false;
+                }
+                if !reads(command[start..index].trim(), first, byte) {
+                    return false;
+                }
+                first = false;
+                last_connector = byte;
+                index +=
+                    usize::from(matches!(byte, b'|' | b'&') && bytes.get(index + 1) == Some(&byte));
+                start = index + 1;
+            }
+            None => {}
+        }
+        index += 1;
     }
-    command
-        .split(['|', ';', '&'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .all(|segment| {
-            READ_ONLY.iter().any(|prefix| {
-                segment == *prefix
-                    || segment
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with(' '))
-            })
-        })
+    quote.is_none()
+        && if command[start..].trim().is_empty() {
+            last_connector == b';'
+        } else {
+            reads(command[start..].trim(), first, 0)
+        }
+}
+
+/// A bounded, literal sed program containing only addresses, printing and
+/// pattern-space substitutions. Delimiters are parsed before command separators.
+fn read_only_sed_script(script: &str) -> bool {
+    fn field(bytes: &[u8], position: &mut usize, delimiter: u8) -> bool {
+        while let Some(&byte) = bytes.get(*position) {
+            *position += 1;
+            if byte == delimiter {
+                return true;
+            }
+            if byte == b'\\' {
+                if *position == bytes.len() {
+                    return false;
+                }
+                *position += 1;
+            }
+        }
+        false
+    }
+
+    let bytes = script.as_bytes();
+    let mut position = 0;
+    let mut seen = false;
+    loop {
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        if position == bytes.len() {
+            return seen;
+        }
+        for address in 0..2 {
+            match bytes.get(position) {
+                Some(b'0'..=b'9') => {
+                    while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+                        position += 1;
+                    }
+                }
+                Some(b'$') => position += 1,
+                Some(b'/') => {
+                    position += 1;
+                    if !field(bytes, &mut position, b'/') {
+                        return false;
+                    }
+                }
+                _ if address == 0 => break,
+                _ => return false,
+            }
+            while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                position += 1;
+            }
+            if address == 0 && bytes.get(position) == Some(&b',') {
+                position += 1;
+                while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                    position += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        match bytes.get(position) {
+            Some(b'p' | b'=') => position += 1,
+            Some(b'l') => {
+                position += 1;
+                while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                    position += 1;
+                }
+                while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+                    position += 1;
+                }
+            }
+            Some(b's') => {
+                position += 1;
+                let Some(&delimiter) = bytes.get(position) else {
+                    return false;
+                };
+                if !delimiter.is_ascii() || delimiter.is_ascii_whitespace() || delimiter == b'\\' {
+                    return false;
+                }
+                position += 1;
+                if !field(bytes, &mut position, delimiter)
+                    || !field(bytes, &mut position, delimiter)
+                {
+                    return false;
+                }
+                while let Some(&flag) = bytes.get(position) {
+                    if flag == b';' || flag.is_ascii_whitespace() {
+                        break;
+                    }
+                    if !matches!(flag, b'p' | b'g' | b'i' | b'I' | b'm' | b'M' | b'0'..=b'9') {
+                        return false;
+                    }
+                    position += 1;
+                }
+            }
+            _ => return false,
+        }
+        seen = true;
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        match bytes.get(position) {
+            None => return true,
+            Some(b';') => position += 1,
+            _ => return false,
+        }
+    }
+}
+
+pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
+    match program {
+        "git" => {
+            let args = if args.first() == Some(&"-C") {
+                match args.get(2..) {
+                    Some(args) => args,
+                    None => return false,
+                }
+            } else {
+                args
+            };
+            // Working-tree reads may run a configured fsmonitor hook.
+            let Some(args) = args.strip_prefix(&["--no-lazy-fetch", "-c", "core.fsmonitor=false"])
+            else {
+                return false;
+            };
+            let Some((subcommand, args)) = args.split_first() else {
+                return false;
+            };
+            match *subcommand {
+                "branch" => {
+                    args.contains(&"--sort=refname")
+                        && !args.iter().any(|arg| {
+                            arg.starts_with("--format")
+                                || (arg.starts_with("--sort") && *arg != "--sort=refname")
+                        })
+                        && rules::branch_lists(args)
+                }
+                "log" | "show" => {
+                    let Some(args) = args.strip_prefix(&[
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-patch",
+                        "--diff-merges=off",
+                        "--no-show-signature",
+                        "--format=oneline",
+                    ]) else {
+                        return false;
+                    };
+                    let mut paths = false;
+                    args.iter().all(|arg| {
+                        if paths {
+                            return true;
+                        }
+                        if *arg == "--" {
+                            paths = true;
+                            return true;
+                        }
+                        !arg.starts_with('-')
+                            || matches!(
+                                *arg,
+                                "--all"
+                                    | "--branches"
+                                    | "--tags"
+                                    | "--remotes"
+                                    | "--first-parent"
+                                    | "--no-merges"
+                                    | "--reverse"
+                            )
+                            || arg.strip_prefix("--max-count=").is_some_and(|n| {
+                                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                            })
+                            || arg.strip_prefix('-').is_some_and(|n| {
+                                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                            })
+                    })
+                }
+                // Working-tree reads can invoke configured clean/process filters.
+                "status" | "diff" | "blame" => false,
+                "rev-parse" => matches!(
+                    args,
+                    ["HEAD"]
+                        | ["--short", "HEAD"]
+                        | ["--show-toplevel"]
+                        | ["--git-dir"]
+                        | ["--show-prefix"]
+                        | ["--is-inside-work-tree"]
+                ),
+                "worktree" => matches!(args, ["list"] | ["list", "--porcelain"]),
+                _ => false,
+            }
+        }
+        "find" => !args.iter().any(|arg| {
+            *arg == "-delete"
+                || *arg == "-fls"
+                || ["-exec", "-ok", "-fprint"]
+                    .iter()
+                    .any(|prefix| arg.starts_with(prefix))
+        }),
+        // Spills can write inside the workspace through inherited TMPDIR.
+        "sort" => false,
+        "uniq" => {
+            let mut operands = 0;
+            let mut stdout = false;
+            let mut value = false;
+            let mut options = true;
+            for arg in args {
+                if std::mem::take(&mut value) {
+                    continue;
+                }
+                if options && *arg == "--" {
+                    options = false;
+                    continue;
+                }
+                if options
+                    && matches!(
+                        *arg,
+                        "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
+                    )
+                {
+                    value = true;
+                } else if !options || !arg.starts_with('-') || *arg == "-" {
+                    operands += 1;
+                    stdout = *arg == "-";
+                }
+            }
+            operands <= 1 || (operands == 2 && stdout)
+        }
+        "sed" => {
+            let mut quiet = false;
+            let mut script = false;
+            let mut expect_script = false;
+            for arg in args {
+                if expect_script || (!script && !arg.starts_with('-')) {
+                    if !read_only_sed_script(arg) {
+                        return false;
+                    }
+                    script = true;
+                    expect_script = false;
+                } else if arg.starts_with('-') {
+                    match *arg {
+                        "-n" | "--quiet" | "--silent" => quiet = true,
+                        "-e" | "--expression" => expect_script = true,
+                        option if option.starts_with("--expression=") => {
+                            if !read_only_sed_script(&option[13..]) {
+                                return false;
+                            }
+                            script = true;
+                        }
+                        "-E" | "-r" | "--regexp-extended" => {}
+                        option
+                            if option.starts_with('-')
+                                && !option.starts_with("--")
+                                && option.len() > 1
+                                && option[1..]
+                                    .bytes()
+                                    .all(|flag| matches!(flag, b'n' | b'E' | b'r')) =>
+                        {
+                            quiet |= option.contains('n');
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            quiet && script && !expect_script
+        }
+        // Repository loading may reconcile and persist divergent operation heads.
+        "jj" => false,
+        // Compiler queries invoke wrappers; rustup proxies can install toolchains.
+        "cargo" | "rustc" => false,
+        "tree" => !args.iter().any(|arg| {
+            (arg.starts_with('-')
+                && !arg.starts_with("--")
+                && (arg.contains('o') || arg.contains('R')))
+                || arg.starts_with("--out")
+        }),
+        "fd" => !args.iter().any(|arg| {
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X', 'l']))
+                || arg.starts_with("--exec")
+                || arg.starts_with("--list")
+        }),
+        "rg" => {
+            args.first() == Some(&"--no-config")
+                && !args.iter().any(|arg| {
+                    arg.starts_with("--pre")
+                        || arg.starts_with("--hostname-bin")
+                        || arg.starts_with("--search-zip")
+                        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
+                })
+        }
+        "file" => !args.iter().any(|arg| {
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z', 'p']))
+                || {
+                    let option = arg.split('=').next().unwrap_or(arg);
+                    option.len() > 2
+                        && [
+                            "--compile",
+                            "--uncompress",
+                            "--uncompress-noreport",
+                            "--preserve-date",
+                        ]
+                        .iter()
+                        .any(|name| name.starts_with(option))
+                }
+        }),
+        "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
+        | "du" | "df" | "nl" | "cut" => true,
+        _ => false,
+    }
 }
 
 /// Decides whether one classified tool call executes, waits for approval, or
@@ -642,6 +1033,512 @@ pub(crate) fn evaluate(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ab1_configured_helpers_and_quoted_literals_have_correct_verdicts() {
+        for (command, expected) in [
+            ("git status", false),
+            ("git diff --stat", false),
+            ("git -c core.fsmonitor=false status", false),
+            ("git -C sub -c core.fsmonitor=false diff --stat", false),
+            ("rg needle f", false),
+            ("rg --no-config 'foo(bar)' f.rs", !cfg!(windows)),
+            ("rg --no-config '$#<>\\' f.rs", !cfg!(windows)),
+            ("rg --no-config --pre=./mutate x f", false),
+            ("fd -l", false),
+            ("fd --list-details", false),
+            ("file -Sz sample.Z", false),
+            ("file --uncompress sample.Z", false),
+        ] {
+            assert_eq!(
+                super::read_only_shell_command(command),
+                expected,
+                "{command}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab1_cmd_separators_and_native_sort_output_are_work() {
+        for command in [
+            "echo 'x & cargo fmt & echo x'",
+            "sort input.txt /o output.txt",
+            "echo %MUTATING_COMMAND%",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_read_scan_bounds_and_uncertain_shell_syntax() {
+        assert!(super::read_only_shell_command(&format!(
+            "echo {}",
+            "x ".repeat(127)
+        )));
+        assert!(!super::read_only_shell_command(&format!(
+            "echo {}",
+            "x ".repeat(128)
+        )));
+        assert!(!super::read_only_shell_command(&format!(
+            "cat {}",
+            "x".repeat(super::classify::MAX_CLASSIFIED_BYTES)
+        )));
+        for command in [
+            "cat 'unterminated",
+            "cat f &&",
+            "cd x && cd y && cat f",
+            "sort --out\"put\"=out f",
+            "find . -ex\"ec\" touch out ';'",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert!(super::read_only_shell_command("cd x; grep\tx\tf | wc -l"));
+    }
+
+    #[test]
+    fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
+        let cases = [
+            (
+                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=%GG",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?",
+                false,
+            ),
+            (
+                "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD",
+                true,
+            ),
+            ("rg -z needle f.gz", false),
+            ("rg --search-zip needle f.gz", false),
+            ("rg -nz needle f.gz", false),
+            ("sed -n -e 1p -e 3p f.rs", true),
+            ("sed -n -e 1p -e 's/x/y/e' f.rs", false),
+            ("jj diff --tool ./mutate", false),
+            ("jj status", false),
+            ("jj --ignore-working-copy --no-pager status", false),
+            ("cd crates/x && grep -n foo y.rs", true),
+            ("cd crates/x; sed -n 1,80p y.rs", true),
+            ("sed -n 1,80p f.rs | nl", true),
+            (
+                "git -C .worktrees/a -c core.fsmonitor=false diff --stat",
+                false,
+            ),
+            (
+                "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
+                true,
+            ),
+            ("cut -f 1 f.rs | sort | uniq", false),
+            ("grep 'a;b' f | wc -l", !cfg!(windows)),
+            ("sed -n '/write/p' f", !cfg!(windows)),
+            (
+                "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname 'topic*'",
+                !cfg!(windows),
+            ),
+            ("find . -de\"lete\"", false),
+            ("grep x f &&", false),
+            ("grep x f &", false),
+            ("sed -n '1p;w out' f", false),
+            ("git -c core.fsmonitor=false log --output=out", false),
+            (
+                "git -c core.fsmonitor=false show --output=written.txt HEAD",
+                false,
+            ),
+            ("sed -n -f write.sed input.txt", false),
+            ("sed -n 's/.*/touch generated/e' input.txt", false),
+            ("sed -n 's/x/y/w generated.txt' input.txt", false),
+            ("sort --o=written.txt input.txt", false),
+            ("sed -n --file=write.sed input.txt", false),
+            ("tree -o out", false),
+            ("fd -x cargo fmt", false),
+            ("rg --pre 'touch out' x f", false),
+            (
+                "cd sub && rg --hostname-bin ./mutate --hyperlink-format default --color=always x f",
+                false,
+            ),
+            ("git -C sub -c core.fsmonitor=false diff --ext-diff", false),
+            ("git -c core.fsmonitor=false diff", false),
+            ("git -c core.fsmonitor=false show HEAD", false),
+            ("git -c core.fsmonitor=false log -p", false),
+            ("git -c core.fsmonitor=false diff --stat -p", false),
+            (
+                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature HEAD",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --ext-diff",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --ext-diff --no-ext-diff --no-textconv",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --ext --no-textconv",
+                false,
+            ),
+            ("git -c core.fsmonitor=false log --textc", false),
+            (
+                "git -c core.fsmonitor=false diff -- --no-ext-diff --no-textconv",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --src-prefix --no-ext-diff --no-textconv",
+                false,
+            ),
+            ("git -c core.fsmonitor=false blame f", false),
+            ("git -c core.fsmonitor=false blame --no-textconv f", false),
+            ("git -c core.fsmonitor=false blame -- --no-textconv", false),
+            (
+                "git -c core.fsmonitor=false blame --no-textconv --textc f",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv HEAD",
+                false,
+            ),
+            ("git -c core.fsmonitor=false log --textconv -p", false),
+            ("git -c core.fsmonitor=false show --ext-diff HEAD", false),
+            ("cd sub && cargo metadata --format-version=1", false),
+            ("cargo tree", false),
+            ("cargo metadata --offline", false),
+            ("cargo metadata -- --locked", false),
+            ("cargo tree --prefix --locked", false),
+            (
+                "cargo metadata --locked --config build.rustc=./mutate",
+                false,
+            ),
+            ("rg --hostname-bin=./mutate x f", false),
+            ("cargo metadata --locked --format-version=1", false),
+            ("cargo tree --frozen", false),
+            ("file -C", false),
+            ("file --comp -m magic", false),
+            ("find . -de*", false),
+            ("find . -name '*.rs'", !cfg!(windows)),
+            ("cd x && cargo test -p y", false),
+            ("sed -i s/a/b/ f.rs", false),
+            ("cd x && grep foo f > out", false),
+            ("cd 'a b' && grep x f", false),
+            ("sed -ni s/a/b/ f.rs", false),
+            ("sed -n --in-place s/a/b/ f.rs", false),
+            ("sed -n '1,5w out' f", false),
+            ("sed -n '1,5e' f", false),
+            ("sort -o f.rs f.rs", false),
+            ("sort -oout f.rs", false),
+            ("sort --output=out f.rs", false),
+            ("sort --output out f.rs", false),
+            ("uniq in out", false),
+            ("find . -name '*.orig' -delete", false),
+            ("find . -exec cargo fmt ;", false),
+            ("find . -fprint out", false),
+            ("git -c core.fsmonitor=false branch -D topic", false),
+            ("git -c core.fsmonitor=false branch --delete topic", false),
+            ("git -c core.fsmonitor=false branch --move old new", false),
+            ("git -c core.fsmonitor=false branch --copy old new", false),
+            ("git -c core.fsmonitor=false branch --force topic", false),
+            ("git -c core.fsmonitor=false branch created", false),
+            (
+                "git -c core.fsmonitor=false branch --list --no-list created",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false branch --format --list created",
+                false,
+            ),
+            ("git -c core.fsmonitor=false diff --output=x", false),
+            ("grep x f\ncargo fmt", false),
+            ("cat $(cargo fmt)", false),
+            ("cat `cargo fmt`", false),
+            ("cat <(cargo fmt)", false),
+        ];
+        let failures: Vec<_> = cases
+            .into_iter()
+            .filter(|(command, read)| super::read_only_shell_command(command) != *read)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "wrong shell read verdicts: {failures:?}"
+        );
+    }
+    #[test]
+    fn ab1_git_filters_and_signature_helpers_are_work() {
+        for command in [
+            "git -c core.fsmonitor=false status",
+            "git -c core.fsmonitor=false diff --stat",
+            "git -c core.fsmonitor=false blame --no-textconv f.rs",
+            "git -c core.fsmonitor=false branch --list --format='%(signature:grade)'",
+            "git -c core.fsmonitor=false branch --list --sort=signature:grade",
+            "git -c core.fsmonitor=false branch --list",
+            "git -c core.fsmonitor=false branch --list --sort=refname --sort=signature:grade",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --remerge-diff -1",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline --diff-merges=remerge -1",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --remerge-diff -1",
+            "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --diff-merges=remerge -1",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert!(super::read_only_shell_command(
+            "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname"
+        ));
+    }
+
+    #[test]
+    fn ab1_literal_exec_arguments_remain_reads() {
+        for args in [
+            r#"{"program":"rg","args":["--no-config","foo bar","f.rs"]}"#,
+            r#"{"program":"rg","args":["--no-config","it's $HOME!^%","f.rs"]}"#,
+        ] {
+            let call = crate::runtime::RuntimeToolCall {
+                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+                turn_ordinal: 0,
+                call_ordinal: 0,
+                provider_call_id: "exec-read".to_owned(),
+                rejection: None,
+                name: "exec".to_owned(),
+                arguments: args.to_owned(),
+                effect: crate::catalog::EffectClass::Shell,
+            };
+            let result = crate::tools::bounded_result("exec exit=0\nmatch".to_owned(), false);
+            assert!(!crate::runtime::is_progress(&call, None, &result), "{args}");
+            let mut triggers = crate::runtime::AuditTriggers::default();
+            crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
+            assert!(
+                !triggers.fires(crate::runtime::AuditMode::Heuristic),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn ab1_git_help_is_not_a_progress_read() {
+        for command in [
+            "git --no-lazy-fetch -c core.fsmonitor=false rev-parse --help",
+            "git --no-lazy-fetch -c core.fsmonitor=false worktree list --help",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_trailing_separators_and_substitutions_preserve_read_verdicts() {
+        for command in [
+            "grep x f;",
+            "grep x f;  ",
+            "cat f; grep x f;",
+            "cd x; grep x f;",
+            "sed -n 's/foo/bar/p' f",
+            "sed -n 's#foo#bar#gp' f",
+            "sed -n '1,$s/foo/bar/p' f",
+            "sed -n 's/foo;bar/baz;p/p' f",
+            "sed -n 's/foo\\/bar/baz/p' f",
+            "sed -n -e 's/foo/bar/p' -e '2p' f",
+        ] {
+            assert_eq!(
+                super::read_only_shell_command(command),
+                !cfg!(windows) || !command.contains('\''),
+                "{command}"
+            );
+        }
+        for command in [
+            ";",
+            "grep x f;;",
+            "grep x f &&",
+            "grep x f |",
+            "grep x f ||",
+            "sed -n 's/foo/bar/ep' f",
+            "sed -n 's/foo/bar/pe' f",
+            "sed -n 's/foo/bar/w out' f",
+            "sed -n 's/foo/bar/p; e touch out' f",
+            "sed -n -e 's/foo/bar/p' -e 's/foo/bar/e' f",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_sed_extended_regex_is_read_without_write_options() {
+        for options in [
+            vec!["-E", "-n"],
+            vec!["-r", "-n"],
+            vec!["--regexp-extended", "-n"],
+            vec!["-En"],
+            vec!["-nE"],
+            vec!["-rn"],
+        ] {
+            let mut args = vec!["sed"];
+            args.extend(options);
+            args.extend(["/foo+/p", "f"]);
+            assert!(super::read_only_argv(args[0], &args[1..]), "{args:?}");
+        }
+        for args in [
+            ["sed", "-Eni", "/foo+/p", "f"],
+            ["sed", "-En", "s/foo/bar/e", "f"],
+        ] {
+            assert!(!super::read_only_argv(args[0], &args[1..]), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn ab1_tree_recursive_html_output_is_work() {
+        for command in ["tree -L 2 -R .", "tree -RL2 .", "tree -aR ."] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_joined_sed_printing_and_literal_opposite_quotes_are_reads() {
+        for command in [
+            "sed -n --expression=1p f",
+            "sed -n l f",
+            "sed -n 'l 80' f",
+            "sed -n 'l;1p' f",
+            r#"grep '"foo"' f"#,
+        ] {
+            assert!(super::read_only_shell_command(command), "{command}");
+        }
+        for command in [
+            "sed -n --expression= f",
+            "sed -n --expression=wout f",
+            "sed -n 'l -1' f",
+            "sed -n 'l;w out' f",
+            "grep 'a'b f",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_output_only_sed_and_uniq_are_reads() {
+        for script in ["=", "1,3=", "=; p"] {
+            assert!(super::read_only_sed_script(script), "{script}");
+        }
+        for command in ["uniq input -", "uniq -- input -", "uniq - -"] {
+            assert!(super::read_only_shell_command(command), "{command}");
+        }
+        for command in ["uniq input out", "uniq input - extra"] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_inherited_sort_spills_and_rustup_installation_are_work() {
+        for command in [
+            "sort -S1K huge-input",
+            "sort input",
+            "cargo --version",
+            "rustc --version",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_workspace_sort_temporaries_are_work() {
+        for command in [
+            "sort -T . -S1K huge-input",
+            "sort -T. input",
+            "sort --temporary-directory . input",
+            "sort --temporary-directory=. input",
+            "sort --temp=. input",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_explicit_process_environments_are_work_without_changing_authority() {
+        for tool in ["shell", "exec"] {
+            for env in [
+                serde_json::json!(["LD_PRELOAD"]),
+                serde_json::json!(["LANG"]),
+                serde_json::json!(42),
+            ] {
+                let mut args = if tool == "shell" {
+                    serde_json::json!({"command":"pwd","cwd":"."})
+                } else {
+                    serde_json::json!({"program":"pwd","cwd":"."})
+                };
+                args["env"] = env;
+                let class = super::shell_class(tool, &args.to_string());
+                let super::ToolClass::Shell {
+                    read_only,
+                    command,
+                    cwd,
+                } = class
+                else {
+                    panic!("shell class");
+                };
+                assert!(!read_only, "{tool} {args}");
+                assert_eq!(command, "pwd", "approval preview must be unchanged");
+                assert_eq!(cwd.as_deref(), Some("."));
+            }
+            let args = if tool == "shell" {
+                r#"{"command":"pwd","env":[]}"#
+            } else {
+                r#"{"program":"pwd","env":[]}"#
+            };
+            assert!(matches!(
+                super::shell_class(tool, args),
+                super::ToolClass::Shell {
+                    read_only: true,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn ab1_duplicate_and_escaped_environment_fields_preserve_the_preview() {
+        for arguments in [
+            r#"{"command":"pwd","env":[],"env":["LD_PRELOAD"]}"#,
+            r#"{"command":"pwd","\u0065nv":["LD_PRELOAD"]}"#,
+        ] {
+            let super::ToolClass::Shell {
+                command, read_only, ..
+            } = super::shell_class("shell", arguments)
+            else {
+                panic!("shell class");
+            };
+            assert_eq!(command, "pwd");
+            assert!(!read_only);
+        }
+        let super::ToolClass::Shell {
+            command, read_only, ..
+        } = super::shell_class("exec", r#"{"program":"pwd","env":[],"env":["LD_PRELOAD"]}"#)
+        else {
+            panic!("shell class");
+        };
+        assert_eq!(command, "pwd");
+        assert!(!read_only);
+    }
+
+    #[test]
+    fn ab1_lazy_fetch_operation_merge_and_timestamp_restoration_are_work() {
+        for command in [
+            "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path",
+            "jj --ignore-working-copy --no-pager status",
+            "file -p sample",
+            "file --preserve-date sample",
+            "file --pre sample",
+            "file -bp sample",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+        assert_eq!(
+            super::read_only_shell_command("sed -n '$p' f"),
+            !cfg!(windows)
+        );
+        assert!(super::read_only_shell_command(
+            "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD:path"
+        ));
+    }
+
     #[cfg(feature = "tool-fetch")]
     use std::sync::Arc;
 
@@ -661,6 +1558,7 @@ mod tests {
         ToolClass::Shell {
             command: command.to_owned(),
             cwd: None,
+            read_only: read_only_shell_command(command),
         }
     }
 
@@ -1022,6 +1920,7 @@ mod tests {
             ToolClass::Shell {
                 command: "cargo test -p qq-core -- --nocapture".to_owned(),
                 cwd: Some("crates".to_owned()),
+                read_only: false,
             }
         );
         // A grant on the prefix covers it; auto allows it.
@@ -1051,6 +1950,7 @@ mod tests {
             ToolClass::Shell {
                 command: r#"echo 'rm -rf /' '$HOME' 'a b' 'it'\''s'"#.to_owned(),
                 cwd: None,
+                read_only: true,
             }
         );
         assert_eq!(
@@ -1391,6 +2291,7 @@ mod tests {
             ToolClass::Shell {
                 command: "cargo test".to_owned(),
                 cwd: Some("crates".to_owned()),
+                read_only: false,
             }
         );
         // Every external tool is gated by its effect, whatever its prefix.

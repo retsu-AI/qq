@@ -79,6 +79,14 @@ without producing anything.
    - a *report* (decision 2) that contains text;
    - a goal checklist change, once ADR-0049's `update_goal` exists.
 
+   ADR-0060 supersedes lexical shell-read accounting: executed processes
+   count as Work unless the executor verifies a launch bound to an explicitly
+   host-approved self-contained read image. Failed Work also triggers heuristic
+   audits. The bounded command recognizer remains a lexical diagnostic, never
+   an approval grant. Historical command strings cannot verify execution
+   effects. All `sort` forms remain lexical Work because inherited TMPDIR can
+   place spill files in the workspace.
+
    Reads, searches, listings, history searches, spill reads and fetches are
    never progress, whether or not they are novel. Every run keeps
    `calls_since_progress`. It counts every settled call except runtime
