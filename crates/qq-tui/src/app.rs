@@ -1038,7 +1038,7 @@ impl App {
                 caused_by_me,
             },
         );
-        let mut effects = self.apply_state_effects(reduced);
+        let effects = self.apply_state_effects(reduced);
         if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
             && side_question.state != SideQuestionState::Running
             && self
