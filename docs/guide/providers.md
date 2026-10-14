@@ -103,8 +103,8 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-The complete stack uses protocol 32 and session-store schema 45 for the new
-effort vocabulary, replay envelopes, persisted checkpoint notices, the prune watermark, side questions and indexed internal-compaction accounting; older
+The complete stack uses protocol 32 and session-store schema 46 for the new
+effort vocabulary, replay envelopes, persisted checkpoint notices, the prune watermark, side questions, who a held call waits on and indexed internal-compaction accounting; older
 binaries cannot open upgraded stores. Back up the store before upgrading if rollback is needed.
 
 Anthropic discovery now follows bounded pagination before replacing implicit

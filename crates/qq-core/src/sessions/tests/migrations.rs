@@ -3404,3 +3404,99 @@ fn version_forty_two_gains_the_prune_watermark_at_the_newest_turn() {
         Err(SessionRuntimeError::CONSTRAINT)
     ));
 }
+
+/// Schema 45 records who a held call waits on. A schema-44 store holding a
+/// call upgrades with it waiting for a human, the safe reading: an older
+/// build never recorded a delegate. A column with the wrong shape is refused.
+#[test]
+fn version_forty_four_reads_existing_holds_as_waiting_for_a_human() {
+    for (previous, delegated) in [("44", false), ("45", true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        let session_id = SessionId::from_bytes([0x46; 16]);
+        let workspace = WorkspaceId::from_bytes([0x45; 16]).to_string();
+        let session = session_id.to_string();
+        let run = RunId::from_bytes([0x47; 16]).to_string();
+        let message = MessageId::from_bytes([0x48; 16]).to_string();
+        let call = ToolCallId::from_bytes([0x49; 16]);
+        for (statement, values) in [
+        (
+            "INSERT INTO workspaces(id, path) VALUES (?1, '/v44-holds')",
+            vec![workspace.clone()],
+        ),
+        (
+            "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 't', 'running', 1, 1)",
+            vec![session.clone(), workspace],
+        ),
+        (
+            "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                              assistant_message_id, status, created_at_ms)
+             VALUES (?1, ?2, ?1, ?3, ?3, 'running', 1)",
+            vec![run.clone(), session.clone(), message],
+        ),
+        (
+            "UPDATE sessions SET active_run_id = ?2 WHERE id = ?1",
+            vec![session, run.clone()],
+        ),
+        (
+            "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal, provider_call_id,
+                                    name, arguments_json, state, requested_at_ms)
+             VALUES (?1, ?2, 1, 1, 'call_1', 'shell', '{}', 'awaiting_approval', 1)",
+            vec![call.to_string(), run],
+        ),
+    ] {
+        connection
+            .execute(statement, rusqlite::params_from_iter(values))
+            .unwrap();
+    }
+        connection
+            .execute("DROP INDEX runs_owned_compaction", [])
+            .unwrap();
+        if previous == "44" {
+            connection
+                .execute("ALTER TABLE tool_calls DROP COLUMN approval_delegated", [])
+                .unwrap();
+        } else {
+            connection
+                .execute(
+                    "UPDATE tool_calls SET approval_delegated = 1 WHERE id = ?1",
+                    [call.to_string()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+                [previous],
+            )
+            .unwrap();
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            load_session_summary(&connection, session_id)
+                .unwrap()
+                .pending_holds,
+            [qq_protocol::PendingHold {
+                tool_call_id: call,
+                delegated,
+            }]
+        );
+        drop(connection);
+
+        let (connection, _) = open_database(&path).unwrap();
+        for statement in [
+            "ALTER TABLE tool_calls DROP COLUMN approval_delegated",
+            "ALTER TABLE tool_calls ADD COLUMN approval_delegated TEXT",
+        ] {
+            connection.execute(statement, []).unwrap();
+        }
+        drop(connection);
+        assert!(matches!(
+            open_database(&path),
+            Err(SessionRuntimeError::CONSTRAINT)
+        ));
+    }
+}

@@ -303,6 +303,29 @@ When the terminal is unfocused, an approval request or a finished run rings
 the bell and posts a desktop notification (OSC 9) where the terminal
 supports it.
 
+## Running inside herdr
+
+In a [herdr](https://herdr.dev) pane, `qq` reports its state to herdr
+itself; there is nothing to install. herdr's sidebar and `herdr agent list`
+show the pane as `qq` with one state for every session the window follows:
+
+| herdr state | When |
+| --- | --- |
+| `blocked` | any session has an approval or question waiting for you (the message names it) |
+| `working` | otherwise, any session is running, queued, or answering a side question, including while an approval delegate decides a held call |
+| `idle` | nothing is running |
+
+herdr's notifications and `herdr agent wait` follow these states. The
+focused session's root is reported for restore: after a herdr server
+restart the pane runs `qq --session ID` and reopens it, with a sub-agent
+session reopening as its tree. Quitting `qq` clears the pane.
+
+Reports go to the socket herdr names in `HERDR_SOCKET_PATH`, only when
+`HERDR_ENV=1` and `HERDR_PANE_ID` are set, and never delay the TUI: each
+waits at most half a second and a failed one is dropped. `qq serve` and
+`qq run` never report. Reporting needs a Unix socket, so it is off on
+Windows.
+
 ## Exiting
 
 `Ctrl-C` or `/quit`. The exit message prints the focused session id and

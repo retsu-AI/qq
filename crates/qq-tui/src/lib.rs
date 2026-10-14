@@ -10,6 +10,7 @@ mod composer;
 mod effect;
 #[cfg(any(test, feature = "bench-support"))]
 pub mod fixtures;
+mod herdr;
 mod input;
 mod lazy_port;
 mod picker;

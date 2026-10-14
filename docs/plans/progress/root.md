@@ -541,3 +541,6 @@ User's full autonomous-core goal owns CI diagnostic recording in isolated `.work
 ### 2026-10-13 — AC0.2.1 compiled fixture identity review repair
 
 Recorder review reproduces materially different included soak fixtures across earlier A/B arms. Extend this slice to the concrete `turn_overhead.rs` benchmark, source-manifest/dep-info verification script and tests. Pin its two direct source files from one immutable fixture checkout in both production arms; embedded source SHA-256 binds each sample to the compiled fixture. Production crates remain the comparison variable. Earlier recordings are retained as confounded whole-build diagnostics, not attributed runtime measurements. No new dependency, public protocol or schema change.
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
