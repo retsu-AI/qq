@@ -1084,9 +1084,10 @@ sessions. Unknown usage or cost stays unknown and refuses a new child when the
 corresponding bound is imposed. Descendant history cannot be deleted until every
 owning ancestor run settles. Auditors store their direct spend on their own run;
 the parent meter and inclusive accounting each include that spend once.
-A read-only session is not offered the mutating, shell, or non-read external
-schemas its policy would deny, and a spawned child's approval mode can be
-lowered but never raised by a client command.
+A read-only session exposes built-in inspection and permitted read-child
+delegation. It omits mutation, shell, and all external tool schemas; external
+effect labels do not grant read-only authority. A spawned child's approval mode
+can be lowered but never raised by a client command.
 
 Base prompt identity 22 includes the authority wording for read-only,
 unattended and inspection-only tool sets. Ordinary actionable interactive
@@ -1553,6 +1554,21 @@ Store schema 47 saves bounded nullable process receipts atomically with their
 results, file state, spills and finished events. Historical rows remain NULL;
 saved command shape alone cannot qualify execution effects. These internal
 receipts do not change protocol envelopes or model-facing tool output.
+
+Session tool-turn replay persists the exact model-facing projection (ADR-0061).
+The core emits an internal barrier after budgeting and checkpoint annotations;
+session execution awaits its durable store acknowledgement before polling the
+runtime for another provider request. A failed projection write stops/drains the
+run and settles a persistence failure. Direct execution retains its live
+projection. Per-call rows remain authoritative for actual outcomes and effects;
+the projection preserves the ordered text, flags and correction notice seen by
+the next request. Descriptor15 identifies the strict policy for partial turns,
+and schema49 stores the bounded projection independently of those per-call rows.
+An unresolved historical projection settles only its queued reservation before
+runtime loading or provider polling. Missing projections in checkpoint-enabled
+tool turns also refuse reconstruction, including final-only reviewers, to preserve
+potentially durable verdict consequences without archive scans. It preserves that history, releases the
+preparation slot, and leaves fresh sessions usable; other store faults remain fatal.
 
 ## Concurrency And Multiple Agents
 

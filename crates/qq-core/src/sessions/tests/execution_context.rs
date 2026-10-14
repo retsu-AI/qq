@@ -218,7 +218,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 |row| row.get::<_, String>(0)
             )
             .unwrap(),
-        "48"
+        "50"
     );
 }
 

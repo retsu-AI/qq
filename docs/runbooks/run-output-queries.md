@@ -140,11 +140,13 @@ text only or with nothing.
 From store schema 40 (AP3a), each slice report is marked by
 `model_turns.notice = 'report'` on the first turn whose request carried it.
 From AP3b, a stall report is marked `stall_report` and a sub-agent's last
-turn `final_answer`. Store schema 46 adds `root_stall_report` for new root
+turn `final_answer`. Store schema 50 adds `root_stall_report` for new root
 stalls; children and historical root stalls retain `stall_report`. The query
 below counts slice, child/legacy stall and new root-stall reports with
 `notice IN ('report', 'stall_report', 'root_stall_report')`. The same predicate
-also works on schema 40–45, where the new value is absent.
+also works on accepted schemas40–47 and projection49, where the new value is
+absent. Experimental schema48 notice builds already used `root_stall_report`;
+the schema50 reader upgrades those stores and preserves that wording.
 A report retried after a fault or an output-limit cut continues on later
 turn rows without the mark. Its final attempt is the last row before the row
 marked `continuation`. This query counts reports in the window, and how many

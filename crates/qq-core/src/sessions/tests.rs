@@ -20,6 +20,7 @@ mod feeds;
 mod migrations;
 mod nonblocking;
 mod progress;
+mod projection;
 mod replay_identity;
 mod runs;
 mod settlement;
@@ -2183,6 +2184,7 @@ fn denial_capacity_fixture(
         model: ModelSelection::default(),
         messages: Vec::new(),
         message_effects: Vec::new(),
+        unresolved_tool_projection: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,

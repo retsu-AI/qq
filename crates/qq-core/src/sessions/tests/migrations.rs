@@ -1986,6 +1986,11 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
     let mut context = Vec::new();
     append_run_turns(
         vec![StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
             ordinal,
             content_json,
             truncated,
@@ -3155,6 +3160,11 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
+                strict_projection: true,
+                checkpoint_projection_required: false,
+                projection_json: None,
+                run_id: "fixture".to_owned(),
+                legacy_projection: false,
                 ordinal: 1,
                 content_json: "[{\"type\":\"text\",\"text\":\"legacy\"}]".to_owned(),
                 truncated: false,
@@ -3532,7 +3542,7 @@ fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
 }
 
 #[test]
-fn ab5_schema_forty_five_migrates_once_to_forty_eight() {
+fn ab5_schema_forty_five_migrates_once_to_fifty() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -3553,13 +3563,13 @@ fn ab5_schema_forty_five_migrates_once_to_forty_eight() {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "48"
+            "50"
         );
     }
 }
 
 #[test]
-fn ab5_schema_forty_seven_notice_migration_preserves_structure_and_store_identity() {
+fn ab5_schema_forty_nine_notice_migration_preserves_structure_and_store_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, store_id) = open_database(&path).unwrap();
@@ -3578,7 +3588,7 @@ fn ab5_schema_forty_seven_notice_migration_preserves_structure_and_store_identit
         .unwrap();
     connection
         .execute(
-            "UPDATE metadata SET value='47' WHERE key='schema_version'",
+            "UPDATE metadata SET value='49' WHERE key='schema_version'",
             [],
         )
         .unwrap();
@@ -3612,12 +3622,12 @@ fn ab5_schema_forty_seven_notice_migration_preserves_structure_and_store_identit
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "48");
+        assert_eq!(version, "50");
     }
 }
 
 #[test]
-fn ab5_schema_forty_eight_cannot_hide_a_missing_execution_receipt_column() {
+fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (connection, _) = open_database(&path).unwrap();
@@ -3640,5 +3650,5 @@ fn ab5_schema_forty_eight_cannot_hide_a_missing_execution_receipt_column() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "48");
+    assert_eq!(version, "50");
 }

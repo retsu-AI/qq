@@ -597,7 +597,8 @@ mod tests {
             queries
                 .contains("FROM m WHERE notice IN ('report', 'stall_report', 'root_stall_report')")
         );
-        assert!(queries.contains("schema 46"));
+        assert!(queries.contains("Store schema 50 adds `root_stall_report`"));
+        assert!(queries.contains("Experimental schema48 notice builds"));
     }
 
     use super::*;
