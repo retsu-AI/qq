@@ -811,11 +811,18 @@ impl TurnOutputBudget {
     /// it.
     pub(crate) fn admit(
         &mut self,
-        _tool: &str,
+        tool: &str,
         text: &mut String,
         recall: ResultRecall<'_>,
     ) -> bool {
-        let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
+        // A search cursor advances past every row in its already-bounded page.
+        // Dropping page rows would make continuation lose matches without recall.
+        let floor = if tool == "search" {
+            super::search::SEARCH_BOUNDS.max_bytes
+        } else {
+            MIN_MODEL_TEXT_BYTES
+        };
+        let allowed = self.remaining.max(floor);
         let mut cut = false;
         if text.len() > allowed {
             // The stored-result handle digests the row's text, which is the

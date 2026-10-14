@@ -708,3 +708,16 @@ newest last.
   target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
   AB2 production behavior is unchanged by the qualified AB1/environment and
   scope-query integration. Matched prompt/catalog/search performance stays open.
+
+
+### 2026-10-14 — complete pages and bounded directory enumeration
+
+- Long cursor-page regression fails under the generic per-turn projection:
+  turn-page-red.log. Live and replay now pass actual tool identity; search's
+  complete 12KiB pages survive the per-result floor and are fully charged.
+- Search listing checks cancellation/deadline during enumeration and after
+  sorting, with 100,000 entries and 32MiB retained name/path bytes. Incomplete
+  listing returns an explicit search_listing_limit error without a cursor.
+  Existing caller API remains shared; no unsorted-prefix pagination is used.
+  Focused listing regression fails before enforcement:
+  directory-listing-final-red.log. Final checks and integration remain open.

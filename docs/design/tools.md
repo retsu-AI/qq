@@ -1783,3 +1783,13 @@ dispatch overhead has a benchmark.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.
+
+Search pages retain their complete bounded content during per-turn projection.
+Their cursor advances past every emitted match, so a second generic head/tail
+cut would skip matches on continuation. The turn charges the complete page.
+
+Before ordered search traversal, each directory listing admits at most 100,000
+entries and 32MiB of retained name/path bytes. Cancellation and the search
+deadline are checked during enumeration and after sorting. An incomplete listing
+returns an explicit search-listing-limit error with nearer-root advice and no
+continuation cursor; an unsorted prefix cannot prove an ordered frontier.

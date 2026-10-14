@@ -575,3 +575,13 @@ its digest, and write/read child assertions must pin the new action bullet.
   classification field in its existing shell preview pattern. Approval
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
+
+
+- 2026-10-14 AB2 reserves tools/output.rs and live/replay turn-projection
+  call sites in runtime/run_loop.rs and sessions/{transcript,tests}.rs.
+  Actual tool identity preserves complete bounded search pages so cursors
+  never advance beyond omitted matches; root remains the sole writer.
+
+- AB2 additionally reserves tools/walk.rs for search-specific cancellable,
+  deadline-aware entry/name-byte enumeration ceilings before sorting. Existing
+  callers retain their listing API; incomplete search listings are errors.

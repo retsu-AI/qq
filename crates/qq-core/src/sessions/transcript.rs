@@ -1629,3 +1629,66 @@ pub(super) fn append_run_turns(
     }
     Ok(ends)
 }
+
+#[cfg(test)]
+mod action_bias_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn ab2_replay_preserves_complete_late_search_pages() {
+        let path = format!("{}/file.txt", "a".repeat(2_000));
+        let cursor = URL_SAFE_NO_PAD.encode(format!("{path}\0{}", 0));
+        let page = format!(
+            "search . mode=names next={cursor}\n{path}\n{}\n",
+            "b".repeat(4_000)
+        );
+        let mut blocks = Vec::new();
+        let mut recorded = HashMap::new();
+        for index in 0..4_u8 {
+            let id = format!("call-{index}");
+            let name = if index == 3 { "search" } else { "read_file" };
+            blocks.push(super::super::codec::PersistedContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.to_owned(),
+                arguments: serde_json::json!({}),
+            });
+            recorded.insert(
+                id,
+                RecordedResult {
+                    content: if index == 3 {
+                        page.clone()
+                    } else {
+                        "x".repeat(32 * 1024)
+                    },
+                    is_error: false,
+                    effect: None,
+                    id: ToolCallId::from_bytes([index + 1; 16]),
+                    spill_digest: None,
+                },
+            );
+        }
+        let turn = StoredTurn {
+            ordinal: 1,
+            content_json: serde_json::to_string(&blocks).unwrap(),
+            truncated: false,
+            notice: None,
+        };
+        let mut context = Vec::new();
+        append_run_turns(
+            vec![turn],
+            HashMap::from([(1, recorded)]),
+            Default::default(),
+            Default::default(),
+            None,
+            &mut context,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let ContentBlock::ToolResult { content, .. } = &context[1].content()[3] else {
+            panic!("replayed search");
+        };
+        assert_eq!(content, &page);
+        assert!(!content.contains("turn budget reached"));
+    }
+}
