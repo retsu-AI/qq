@@ -673,3 +673,9 @@ newest last.
 - Integrated accepted AB1 helper/exec fixes and AB2 discovery fixes with their
   qualified receipts. AB3 production read-window behavior is unchanged; rerun
   immutable workspace gates on the combined source before updating draft #303.
+
+- Combined immutable source 0d82d86f passes all workspace gates: 2,303 tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
+  Independent integration review approves; read-window behavior unchanged.
+  Matched performance and final hosted review remain open.
