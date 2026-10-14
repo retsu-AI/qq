@@ -334,10 +334,10 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         "{spawned_system}"
     );
     assert!(spawned_system.contains("You cannot change files or run commands"));
-    assert!(!spawned_system.contains("- Implement requested changes"));
+    assert!(!spawned_system.contains("- Do the work."));
     let follow_up_system = child_reqs[2].system().unwrap();
     assert!(!follow_up_system.contains("Sub-agent:"));
-    assert!(follow_up_system.contains("- Implement requested changes"));
+    assert!(follow_up_system.contains("- Do the work."));
     assert!(
         !child_reqs[2]
             .tools()
@@ -2369,7 +2369,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
     // tells it to implement the change rather than describe it.
     let child_system = child_reqs[0].system().unwrap();
     assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
-    assert!(child_system.contains("- Implement requested changes"));
+    assert!(child_system.contains("- Do the work."));
     assert!(!child_system.contains("You cannot change files or run commands"));
     // The spawn itself was a mutating call under the parent's Auto policy
     // and executed without a prompt.

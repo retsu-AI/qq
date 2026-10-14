@@ -544,3 +544,10 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
 AB2 owns the `src/headless.rs` JSONL regression's expected prompt version
 19 → 20. Workspace test exposed the additional public identity assertion;
 no headless production behavior changes.
+
+### 2026-10-14 — AB2 persisted identity and delegation assertions
+
+AB2 additionally owns test-only golden prompt identity in `plan.rs` and
+role-contract assertions in `sessions/tests/delegation.rs`. No descriptor
+encoding or session production behavior changes; prompt version 20 changes
+its digest, and write/read child assertions must pin the new action bullet.

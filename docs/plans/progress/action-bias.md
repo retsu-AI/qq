@@ -207,3 +207,7 @@ newest last.
   compile median +2.16%, A/A +0.82% (pair range -4.54% to +7.64%). Concurrent
   builds invalidate quiet-host qualification; these are diagnostic samples,
   not a waived performance gate. Initial candidate 30,239 ns/iteration.
+- Second full test run exposed four more stale contract assertions: plan
+  digest, tool-schema digest and two delegation prompts. Updated their
+  expected v20 identities/text, including the negative read-child assertion;
+  no production behavior was changed to satisfy them. Requalification next.
