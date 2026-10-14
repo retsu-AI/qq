@@ -63,8 +63,10 @@ changed/new lines and pruned stubs, maps shell reads to the built-ins, and
 finds scoped instruction files once per discovery root, following cursor
 pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
 targets also use their highest ignored ancestor with `include_ignored=true`,
-covering instructions within that subtree and multiple worktrees. Explicit paths reach
-ignored worktrees. Tool-specific header descriptions and working conventions
+covering instructions within that subtree and multiple worktrees. Targets deeper
+than 64 directory components use additional target-ancestor discovery roots at each
+64-component boundary. Search/tree calls into ignored roots include both path
+and include_ignored=true. Tool-specific header descriptions and working conventions
 are emitted only for declared tools, including restricted and no-tools profiles. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
@@ -600,6 +602,18 @@ refusal would cost a turn for nothing. Anything else that does not decode
 fails `cursor_invalid`, and the message says to omit `cursor` for the first
 page or pass the exact `next=` value from a previous result; the tool
 description and the `cursor` schema property say the same.
+Names searches may report a symlink pathname when its resolved target is a
+regular file inside the workspace. Content searches and directory traversal
+exclude symlinks. A matching AGENTS.md/CLAUDE.md link that is broken, escapes
+or resolves to a nonfile returns an actionable error rather than disappearing.
+
+The walk descends at most 64 directory levels from the selected root.
+`partial=depth` reports omitted deeper directories without an unusable cursor;
+when another limit also stops the page, `depth_limited=64` reports that omission.
+Target ancestors at 64-component intervals give complete bounded instruction
+coverage for deep edit targets. Cursor pages resume output/scan bounds but do
+not recover omitted deeper directories.
+
 `partial=scan|bytes|time` names a scan bound (50 000
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
@@ -807,8 +821,9 @@ rejected outright rather than re-rooted, so the model learns the real
 addressing scheme instead of being silently corrected. Each path is then
 canonicalized inside the capability: `..` traversal that escapes the root
 fails there, and a resolved path that still carries a parent component is
-rejected as a belt-and-suspenders check. `search` never follows symlinks
-at all. Paths outside the workspace remain not an error class the agent
+rejected as a belt-and-suspenders check. Content search never follows symlinks;
+names search resolves only matching file links within the capability and never
+traverses directory links. Paths outside the workspace remain not an error class the agent
 can approve its way through by default — wider access is an explicit
 per-session grant, off by default.
 

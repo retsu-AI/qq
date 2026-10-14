@@ -925,6 +925,7 @@ impl CompiledAgentPlan {
             .any(|tool| tool.spec.name() == "read_file");
         let has_search = static_tools.iter().any(|tool| tool.spec.name() == "search");
         let has_tree = static_tools.iter().any(|tool| tool.spec.name() == "tree");
+        let has_shell = static_tools.iter().any(|tool| tool.spec.name() == "shell");
         for tool in &mut static_tools {
             let description = match tool.spec.name() {
                 "shell" if !(has_read_file && has_search && has_tree) => {
@@ -949,6 +950,11 @@ impl CompiledAgentPlan {
                         &guidance,
                     ))
                 }
+                "exec" if !has_shell => Some(tool.spec.description()
+                    .replace("no shell interpretation", "arguments are literal")
+                    .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
+                    .replace("; reserve shell for pipelines", "")
+                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
                 "edit_file" if !has_read_file => Some(tool.spec.description().replace(
                     "hash from its current read_file header",
                     "current content hash",

@@ -299,6 +299,11 @@ fn agent_prompt_prefix(
     } else {
         "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n"
     };
+    let exploration = if subagent == Some(SubagentAuthority::Read) {
+        "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n"
+    } else {
+        "- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n"
+    };
     let read_window_guidance = if has("read_file") {
         " Read the region you need in one call, with ranges for several windows, rather than paging in slices."
     } else {
@@ -316,7 +321,7 @@ fn agent_prompt_prefix(
     };
     let builtin_guidance = if has("read_file") && has("search") && has("tree") {
         std::borrow::Cow::Borrowed(
-            "- Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd. Prefer search over guessing file paths; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n",
+            "- Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd. Prefer search over guessing file paths; search groups matches by file as L<n>: text and its header carries next=<cursor> when more exist.\n",
         )
     } else {
         let mut text = String::new();
@@ -337,7 +342,11 @@ fn agent_prompt_prefix(
             }
         }
         if !text.is_empty() {
-            text.push_str(". Pass path to reach an ignored directory instead of changing cwd.\n");
+            text.push_str(if has("search") || has("tree") {
+                ". For a declared directory-walking tool in an ignored directory, pass path and include_ignored=true instead of changing cwd.\n"
+            } else {
+                ". Pass path to reach an ignored directory instead of changing cwd.\n"
+            });
         }
         std::borrow::Cow::Owned(text)
     };
@@ -354,7 +363,7 @@ fn agent_prompt_prefix(
         ""
     };
     let instruction_guidance = if has("search") {
-        "- Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.\n"
+        "- Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.\n"
     } else if has("edit_file") || has("write_file") || has("shell") || has("exec") {
         "- Nested AGENTS.md (CLAUDE.md where absent) applies below its directory, more specific first. Discover applicable instructions with declared tools before editing; if you cannot discover them, report that blocker. The host supplies workspace-root instructions.\n"
     } else {
@@ -387,7 +396,7 @@ fn agent_prompt_prefix(
          \n\
          Working conventions:\n\
          {action}\
-         - Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n\
+         {exploration}\
          - Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub.{read_window_guidance}\n\
          {read_file_guidance}\
          {edit_file_guidance}\
@@ -564,8 +573,8 @@ mod ab2_contract {
     const ACTION: &str = "Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.";
     const EXPLORE: &str = "Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.";
     const REREAD: &str = "Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.";
-    const BUILTINS: &str = "Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd.";
-    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query="(^|/)(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions."#;
+    const BUILTINS: &str = "Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd.";
+    const INSTRUCTIONS: &str = r#"Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query="(^|/)(AGENTS|CLAUDE)\.md$", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions."#;
 
     fn render(subagent: Option<SubagentAuthority>, specs: &[ToolSpec]) -> String {
         agent_system_prompt(
@@ -607,9 +616,16 @@ mod ab2_contract {
     fn ab2_read_child_keeps_its_brief_and_omits_the_action_obligation() {
         let prompt = render(Some(SubagentAuthority::Read), &crate::tools::specs());
         assert!(!prompt.contains("Do the work."));
+        assert!(!prompt.contains("Once you can name the file and the change, make the change"));
         assert!(prompt.contains("Sub-agent:"));
         assert!(prompt.contains("Stop as soon as you can answer the brief"));
         assert!(prompt.contains("You cannot change files or run commands"));
+    }
+
+    #[test]
+    fn ab2_ignored_walk_guidance_requires_the_explicit_override() {
+        let prompt = render(None, &crate::tools::specs());
+        assert!(prompt.contains("pass path and include_ignored=true"));
     }
 
     #[test]
