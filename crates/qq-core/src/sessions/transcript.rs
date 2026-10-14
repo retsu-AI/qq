@@ -1571,7 +1571,7 @@ pub(super) fn append_run_turns(
                                     call: tool_call_id,
                                 },
                             };
-                            turn_output.admit(&mut content, recall);
+                            turn_output.admit(name, &mut content, recall);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -1580,7 +1580,7 @@ pub(super) fn append_run_turns(
                         }
                         None => {
                             let mut content = INTERRUPTED_TOOL_RESULT.to_owned();
-                            turn_output.admit(&mut content, crate::tools::ResultRecall::None);
+                            turn_output.admit(name, &mut content, crate::tools::ResultRecall::None);
                             ContentBlock::ToolResult {
                                 call_id: id.clone(),
                                 content,

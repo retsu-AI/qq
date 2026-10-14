@@ -809,7 +809,12 @@ impl TurnOutputBudget {
     /// Deterministic: the same text and recall produce the same bytes, which
     /// is what lets assembly reconstruct the projection instead of storing
     /// it.
-    pub(crate) fn admit(&mut self, text: &mut String, recall: ResultRecall<'_>) -> bool {
+    pub(crate) fn admit(
+        &mut self,
+        _tool: &str,
+        text: &mut String,
+        recall: ResultRecall<'_>,
+    ) -> bool {
         let allowed = self.remaining.max(MIN_MODEL_TEXT_BYTES);
         let mut cut = false;
         if text.len() > allowed {
@@ -1028,9 +1033,10 @@ mod tests {
     fn the_turn_budget_marker_points_at_the_spill_when_one_exists() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        budget.admit(&mut first, ResultRecall::None);
+        budget.admit("other", &mut first, ResultRecall::None);
         let mut second = lines(4_000);
         assert!(budget.admit(
+            "other",
             &mut second,
             ResultRecall::Spill("t:read_file:0123abcd:89ef0123")
         ));
@@ -1258,25 +1264,25 @@ mod tests {
     fn the_turn_budget_shrinks_late_results_to_the_remainder() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        assert!(!budget.admit(&mut first, ResultRecall::None));
+        assert!(!budget.admit("other", &mut first, ResultRecall::None));
         assert_eq!(first.len(), 90 * 1024);
         assert_eq!(budget.remaining(), 6 * 1024);
 
         let mut second = lines(4_000);
         assert!(second.len() > 6 * 1024);
-        assert!(budget.admit(&mut second, ResultRecall::None));
+        assert!(budget.admit("other", &mut second, ResultRecall::None));
         assert!(second.len() <= 6 * 1024);
         assert!(second.contains("turn budget reached; not stored]"));
         assert!(budget.remaining() < MIN_MODEL_TEXT_BYTES);
 
         // Never below the floor: a spent turn still gets a useful result.
         let mut third = lines(4_000);
-        assert!(budget.admit(&mut third, ResultRecall::None));
+        assert!(budget.admit("other", &mut third, ResultRecall::None));
         assert!(third.len() <= MIN_MODEL_TEXT_BYTES);
         assert!(third.len() > MIN_MODEL_TEXT_BYTES / 2);
 
         let mut small = "fits".to_owned();
-        assert!(!budget.admit(&mut small, ResultRecall::None));
+        assert!(!budget.admit("other", &mut small, ResultRecall::None));
         assert_eq!(small, "fits");
     }
 
@@ -1289,9 +1295,10 @@ mod tests {
         let digest = crate::workspace::content_hash(text.as_bytes());
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(92 * 1024);
-        budget.admit(&mut first, ResultRecall::None);
+        budget.admit("other", &mut first, ResultRecall::None);
         let mut second = text.clone();
         assert!(budget.admit(
+            "other",
             &mut second,
             ResultRecall::StoredResult {
                 tool: "read_file",
@@ -1315,9 +1322,10 @@ mod tests {
         // reconstruct the projection from the stored row.
         let mut again = TurnOutputBudget::new();
         let mut first_again = "x".repeat(92 * 1024);
-        again.admit(&mut first_again, ResultRecall::None);
+        again.admit("other", &mut first_again, ResultRecall::None);
         let mut replayed = text;
         again.admit(
+            "other",
             &mut replayed,
             ResultRecall::StoredResult {
                 tool: "read_file",
