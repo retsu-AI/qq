@@ -1341,6 +1341,32 @@ mod tests {
     }
 
     #[test]
+    fn ab1_output_only_sed_and_uniq_are_reads() {
+        for script in ["=", "1,3=", "=; p"] {
+            assert!(super::read_only_sed_script(script), "{script}");
+        }
+        for command in ["uniq input -", "uniq -- input -", "uniq - -"] {
+            assert!(super::read_only_shell_command(command), "{command}");
+        }
+        for command in ["uniq input out", "uniq input - extra"] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_workspace_sort_temporaries_are_work() {
+        for command in [
+            "sort -T . -S1K huge-input",
+            "sort -T. input",
+            "sort --temporary-directory . input",
+            "sort --temporary-directory=. input",
+            "sort --temp=. input",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
     fn ab1_explicit_process_environments_are_work_without_changing_authority() {
         for tool in ["shell", "exec"] {
             for env in [
