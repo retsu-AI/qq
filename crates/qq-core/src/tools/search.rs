@@ -178,6 +178,14 @@ impl Cursor {
     fn skips_dir(&self, dir: &str) -> bool {
         let prefix_len = dir.len() + 1;
         let cursor = self.path.as_bytes();
+        // A trailing slash with the terminal line marks a fully visited subtree.
+        if self.line == u32::MAX
+            && cursor.len() == prefix_len
+            && cursor.starts_with(dir.as_bytes())
+            && cursor[dir.len()] == b'/'
+        {
+            return true;
+        }
         if cursor.len() >= prefix_len
             && &cursor[..dir.len()] == dir.as_bytes()
             && cursor[dir.len()] == b'/'
@@ -252,7 +260,7 @@ struct Walker<'a> {
     last_emitted: Option<Cursor>,
     last_scanned: Option<String>,
     stop: Option<Stop>,
-    depth_limited: bool,
+    depth_skipped: usize,
     buffer: Vec<u8>,
     scratch: String,
 }
@@ -263,6 +271,7 @@ impl Walker<'_> {
             self.stop = Some(Stop::Cancelled);
             return Ok(());
         }
+        let skipped_before = self.depth_skipped;
         let children = list_children(
             self.workspace,
             dir,
@@ -287,13 +296,15 @@ impl Walker<'_> {
                         break;
                     }
                     if depth >= MAX_WALK_DEPTH {
-                        self.depth_limited = true;
+                        self.depth_skipped += 1;
                         continue;
                     }
                     self.visit_dir(&child.path, depth + 1)?;
                 }
                 EntryKind::File { size, .. } => {
-                    if child.ignored
+                    if (child.ignored
+                        && !(matches!(self.matcher, Matcher::Names(_))
+                            && matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md")))
                         || !self.filter.admits_file(&child.path)
                         || self
                             .cursor
@@ -315,7 +326,9 @@ impl Walker<'_> {
                     let Matcher::Names(regex) = self.matcher else {
                         continue;
                     };
-                    if child.ignored
+                    if (child.ignored
+                        && !(matches!(self.matcher, Matcher::Names(_))
+                            && matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md")))
                         || !self.filter.admits_file(&child.path)
                         || self
                             .cursor
@@ -366,6 +379,9 @@ impl Walker<'_> {
             }
         }
         self.stack.leave();
+        if self.stop.is_none() && dir != "." && self.depth_skipped == skipped_before {
+            self.last_scanned = Some(format!("{dir}/"));
+        }
         Ok(())
     }
 
@@ -807,7 +823,7 @@ pub(super) fn search(
         last_emitted: None,
         last_scanned: None,
         stop: None,
-        depth_limited: false,
+        depth_skipped: 0,
         buffer: Vec::new(),
         scratch: String::new(),
     };
@@ -851,14 +867,14 @@ pub(super) fn search(
             last_emitted: None,
             last_scanned: None,
             stop: None,
-            depth_limited: false,
+            depth_skipped: 0,
             buffer: std::mem::take(&mut walker.buffer),
             scratch: String::new(),
         };
         if run(&mut counter, &root).is_ok() && counter.total > 0 {
             hint_insensitive = Some((
                 counter.total,
-                counter.stop.is_some() || counter.depth_limited,
+                counter.stop.is_some() || counter.depth_skipped > 0,
             ));
         }
     }
@@ -891,7 +907,7 @@ pub(super) fn search(
                 "{}/{}{}",
                 walker.shown,
                 walker.total,
-                if walker.stop.is_some() || walker.depth_limited {
+                if walker.stop.is_some() || walker.depth_skipped > 0 {
                     "+"
                 } else {
                     ""
@@ -918,7 +934,7 @@ pub(super) fn search(
         (false, true) => header = header.field("note", "empty_glob_ignored"),
         (false, false) => {}
     }
-    if walker.depth_limited {
+    if walker.depth_skipped > 0 {
         header = if walker.stop.is_none() {
             header.field("partial", "depth")
         } else {

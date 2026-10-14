@@ -89,6 +89,13 @@ the empty-selection hash). Historical runs and runs that fail before
 preparation keep no identity. Nested instruction reads stay in the durable tool
 transcript and do not retroactively change the pre-provider identity.
 
+Names discovery includes exact `AGENTS.md` and `CLAUDE.md` basenames despite
+file-level ignores inside visible directories, including contained file links.
+Directory ignores remain in force unless an explicit discovery scope uses
+`include_ignored=true`. Completed-directory scan watermarks skip only fully
+visited subtrees; a depth-limited subtree cannot suppress watermarks in later
+completed directories. Depth exclusions remain explicit in the header.
+
 ### Explicit Commands And Skills
 
 Commands and skills are optional run guidance, not ambient policy. A leading
@@ -457,6 +464,17 @@ and keeps the schema for each tool in one place:
 - `fetch` — one bounded GET or HEAD of a public http(s) URL, HTML converted
   to markdown and JSON formatted, gated by host grants and SSRF rules
   (§ Network Tools).
+
+Progress and heuristic audits share a bounded read recognizer distinct from
+execution approval. Shell strings undergo quote-aware syntax checks; `exec`
+arguments remain literal. The cached verdict avoids rendering literal arguments
+through a native shell to decide progress. Build/test commands and unknown
+forms count as work. Git working-tree status, diff and blame count as work
+because configured clean/process filters may execute helpers. Recognized Git
+history reads disable patch generation, merge diffs, external diff/textconv and
+signature display with a fixed oneline format; branch reads require explicit
+refname sorting and reject custom formats or alternative sorts. These verdicts
+never grant execution authority.
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded at dispatch (§ Output Bounding).
