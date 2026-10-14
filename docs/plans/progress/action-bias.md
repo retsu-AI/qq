@@ -519,3 +519,12 @@ newest last.
 - Independent final plan review approves. Docs truth23 passed; fmt and diff
   checks passed. Parent production source is unchanged from its qualified
   source; no acceptance or performance gate is waived.
+
+### 2026-10-14 — AB2 file ignores, empty directories and write-only contract
+
+- Test-first public discovery fixtures reproduce hidden instruction basenames
+  in visible directories and no resumable cursor after 50,000 empty dirs:
+  12 focused tests pass, two fail. Captured write-only request separately
+  reproduces unavailable prior-read guidance. Red receipts under AB2 target.
+- Repair preserves directory ignores and names-only safe-link handling; only
+  fully visited directories may advance a scan watermark. Work in progress.

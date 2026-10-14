@@ -10441,6 +10441,7 @@ mod tests {
             vec!["shell".to_owned()],
             vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
+            vec!["write_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10500,6 +10501,12 @@ mod tests {
                         .description()
                         .contains("path and include_ignored=true")
                 );
+            }
+            if expected == ["write_file"] {
+                let description = requests[0].tools()[0].description();
+                assert!(description.contains("create_only"), "{description}");
+                assert!(description.contains("independently known"), "{description}");
+                assert!(!description.contains("read earlier"), "{description}");
             }
             if expected == ["exec"] {
                 assert!(

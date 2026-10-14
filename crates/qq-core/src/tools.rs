@@ -1405,6 +1405,69 @@ mod tests {
     }
 
     #[test]
+    fn ab2_names_scan_budget_advances_past_empty_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_names_discover_file_ignored_instructions_in_visible_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::create_dir(directory.path().join("hidden")).unwrap();
+        fs::write(
+            directory.path().join(".gitignore"),
+            "AGENTS.md\nCLAUDE.md\nhidden/\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("src/AGENTS.md"), "rules\n").unwrap();
+        fs::write(directory.path().join("src/CLAUDE.md"), "fallback\n").unwrap();
+        fs::write(directory.path().join("hidden/AGENTS.md"), "hidden\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        for path in ["src/AGENTS.md", "src/CLAUDE.md"] {
+            assert!(result.model_text.contains(path), "{}", result.model_text);
+        }
+        assert!(!result.model_text.contains("hidden/AGENTS.md"));
+    }
+
+    #[test]
     fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
         let directory = tempfile::tempdir().unwrap();
         let mut path = String::new();
