@@ -861,3 +861,10 @@ newest last.
   Independent notice-documentation/integration review approves; exact SQL
   fixture and 24 docs-truth tests pass. Hosted review and matched performance
   remain open; no deployment or completed observation window is claimed.
+
+- Immutable typed-envelope source 08458f17 passes all workspace checks:
+  2,325 tests, zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab6-2026-10-14/typed-envelope-gate-{0,1,2,3}.log.
+  Eight focused fixtures and independent final typed-envelope review pass.
+  Publish tooling as draft; upstream review repairs, final classifier recount,
+  matched performance and deployed observation cohort remain open.
