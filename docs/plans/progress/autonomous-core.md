@@ -1425,4 +1425,6 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 
 - Integrated workspace checks caught the old schema45 doctor example, then its missing sample header after removal. The example now uses explicit build placeholders and current protocol32/descriptor13/schema46. All23 documentation truth tests pass (`ac3-main46-doctor-docs-truth-shared.log`); full workspace gates rerun with the unchanged serial test settings before publication. Earlier failed logs remain diagnostic evidence.
 
+- Integrated source12d2f0bf qualifies: serial workspace2309 passed/0failed/14ignored (one nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, workspace build (`ac3-main46-doctor-fixed-workspace-*`). Independent main/schema/client integration review Approve. Publish main7de994b1 integration preserving45 flags and adding46 owner index; prior10f opening approval does not qualify this new head. Fresh Codex review and final-head performance remain open.
+
 - First integrated workspace attempt stops at root docs-truth:266 passed/1failed/2ignored, because troubleshooting's hard-coded old build/schema45 header contradicts current46. Replace that stale header with `qq version` guidance; retain the readiness-check excerpt and original failed log. No production behavior changed; full workspace rerun follows.
