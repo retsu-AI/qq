@@ -8,6 +8,10 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
+
+
+| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft source review; performance gate open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | Planned | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
@@ -280,3 +284,31 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy and build exit 0. Logs:
   `target/qq-perf/ab2-2026-10-14/candidate-basename-final-gate-{0,1,2,3}.log`.
   Integrated latest AB1 and reviewed parent docs; final publication gates next.
+
+
+### 2026-10-14 — AB1 draft publication qualification
+
+- Integrated reviewed parent `188b69ff`; exact git-output and sed-file
+  regressions pass without changing the classifier. Final workspace gates
+  pass: 2,277 tests, 0 failures, 14 ignored; fmt, Clippy and build exit 0.
+  `cargo test --workspace -- --test-threads=1` serializes fixtures while their
+  internal async concurrency tests still execute. Color enabled, tmpfs stores.
+- Parallel publication attempt hit unchanged MCP cancellation timing
+  (45.83 ms against 45 ms); full serial rerun passes without threshold edits.
+  Logs `target/qq-perf/ab1-2026-10-14/publish-serial-gate-{0,1,2,3}.log`.
+- Publish as draft for hosted source review; matched performance qualification
+  remains open. No readiness or merge claim is made by draft publication.
+- Draft implementation PR [#301](https://github.com/retsu-AI/qq/pull/301)
+  opened on `83f9621e`, base #295; requested hosted Codex review. Linear
+  remains In Progress because matched performance qualification is open.
+
+### 2026-10-14 — AB2 draft publication qualification
+
+- Integrated AB1 and reviewed parent corrections. Workspace gates on the
+  exact production source pass: 2,282 tests, 0 failed, 14 ignored; fmt,
+  all-target/all-feature Clippy and build exit 0. Logs under
+  `target/qq-perf/ab2-2026-10-14/publish-gate-{0,1,2,3}.log`.
+- Final fixed-prefix fixture: 5,521 bytes (baseline 4,214), builtin schema
+  `f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85`.
+  Independent review approved. Draft publication awaits hosted source review;
+  plan_compile quiet-host/noise qualification remains open.
