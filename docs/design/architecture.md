@@ -198,7 +198,8 @@ xtask/
   spend. Focused completion requests a body refresh; warm background completion
   requests an included body without changing focus. Included-body refreshes
   replay newer retained events just as focused refreshes do, preserving unread
-  badges and drafts without repeating surface effects. Late responses do not
+  badges and drafts without repeating surface effects. If replay warms a previously
+  cold body, it requests one fresh terminal receipt for missing run pricing. Late responses do not
   replace a body or its summary already loaded through a newer cursor. Terminal cost
   remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi

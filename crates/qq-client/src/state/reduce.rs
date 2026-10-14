@@ -106,8 +106,12 @@ pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
     /// Rebuild a replaced body from retained events already observed live.
-    /// Keep client-owned unread state and drafts, and repeat no surface effect.
-    pub fn replay_event(&mut self, envelope: &SessionEventEnvelope, context: ReduceContext<'_>) {
+    /// Keep local unread state and drafts; return only read-only receipt refreshes.
+    pub fn replay_event(
+        &mut self,
+        envelope: &SessionEventEnvelope,
+        context: ReduceContext<'_>,
+    ) -> Vec<SnapshotRequest> {
         let local = self.get_mut(&envelope.session_id).map(|view| {
             (
                 view.unread,
@@ -115,8 +119,7 @@ impl SessionStore {
                 std::mem::take(&mut view.drafts),
             )
         });
-        // All effects were handled when this event first arrived.
-        let _ = self.reduce_event(envelope, context);
+        let effects = self.reduce_event(envelope, context);
         if let Some((unread, finished_unread, drafts)) = local
             && let Some(view) = self.get_mut(&envelope.session_id)
         {
@@ -124,6 +127,13 @@ impl SessionStore {
             view.finished_unread = finished_unread;
             view.drafts = drafts;
         }
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                StateEffect::RequestSnapshot(request) => Some(request),
+                _ => None, // Replay deliberately suppresses every surface side effect.
+            })
+            .collect()
     }
 
     /// Apply one durable event. The caller has already deduplicated by cursor

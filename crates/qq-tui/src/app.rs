@@ -913,6 +913,15 @@ impl App {
             return Effects::redraw(Redraw::Scheduled);
         }
 
+        let mut rewarmed_sessions = installed_sessions
+            .iter()
+            .copied()
+            .filter(|session| {
+                self.sessions
+                    .get(session)
+                    .is_none_or(|view| !view.is_warm())
+            })
+            .collect::<Vec<_>>();
         let snapshot_sequence = snapshot.cursor.sequence;
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
@@ -969,8 +978,9 @@ impl App {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            self.sessions.replay_event(
+            let refreshes = self.sessions.replay_event(
                 &event,
                 ReduceContext {
                     focused: self.view().transcript(),
@@ -981,8 +991,20 @@ impl App {
                     caused_by_me: false,
                 },
             );
+            if !refreshes.is_empty()
+                && let Some(index) = rewarmed_sessions
+                    .iter()
+                    .position(|session| *session == event.session_id)
+            {
+                // Live reduction could not refresh this receipt while cold.
+                // One latest body fetch covers every replayed terminal event.
+                rewarmed_sessions.swap_remove(index);
+                for request in refreshes {
+                    effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                }
+            }
         }
-        Effects::redraw(Redraw::Scheduled)
+        effects
     }
 
     /// Reduce one event into the store and apply what the reducer asks of the
