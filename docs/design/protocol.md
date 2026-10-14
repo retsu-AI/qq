@@ -2021,6 +2021,12 @@ path (`qq ask` and internal runtime tests):
 - `RunEvent` — `started`, `output_text_delta`, `refusal_delta`, `usage`,
   `completed`, `failed`
 
+Direct requests declare workspace read tools and configuration-granted external
+tools; denied builtin mutation/command/question/network schemas are omitted.
+The gate uses the plan's immutable grant snapshot. Strict read-only session
+requests omit every External schema, regardless of hints or grants. This is
+request visibility behavior; protocol and descriptor encodings are unchanged.
+
 These types are not persisted session state. `qq ask` consumes them entirely
 in-process; use the workspace/session routes or `qq run` for work that must be
 durable, resumable, approval-capable, or shared across clients.

@@ -563,6 +563,16 @@ using the existing dispatch helper; production scope remains read.rs/specs.rs.
 AB3 owns one `lib.rs` six-parallel-read runtime regression and its existing
 schema-identity assertion. The provider accounts for only model-visible
 rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
+
+### 2026-10-14 — AB4 shared eligibility ownership
+
+- AB4 owns `runtime/run_loop.rs` and `sessions/execution.rs` capability/filter
+  propagation in addition to plan/catalog/prompt/direct entrypoints. Reserve
+  `docs/design/architecture.md`, `docs/design/protocol.md`, ADR-0059 and its
+  index amendment for shipped behavior; no mutable approval mode in cache keys.
+- AB4 additionally owns the read-only child user-follow-up assertion in
+  `sessions/tests/delegation.rs`: it has root framing but retains ReadOnly
+  authority. This updates expected wording, without weakening child policy.
 ### 2026-10-14 — AB2 filtered tool description ownership
 
 - AB2 owns `plan.rs` compilation of filtered builtin descriptions: shell
@@ -595,6 +605,14 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   Returned line bounds preserve manually clipped complete rows and gutters.
 
 
+- 2026-10-14 AB4 owns the prompt-version assertion in src/headless.rs for
+  JSONL provenance: the expected current value follows the version-21 bump.
+  No production CLI behavior is changed; root is the sole writer.
+
+
+- 2026-10-14 AB4 qualification owns a narrow inherited fixture repair in
+  sessions/tests/nonblocking.rs: separate child gates remove shared-semaphore
+  arrival-order assumptions. No production session behavior is changed.
 - 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
   for the native Unicode-path contiguous-window regression. The existing job
   selected teardown tests only. A test-only read/output hook exercises the

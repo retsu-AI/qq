@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(20) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(22) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 20. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 22. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -31,6 +31,9 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// file takes a unique exact edit, and how to recover from a refusal (T19).
 /// 19 → 20 adds action and exploration conventions, built-in mapping, nested
 /// instruction discovery and a header naming present read tools (AB2).
+/// 20 → 21 states actual read-only, unattended and declared-tool authority (AB4).
+/// 21 → 22 removes write-child guidance from read-only delegation and freezes
+/// the restricted spawn declaration to its actual authority (AB4).
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -51,6 +54,8 @@ pub(crate) struct PromptSections<'a> {
     /// Set for a model-spawned child run: it answers a waiting parent, not a
     /// user. `None` for roots and for a user's own prompt in a child session.
     pub(crate) subagent: Option<SubagentAuthority>,
+    pub(crate) read_only: bool,
+    pub(crate) unattended: bool,
 }
 
 /// What a sub-agent may do, as far as its prompt is concerned. A read child
@@ -145,6 +150,8 @@ fn agent_prompt_prefix(
         roster: roster_text,
         skill_index,
         subagent,
+        read_only,
+        unattended,
     } = sections;
     let mut tool_names = String::new();
     let mut has_external = tool_index.is_some();
@@ -185,6 +192,12 @@ fn agent_prompt_prefix(
         format!("{read_tools} are read-only; ")
     };
     let has = |name: &str| specs.iter().any(|spec| spec.name() == name);
+    let can_act = has_external
+        || write_children
+        || has("edit_file")
+        || has("write_file")
+        || has("shell")
+        || has("exec");
     let edit_description = match (has("edit_file"), has("write_file")) {
         (true, true) => {
             "edit_file and write_file modify workspace files and may require user approval; "
@@ -296,11 +309,19 @@ fn agent_prompt_prefix(
     // A read child answers its brief; the root action contract would keep it reading.
     let action = if subagent == Some(SubagentAuthority::Read) {
         ""
+    } else if read_only {
+        "- This run cannot change files or run commands. When the request is a change, give it as exact edits (path, old, new) or commands, and stop.\n"
+    } else if unattended {
+        "- This unattended run cannot ask questions. For an analysis-only or review request, deliver the findings. Use only declared tools; configured external grants may let them act. If no declared tool can perform the requested change, give exact caller-applied edits (path, old, new) or commands, and stop.\n"
+    } else if !can_act {
+        "- No tool capable of making the requested change is declared. For a change request, give exact caller-applied edits (path, old, new) or commands, and stop. For an analysis-only or review request, deliver the findings.\n"
     } else {
         "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n"
     };
     let exploration = if subagent == Some(SubagentAuthority::Read) {
         "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n"
+    } else if read_only || unattended || !can_act {
+        "- Explore only as far as your next action needs. Once you can name the file and the change, take the next permitted action. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n"
     } else {
         "- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n"
     };
@@ -611,7 +632,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 20);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 22);
     }
 
     #[test]

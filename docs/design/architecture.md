@@ -455,12 +455,23 @@ The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
 index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
-may load guidance, and whether it is a model-spawned child with read or write
-authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
+may load guidance, strict read-only or unattended authority, and whether it is
+a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
+built at compile; other sets on first use, bounded by the 390 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+
+Tool visibility follows immutable run authority. Strict read-only runs omit
+mutating, shell, network and all external schemas; external read-only hints
+never grant permission. Unattended direct runs omit questions and retain
+read-only builtins plus configuration-granted external tools. The compiler
+captures grants once; direct gates use that same snapshot. The declaration
+predicate also filters recovered pins, progressive indexes and selector
+reports. Read-only roots receive exact caller-applied changes instead of an
+implementation obligation; unattended roots use declared tools and return
+caller-applied changes when those tools cannot act. Mutable approval modes
+are absent from cached prompt wording (ADR-0059).
 
 Per-request work is likewise kept off the transcript. The run holds its
 messages as `Arc<Vec<Message>>`, hands the same allocation to each turn's
@@ -1073,9 +1084,18 @@ sessions. Unknown usage or cost stays unknown and refuses a new child when the
 corresponding bound is imposed. Descendant history cannot be deleted until every
 owning ancestor run settles. Auditors store their direct spend on their own run;
 the parent meter and inclusive accounting each include that spend once.
-A read-only session is not offered the mutating, shell, or non-read external
-schemas its policy would deny, and a spawned child's approval mode can be
-lowered but never raised by a client command.
+A read-only session exposes built-in inspection and permitted read-child
+delegation. It omits mutation, shell, and all external tool schemas; external
+effect labels do not grant read-only authority. A spawned child's approval mode
+can be lowered but never raised by a client command.
+
+Base prompt identity 22 includes the authority wording for read-only,
+unattended and inspection-only tool sets. Ordinary actionable interactive
+wording is unchanged from version 20, but the version distinguishes the
+changed restricted prompts in otherwise identical plan descriptors. A read-only
+root retains read-only delegation, with a cached restricted spawn schema that
+omits write authority even when the configured roster permits write children.
+Injected write requests remain denied by policy.
 
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a

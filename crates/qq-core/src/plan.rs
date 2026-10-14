@@ -525,8 +525,8 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values: 2⁵ tool filters plus none, times
-    /// guidance, times three sub-agent states (198). In practice a plan sees a
+    /// number of `PromptPrefixKey` values: 2⁶ tool filters plus none, times
+    /// guidance, times three sub-agent states (390). In practice a plan sees a
     /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
@@ -574,7 +574,11 @@ impl CompiledAgentPlan {
             self.workspace.path(),
             base_specs,
             crate::runtime::PromptSections {
-                tool_index: self.catalog.index_text().map(Arc::as_ref),
+                tool_index: key
+                    .tools
+                    .as_ref()
+                    .and_then(|filter| self.catalog.eligible_index_text(filter))
+                    .map(Arc::as_ref),
                 roster: self.roster_text.as_deref(),
                 // Disclosure follows the guidance capability: restricted runs
                 // (compaction, model-authored child tasks) neither list nor
@@ -585,6 +589,8 @@ impl CompiledAgentPlan {
                     None
                 },
                 subagent: key.subagent,
+                read_only: key.tools.is_some_and(|filter| filter.read_only),
+                unattended: key.tools.is_some_and(|filter| filter.unattended),
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -734,19 +740,16 @@ impl CompiledAgentPlan {
         if let Some(cache) = context_cache {
             runtime = runtime.with_context_cache(cache);
         }
-        let mut config_grants = Vec::new();
         let mut host_handles = Vec::with_capacity(hosts.len());
         let mut contributions = Vec::with_capacity(hosts.len());
         for snapshot in hosts {
-            config_grants.extend(snapshot.host.config_grants());
             contributions.push(HostContribution {
                 name: snapshot.host.name().to_owned(),
                 catalog: snapshot.catalog,
+                config_grants: snapshot.host.config_grants(),
             });
             host_handles.push(snapshot.host);
         }
-        config_grants.sort();
-        config_grants.dedup();
         let host_handles: Arc<[Arc<dyn ExternalToolHost>]> = host_handles.into();
         runtime.hosts = Arc::clone(&host_handles);
 
@@ -832,11 +835,17 @@ impl CompiledAgentPlan {
                 });
             }
         }
-        static_tools.push(StaticTool::new(
-            spawn_spec,
-            ToolHost::SpawnAgent,
-            EffectClass::ReadOnly,
-        ));
+        let mut spawn_tool =
+            StaticTool::new(spawn_spec, ToolHost::SpawnAgent, EffectClass::ReadOnly);
+        if runtime.delegation.write_children {
+            let mut read_only_delegation = (*runtime.delegation).clone();
+            read_only_delegation.write_children = false;
+            spawn_tool.read_only_spec = Some(tools::spawn_agent_spec(
+                &runtime.spawn_model_routes,
+                &read_only_delegation,
+            ));
+        }
+        static_tools.push(spawn_tool);
         // Waiting for and cancelling the run's own background children
         // change nothing outside it (ADR-0054 § 4).
         static_tools.push(StaticTool::new(
@@ -1003,7 +1012,7 @@ impl CompiledAgentPlan {
                 hosts: catalog.hosts().to_vec(),
                 excluded: catalog.excluded().to_vec(),
                 spawn_model_routes: runtime.spawn_model_routes.to_vec(),
-                config_grants,
+                config_grants: catalog.config_grants().map(str::to_owned).collect(),
             },
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
@@ -1058,6 +1067,7 @@ impl CompiledAgentPlan {
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             guidance: true,
             subagent: None,
@@ -1070,6 +1080,8 @@ impl CompiledAgentPlan {
                 roster: roster_text.as_deref(),
                 skill_index: skills.disclosure_text(),
                 subagent: None,
+                read_only: false,
+                unattended: false,
             },
             &instructions,
             persona.as_deref(),
@@ -1685,6 +1697,18 @@ mod tests {
     }
 
     #[test]
+    fn ab4_inspection_only_descriptor_differs_from_prompt20_identity() {
+        let workspace = canonical_temp();
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        let mut predecessor = plan.descriptor().as_ref().clone();
+        predecessor.prompt_version = PromptVersion::new(20).unwrap();
+        assert_ne!(plan.digest(), predecessor.digest().unwrap());
+    }
+
+    #[test]
     fn canonical_encoding_and_digest_are_stable() {
         let descriptor = golden_descriptor();
         let bytes = descriptor.canonical_bytes().unwrap();
@@ -1697,10 +1721,10 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 15 and prompt 20: strict projection identity, AB2).
+        // changing the encoding (descriptor 15 and prompt 22: strict projection identity and read-only authority, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "c884d5651634f28914923f54e284b3d6c14e54d747910dd51cf525fdfafd3608"
+            "d8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
@@ -1709,12 +1733,24 @@ mod tests {
     }
 
     #[test]
-    fn historical_descriptor_13_prompt_20_digest_is_preserved() {
+    fn historical_descriptor_13_prompt_20_through_22_digests_are_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 13;
         descriptor.tool_output_projection = None;
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
+            "c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92"
+        );
+        let mut prompt21 = descriptor.clone();
+        prompt21.prompt_version = PromptVersion::new(21).unwrap();
+        assert_eq!(
+            prompt21.digest().unwrap().to_string(),
+            "6ac21a27f741953eb66c4e8f4d92c2ff8d32e46ca23058a2b7d4a5835facaded"
+        );
+        let mut prompt20 = descriptor.clone();
+        prompt20.prompt_version = PromptVersion::new(20).unwrap();
+        assert_eq!(
+            prompt20.digest().unwrap().to_string(),
             "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
         );
     }
@@ -1723,10 +1759,22 @@ mod tests {
     fn historical_descriptor_14_prompt_20_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 14;
+        descriptor.prompt_version = PromptVersion::new(20).unwrap();
         descriptor.tool_output_projection = None;
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
             "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
+        );
+    }
+
+    #[test]
+    fn historical_descriptor_14_prompt_22_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 14;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d"
         );
     }
 

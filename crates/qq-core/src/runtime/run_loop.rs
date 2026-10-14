@@ -104,6 +104,7 @@ struct RunEnvironment {
     system: Arc<str>,
     system_prompt_hash: ContentHash,
     base_specs: Arc<[ToolSpec]>,
+    static_filter: Option<catalog::StaticFilter>,
     reducible_messages: usize,
     audit_prompt: String,
     allow_tools: bool,
@@ -418,6 +419,7 @@ impl plan::CompiledAgentPlan {
                        slash_is_literal,
                        allow_tools,
                        read_only,
+                       unattended,
                        max_output_tokens,
                        limits,
                        routing_spend,
@@ -591,6 +593,7 @@ impl plan::CompiledAgentPlan {
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
+                               unattended,
                            }),
                            guidance: allow_guidance,
                            subagent,
@@ -606,12 +609,12 @@ impl plan::CompiledAgentPlan {
                    // A recovered run re-pins what its earlier `select_tools` calls
                    // pinned, so the resumed request offers the same schemas.
                    if allow_tools && catalog.exposure() == catalog::Exposure::Progressive {
-                       recover_pins(&messages, &catalog, &mut pins);
+                       recover_pins(&messages, &catalog, &mut pins, static_filter.as_ref().expect("tools have a filter"));
                    }
                    let tool_specs: Arc<[ToolSpec]> = if pins.is_empty() {
                        Arc::clone(&base_specs)
                    } else {
-                       catalog.specs_with_pins(&base_specs, &pins)
+                       catalog.specs_with_pins(&base_specs, &pins, static_filter.as_ref().expect("pins require tools"))
                    };
                    // The plan-constant prefix is built once per capability set and
                    // its SHA-256 state continued over this run's suffix, so neither
@@ -770,7 +773,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
         });
                }
     }
@@ -2725,7 +2728,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, audit_hook, tool_tasks, output: _, limits, base_specs, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, audit_hook, tool_tasks, output: _, limits, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -2837,7 +2840,7 @@ impl RunState {
                             ) {
                                 continue;
                             }
-                            let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments);
+                            let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools"));
                             run.stall.settled(false);
                             tool_scope.pins_changed |= changed;
                             results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -2852,7 +2855,7 @@ impl RunState {
                             });
                         }
                         if tool_scope.pins_changed {
-                            run.tool_specs = catalog.specs_with_pins(base_specs, &run.pins);
+                            run.tool_specs = catalog.specs_with_pins(base_specs, &run.pins, static_filter.as_ref().expect("pins require tools"));
                             run.tool_schema = catalog.schema_measurement(&run.tool_specs);
                         }
                         let approved = approved
