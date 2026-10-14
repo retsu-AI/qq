@@ -423,11 +423,16 @@ q "WITH rr AS ($RR), paths AS (
      FROM paths p
      WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
      GROUP BY p.run_id),
+   cursor_space AS (SELECT char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288) ws),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
-     FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
+     FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id CROSS JOIN cursor_space
      WHERE t.name = 'search' AND t.turn_ordinal < q.first_edit_turn
        AND json_extract(t.arguments_json, '\$.mode') = 'names'
-       AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
+       AND (json_type(t.arguments_json, '\$.cursor') IS NULL
+         OR json_type(t.arguments_json, '\$.cursor') = 'null'
+         OR (json_type(t.arguments_json, '\$.cursor') = 'text'
+           AND lower(trim(json_extract(t.arguments_json, '\$.cursor'), ws))
+             IN ('','initial','start','first','0','.','/','null','none')))
        AND json_type(t.arguments_json, '\$.regex') = 'true'
        AND json_extract(t.arguments_json, '\$.query') = '(^|/)(AGENTS|CLAUDE)\\.md\$'
      GROUP BY 1, 2),
@@ -451,6 +456,11 @@ pages continue one discovery; the scope query counts all matching new starts,
 including failed, denied or interrupted attempts. A completed pre-edit result
 and full applicable coverage remain separate requirements;
 while the raw diagnostic above retains physical call counts.
+Omitted/null cursors and trimmed, ASCII-case-insensitive first-page placeholders
+are starts, matching runtime repair semantics. Other cursor values are not
+proof of continuation: validate each against an exact prior next= for the
+same discovery scope. Nonstring, malformed or unverifiable cursor records
+leave qualification open rather than silently establishing continuation.
 
 Qualification shell-read shares must use AB6.1's bounded export/recount with
 one pinned AB1 classifier binary for both windows. The program-name SQL above
