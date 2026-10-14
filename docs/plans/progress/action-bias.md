@@ -2053,3 +2053,7 @@ newest last.
 - Immutable sourceb5a3ebaacb3fc88e2393b80f5ff50ca61e5fe445 passes fresh workspace-package clean/rebuild, workspace tests, formatting, all-target/all-feature Clippy with warnings denied, and workspace build. Receipt: target/qq-perf/ab6-2026-10-14/loaded-producer-zero-shell-integrated-gate-receipt.json.
 - Workspace totals: 2439 passed, 0 failed, 14 ignored. Six focused core/15 export-recount regressions pass; independent review approves.
 - Previous hosted6878b065 passed controlled turn-overhead, Windows teardown and wasm; H0 baseline compiler setup and parallel debug-hash tests failed as recorded above. These repairs require latest-head hosted CI/Codex before readiness. No failed performance budget or observational gate is waived.
+
+### 2026-10-14 — H0 direct compiler path
+
+- Job116130357434 now avoids stable downloads but baseline convert_case selected its dependency-local1.83.0 toolchain via rustup proxies, producing incompatible rmeta. Pinning the default alone does not override per-directory toolchain files. Prepend the exact pinned toolchain binary directory to GITHUB_PATH before sanitized recorder builds; fixture/code/budgets remain unchanged. Failed artifact11931624160 retained; no performance comparison was produced.

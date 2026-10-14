@@ -264,6 +264,8 @@ jobs:
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           # The recorder clears toolchain overrides before native builds.
           rustup default "$channel"
+          # Dependency-local toolchain files must not redirect rustc proxies.
+          dirname "$(rustup which rustc --toolchain "$channel")" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/h0-recording"
       - name: Record baseline, candidate and same-binary control
         shell: bash
