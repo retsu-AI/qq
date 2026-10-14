@@ -800,6 +800,23 @@ mod tests {
     }
 
     #[test]
+    fn ab3_scan_cap_continuation_does_not_claim_an_exact_remainder() {
+        let directory = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "x".repeat(1_023));
+        fs::write(directory.path().join("capped"), line.repeat(4_097)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for arguments in [r#"{"path":"capped"}"#, r#"{"path":"capped","limit":2}"#] {
+            let result = run_tool(&workspace, &FileState::default(), "read_file", arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            let marker = result.model_text.lines().last().unwrap();
+            assert!(marker.contains("count unknown"), "{marker}");
+            assert!(marker.contains("4 MiB scan cap"), "{marker}");
+            assert!(marker.contains("continue from offset="), "{marker}");
+            assert!(!marker.contains("4094 more lines"));
+        }
+    }
+
+    #[test]
     fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
         use super::output::{ResultRecall, TurnOutputBudget};
         let directory = tempfile::tempdir().unwrap();

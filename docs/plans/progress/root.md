@@ -556,3 +556,9 @@ its digest, and write/read child assertions must pin the new action bullet.
 
 AB3 owns `tools.rs` focused read-window and turn-budget projection tests,
 using the existing dispatch helper; production scope remains read.rs/specs.rs.
+
+### 2026-10-14 — AB3 parallel runtime regression ownership
+
+AB3 owns one `lib.rs` six-parallel-read runtime regression and its existing
+schema-identity assertion. The provider accounts for only model-visible
+rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.

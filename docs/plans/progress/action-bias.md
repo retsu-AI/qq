@@ -224,3 +224,6 @@ newest last.
   line-stop has no offset marker). Six-result fixture baseline: 30 reads,
   0 turn-budget cuts, mean 7,079 bytes per read. This is deterministic output
   projection characterization, not timing or live parallel execution.
+- Scan-cap exact/unknown-count regression fails before its marker fix.
+  Added an actual six-parallel-read runtime fixture that tracks only visible
+  rows and recovers missing offsets; baseline runtime execution is next.
