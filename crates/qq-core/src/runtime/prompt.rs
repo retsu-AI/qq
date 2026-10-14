@@ -309,7 +309,9 @@ fn agent_prompt_prefix(
     } else {
         ""
     };
-    let read_file_guidance = if has("read_file") {
+    let read_file_guidance = if has("read_file") && !has("edit_file") {
+        "- Read a file with read_file before overwriting it. Its header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline for the shape of a long file.\n"
+    } else if has("read_file") {
         "- Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline for the shape of a long file.\n"
     } else {
         ""

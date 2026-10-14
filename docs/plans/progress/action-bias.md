@@ -586,3 +586,12 @@ newest last.
   two fail; long-cursor-readwrite-contract-red.log.
 - Cursor repair must budget its full header and preserve native line bounds.
   Unsupported paths must be explicit blockers, never skipped or unusable next.
+
+
+- The cursor repair supports 4,096-byte paths with complete dynamically
+  reserved headers, explicit path/first-record budget errors and releasable
+  reservation as the frontier shortens. Nineteen focused AB2 tests pass,
+  including long-directory continuation, Unicode boundaries and exact-once
+  long-header pagination. long-cursor-final.log; independent review approves.
+- Read/write-only prompt guidance excludes absent anchor-edit semantics.
+  Full integrated gates and matched performance remain pending.

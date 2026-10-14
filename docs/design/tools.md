@@ -67,7 +67,9 @@ covering instructions within that subtree and multiple worktrees. Targets deeper
 than 64 directory components use additional target-ancestor discovery roots at each
 64-component boundary. Search/tree calls into ignored roots include both path
 and include_ignored=true. Tool-specific header descriptions and working conventions
-are emitted only for declared tools, including restricted and no-tools profiles. The prompt is
+are emitted only for declared tools, including restricted and no-tools profiles.
+A read_file plus write_file profile describes whole-file replacement with its
+current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own
@@ -645,6 +647,14 @@ an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
 and hands back a cursor, so no match is lost between pages.
+Cursor paths are capped at 4,096 UTF-8 bytes, including a completed-directory
+slash; their base64url tokens are capped at 5,476 bytes. The walk reserves the
+current frontier's full cursor before admitting body text, and dispatch keeps
+the complete header. A longer path produces `search_path_budget`; a first
+match that cannot fit with its cursor produces `search_output_budget`.
+Selecting a nearer workspace root shortens cursor paths; reducing context can
+also make a content match fit. These explicit limits do not claim a universal
+filesystem path maximum.
 
 **`tree`.** Fills breadth-first so the top level is complete before any
 deeper level appears — a model asking about a repository sees every

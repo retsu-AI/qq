@@ -1442,6 +1442,127 @@ mod tests {
     }
 
     #[test]
+    fn ab2_cursor_path_boundary_round_trips_without_header_clipping() {
+        for path in ["a".repeat(4_096), "界".repeat(1_365) + "/"] {
+            let cursor = search::Cursor {
+                path,
+                line: u32::MAX,
+            };
+            assert_eq!(search::Cursor::decode(&cursor.encode()), Some(cursor));
+        }
+        let cursor = search::Cursor {
+            path: "a".repeat(4_097),
+            line: 0,
+        };
+        assert!(search::Cursor::decode(&cursor.encode()).is_none());
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..8)
+            .map(|_| "a".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cursor = None::<String>;
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let args =
+                serde_json::json!({"query":"x", "mode":"names", "cursor":cursor}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), "search", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(!result.model_text.contains("…+"), "{}", result.model_text);
+            assert!(output::escaped_len(&result.model_text) <= 12 * 1024);
+            for path in result.model_text.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate path");
+            }
+            cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .map(str::to_owned);
+            if let Some(encoded) = &cursor {
+                assert!(search::Cursor::decode(encoded).is_some());
+            } else {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 10);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn ab2_long_nonmatching_prefix_releases_its_cursor_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = (0..14)
+            .map(|_| "a".repeat(235))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(prefix)).unwrap();
+        let text = format!(
+            "{}needle{}\n",
+            format!("{}\n", "x".repeat(1_900)).repeat(4),
+            "x".repeat(1_890)
+        );
+        fs::write(directory.path().join("z.txt"), text).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","context":4}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("L5: needle"),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            !result.model_text.contains("truncated="),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_unrepresentable_match_returns_an_explicit_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..16)
+            .map(|_| "\"".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        fs::write(directory.path().join(&root).join("AGENTS.md"), "rules").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("search_output_budget"),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[test]
     fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
         let directory = tempfile::tempdir().unwrap();
         let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
