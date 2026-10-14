@@ -299,6 +299,11 @@ fn agent_prompt_prefix(
     } else {
         "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n"
     };
+    let read_window_guidance = if has("read_file") {
+        " Read the region you need in one call, with ranges for several windows, rather than paging in slices."
+    } else {
+        ""
+    };
     let read_file_guidance = if has("read_file") {
         "- Read a file with read_file before overwriting it or editing by anchor; an edit to a file not read in this session (or changed since) applies only when its old matches exactly once, and the result says note=unread or note=changed_since_read. If one is refused, extend old until it is exact and unique, or read the lines around it. read_file's header carries h:<hash>; pass if_changed_since to skip an unchanged re-read, ranges for several windows at once, and mode=outline for the shape of a long file.\n"
     } else {
@@ -383,7 +388,7 @@ fn agent_prompt_prefix(
          Working conventions:\n\
          {action}\
          - Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n\
-         - Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n\
+         - Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub.{read_window_guidance}\n\
          {read_file_guidance}\
          {edit_file_guidance}\
          - Preserve unrelated work in the files you change.\n\
