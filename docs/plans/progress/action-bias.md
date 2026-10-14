@@ -808,3 +808,238 @@ newest last.
   Independent notice-documentation/integration review approves; exact SQL
   fixture and 24 docs-truth tests pass. Hosted review and matched performance
   remain open; no deployment or completed observation window is claimed.
+### 2026-10-14 — AB4 prompt behavioral identity
+
+- Independent review confirms an unchanged read_file-only profile keeps the
+  same descriptor/catalog fields while AB4 changes its authority text. Public
+  compiled-plan regression reproduces the same digest as its prompt-20
+  predecessor. Receipt prompt21-descriptor-red.log.
+- Bump AB4's base prompt identity to 21, preserving ordinary actionable auto
+  prompt bytes. Retain historical version-20 digest coverage; AB6 must pin
+  the deployed version-21 runtime, not infer treatment from prompt 20.
+
+
+- Authority-sensitive prompt behavior now carries base version 21. The
+  read-only descriptor regression distinguishes the old prompt-20 identity;
+  canonical prompt-20 bytes remain a historical golden. Sixty-two prompt
+  focused tests pass; independent source review approves. Full integrated
+  qualification follows upstream repair integration.
+### 2026-10-14 — masked read window regressions
+
+- Public default reads of 2,500 short credential-shaped rows spill after
+  masking expansion, invalidating the advertised contiguous window. Regression
+  fails before correction; includes repaired arguments and a long filename.
+- Full 2,000-byte rows also lose content when dispatch clips the added gutter.
+  Test-first failure captured; shared masked measure and actual note budget
+  preserve complete rows while retaining the existing content clip ceiling.
+
+
+- Masked escaped row/header admission includes actual repair-note bytes,
+  preserves unmasked spill contents and prevents a second gutter-based clip.
+  Ten focused regressions pass; independent source review approves. Existing
+  range-separator accounting now charges its four escaped bytes.
+  Full integrated gates and dispatch measurements remain pending.
+### 2026-10-14 — long cursors and read/write-only prompt contract
+
+- Two public regressions fail before correction: a completed subtree with
+  two 250-byte components emits an undecodable cursor, and read_file plus
+  write_file describes absent anchor-edit semantics. Fourteen focused pass,
+  two fail; long-cursor-readwrite-contract-red.log.
+- Cursor repair must budget its full header and preserve native line bounds.
+  Unsupported paths must be explicit blockers, never skipped or unusable next.
+
+
+- The cursor repair supports 4,096-byte paths with complete dynamically
+  reserved headers, explicit path/first-record budget errors and releasable
+  reservation as the frontier shortens. Nineteen focused AB2 tests pass,
+  including long-directory continuation, Unicode boundaries and exact-once
+  long-header pagination. long-cursor-final.log; independent review approves.
+- Read/write-only prompt guidance excludes absent anchor-edit semantics.
+  Full integrated gates and matched performance remain pending.
+### 2026-10-14 — lazy fetch, operation merge and timestamp regressions
+
+- Test-first hosted regressions reproduce Git history lazy fetching, JJ
+  operation reconciliation and file's explicit timestamp restoration as false
+  reads. The same fixture requires Unix sed's literal last-line address.
+- Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
+  confirms the side effects. Constrain canonical Git reads, classify JJ as
+  work, and exclude timestamp-restoring file modes; approval unchanged.
+
+- Nine focused fixtures pass after lazy-fetch/operation/timestamp repairs.
+  Additional test-first Git --help case reproduces a false read: repository
+  help settings may launch a browser/helper. rev-parse and worktree listing
+  now use closed suffixes. Receipt git-help-red.log; final focused run next.
+
+### 2026-10-14 — ninth hosted plan review reconciliation
+
+- Instruction-scope qualification now requires the exact anchored basename
+  regex and JSON boolean regex=true. The fixed-window recount is 108 roots,
+  one scope/start, zero repeats; the 25-start substring proxy remains context.
+  The deterministic query fixture rejects NOTAGENTS, mistyped regex flags,
+  literal searches and continuation pages; anchored-scope-query.json.
+- AB1 acceptance requires --no-lazy-fetch, closed Git inspection forms,
+  JJ classified as work and file preserve-date excluded. AB4 records version
+  21; historical 19/20 are AB2 treatment labels on the same accepted runtime.
+- Coverage, matched performance, final classifier recount and deployed
+  candidate observation remain open; no deployment or paid calls performed.
+
+- Docs truth passes 23 tests; formatting and diff checks pass. Independent
+  review caught and corrected the branch-list acceptance example's missing
+  no-lazy-fetch switch. Source is unchanged; slice-specific source gates
+  remain tracked independently.
+
+
+- Immutable integrated source 007d6728 passes 2,282 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
+  Ten focused classifier fixtures pass; independent source review approves.
+  Matched performance and final hosted review remain open.
+
+
+- Integrated gate caught the cursor schema's generated maxLength change and
+  an old fixture requiring a clipped-header spill. The bound is intentionally
+  widened to 5,476; canonical tool identity is now af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d.
+  The repair-note fixture now requires a complete decodable header and no
+  spill while preserving baseline content/cursor. Prior green receipts remain
+  historical; fresh integrated gates follow this correction.
+
+
+- Immutable integrated source d0274113 passes 2,301 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/long-cursor-final-gate-{0,1,2,3}.log.
+  Nineteen focused AB2 fixtures pass; independent source and schema review
+  approves. Matched performance and final hosted review remain open.
+
+
+- Integrated the qualified complete-cursor schema and classifier repairs.
+  Combined AB3 tool identity is 2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27;
+  both canonical goldens reflect the observed declaration identity. No
+  production description or schema change beyond the upstream cursor bound.
+
+
+- Integrated workspace test found a legacy repair-note fixture requiring a
+  separate row even when the complete read header now fits. It now checks
+  visibility as a complete token for both inline and separate-line rendering.
+  The note text and public visibility contract remain asserted. Fresh gates
+  follow this fixture correction; no failed check is waived.
+
+
+- Immutable integrated source 5581e55c passes 2,311 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/masked-cursor-final-gate-{0,1,2,3}.log.
+  Ten focused masked-read regressions pass; independent repair and integration
+  reviews approve. Matched dispatch/output performance remains open.
+
+
+- Full integrated gate caught the JSONL headless provenance fixture's old
+  prompt-20 expectation. Updated that public output assertion to 21; the
+  canonical descriptor and historical prompt-20 goldens remain distinct.
+  Fresh integrated gates follow; no failed check is waived.
+
+
+- Full AB4 gate reproduced an inherited shared-semaphore fixture race: B
+  settled when the test assumed A would be released. Independent diagnosis
+  traces unchanged fixture code to #257. Separate explicit model gates now
+  release A and B deterministically and select B by model, preserving the
+  answer-before-interim-report and replay assertions. No production change.
+### 2026-10-14 — trailing reads, substitutions and explicit environments
+
+- Hosted review identifies trailing-semicolon and print-substitution reads
+  wrongly treated as work, and explicit passthrough environments that can
+  mutate via process initialization. Test-first cases cover both shell/exec
+  environments, safe substitutions and incomplete/mutating script exclusions.
+- Nonempty requested environments must count as work without changing
+  execution authority; AB6 must retain that fact through export/recount.
+
+
+- Safe sed fields/flags and trailing separators are implemented without
+  accepting incomplete pipelines/conjunctions or write/execute flags. Ten
+  prior plus two new focused regressions pass; an additional duplicate/escaped
+  environment fixture preserves the original command preview. Both independent
+  source reviews approve; full integration gates follow.
+- Environment inspection runs only for read candidates and does not alter
+  approval input. The zero-sized ignored-element vector does not allocate
+  element storage. Parsing overhead still needs matched measurement.
+### 2026-10-14 — failed discovery starts and environment-aware reads
+
+- The repeated-root gate counts every matching start, including failed
+  attempts, while completed pre-edit coverage stays independent. A two-root
+  failed/retried fixture corrects 2 starts/0 repeats to 3 starts/1 repeat;
+  fixed-window baseline remains 108 roots, one scope/start, zero repeats.
+- Qualification derives historical root role from persisted depth; a
+  read-only check finds zero orphaned child runs in the fixed baseline.
+- AB1's narrow sed substitutions/trailing semicolons are reads; explicit
+  requested process environments disqualify reads without changing authority.
+  AB6 must preserve that status. Performance and deployed observation remain open.
+
+
+- Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
+  review approves. failed-discovery-starts.json records the executable SQL
+  fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Immutable integrated source 8f9c4253 passes 2,285 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
+  Thirteen focused classifier fixtures pass in the workspace run; independent
+  source reviews approve. Matched hot-path performance remains open.
+- Proactive scope review found first-page cursor placeholders were omitted
+  from start counts. The query now matches typed omitted/null values and all
+  runtime placeholders with Unicode whitespace trim and ASCII case folding.
+  A padded-placeholder fixture counts 14 starts across two roots with one
+  repeated root; baseline remains one start. Other cursor values require
+  exact prior-next provenance or leave qualification open.
+  Evidence: placeholder-discovery-starts.json; independent design review.
+
+
+- Placeholder docs truth passes 23 tests; formatting and diff checks pass.
+  Independent final review approves typed/trimmed cursor-start semantics and
+  the explicit provenance requirement for all other cursor records.
+
+
+- Immutable integrated source b937a2b7 passes 2,304 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  AB2 production behavior is unchanged by the qualified AB1/environment and
+  scope-query integration. Matched prompt/catalog/search performance stays open.
+
+
+- Immutable integrated source ba137d16 passes 2,314 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  Masked-read behavior is unchanged by the qualified environment-aware upstream
+  integration. Matched dispatch/output performance and hosted review stay open.
+
+
+### 2026-10-14 — native long-header repair-note rows
+
+- Source-supported Windows input can have >32KiB UTF-8 path bytes while
+  fitting its UTF-16/component limits. Credential masking shortens the header,
+  but dispatch may still add a separate repair-note row based on raw length.
+- Renderer/output-bound regression uses that valid metadata shape; a native
+  Windows public-dispatch regression checks all 5,000 blank rows exactly once.
+  Linux native paths reject this shape; native Windows execution remains a
+  separate hosted verification requirement.
+
+
+- Renderer plus actual dispatch reproduces the missing note-row spill before
+  correction: native-note-row-final-red.log. Reserving a possible note row and
+  its additional escaped byte fixes it; eleven focused Linux tests pass in
+  native-note-row-green.log. Independent final source/CI review approves.
+- The native Windows test is selected by CI's exact-test wrapper. Its hosted
+  execution is required separately; local Linux success is not native proof.
+
+
+- Immutable source 467a39db passes 2,315 workspace tests, zero failures,
+  14 ignored; fmt, Clippy, build and the exact-test wrapper guard exit 0.
+  Logs: target/qq-perf/ab3-2026-10-14/native-note-gate-{0,1,2,3,4}.log.
+  Actionlint passes excluding the pre-existing SC2129 release-size style
+  diagnostic. Native Windows execution and matched performance remain open.
+
+
+- Immutable integrated AB4 source bca83a30 passes 2,324 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab4-2026-10-14/native-note-integrated-gate-
+  {0,1,2,3}.log. Prompt provenance is version 21; the deterministic child
+  fixture retains separate gates. Independent integration review approves.
+  Native Windows execution, matched performance and hosted review remain open.

@@ -67,7 +67,9 @@ covering instructions within that subtree and multiple worktrees. Targets deeper
 than 64 directory components use additional target-ancestor discovery roots at each
 64-component boundary. Search/tree calls into ignored roots include both path
 and include_ignored=true. Tool-specific header descriptions and working conventions
-are emitted only for declared tools, including restricted and no-tools profiles. The prompt is
+are emitted only for declared tools, including restricted and no-tools profiles.
+A read_file plus write_file profile describes whole-file replacement with its
+current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own
@@ -472,9 +474,19 @@ through a native shell to decide progress. Build/test commands and unknown
 forms count as work. Git working-tree status, diff and blame count as work
 because configured clean/process filters may execute helpers. Recognized Git
 history reads disable patch generation, merge diffs, external diff/textconv and
-signature display with a fixed oneline format; branch reads require explicit
+signature display with a fixed oneline format and global `--no-lazy-fetch`;
+branch reads require explicit
 refname sorting and reject custom formats or alternative sorts. These verdicts
-never grant execution authority.
+never grant execution authority. A final semicolon after validated reads is
+accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
+only supported addresses, printing and pattern-space substitutions with safe
+flags; delimiter escapes and embedded semicolons are parsed before separators.
+Any nonempty requested shell/exec environment counts as work, including benign
+names conservatively. An additional environment view only disqualifies read
+candidates, preserving command/cwd parsing and approval previews even when the
+environment field is malformed or duplicated. JJ repository loading counts as work because
+operation reconciliation may persist state. File timestamp-restoring modes
+count as work; Unix sed supports a literal last-line print address.
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded at dispatch (§ Output Bounding).
@@ -645,6 +657,15 @@ an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
 and hands back a cursor, so no match is lost between pages.
+Cursor paths are capped at 4,096 UTF-8 bytes, including a completed-directory
+slash; their base64url tokens and the cursor schema maxLength are capped at 5,476
+bytes. This widens the former 512-byte schema ceiling. The walk reserves the
+current frontier's full cursor before admitting body text, and dispatch keeps
+the complete header. A longer path produces `search_path_budget`; a first
+match that cannot fit with its cursor produces `search_output_budget`.
+Selecting a nearer workspace root shortens cursor paths; reducing context can
+also make a content match fit. These explicit limits do not claim a universal
+filesystem path maximum.
 
 **`tree`.** Fills breadth-first so the top level is complete before any
 deeper level appears — a model asking about a repository sees every
@@ -709,7 +730,14 @@ When both are given, `ranges` wins and the header carries
 nothing (tool-layer D9). With no `limit`, the window runs to the end of
 file, bounded by 32 KiB and 4,000 rendered lines. Prefer one larger read
 over repeated small slices. The renderer reserves room for its header
-and continuation marker and never cuts a row in half. A byte or rendered-
+and continuation marker and never cuts a row in half. Row and header admission
+measure the masked escaped output, including argument-repair notes, so secret
+masking expansion cannot invalidate the contiguous window.
+Repairs reserve a possible separate note row and its escaped newline, because
+placement uses the raw header before masking. This also covers native Unicode
+paths whose UTF-8 text exceeds the rendered line cap. The 2,000-byte
+content ceiling applies before the gutter; dispatch retains complete rendered
+rows. A byte or rendered-
 line stop carries `truncated=bytes` or `truncated=lines`, with a contiguous
 `continue from offset=<next>` marker. An explicit `limit` ending before
 EOF names the remaining lines and next offset. For a file beyond the

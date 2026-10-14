@@ -614,3 +614,23 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   docs/runbooks/run-output-queries.md report predicate and src/docs_truth.rs
   regression for root-stall documentation. Schema/history and Goal 6's
   narrower slice-checkpoint cohort remain explicit. No runtime behavior change.
+### 2026-10-14 — AB3 masked read admission
+
+- Reserve tools/output.rs shared allocation-free masked escaped-size measure
+  and tools/dispatch.rs actual repaired-argument note byte reservation. Read
+  construction uses post-mask costs and retains unmasked spill semantics.
+  Returned line bounds preserve manually clipped complete rows and gutters.
+
+
+- 2026-10-14 AB4 owns the prompt-version assertion in src/headless.rs for
+  JSONL provenance: the expected current value follows the version-21 bump.
+  No production CLI behavior is changed; root is the sole writer.
+
+
+- 2026-10-14 AB4 qualification owns a narrow inherited fixture repair in
+  sessions/tests/nonblocking.rs: separate child gates remove shared-semaphore
+  arrival-order assumptions. No production session behavior is changed.
+- 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
+  for the native Unicode-path contiguous-window regression. The existing job
+  selected teardown tests only. A test-only read/output hook exercises the
+  actual dispatch mask/bound pipeline using valid Windows metadata on Linux.

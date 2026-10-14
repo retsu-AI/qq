@@ -29,7 +29,10 @@ use super::{
 
 /// Model-facing bound. Search stops emitting at this budget and returns a
 /// cursor, so the bound is a ceiling the walk itself respects.
-pub(super) const SEARCH_BOUNDS: Bounds = Bounds::new(12 * 1024, 4_000);
+pub(super) const SEARCH_BOUNDS: Bounds = Bounds {
+    max_line_bytes: 12 * 1024,
+    ..Bounds::new(12 * 1024, 4_000)
+};
 /// File bytes one call may scan before returning `partial=bytes`.
 pub(super) const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 /// Directory entries one call may visit before returning `partial=scan`.
@@ -44,7 +47,8 @@ const DEFAULT_MAX_PER_FILE: usize = 10;
 pub(super) const MAX_CONTEXT: usize = 5;
 pub(super) const MAX_GLOBS: usize = 8;
 pub(super) const MAX_GLOB_BYTES: usize = 256;
-pub(super) const MAX_CURSOR_BYTES: usize = 512;
+pub(super) const MAX_CURSOR_PATH_BYTES: usize = 4_096;
+pub(super) const MAX_CURSOR_BYTES: usize = ((MAX_CURSOR_PATH_BYTES + 1 + 10) * 4).div_ceil(3);
 /// Cursor values models send for "the first page". None can be a real cursor
 /// under any casing: a real one is base64url of `path\0line` with a non-empty
 /// path, so at least four alphabet characters that decode to a NUL byte.
@@ -163,7 +167,7 @@ impl Cursor {
         let split = raw.iter().position(|&byte| byte == 0)?;
         let path = std::str::from_utf8(&raw[..split]).ok()?;
         let line = std::str::from_utf8(&raw[split + 1..]).ok()?.parse().ok()?;
-        (!path.is_empty()).then(|| Self {
+        (!path.is_empty() && path.len() <= MAX_CURSOR_PATH_BYTES).then(|| Self {
             path: path.to_owned(),
             line,
         })
@@ -236,6 +240,14 @@ enum SearchWalkError {
     },
     #[error("instruction link {path} does not resolve to a regular file")]
     InstructionNotAFile { path: String },
+    #[error(
+        "search_path_budget: path exceeds the {MAX_CURSOR_PATH_BYTES}-byte cursor bound; select a nearer workspace root"
+    )]
+    CursorPathBudget,
+    #[error(
+        "search_output_budget: a complete match cannot fit with its cursor; reduce context or select a nearer workspace root"
+    )]
+    MatchBudget,
 }
 
 struct Walker<'a> {
@@ -266,9 +278,33 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
+    /// Reserve the longest possible line position before advancing the frontier.
+    /// A larger cursor must not consume bytes already promised to the body.
+    fn reserve_cursor(&mut self, path: &str) -> Result<bool, SearchWalkError> {
+        if self.count_only {
+            return Ok(true);
+        }
+        if path.len() > MAX_CURSOR_PATH_BYTES {
+            return Err(SearchWalkError::CursorPathBudget);
+        }
+        let encoded = ((path.len() + 1 + 10) * 4).div_ceil(3);
+        let budget = SEARCH_BOUNDS
+            .max_bytes
+            .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES + encoded);
+        if self.body_escaped > budget {
+            self.stop = Some(Stop::Bytes);
+            return Ok(false);
+        }
+        self.body_budget = budget;
+        Ok(true)
+    }
+
     fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<(), SearchWalkError> {
         if self.cancelled.is_cancelled() {
             self.stop = Some(Stop::Cancelled);
+            return Ok(());
+        }
+        if !self.reserve_cursor(dir)? {
             return Ok(());
         }
         let skipped_before = self.depth_skipped;
@@ -291,6 +327,9 @@ impl Walker<'_> {
                     {
                         continue;
                     }
+                    if !self.reserve_cursor(&child.path)? {
+                        break;
+                    }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
                         break;
@@ -311,6 +350,9 @@ impl Walker<'_> {
                             .is_some_and(|cursor| cursor.skips_file(&child.path))
                     {
                         continue;
+                    }
+                    if !self.reserve_cursor(&child.path)? {
+                        break;
                     }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
@@ -335,6 +377,9 @@ impl Walker<'_> {
                             .is_some_and(|cursor| cursor.skips_file(&child.path))
                     {
                         continue;
+                    }
+                    if !self.reserve_cursor(&child.path)? {
+                        break;
                     }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
@@ -368,7 +413,7 @@ impl Walker<'_> {
                     };
                     if metadata.is_file() {
                         self.scanned_files += 1;
-                        self.emit_name(&child.path);
+                        self.emit_name(&child.path)?;
                     } else if instruction {
                         return Err(SearchWalkError::InstructionNotAFile {
                             path: child.path.clone(),
@@ -380,20 +425,26 @@ impl Walker<'_> {
         }
         self.stack.leave();
         if self.stop.is_none() && dir != "." && self.depth_skipped == skipped_before {
-            self.last_scanned = Some(format!("{dir}/"));
+            let completed = format!("{dir}/");
+            if self.reserve_cursor(&completed)? {
+                self.last_scanned = Some(completed);
+            }
         }
         Ok(())
     }
 
-    fn scan(&mut self, child: &Child, size: u64) -> Result<(), ListError> {
+    fn scan(&mut self, child: &Child, size: u64) -> Result<(), SearchWalkError> {
         if self.cancelled.is_cancelled() {
             self.stop = Some(Stop::Cancelled);
+            return Ok(());
+        }
+        if !self.reserve_cursor(&child.path)? {
             return Ok(());
         }
         if let Matcher::Names(regex) = self.matcher {
             self.scanned_files += 1;
             if regex.is_match(child.path.as_bytes()) {
-                self.emit_name(&child.path);
+                self.emit_name(&child.path)?;
             }
             self.last_scanned = Some(child.path.clone());
             return Ok(());
@@ -424,7 +475,7 @@ impl Walker<'_> {
         if looks_binary(&self.buffer) {
             self.budget.skipped_binary += 1;
         } else {
-            self.scan_buffer(&child.path);
+            self.scan_buffer(&child.path)?;
         }
         self.last_scanned = Some(child.path.clone());
         if self.stop.is_none()
@@ -435,25 +486,28 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn emit_name(&mut self, path: &str) {
+    fn emit_name(&mut self, path: &str) -> Result<(), SearchWalkError> {
         if self.cursor.is_some_and(|cursor| cursor.skips_line(path, 0)) {
-            return;
+            return Ok(());
         }
         self.total += 1;
         if self.count_only {
             if self.total >= MAX_HINT_MATCHES {
                 self.stop = Some(Stop::Limit);
             }
-            return;
+            return Ok(());
         }
         if self.shown >= self.limit {
             self.stop = Some(Stop::Limit);
-            return;
+            return Ok(());
         }
         let cost = escaped_len(path) + 1;
+        if cost > self.body_budget && self.body.is_empty() {
+            return Err(SearchWalkError::MatchBudget);
+        }
         if self.body_escaped + cost > self.body_budget {
             self.stop = Some(Stop::Bytes);
-            return;
+            return Ok(());
         }
         self.body.push_str(path);
         self.body.push('\n');
@@ -464,12 +518,13 @@ impl Walker<'_> {
             path: path.to_owned(),
             line: 0,
         });
+        Ok(())
     }
 
     /// Finds every matching line in `self.buffer` and emits it. Matches are
     /// located over the whole buffer (one vectorized pass) and mapped to
     /// lines afterwards; a line with several matches is reported once.
-    fn scan_buffer(&mut self, path: &str) {
+    fn scan_buffer(&mut self, path: &str) -> Result<(), SearchWalkError> {
         let buffer = std::mem::take(&mut self.buffer);
         let language = Language::from_path(path);
         let mut file_shown = 0_usize;
@@ -584,6 +639,9 @@ impl Walker<'_> {
                 pending_after = Some((line_number + self.context as u32, line_end + 1));
             }
             let cost = escaped_len(&self.scratch);
+            if cost > self.body_budget && self.body.is_empty() {
+                return Err(SearchWalkError::MatchBudget);
+            }
             if self.body_escaped + cost > self.body_budget {
                 self.stop = Some(Stop::Bytes);
                 break;
@@ -632,6 +690,7 @@ impl Walker<'_> {
             }
         }
         self.buffer = buffer;
+        Ok(())
     }
 }
 
@@ -1009,9 +1068,7 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
                     },
                     ignored: false,
                 };
-                walker
-                    .scan(&child, metadata.len())
-                    .map_err(SearchWalkError::List)
+                walker.scan(&child, metadata.len())
             }
             Ok(_) => return Err("path_not_found: not a file or directory".to_owned()),
             Err(error) => return Err(format!("path_not_found: {error}")),
