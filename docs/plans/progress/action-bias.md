@@ -566,3 +566,42 @@ newest last.
   with AB3's removed default200: a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323.
   Keep both corresponding golden assertions in sync with the measured full
   catalog. Parent source integration requires fresh immutable workspace gates.
+- Immutable integrated sourcec7c0bc41 passes workspace gates:2,290 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab2-2026-10-14/discovery-qualified-gate-{0,1,2,3}.log.
+  Newer parent documentation integration and matched performance remain open.
+### 2026-10-14 — sixth hosted plan review corrections
+
+- Explicit existing classifier exclusions now cover find okdir, fd exec/
+  exec-batch, tree output and file compile modes. No runtime verdicts
+  changed for these cases. Preview exclusion applies only to edit_file;
+  write_file dry_run is a schema failure. Corrected205/1,222 baseline is
+  published beside the obsolete211/1,230 proxy.
+- Successful discovery starts must precede actual edits in a model-visible
+  earlier turn. Same-turn/failed/later starts cannot prove coverage; later
+  new targets require separate ordered coverage evidence. Exact-query
+  fixtures pass: five failures/six nonpreview calls; one eligible discovery
+  of four starts. Fixed historical early scope:108roots,18distinct roots,
+  25starts,7repeated roots,5affected runs,max5. Coverage remains unqualified.
+- Independent final review approved; docs truth/fmt/diff checks next.
+  Evidence `target/qq-perf/ab-plan-2026-10-14/typed-preview-preedit.json`.
+- Docs truth23passed; fmt/diff checks pass. Production parent unchanged
+  from qualified source; sixth-review corrections ready for hosted review.
+
+### 2026-10-14 — seventh hosted plan review reconciliation
+
+- Clarified canonical Git/ripgrep configuration disables, native Windows
+  uncertainty, read-child findings, ignored-walk overrides, safe instruction
+  links/depth windows, terminal scan-cap markers and compiled grant lifetime.
+  Source regressions and independent reviews cover the corresponding slices.
+- Export overflow makes qualification unqualified unless the pinned classifier
+  itself rejects the command. Canonical persisted read identity replaces
+  argument spelling for re-read qualification; unresolved aliases remain open.
+- Exact SQL fixture retains a failed boolean-true preview (one failure/two
+  attempts) and accepts discovery between root-level and below-root edits.
+  Corrected fixed-window baseline:211 failures/1,228 attempts,17.1824%;
+  below-root early scopes108/18/25/7/5/5,still unqualified for path/page/read
+  coverage. Evidence completed-preview-below-root.json under the plan receipts.
+- Independent final plan review approves. Docs truth23 passed; fmt and diff
+  checks passed. Parent production source is unchanged from its qualified
+  source; no acceptance or performance gate is waived.
