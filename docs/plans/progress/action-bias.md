@@ -219,3 +219,6 @@ newest last.
   14 ignored; fmt/Clippy/build exit 0. Independent review approved identities
   and child contracts. Third hosted plan review requires exact-basename
   instruction search; added NOTAGENTS.md rejection, requalification next.
+- Basename full gate hit unchanged MCP cancellation timing: 49.56 ms
+  against 45 ms fixture bound during concurrent builds. Same compiled test
+  passes alone in 20 ms; no MCP code or threshold changed. Full rerun next.
