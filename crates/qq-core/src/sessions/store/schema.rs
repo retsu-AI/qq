@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 49;
+pub const STORE_SCHEMA_VERSION: u16 = 50;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -383,7 +383,7 @@ pub(in crate::sessions) fn open_database(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
             | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33"
             | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42" | "43" | "44" | "45"
-            | "46" | "47" | "49",
+            | "46" | "47" | "48" | "49" | "50",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -426,7 +426,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -475,7 +477,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -523,7 +527,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -570,7 +576,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -617,7 +625,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -673,7 +683,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -720,7 +732,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -765,7 +779,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -809,7 +825,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -852,7 +870,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -892,7 +912,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -931,7 +953,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -970,7 +994,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1008,7 +1034,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1045,7 +1073,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1081,7 +1111,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1116,7 +1148,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1150,7 +1184,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1183,7 +1219,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1215,7 +1253,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1246,7 +1286,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1285,7 +1327,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1329,7 +1373,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1381,7 +1427,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1420,7 +1468,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1467,7 +1517,9 @@ pub(in crate::sessions) fn open_database(
                 | "45"
                 | "46"
                 | "47"
+                | "48"
                 | "49"
+                | "50"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1488,7 +1540,21 @@ pub(in crate::sessions) fn open_database(
     // 37: persisted `max` effort requires a reader that understands it.
     if !matches!(
         schema_version.as_deref(),
-        Some("37" | "38" | "39" | "40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some(
+            "37" | "38"
+                | "39"
+                | "40"
+                | "41"
+                | "42"
+                | "43"
+                | "44"
+                | "45"
+                | "46"
+                | "47"
+                | "48"
+                | "49"
+                | "50"
+        )
     ) {
         connection.execute(
             "UPDATE metadata SET value = '37' WHERE key = 'schema_version'",
@@ -1498,7 +1564,20 @@ pub(in crate::sessions) fn open_database(
     // 38: model turns may contain a provider continuation envelope.
     if !matches!(
         schema_version.as_deref(),
-        Some("38" | "39" | "40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some(
+            "38" | "39"
+                | "40"
+                | "41"
+                | "42"
+                | "43"
+                | "44"
+                | "45"
+                | "46"
+                | "47"
+                | "48"
+                | "49"
+                | "50"
+        )
     ) {
         connection.execute(
             "UPDATE metadata SET value = '38' WHERE key = 'schema_version'",
@@ -1508,7 +1587,7 @@ pub(in crate::sessions) fn open_database(
     // 39: explicit provider-default effort is distinct from inheritance.
     if !matches!(
         schema_version.as_deref(),
-        Some("39" | "40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some("39" | "40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         connection.execute(
             "UPDATE metadata SET value = '39' WHERE key = 'schema_version'",
@@ -1520,7 +1599,7 @@ pub(in crate::sessions) fn open_database(
     // replays it before the turn.
     if !matches!(
         schema_version.as_deref(),
-        Some("40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some("40" | "41" | "42" | "43" | "44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "notice")? {
@@ -1540,7 +1619,7 @@ pub(in crate::sessions) fn open_database(
     // run, so a second delivery of the same answer is a constraint failure.
     if !matches!(
         schema_version.as_deref(),
-        Some("41" | "42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some("41" | "42" | "43" | "44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         let transaction = connection.transaction()?;
         create_child_deliveries_table(&transaction)?;
@@ -1556,7 +1635,7 @@ pub(in crate::sessions) fn open_database(
     // by the child's report turn.
     if !matches!(
         schema_version.as_deref(),
-        Some("42" | "43" | "44" | "45" | "46" | "47" | "49")
+        Some("42" | "43" | "44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         let transaction = connection.transaction()?;
         create_child_reports_table(&transaction)?;
@@ -1573,7 +1652,7 @@ pub(in crate::sessions) fn open_database(
     // and then holds still until the next seam.
     if !matches!(
         schema_version.as_deref(),
-        Some("43" | "44" | "45" | "46" | "47" | "49")
+        Some("43" | "44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         let transaction = connection.transaction()?;
         for column in ["prune_through_ordinal", "prune_through_turn"] {
@@ -1610,7 +1689,7 @@ pub(in crate::sessions) fn open_database(
     // the main transcript; at most one runs per session.
     if !matches!(
         schema_version.as_deref(),
-        Some("44" | "45" | "46" | "47" | "49")
+        Some("44" | "45" | "46" | "47" | "48" | "49" | "50")
     ) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(
@@ -1650,7 +1729,10 @@ pub(in crate::sessions) fn open_database(
     // 45: who a held call waits on. Existing schema-45 stores already
     // contain this flag; never recreate or reset their delegated authority.
     let has_tool_calls = has_table(&connection, "tool_calls")?;
-    if !matches!(schema_version.as_deref(), Some("45" | "46" | "47" | "49")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("45" | "46" | "47" | "48" | "49" | "50")
+    ) {
         let transaction = connection.transaction()?;
         if has_tool_calls && !has_column(&transaction, "tool_calls", "approval_delegated")? {
             transaction.execute(
@@ -1672,7 +1754,10 @@ pub(in crate::sessions) fn open_database(
     }
     // 46: owned internal compaction attempts belong to their prompt's spend
     // receipt. Add the bounded owner lookup after main's schema-45 migration.
-    if !matches!(schema_version.as_deref(), Some("46" | "47" | "49")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("46" | "47" | "48" | "49" | "50")
+    ) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(
             "CREATE INDEX IF NOT EXISTS runs_owned_compaction
@@ -1689,7 +1774,7 @@ pub(in crate::sessions) fn open_database(
     validate_owned_compaction_index(&connection)?;
     // 47: evidence captured by the process executor, independent of output.
     // Historical calls remain NULL and cannot qualify execution effects.
-    if !matches!(schema_version.as_deref(), Some("47" | "49")) {
+    if !matches!(schema_version.as_deref(), Some("47" | "48" | "49" | "50")) {
         let transaction = connection.transaction()?;
         if has_tool_calls && !has_column(&transaction, "tool_calls", "execution_context_json")? {
             transaction.execute("ALTER TABLE tool_calls ADD COLUMN execution_context_json TEXT CHECK (execution_context_json IS NULL OR length(CAST(execution_context_json AS BLOB)) <= 16384)", [])?;
@@ -1708,14 +1793,26 @@ pub(in crate::sessions) fn open_database(
     }
     // 49: exact model-facing tool replies and checkpoint correction notice.
     // Published experimental schema 48 belongs to the later root-stall slice.
-    if schema_version.as_deref() != Some("49") {
+    if !matches!(schema_version.as_deref(), Some("49" | "50")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "tool_results_projection_json")? {
             transaction.execute("ALTER TABLE model_turns ADD COLUMN tool_results_projection_json TEXT CHECK (tool_results_projection_json IS NULL OR length(CAST(tool_results_projection_json AS BLOB)) <= 2097152)", [])?;
         }
+        if column_shape(&transaction, "model_turns", "tool_results_projection_json")?
+            != ("TEXT".to_owned(), false, None, 0)
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        // Schema48 already contains notices that a schema49 reader cannot decode.
+        // Publish its projection storage and compatible version in one transaction.
+        let projection_version = if schema_version.as_deref() == Some("48") {
+            "50"
+        } else {
+            "49"
+        };
         transaction.execute(
-            "UPDATE metadata SET value='49' WHERE key='schema_version'",
-            [],
+            "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+            [projection_version],
         )?;
         transaction.commit()?;
     }
@@ -1724,6 +1821,16 @@ pub(in crate::sessions) fn open_database(
             != ("TEXT".to_owned(), false, None, 0)
     {
         return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    // 50: root_stall_report is a replay value. Experimental48 already used
+    // it; this reader retains its codec and adds projection storage first.
+    if !matches!(schema_version.as_deref(), Some("48" | "50")) {
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE metadata SET value='50' WHERE key='schema_version'",
+            [],
+        )?;
+        transaction.commit()?;
     }
     debug_assert_eq!(
         connection

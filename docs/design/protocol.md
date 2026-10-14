@@ -282,7 +282,9 @@ projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
 without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
 experimental schema-48 AB5 build because it lacks that build's root-notice
 codec. The schema50 reader migrates both experimental48 and projection49,
-adding projection storage for48 while retaining the root-notice codec.
+adding projection storage and publishing version50 atomically for48 while
+retaining the root-notice codec. A failed48 upgrade leaves its original version
+and structure intact.
 
 Schema 50 adds the replay value `root_stall_report` through a version-only
 migration. Roots receive an action-oriented, authority-neutral notice;

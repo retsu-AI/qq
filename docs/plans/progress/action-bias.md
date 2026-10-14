@@ -1719,3 +1719,9 @@ newest last.
   could crash after publishing49 while retaining root notices its reader cannot
   decode. Add a trigger-injected final-version failure;48 must retain both its
   version and original structure. Publish48→50 projection/version together.
+
+- The injected failure reproduced an unsafe committed49 intermediate version.
+  Schema48 now adds projection storage, validates its shape and publishes50 in
+  one transaction. All six focused AB5 cases pass, including rollback, retained
+  notice bytes/store identity and two reopens. Parent migration expectations now
+  follow the reader version and require the notice codec before admitting48.

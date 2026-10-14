@@ -506,7 +506,7 @@ fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores()
                 |row| row.get::<_, String>(0)
             )
             .unwrap(),
-        "49"
+        STORE_SCHEMA_VERSION.to_string()
     );
     drop(connection);
     let (connection, _) = open_database(&path).unwrap();
@@ -514,21 +514,37 @@ fn ab2_projection_migration_preserves_old_rows_and_refuses_incompatible_stores()
         .execute_batch("UPDATE metadata SET value='48' WHERE key='schema_version'")
         .unwrap();
     drop(connection);
-    assert!(
-        open_database(&path).is_err(),
-        "experimental notice schema requires its notice decoder"
-    );
-    let connection = Connection::open(&path).unwrap();
-    assert_eq!(
+    let connection = if crate::runtime::TurnNotice::from_stored("root_stall_report").is_some() {
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            STORE_SCHEMA_VERSION.to_string()
+        );
         connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='schema_version'",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-        "48"
-    );
+    } else {
+        assert!(
+            open_database(&path).is_err(),
+            "experimental notice schema requires its notice decoder"
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "48"
+        );
+        connection
+    };
     connection.execute_batch("UPDATE metadata SET value='49' WHERE key='schema_version'; ALTER TABLE model_turns DROP COLUMN tool_results_projection_json").unwrap();
     drop(connection);
     assert!(
