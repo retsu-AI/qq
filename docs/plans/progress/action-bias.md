@@ -1414,3 +1414,19 @@ newest last.
 - Corrected the initial supported-version match and all earlier multiline
   migration guards to include 48. Late receipt/accounting validators remain
   intact. Focused migration/notice fixtures and full fresh gates rerun next.
+
+### 2026-10-14 — AB5 schema-48 local qualification and older-reader proof
+
+- Immutable `9971c44c802e88a1bbadb7d4888045746e71d35e`: fresh workspace
+  passes 2,399 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source stayed clean and unchanged. Five focused AB5 fixtures pass.
+- Evidence: `target/qq-perf/ab5-2026-10-14/verified-context-schema48-fixed-{0..4}.log`
+  and receipt JSON. First failing workspace/red reopen evidence is retained.
+- Real isolated schema-48 store was created and cleanly shut down by this
+  build; retained schema-47 binary `9cbbaa7d` exits 1 at store open, leaving
+  metadata, structure and empty session count unchanged. Receipt/log/script:
+  `schema47-refusal*` under the same evidence directory; no model calls.
+- Independent post-repair review checks all 37 historical migration guards,
+  structural validators and notice compatibility. Nondraft publication and
+  fresh hosted/Codex review follow; performance gates remain open.
