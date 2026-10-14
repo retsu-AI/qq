@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after AB1–AB4 have been on `main` for seven days |
+| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after AB1–AB5 have been on `main` for seven days |
 | Research | [`../research/action-bias.md`](../research/action-bias.md): live store, 30 days to 2026-10-13, findings AB-F1–AB-F7; reference prompts and tools from Codex, OpenCode, Pi, fx |
 | Ledger | [`progress/action-bias.md`](./progress/action-bias.md) |
 | Linear | [ENG-1037](https://linear.app/retsu-ai/issue/ENG-1037) (program), milestone `Action Bias`; AB1–AB6 are ENG-1038–ENG-1043 |
@@ -80,7 +80,8 @@ described in AB6.
 | AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit always carries `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a 3,000-line short-line file fitting the byte and rendered-line bounds returns whole; a 4,000-empty-line file gets contiguous offset continuation before generic bounding; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
 | AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
 | AB5 | A root's stall report asks for the next action, not a status summary: a new `TurnNotice::RootStallReport` with its own wording; children keep `StallReport` | AB-F1 | S | AB1 | `crates/qq-core/src/lib.rs` (notice constant), `runtime/events.rs` (`TurnNotice`, `from_stored`), `runtime/run_loop.rs` (choose by `StallPolicy`), `sessions/store/schema` (`STORE_SCHEMA_VERSION` 45 → 46, version-only migration; root request), `docs/design/protocol.md` store schema history, guide `troubleshooting.md` and `providers.md` schema mentions (checked by `docs_truth`) | A root fixture gets `root_stall_report` on request 65 and its continuation; a replayed pre-AB5 root run still renders `stall_report` byte-identically; live/replayed read-only roots receive the same authority-neutral notice; a child fixture is unchanged; a schema-45 binary refuses a schema-46 store at open instead of failing per session with `CODEC` |
-| AB6 | Qualification: re-run the research queries after seven days of AB1–AB4 on `main`; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB1–AB4 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
+| AB6.1 | Reproducible shell-read qualification export and classifier recount | AB-F1 | S | AB1 | `xtask/src/{main,action_bias}.rs`, `xtask/Cargo.toml` if SQLite access is needed, existing hidden `approval.rs` support wrapper, research export/recount instructions, ledger | Read-only consistent snapshot with fixed root terminal-by-cutoff cohort; versioned bounded JSONL with schema/window/cutoff/expected count and every shell call ID/run/state/command status; same pinned AB1 classifier binary recounts both windows; malformed/incomplete/duplicate/oversized export tests; accepted and mutating command cases; immutable classifier SHA and binary hash recorded |
+| AB6 | Qualification: re-run the research queries after seven days of AB1–AB5 on `main`; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB6.1 accepted; AB1–AB5 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
 
 Order: AB1 and AB2 in parallel, then AB3, AB4, AB5, and AB6 after seven days.
 AB2 and AB4 both edit `prompt.rs`, so AB4 rebases on AB2. AB1 and AB5 both
@@ -114,15 +115,24 @@ The rule:
    - `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, or their long aliases
      `--delete`, `--move`, `--copy`, `--force`; creation/reset operands
      also count as work (only listing/filter operands are reads);
-   - `git diff`, `git log` and `git show` without `--output` (including
-     accepted long-option abbreviations).
+   - `git diff`, `git log` and `git show` reject output/helper/signature
+     enabling options and accepted abbreviations. Canonical read forms start
+     their subcommand arguments with `--no-ext-diff --no-textconv` (either
+     order); `log`/`show` then use `--no-show-signature`. These disabling flags
+     must be options, never operands after `--` or values of another option.
+     Exact `git diff --stat` also reads; its mode skips diff/textconv drivers;
+   - `git blame` starts with `--no-textconv`, with no enabling aliases;
+   - `cargo metadata`/`cargo tree` start their arguments with `--locked` or
+     `--frozen` and no `--config` override; plain/offline queries are work;
+   - `rg` rejects `--pre` and hostname helper programs (`--hostname-bin`).
 5. Additions:
    - `sed` when `-n` is present, no flag contains `i` or is
      `--in-place`, no file-supplied program (`-f`/`--file`, joined or
-     abbreviated forms), and every literal script has no `w`, `W` or `e` command;
+     abbreviated forms), and every literal script has no `w`, `W` or `e`
+     command or substitution `w`/`e` flag;
    - `nl`, `cut`;
    - `sort` without `-o` (including attached `-oFILE`), `--output` or
-     `--output=FILE`, and `uniq` with at most one operand;
+     `--output=FILE` and accepted long-option abbreviations such as `--o=FILE`, and `uniq` with at most one operand;
    - `git -C DIR` followed by a read under the same rules, and
      `git worktree list`.
 
@@ -136,6 +146,7 @@ The rule:
 | `sed -i s/a/b/ f.rs` | no |
 | `cd x && grep foo f > out` | no |
 | `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
+| `sed -n 's/.*/touch generated/e' input.txt`, `sed -n 's/x/y/w generated.txt' input.txt`, `sort --o=written.txt input.txt` | no |
 | `sed -n -f write.sed input.txt`, `sed -n --file=write.sed input.txt` | no |
 | `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |
 | `sort -o f.rs f.rs`, `sort -oout f.rs`, `sort --output=out f.rs`, `sort --output out f.rs`, `uniq in out` | no |
@@ -199,8 +210,11 @@ is reviewed in the PR; these bullets are the contract.
   restart it unchanged. The host supplies workspace-root instructions."
 - **Shorten** "mode=outline to see a file's shape before reading it" to "mode=outline
   for the shape of a long file". The rest of the T19 bullet is unchanged.
-- **Header:** list `search_history` and `read_tool_result` as read-only only
-  when they are in `specs`.
+- **Declared tools:** every tool-specific header description and working
+  convention is conditional on `specs`, including arbitrary configured
+  subsets and no-tools profiles. Capture a read_file-only and a no-tools
+  request and assert no absent tool is advertised or instructed. The full
+  toolset retains the quoted contract bullets above.
 - **Fallout in the same PR:**
   - The `lib.rs` prompt assertion on "observable completion criteria"
     (`lib.rs:2669`) moves to the new wording.
@@ -289,8 +303,13 @@ projection is deterministic (F23).
     which the evidence shows sends the model looking for a way to act
     that does not exist.
   - ADR-0059 records the decision and supersedes that clause.
-- The authority line is keyed on the prefix key's existing `read_only`
-  flag only. No `ask`/`auto`/`full` clause is added:
+- The authority line is keyed on strict `read_only` and unattended-direct
+  eligibility, both in the bounded prefix key. Direct wording is authority-
+  neutral: it cannot ask questions, uses only declared tools, may act through
+  configured external grants, and gives exact caller-applied changes if no
+  declared tool can perform the task. Test both granted and ungranted direct
+  prompts. Do not label a granted direct run unable to act. No mutable
+  `ask`/`auto`/`full` clause is added:
   - `SetApprovalMode` can change the mode mid-session
     (`sessions/commands.rs:1279`), so a mode baked into the prompt would
     go stale;
@@ -340,9 +359,25 @@ The wording of a stored notice is part of every run that carried it
 
 ### AB6 — reproducible qualification
 
+Qualification uses the same pinned AB1 classifier for both windows to
+recount shell reads, not the historical program-name SQL proxy. Add a
+bounded read-only JSONL export/recount tool (AB6.1) before qualification,
+using the existing hidden support seam to call `read_only_shell_command`, not
+approval `classify`. Export in a consistent read transaction: version, schema,
+start/end/cutoff, root terminal-by-cutoff cohort and expected record count;
+records carry every shell call ID/run/state/command and malformed/oversized
+status. Keep every qualifying shell call in the denominator; invalid or
+oversized commands count as nonreads explicitly, never truncated or skipped.
+Stream recount with bounded record bytes/count; reject malformed, incomplete
+and duplicate-call exports. Record immutable classifier build SHA and binary
+hash; recount both windows with that same binary. Test cohort boundaries and
+identity, git -C/cut/sort/uniq/leading cd, every write exclusion, dynamic syntax,
+malformed JSON, oversized records and duplicates. The historical SQL proxy
+remains context; requery its baseline with this shared classifier.
+
 Use the research appendix's explicit start/end parameters for both windows.
 The historical baseline is 30 days ending 2026-10-13 UTC; the candidate is
-seven full UTC days starting after the last AB1–AB4 merge. Record merge
+seven full UTC days starting after the last AB1–AB5 merge. Record merge
 SHAs, window boundaries, store schema and prompt versions. Fix observation
 to end + 24 hours for both windows and do not query before that cutoff.
 Completion counts every started root in the denominator and only roots
@@ -368,11 +403,20 @@ probe count remains context, with its separate denominator stated.
 Paid paired comparison requires ENG-809 authorization and an evaluator
 slice before dispatch. Existing `xtask eval compare` rejects differing
 prompt versions; it must keep doing so for ordinary comparisons. The
-prerequisite slice adds an explicit prompt-treatment mode that allows only
-the recorded 19→20 identity change, preserves all other comparator identity
-checks, and accepts results from separately built immutable prompt-19 and
-prompt-20 binaries with identical T13 fixtures/model/configuration. Tests
-must reject unrelated prompt pairs and other identity changes. Until that
+prerequisite slice adds an explicit AB2-treatment mode. Build both arms
+from the same accepted AB1–AB5 runtime source; a reviewed counterfactual
+patch changes only AB2's prompt treatment and four descriptions, retaining
+identical AB3 schemas/behavior and AB4/AB5 authority/notice behavior. Label
+this prompt-19-versus-20 treatment on a fixed runtime, not a comparison to
+the historical released prompt-19 runtime. Record the exact expected pairs
+for source revision, binary hash, prompt/system hashes, tool-schema hash and
+derived catalog identity. The treatment mode validates only those recorded
+pairs and preserves every other comparator check; identical T13 fixtures,
+model and configuration remain required. Tests reject unrelated pairs,
+unlisted identity changes and differing input schemas/runtime behavior.
+A pre-stack versus post-stack comparison is explicitly AB1–5 treatment,
+not attributable solely to AB2; it requires separate declared identity
+pairs and authorization. Until that
 slice is accepted, the paired branch is blocked; no paid run or comparator
 bypass is authorized by this plan.
 
