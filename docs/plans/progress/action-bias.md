@@ -480,3 +480,8 @@ newest last.
   existing terminal scan-cap marker. A single over-cap line is also terminal.
   Regression passes without a production change; the older draft contract
   needs to state this existing terminal behavior explicitly.
+
+- Immutable source0eaf8dd2 workspace gates pass: 2,292 tests, zero failed,
+  14 ignored; fmt, Clippy and build all exit0. Logs
+  target/qq-perf/ab3-2026-10-14/header-final-gate-{0,1,2,3}.log.
+  Matched performance and newer upstream integration remain open.
