@@ -630,3 +630,56 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
     assert_eq!(harness.requests.lock().unwrap().len(), before + 1);
     harness.runtime.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (session, claimed, ids) = projection_fixture(&store, directory.path()).await;
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
+        Ok(())
+    }).await.unwrap();
+    store
+        .record_checkpoint(
+            &claimed,
+            super::super::streaming::CheckpointRecord {
+                correlation: "checkpoint-proof".to_owned(),
+                phase: qq_protocol::CheckpointPhase::ToolResult,
+                tool_call_id: Some(ids[0]),
+                outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                confidence_basis_points: Some(10_000),
+                feedback: "the result contradicts the task".to_owned(),
+                spend: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Interrupted,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(path).await.unwrap();
+    let result = reopened
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, session, u64::MAX)
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SessionRuntimeError::ToolProjectionUnavailable { .. })
+        ),
+        "durable checkpoint consequences must not disappear: {result:?}"
+    );
+    reopened.close().await.unwrap();
+}

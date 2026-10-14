@@ -1056,3 +1056,13 @@ newest last.
   Receipts: `schema{47,48}-refusal-receipt.json`; new binary SHA350db0ae9ae9d49fb2e45d1f13aa12e03e220ce3af4a474f0b8d596fe1ccc7a3.
 - This commit adds only the qualification ledger. Fresh hosted/Codex review, child
   propagation and named performance gates remain open; no performance gate is waived.
+
+### 2026-10-14 — AB2 fresh checkpoint feedback/crash findings
+
+- Fresh Codex findingsPRRT_kwDOTmbEW86se2Ob andse2On are confirmed: raw correction
+  feedback can exceed the durable notice cap; a missing barrier can lose already
+  durable checkpoint consequences. Test-first single/aggregate Unicode feedback
+  and checkpoint-before-barrier reopen regressions precede the repair.
+- All dependent publication waits on the repaired parent. Existing event journal
+  lacks a run checkpoint index, so detection must preserve retained-context scaling
+  rather than scanning the entire workspace archive for every replayed turn.

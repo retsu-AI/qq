@@ -4937,6 +4937,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_checkpoint_feedback_and_combined_correction_notice_are_bounded() {
+        struct Oversized;
+        impl CheckpointReviewer for Oversized {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: if request.phase == runtime::CheckpointPhase::ToolResult {
+                        CheckpointOutcome::Contradicted
+                    } else {
+                        CheckpointOutcome::Supported
+                    },
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        for count in [1, 3] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("note"), "evidence").unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("read_file", r#"{"path":"note"}"#.to_owned()); count]],
+                    requests: Arc::clone(&requests),
+                },
+                "test",
+                256,
+            )
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Oversized));
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                events.last(),
+                Some(RuntimeEvent::Completed { .. })
+            ));
+            let notice = events
+                .iter()
+                .find_map(|event| match event {
+                    RuntimeEvent::ToolResultsProjected { projection, .. } => {
+                        projection.correction_notice.as_deref()
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                notice.len() <= 32 * 1024,
+                "{count} results: {} notice bytes",
+                notice.len()
+            );
+            assert!(notice.starts_with("JEV RED"));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].messages().contains(&Message::user(notice)));
+        }
+    }
+
+    #[tokio::test]
     async fn a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record() {
         // Regression (RR3): 9 real runs on 2026-09-19/20 ended as `Failed`
         // with "Jev exhausted its two correction attempts" after the model
