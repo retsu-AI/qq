@@ -689,3 +689,15 @@ newest last.
   target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
   Thirteen focused classifier fixtures pass in the workspace run; independent
   source reviews approve. Matched hot-path performance remains open.
+- Proactive scope review found first-page cursor placeholders were omitted
+  from start counts. The query now matches typed omitted/null values and all
+  runtime placeholders with Unicode whitespace trim and ASCII case folding.
+  A padded-placeholder fixture counts 14 starts across two roots with one
+  repeated root; baseline remains one start. Other cursor values require
+  exact prior-next provenance or leave qualification open.
+  Evidence: placeholder-discovery-starts.json; independent design review.
+
+
+- Placeholder docs truth passes 23 tests; formatting and diff checks pass.
+  Independent final review approves typed/trimmed cursor-start semantics and
+  the explicit provenance requirement for all other cursor records.
