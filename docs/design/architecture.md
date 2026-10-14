@@ -199,7 +199,7 @@ xtask/
   requests an included body without changing focus. Included-body refreshes
   replay newer retained events just as focused refreshes do, preserving unread
   badges and drafts without repeating surface effects. Late responses do not
-  replace a body already loaded through a newer cursor. Terminal cost
+  replace a body or its summary already loaded through a newer cursor. Terminal cost
   remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
@@ -1373,7 +1373,9 @@ After cancellation, deadline teardown or panic, a started prompt's terminal
 transaction settles its abandoned in-run summary first. This preserves the
 summary's durable measured prefix and unknown pending-send aggregate, and
 makes the owned child receipt readable when the prompt's terminal event arrives.
-Delayed drop cleanup observes the terminal row and adds no event or charge.
+Delayed drop cleanup observes the terminal row and adds no event or charge. The
+visible session last outcome excludes owned compaction steps, so their newer
+row or equal timestamp cannot hide the owning prompt's terminal reason.
 
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
