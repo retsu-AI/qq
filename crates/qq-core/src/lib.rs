@@ -9651,7 +9651,7 @@ mod tests {
             head.to_owned()
         };
         assert_eq!(without_section(&write), root);
-        assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1));
+        assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1).replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change.", "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence.", 1));
     }
 
     #[test]
@@ -9782,9 +9782,9 @@ mod tests {
             .replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n", "", 1)
             .replacen("- Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n", "", 1)
             .replacen("Preserve unrelated work in the files you change.", "Inspect existing state before changing it and preserve unrelated work.", 1)
-            .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
+            .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
             .replacen("mode=outline for the shape of a long file", "mode=outline to see a file's shape before reading it", 1)
-            .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
+            .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
             .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1)
             .replacen("- Give every tool path relative to the workspace root; absolute paths are rejected.\n", "- Give every tool path relative to the workspace root; absolute paths are rejected.\n- When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
@@ -9815,7 +9815,7 @@ mod tests {
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f"
+            "a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10177,6 +10177,7 @@ mod tests {
         read_only_hint: bool,
         /// Whether the host declares configuration grants for its tools.
         granted: bool,
+        live_granted: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl WideHost {
@@ -10188,6 +10189,7 @@ mod tests {
                 failure: None,
                 read_only_hint: false,
                 granted: true,
+                live_granted: None,
             }
         }
     }
@@ -10226,7 +10228,9 @@ mod tests {
         }
 
         fn config_grants(&self) -> Vec<String> {
-            if !self.granted {
+            if !self.live_granted.as_ref().map_or(self.granted, |granted| {
+                granted.load(std::sync::atomic::Ordering::SeqCst)
+            }) {
                 return Vec::new();
             }
             (0..self.count)
@@ -10683,6 +10687,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
+        for granted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            let live_granted = Arc::new(std::sync::atomic::AtomicBool::new(granted));
+            host.live_granted = Some(Arc::clone(&live_granted));
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                    &runtime, workspace,
+                ))
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            live_granted.store(!granted, std::sync::atomic::Ordering::SeqCst);
+            let events = plan
+                .run(RunCommand::new("perform the requested operation"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10741,7 +10794,10 @@ mod tests {
         for exposed in [
             Vec::new(),
             vec!["read_file".to_owned()],
+            vec!["search".to_owned()],
+            vec!["tree".to_owned()],
             vec!["shell".to_owned()],
+            vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -10794,6 +10850,21 @@ mod tests {
                 assert!(
                     !prompt.contains("with ranges"),
                     "absent read_file ranges guidance: {prompt}"
+                );
+            }
+            if expected == ["search"] || expected == ["tree"] {
+                assert!(
+                    requests[0].tools()[0]
+                        .description()
+                        .contains("path and include_ignored=true")
+                );
+            }
+            if expected == ["exec"] {
+                assert!(
+                    !requests[0].tools()[0]
+                        .description()
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .any(|token| token == "shell")
                 );
             }
             if expected == ["shell"] {
