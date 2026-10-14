@@ -1777,3 +1777,13 @@ newest last.
 - Actual retained experimental48 binary created an isolated store; qualified
   schema50 upgrades it, adds projection storage and preserves store identity
   across reopen. Evidence: actual48-upgrade50-receipt.json; zero model calls.
+
+### 2026-10-14 — AB5 declaring-host integration qualification
+
+- Immutable b004300474c96c5470e79876b925832414dcd972 passes fresh workspace
+  2,417 tests, zero failures,14 ignored; formatting, all-target/all-feature
+  Clippy with warnings denied and workspace build pass. Source remained frozen.
+  Receipt: host-grant-integrated-final-gate-receipt.json.
+- Includes qualified304 owner-bound grant fix and schema50 atomic notice
+  migration. This commit adds only the receipt; fresh hosted/Codex,306
+  propagation and named performance gates remain open.
