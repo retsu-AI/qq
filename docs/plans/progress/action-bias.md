@@ -914,3 +914,17 @@ newest last.
 - This publication resolves the actual batched-search output overflow and
   integrates current main/AB1. Hosted checks, fresh Codex review, and named
   performance gates remain open; this receipt does not waive them.
+
+### 2026-10-14 — AB2 fresh review admission/replay/frontier findings
+
+- Fresh Codex review of published `e4342a5c` identified real gaps: deferred
+  searches were still counted against slices; historical turn projection
+  lacked policy evidence; depth-limited siblings could exhaust scanning
+  without advancing a cursor. Independent investigations confirm all three.
+- Added twenty sixteen-search-batch regression: 140 admitted executions must
+  not trigger a 256-execution slice checkpoint. Test-first reproduction
+  follows before correcting the final-admission counter.
+- Replay repair will retain explicit persisted projection identity or exact
+  bounded model-facing bytes; ambiguous old identities cannot be backfilled
+  from present code. Frontier repair must watermark only policy-skipped
+  child subtrees, preserving eligible depth-64 files. Nothing is waived.
