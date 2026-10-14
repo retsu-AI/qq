@@ -1084,3 +1084,20 @@ newest last.
 - Checkpoint source6d09bb91 passes fresh workspace tests and formatting; Clippy
   catches `.last()` on a double-ended iterator in the new final-candidate test.
   Replace with `.next_back()`, retain the failed receipt, and rerun all gates before push.
+
+### 2026-10-14 — AB2 checkpoint projection final qualification
+
+- Immutable `fe8fce20668ea70f8d4299ac56826bb7f551bac6`: fresh workspace2,386passed,
+  0failed,14ignored (38blocks); fmt/all-target/all-feature Clippy/build exit0.
+  Logs: `target/qq-perf/ab2-2026-10-14/checkpoint-projection-final-gate-{0,1,2,3,4}.log`.
+-42focused AB2 cases pass; independent review approves bounded feedback/combined
+  notice and recorded-descriptor guard without workspace journal scans. Public
+  correction, exact reopen and zero-provider failure after missing barrier pass.
+- Any checkpoint-enabled tool turn without its exact projection refuses replay,
+  including final-only reviewers. Saved projections stay authoritative; unchecked
+  partial turns remain recoverable. Feedback24KiB/notice32KiB include truncation framing.
+- Actual47/48 readers refuse a schema49 store made by this build without changing
+  metadata/structure. `checkpoint-schema{47,48}-refusal-receipt.json`; new binary
+  SHAbeb64304bbeb4cb0d2cafd110cde8f7e07a1373e9f74dcd35f1043a2e25cd4d7.
+- This commit adds only the qualification ledger. Fresh hosted/Codex, child
+  propagation and named performance gates remain open; no performance gate is waived.
