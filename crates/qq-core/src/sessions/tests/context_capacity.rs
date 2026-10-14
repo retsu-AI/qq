@@ -172,7 +172,7 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
     // header's bound: not a stub.
     let long_first_line = format!(
         "search {}\n[pruned: search {{\"query\":\"needle\"}} returned 1 bytes; call it again if needed]",
-        "m".repeat(4 * 1024)
+        "m".repeat(crate::tools::MAX_MODEL_TEXT_BYTES)
     );
     // A stub line whose size is not a `u64`: not a stub.
     let huge_size = format!(
