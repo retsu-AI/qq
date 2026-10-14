@@ -1347,6 +1347,26 @@ mod tests {
     }
 
     #[test]
+    fn ab1_sed_extended_regex_is_read_without_write_options() {
+        for options in [vec!["-E", "-n"],vec!["-r", "-n"],vec!["--regexp-extended", "-n"],vec!["-En"],vec!["-nE"],vec!["-rn"]] {
+            let mut args = vec!["sed"];
+            args.extend(options);
+            args.extend(["/foo+/p", "f"]);
+            assert!(super::read_only_argv(&args), "{args:?}");
+        }
+        for args in [["sed","-Eni","/foo+/p","f"],["sed","-En","s/foo/bar/e","f"]] {
+            assert!(!super::read_only_argv(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn ab1_tree_recursive_html_output_is_work() {
+        for command in ["tree -L 2 -R .", "tree -RL2 .", "tree -aR ."] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
     fn ab1_output_only_sed_and_uniq_are_reads() {
         for script in ["=", "1,3=", "=; p"] {
             assert!(super::read_only_sed_script(script), "{script}");
