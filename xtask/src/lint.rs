@@ -24,7 +24,10 @@ use thiserror::Error;
 /// it. A sleep that is genuinely required (mtime granularity, a real
 /// process) is marked `// lint: allow(sleep) <reason>` on the same or the
 /// preceding line and is not counted.
-pub const SLEEP_CEILING: usize = 70;
+// Baseline correction: compound native tests add one previously missed sleep;
+// test-only functions add three; syncing main adds four existing sleeps.
+// No new sleeps are introduced by this change.
+pub const SLEEP_CEILING: usize = 78;
 
 #[derive(Debug, Error)]
 pub enum LintError {
@@ -151,7 +154,13 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
         let Some(text) = file.text else {
             continue;
         };
-        if is_crate_root(path) && !text.contains("#![forbid(unsafe_code)]") {
+        let stripped = strip_strings(text);
+        let compact = stripped
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        if is_crate_root(path) && !compact.contains("#![forbid(unsafe_code)]") {
             findings.push(Finding {
                 rule: Rule::ForbidUnsafe,
                 path: path.to_owned(),
@@ -166,7 +175,6 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
             inline_test_lines(text)
         };
         let mut previous = "";
-        let stripped = strip_strings(text);
         for (index, line) in text.lines().enumerate() {
             let number = index + 1;
             let code = stripped[index].trim_start();
@@ -174,7 +182,25 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                 previous = line;
                 continue;
             }
-            if code.starts_with("#[ignore]") {
+            let ignore_reason_empty = code.starts_with("#[ignore")
+                && line
+                    .split_once('=')
+                    .and_then(|(_, value)| value.split_once(']'))
+                    .is_some_and(|(value, _)| {
+                        let value = value.trim();
+                        let decoded = if value.starts_with('r') {
+                            value.find('"').and_then(|start| {
+                                value
+                                    .rfind('"')
+                                    .filter(|end| *end > start)
+                                    .map(|end| value[start + 1..end].to_owned())
+                            })
+                        } else {
+                            serde_json::from_str::<String>(value).ok()
+                        };
+                        decoded.is_none_or(|reason| reason.trim().is_empty())
+                    });
+            if code.starts_with("#[ignore]") || ignore_reason_empty {
                 findings.push(Finding {
                     rule: Rule::IgnoreNeedsReason,
                     path: path.to_owned(),
@@ -183,7 +209,12 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                 });
             }
             let in_tests = test_lines.get(index).copied().unwrap_or(false);
-            if !in_tests && code.contains("unbounded_channel") {
+            if !in_tests
+                && (code.contains("unbounded_channel")
+                    || code.contains("::unbounded(")
+                    || code.contains("std::sync::mpsc::channel(")
+                    || (code.contains("mpsc::channel()") && text.contains("std::sync::mpsc")))
+            {
                 findings.push(Finding {
                     rule: Rule::UnboundedChannel,
                     path: path.to_owned(),
@@ -211,7 +242,12 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
     if let Some(index) = adr_index {
         for adr in adrs {
             let number = &adr[..4];
-            if !index.contains(adr) && !index.contains(&format!("| {number} ")) {
+            if !index.lines().any(|line| {
+                let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+                cells.first() == Some(&"")
+                    && cells.get(1) == Some(&number)
+                    && cells.iter().any(|cell| cell.contains(&format!("]({adr})")))
+            }) {
                 findings.push(Finding {
                     rule: Rule::AdrIndexed,
                     path: format!("docs/adr/{adr}"),
@@ -277,6 +313,7 @@ fn strip_strings(text: &str) -> Vec<String> {
         },
         /// Inside a raw string closed by `"` plus this many `#`.
         Raw(usize),
+        BlockComment(usize),
     }
     let mut lines = Vec::new();
     let mut state = State::Code;
@@ -287,6 +324,22 @@ fn strip_strings(text: &str) -> Vec<String> {
         while index < bytes.len() {
             let byte = bytes[index];
             match state {
+                State::BlockComment(depth) => {
+                    if bytes[index..].starts_with(b"/*") {
+                        state = State::BlockComment(depth + 1);
+                        index += 2;
+                    } else if bytes[index..].starts_with(b"*/") {
+                        state = if depth == 1 {
+                            State::Code
+                        } else {
+                            State::BlockComment(depth - 1)
+                        };
+                        index += 2;
+                        out.push(' ');
+                    } else {
+                        index += 1;
+                    }
+                }
                 State::Plain { escaped } => {
                     if escaped {
                         state = State::Plain { escaped: false };
@@ -313,6 +366,15 @@ fn strip_strings(text: &str) -> Vec<String> {
                     }
                 }
                 State::Code => {
+                    if bytes[index..].starts_with(b"//") {
+                        break;
+                    }
+                    if bytes[index..].starts_with(b"/*") {
+                        state = State::BlockComment(1);
+                        index += 2;
+                        out.push(' ');
+                        continue;
+                    }
                     let raw_start = byte == b'r'
                         && (index == 0
                             || !(bytes[index - 1].is_ascii_alphanumeric()
@@ -378,22 +440,49 @@ fn inline_test_lines(text: &str) -> Vec<bool> {
             }
             continue;
         }
-        if code == "#[cfg(test)]" {
+        let cfg = code
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        // Only predicates that require `test` may exempt production code.
+        // Be conservative for nested/unknown predicates, especially any(test, …).
+        let test_only = cfg == "#[cfg(test)]"
+            || cfg
+                .strip_prefix("#[cfg(all(")
+                .and_then(|rest| rest.strip_suffix("))]"))
+                .is_some_and(|rest| {
+                    let mut depth = 0usize;
+                    let mut start = 0usize;
+                    for (index, byte) in rest.bytes().enumerate() {
+                        match byte {
+                            b'(' => depth += 1,
+                            b')' => depth = depth.saturating_sub(1),
+                            b',' if depth == 0 => {
+                                if &rest[start..index] == "test" {
+                                    return true;
+                                }
+                                start = index + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    &rest[start..] == "test"
+                });
+        if test_only {
             cfg_test = true;
             marks.push(false);
             continue;
         }
-        let module = code.starts_with("mod ")
-            || code.starts_with("pub(crate) mod ")
-            || code.starts_with("pub mod ");
-        if cfg_test && module && code.contains('{') {
+        // Keep the attribute through a multiline function signature; a
+        // semicolon ends out-of-line modules and test-only declarations.
+        if cfg_test && code.contains('{') {
             marks.push(true);
             let open = code.matches('{').count() as i64 - code.matches('}').count() as i64;
             depth = (open > 0).then_some(open);
             cfg_test = false;
             continue;
         }
-        if !code.starts_with("#[") {
+        if cfg_test && code.ends_with(';') {
             cfg_test = false;
         }
         marks.push(false);
@@ -493,6 +582,68 @@ mod tests {
     const ROOT: &str = "#![forbid(unsafe_code)]\n";
 
     #[test]
+    fn safety_attributes_must_be_code_not_comments_or_literals() {
+        for text in [
+            "// #![forbid(unsafe_code)]",
+            "/* #![forbid(unsafe_code)] */",
+            "const S: &str = \"#![forbid(unsafe_code)]\";",
+        ] {
+            assert!(
+                rules(
+                    &[Source {
+                        path: "src/lib.rs",
+                        text: Some(text)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(r, ..)| *r == Rule::ForbidUnsafe)
+            );
+        }
+    }
+
+    #[test]
+    fn compound_cfg_tests_and_channel_constructors_are_recognized() {
+        for cfg in [
+            "any(test, feature = \"native\")",
+            "all(any(test, feature = \"native\"), unix)",
+            "not(test)",
+        ] {
+            let source = format!(
+                "#[cfg({cfg})]\nmod native {{\nfn run() {{ mpsc::unbounded_channel(); }}\n}}\n"
+            );
+            assert!(
+                rules(
+                    &[Source {
+                        path: "src/native.rs",
+                        text: Some(&source)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::UnboundedChannel),
+                "{cfg}"
+            );
+        }
+        let text = "fn a() { crossbeam_channel::unbounded(); }\nfn b() { std::sync::mpsc::channel(); }\n#[cfg(all(test, feature = \"native\"))]\nmod tests {\nfn t() { tokio::time::sleep(d); }\n}\n";
+        let (findings, count) = evaluate(
+            &[Source {
+                path: "src/run.rs",
+                text: Some(text),
+            }],
+            1,
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.rule == Rule::UnboundedChannel)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn a_clean_tree_has_no_findings() {
         let files = [
             Source {
@@ -530,6 +681,20 @@ mod tests {
 
     #[test]
     fn a_bare_ignore_is_reported_and_a_reasoned_one_is_not() {
+        for reason in ["", "   "] {
+            let source = format!("#[ignore = \"{reason}\"]\nfn skipped() {{}}\n");
+            assert!(
+                rules(
+                    &[Source {
+                        path: "tests/skipped.rs",
+                        text: Some(&source)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::IgnoreNeedsReason)
+            );
+        }
         let text = "#[test]\n#[ignore]\nfn a() {}\n#[ignore = \"soak\"]\nfn b() {}\n";
         let files = [Source {
             path: "crates/qq-x/tests/soak.rs",
@@ -638,7 +803,7 @@ mod tests {
 
     #[test]
     fn an_adr_without_an_index_row_is_reported() {
-        let index = "| 0001 | [One runtime](0001-one.md) | Accepted |\n";
+        let index = "| 0001 | [One runtime](0001-one.md) | Accepted |\n| 0002 | Reserved | |\nMention: 0002-two.md\n";
         let files = [
             Source {
                 path: "docs/adr/README.md",
