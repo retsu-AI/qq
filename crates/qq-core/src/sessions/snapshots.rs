@@ -174,14 +174,41 @@ pub(super) fn load_session_snapshot(
         messages.push(message);
     }
     messages.reverse();
+    // Reserve bounded slots for the active run and last visible terminal receipt.
+    // Internal recovery steps cannot evict the foreground cost from its refresh.
     let mut statement = transaction.prepare(
-        "SELECT id FROM runs WHERE session_id = ?1
-             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?2",
+        "WITH pinned AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id = ?2
+             UNION
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs WHERE id = (
+                 SELECT id FROM runs WHERE session_id = ?1 AND outcome_json IS NOT NULL
+                     AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
+                 ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1
+             )
+         ), recent AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id NOT IN (SELECT id FROM pinned)
+             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3
+         )
+         SELECT id FROM (
+             SELECT id, created_at_ms, creation_order FROM (
+                 SELECT id, created_at_ms, creation_order, 0 AS priority FROM pinned
+                 UNION ALL
+                 SELECT id, created_at_ms, creation_order, 1 AS priority FROM recent
+             ) ORDER BY priority, CASE WHEN id = ?2 THEN 0 ELSE 1 END,
+                 created_at_ms DESC, creation_order DESC LIMIT ?3
+         ) ORDER BY created_at_ms DESC, creation_order DESC",
     )?;
     let mut run_ids = statement
-        .query_map(params![session_id.to_string(), message_limit], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            params![
+                session_id.to_string(),
+                summary.active_run_id.map(|id| id.to_string()),
+                message_limit
+            ],
+            |row| row.get::<_, String>(0),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     // Run rows are small and fixed-shape; they are charged at the row

@@ -106,12 +106,12 @@ pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
     /// Rebuild a replaced body from retained events already observed live.
-    /// Keep local unread state and drafts; return only read-only receipt refreshes.
+    /// Keep local unread state and drafts; preserve receipt refresh and deletion effects.
     pub fn replay_event(
         &mut self,
         envelope: &SessionEventEnvelope,
         context: ReduceContext<'_>,
-    ) -> Vec<SnapshotRequest> {
+    ) -> StateEffects {
         let local = self.get_mut(&envelope.session_id).map(|view| {
             (
                 view.unread,
@@ -130,8 +130,13 @@ impl SessionStore {
         effects
             .into_iter()
             .filter_map(|effect| match effect {
-                StateEffect::RequestSnapshot(request) => Some(request),
-                _ => None, // Replay deliberately suppresses every surface side effect.
+                effect @ (StateEffect::RequestSnapshot(_)
+                | StateEffect::Refocus(_)
+                | StateEffect::SessionRemoved { .. }) => Some(effect),
+                StateEffect::Notice { .. }
+                | StateEffect::Attention(_)
+                | StateEffect::AdoptCreated(_)
+                | StateEffect::SubmitDraft { .. } => None,
             })
             .collect()
     }

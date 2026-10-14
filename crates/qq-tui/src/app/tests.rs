@@ -3304,20 +3304,31 @@ fn deleting_the_shown_session_moves_to_its_neighbour() {
 
 #[test]
 fn late_snapshot_replay_keeps_the_only_deleted_session_unfocused() {
-    let mut app = App::new(TuiOptions::default());
-    let initial = snapshot();
-    let deleted = initial.sessions[0].id;
-    let late = initial.clone();
-    app.apply_snapshot(initial);
-    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
-        2,
-        deleted,
-        SessionEvent::SessionDeleted { session_id: deleted },
-    )));
-    assert_eq!(app.focused(), None);
-    app.apply_snapshot(late);
-    assert!(app.sessions.is_empty());
-    assert_eq!(app.focused(), None, "replayed deletion clears surface focus");
+    for side_view in [false, true] {
+        let mut app = App::new(TuiOptions::default());
+        let initial = snapshot();
+        let deleted = initial.sessions[0].id;
+        let late = initial.clone();
+        app.apply_snapshot(initial);
+        if side_view {
+            app.execute(Command::ShowSideQuestions);
+        }
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            deleted,
+            SessionEvent::SessionDeleted {
+                session_id: deleted,
+            },
+        )));
+        assert_eq!(app.view(), View::Transcript(None));
+        app.apply_snapshot(late);
+        assert!(app.sessions.is_empty());
+        assert_eq!(
+            app.view(),
+            View::Transcript(None),
+            "replayed deletion clears surface focus"
+        );
+    }
 }
 
 #[test]

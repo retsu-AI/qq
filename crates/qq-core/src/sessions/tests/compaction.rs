@@ -6032,20 +6032,30 @@ async fn snapshot_run_tail_retains_the_foreground_receipt_after_many_owned_compa
                         [session_id.to_string()],
                     )?;
                 }
-                let mut budget = snapshots::SnapshotBudget::new(16 * 1024 * 1024);
-                let body =
-                    snapshots::load_session_snapshot(connection, session_id, 256, &mut budget)?;
-                assert_eq!(body.runs.len(), 256, "the run tail stays bounded");
-                let receipt = body
-                    .runs
-                    .iter()
-                    .find(|run| run.id == run_id)
-                    .expect("foreground receipt survives newer internal steps");
-                if finished {
-                    assert_eq!(receipt.outcome, Some(RunOutcome::Cancelled));
-                    assert_eq!(receipt.estimated_cost_usd_nanos, Some(1234567));
-                } else {
-                    assert_eq!(receipt.status, RunStatus::Running);
+                for limit in [1, 2, 256] {
+                    let mut budget = snapshots::SnapshotBudget::new(16 * 1024 * 1024);
+                    let body = snapshots::load_session_snapshot(
+                        connection,
+                        session_id,
+                        limit,
+                        &mut budget,
+                    )?;
+                    assert_eq!(
+                        body.runs.len(),
+                        usize::from(limit),
+                        "the run tail stays bounded"
+                    );
+                    let receipt = body
+                        .runs
+                        .iter()
+                        .find(|run| run.id == run_id)
+                        .expect("foreground receipt survives newer internal steps");
+                    if finished {
+                        assert_eq!(receipt.outcome, Some(RunOutcome::Cancelled));
+                        assert_eq!(receipt.estimated_cost_usd_nanos, Some(1234567));
+                    } else {
+                        assert_eq!(receipt.status, RunStatus::Running);
+                    }
                 }
             }
             Ok(())
