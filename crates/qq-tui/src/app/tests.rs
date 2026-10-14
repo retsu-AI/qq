@@ -3022,6 +3022,59 @@ fn two_session_app() -> (App, SessionId, SessionId) {
 }
 
 #[test]
+fn background_terminal_receipt_refresh_keeps_focus_and_replays_newer_events() {
+    let (mut app, first, other) = two_session_app();
+    let run = id(0x75, qq_protocol::RunId::from_bytes);
+    let mut idle = app.sessions[&other].summary.clone();
+    idle.status = qq_protocol::SessionStatus::Idle;
+    idle.active_run_id = None;
+    let effects = app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        other,
+        SessionEvent::RunFinished {
+            session: Box::new(idle.clone()),
+            run_id: run,
+            outcome: qq_protocol::RunOutcome::Completed,
+            usage: None,
+            context_tokens: None,
+            final_output: None,
+        },
+    )));
+    assert!(
+        effects
+            .requests()
+            .any(|request| matches!(request, ClientRequest::Snapshot(request)
+        if request.focused_session_id.is_none() && request.include_sessions == [other]))
+    );
+    let mut newer = idle.clone();
+    newer.title = "newer title".to_owned();
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        other,
+        SessionEvent::SessionUpdated {
+            session: Box::new(newer),
+        },
+    )));
+    let mut body = body_for(&idle, "other body");
+    body.runs.push(
+        serde_json::from_value(serde_json::json!({
+            "id":run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+            "estimated_cost_usd_nanos":150,"correlation":{}
+        }))
+        .unwrap(),
+    );
+    let mut response = snapshot();
+    response.cursor = fixtures::cursor(2);
+    response.focused = None;
+    response.included = vec![body];
+    app.apply_snapshot(response);
+    assert_eq!(app.focused(), Some(first));
+    assert_eq!(app.sessions[&other].summary.title, "newer title");
+    assert_eq!(app.sessions[&other].runs[&run].cost_usd_nanos, Some(150));
+    assert!(app.focus_session(other).requests().next().is_none());
+}
+
+#[test]
 fn the_shown_session_is_pinned_warm_while_others_evict() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
