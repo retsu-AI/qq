@@ -395,3 +395,17 @@ newest last.
   Logs: `target/qq-perf/ab2-2026-10-14/subset-final-gate-{0,1,2,3}.log`.
 - Fixed prefix 5,299 bytes; builtin schema unchanged. Matched plan compilation
   performance remains unqualified; draft source review continues.
+
+### 2026-10-14 — AB3 integrated publication qualification
+
+- Independent final source review approved. Integrated workspace: 2,289
+  passed, 0 failed, 14 ignored; fmt, Clippy and build exit 0. First attempt
+  stopped when the filesystem filled; removed only task-owned obsolete
+  incremental caches, then reran all gates. Logs under this worktree
+  `target/qq-perf/ab3-2026-10-14/integrated-space-retry-{0,1,2,3}.log`.
+- Actual parallel coverage recovers all 6,000 rows: baseline 30 calls/0 cuts,
+  candidate 15 calls/4 cuts. Explicit windows, ranges and scan-cap fixtures pass.
+- Loaded-host diagnostics: dispatch 94,369 → 64,433 ns/iteration (1,000);
+  default output bounding 132,475 → 128,788 ns. Matched/noise performance
+  qualification remains open; these samples do not establish a speedup.
+- Draft source publication next, stacked on AB2; no readiness claim.
