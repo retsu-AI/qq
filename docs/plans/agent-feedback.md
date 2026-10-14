@@ -4,7 +4,8 @@
 
 AF0–AF4, AF7, AF8 and the first part of AF9 are in review as one stack
 (ENG-1028, branch `build/eng-1028-agent-feedback-loop`). AF5, AF6 and AF10
-are planned.
+are planned; AF6.1 audits the cancellation module in a PR stacked on #282.
+The parent AF6 audit stays open for the remaining modules.
 
 ## Goal
 

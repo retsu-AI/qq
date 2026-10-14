@@ -10,7 +10,9 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 | AF3 | `cargo xtask check` | In review | same | |
 | AF4 | `cargo xtask smoke` | In review | same | |
 | AF5 | `QQ_LOG` tracing | Planned | | ADR needed |
-| AF6 | Test audit | Planned | | one module per PR |
+| AF6 | Test audit | Planned (remaining modules) | | one module per PR |
+| AF6.1 | Cancellation module audit | In progress | `test/eng-1028-af6-cancellation-audit` (stacked on #282) | deterministic wakeups, stress, mutation coverage |
+
 | AF7 | CI affected/full split | In review | same | merge queue setting is the operator's |
 | AF8 | AGENTS.md and skills | In review | same | |
 | AF9 | `cargo xtask lint` | In review (first rules) | same | mistake mining next |
