@@ -615,6 +615,33 @@ mod tests {
     }
 
     #[test]
+    fn ab6_malformed_shell_envelopes_cannot_become_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        for (index, arguments) in [
+            r#"{"command":"pwd","command":"cargo test"}"#,
+            r#"{"command":"pwd","cwd":42}"#,
+            r#"{"command":"pwd","cwd":".","cwd":"other"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            call(&connection, index as u8 + 1, 1, "failed", arguments);
+        }
+        let path = directory.path().join("cohort.jsonl");
+        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        let result = recount(&path).unwrap();
+        assert_eq!(
+            (
+                result.total_calls,
+                result.read_calls,
+                result.malformed_commands
+            ),
+            (3, 0, 3)
+        );
+    }
+
+    #[test]
     fn ab6_cohort_excludes_children_nonprompts_end_boundary_and_late_completions() {
         let directory = tempfile::tempdir().unwrap();
         let (store, connection) = fixture(directory.path());

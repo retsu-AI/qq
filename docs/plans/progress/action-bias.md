@@ -836,3 +836,14 @@ newest last.
   Indexed the qualification runbook. Freeze combined source for full checks;
   final classifier export/recount and hosted review follow. No candidate
   observation window or deployment is claimed.
+
+- Combined source 8cda0e3a passes workspace checks (2,324 tests, zero failures,
+  14 ignored; fmt/Clippy/build exit 0), but independent review found SQLite
+  command extraction accepts duplicate fields and wrongly typed cwd rejected
+  by the runtime parser. Qualification remains open; reproduce test-first and
+  validate bounded argument envelopes through the shared typed parsing seam.
+
+- Typed-envelope regression reproduces three false reads: duplicate command,
+  numeric cwd and duplicate cwd each become Read in SQLite extraction but
+  are rejected by the runtime parser. Red result: expected 3 malformed/0
+  reads, got 0 malformed/3 reads. Receipt typed-envelope-red.log.
