@@ -269,3 +269,17 @@ newest last.
 - Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
   review approves. failed-discovery-starts.json records the executable SQL
   fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Proactive scope review found first-page cursor placeholders were omitted
+  from start counts. The query now matches typed omitted/null values and all
+  runtime placeholders with Unicode whitespace trim and ASCII case folding.
+  A padded-placeholder fixture counts 14 starts across two roots with one
+  repeated root; baseline remains one start. Other cursor values require
+  exact prior-next provenance or leave qualification open.
+  Evidence: placeholder-discovery-starts.json; independent design review.
+
+
+- Placeholder docs truth passes 23 tests; formatting and diff checks pass.
+  Independent final review approves typed/trimmed cursor-start semantics and
+  the explicit provenance requirement for all other cursor records.
