@@ -492,9 +492,8 @@ pub(crate) fn exec_command_line(program: &str, args: &[String]) -> String {
 /// when the independent approval classifier allows them.
 pub(crate) fn read_only_shell_command(command: &str) -> bool {
     if command.len() > classify::MAX_CLASSIFIED_BYTES
-        || command.contains([
-            '\n', '\r', '>', '<', '$', '`', '\\', '(', ')', '{', '}', '#',
-        ])
+        || command.contains(['\n', '\r'])
+        || (cfg!(windows) && command.contains(['\'', '^', '%', '!']))
     {
         return false;
     }
@@ -565,6 +564,10 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                 } else {
                     args
                 };
+                // Working-tree reads may run a configured fsmonitor hook.
+                let Some(args) = args.strip_prefix(&["-c", "core.fsmonitor=false"]) else {
+                    return false;
+                };
                 let Some((subcommand, args)) = args.split_first() else {
                     return false;
                 };
@@ -618,14 +621,17 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                         .iter()
                         .any(|prefix| arg.starts_with(prefix))
             }),
-            "sort" => !args.iter().any(|arg| {
-                let option = arg.split('=').next().unwrap_or(arg);
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
-                    || (option.len() > 2
-                        && ["--output", "--compress-program"]
-                            .iter()
-                            .any(|name| name.starts_with(option)))
-            }),
+            "sort" => {
+                !cfg!(windows)
+                    && !args.iter().any(|arg| {
+                        let option = arg.split('=').next().unwrap_or(arg);
+                        (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+                            || (option.len() > 2
+                                && ["--output", "--compress-program"]
+                                    .iter()
+                                    .any(|name| name.starts_with(option)))
+                    })
+            }
             "uniq" => {
                 let mut operands = 0;
                 let mut value = false;
@@ -711,20 +717,28 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
                     || arg.starts_with("--out")
             }),
             "fd" => !args.iter().any(|arg| {
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X', 'l']))
                     || arg.starts_with("--exec")
+                    || arg.starts_with("--list")
             }),
-            "rg" => !args.iter().any(|arg| {
-                arg.starts_with("--pre")
-                    || arg.starts_with("--hostname-bin")
-                    || arg.starts_with("--search-zip")
-                    || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
-            }),
+            "rg" => {
+                args.first() == Some(&"--no-config")
+                    && !args.iter().any(|arg| {
+                        arg.starts_with("--pre")
+                            || arg.starts_with("--hostname-bin")
+                            || arg.starts_with("--search-zip")
+                            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('z'))
+                    })
+            }
             "file" => !args.iter().any(|arg| {
-                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')) || {
-                    let option = arg.split('=').next().unwrap_or(arg);
-                    option.len() > 2 && "--compile".starts_with(option)
-                }
+                (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z']))
+                    || {
+                        let option = arg.split('=').next().unwrap_or(arg);
+                        option.len() > 2
+                            && ["--compile", "--uncompress", "--uncompress-noreport"]
+                                .iter()
+                                .any(|name| name.starts_with(option))
+                    }
             }),
             "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
             | "du" | "df" | "nl" | "cut" => true,
@@ -740,7 +754,15 @@ pub(crate) fn read_only_shell_command(command: &str) -> bool {
         let byte = bytes[index];
         match quote {
             Some(delimiter) if byte == delimiter => quote = None,
+            Some(b'"') if matches!(byte, b'$' | b'`' | b'\\') => return false,
             Some(_) => {}
+            None if matches!(
+                byte,
+                b'>' | b'<' | b'$' | b'`' | b'\\' | b'(' | b')' | b'{' | b'}' | b'#'
+            ) =>
+            {
+                return false;
+            }
             None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
             None if matches!(byte, b'|' | b';' | b'&') => {
                 if byte == b'&' && bytes.get(index + 1) != Some(&b'&') {
@@ -864,8 +886,8 @@ mod tests {
             ("git -c core.fsmonitor=false status", true),
             ("git -C sub -c core.fsmonitor=false diff --stat", true),
             ("rg needle f", false),
-            ("rg --no-config 'foo(bar)' f.rs", true),
-            ("rg --no-config '$#<>\\' f.rs", true),
+            ("rg --no-config 'foo(bar)' f.rs", !cfg!(windows)),
+            ("rg --no-config '$#<>\\' f.rs", !cfg!(windows)),
             ("rg --no-config --pre=./mutate x f", false),
             ("fd -l", false),
             ("fd --list-details", false),
@@ -922,15 +944,15 @@ mod tests {
     fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
         let cases = [
             (
-                "git log --no-ext-diff --no-textconv --no-show-signature --format=%GG",
+                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=%GG",
                 false,
             ),
             (
-                "git log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?",
+                "git -c core.fsmonitor=false log --no-ext-diff --no-textconv --no-show-signature --format=oneline --pretty=format:%G?",
                 false,
             ),
             (
-                "git show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD",
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature --format=oneline HEAD",
                 true,
             ),
             ("rg -z needle f.gz", false),
@@ -944,18 +966,27 @@ mod tests {
             ("cd crates/x && grep -n foo y.rs", true),
             ("cd crates/x; sed -n 1,80p y.rs", true),
             ("sed -n 1,80p f.rs | nl", true),
-            ("git -C .worktrees/a diff --stat", true),
-            ("git worktree list", true),
-            ("cut -f 1 f.rs | sort | uniq", true),
-            ("grep 'a;b' f | wc -l", true),
-            ("sed -n '/write/p' f", true),
-            ("git branch --list 'topic*'", true),
+            (
+                "git -C .worktrees/a -c core.fsmonitor=false diff --stat",
+                true,
+            ),
+            ("git -c core.fsmonitor=false worktree list", true),
+            ("cut -f 1 f.rs | sort | uniq", !cfg!(windows)),
+            ("grep 'a;b' f | wc -l", !cfg!(windows)),
+            ("sed -n '/write/p' f", !cfg!(windows)),
+            (
+                "git -c core.fsmonitor=false branch --list 'topic*'",
+                !cfg!(windows),
+            ),
             ("find . -de\"lete\"", false),
             ("grep x f &&", false),
             ("grep x f &", false),
             ("sed -n '1p;w out' f", false),
-            ("git log --output=out", false),
-            ("git show --output=written.txt HEAD", false),
+            ("git -c core.fsmonitor=false log --output=out", false),
+            (
+                "git -c core.fsmonitor=false show --output=written.txt HEAD",
+                false,
+            ),
             ("sed -n -f write.sed input.txt", false),
             ("sed -n 's/.*/touch generated/e' input.txt", false),
             ("sed -n 's/x/y/w generated.txt' input.txt", false),
@@ -968,29 +999,53 @@ mod tests {
                 "cd sub && rg --hostname-bin ./mutate --hyperlink-format default --color=always x f",
                 false,
             ),
-            ("git -C sub diff --ext-diff", false),
-            ("git diff", false),
-            ("git show HEAD", false),
-            ("git log -p", false),
-            ("git diff --stat -p", false),
-            ("git diff --no-ext-diff --no-textconv", true),
+            ("git -C sub -c core.fsmonitor=false diff --ext-diff", false),
+            ("git -c core.fsmonitor=false diff", false),
+            ("git -c core.fsmonitor=false show HEAD", false),
+            ("git -c core.fsmonitor=false log -p", false),
+            ("git -c core.fsmonitor=false diff --stat -p", false),
             (
-                "git show --no-ext-diff --no-textconv --no-show-signature HEAD",
+                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv",
+                true,
+            ),
+            (
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-show-signature HEAD",
                 false,
             ),
-            ("git diff --no-ext-diff --no-textconv --ext-diff", false),
-            ("git diff --ext-diff --no-ext-diff --no-textconv", false),
-            ("git diff --ext --no-textconv", false),
-            ("git log --textc", false),
-            ("git diff -- --no-ext-diff --no-textconv", false),
-            ("git diff --src-prefix --no-ext-diff --no-textconv", false),
-            ("git blame f", false),
-            ("git blame --no-textconv f", true),
-            ("git blame -- --no-textconv", false),
-            ("git blame --no-textconv --textc f", false),
-            ("git show --no-ext-diff --no-textconv HEAD", false),
-            ("git log --textconv -p", false),
-            ("git show --ext-diff HEAD", false),
+            (
+                "git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --ext-diff",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --ext-diff --no-ext-diff --no-textconv",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --ext --no-textconv",
+                false,
+            ),
+            ("git -c core.fsmonitor=false log --textc", false),
+            (
+                "git -c core.fsmonitor=false diff -- --no-ext-diff --no-textconv",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false diff --src-prefix --no-ext-diff --no-textconv",
+                false,
+            ),
+            ("git -c core.fsmonitor=false blame f", false),
+            ("git -c core.fsmonitor=false blame --no-textconv f", true),
+            ("git -c core.fsmonitor=false blame -- --no-textconv", false),
+            (
+                "git -c core.fsmonitor=false blame --no-textconv --textc f",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv HEAD",
+                false,
+            ),
+            ("git -c core.fsmonitor=false log --textconv -p", false),
+            ("git -c core.fsmonitor=false show --ext-diff HEAD", false),
             ("cd sub && cargo metadata --format-version=1", false),
             ("cargo tree", false),
             ("cargo metadata --offline", false),
@@ -1006,7 +1061,7 @@ mod tests {
             ("file -C", false),
             ("file --comp -m magic", false),
             ("find . -de*", false),
-            ("find . -name '*.rs'", true),
+            ("find . -name '*.rs'", !cfg!(windows)),
             ("cd x && cargo test -p y", false),
             ("sed -i s/a/b/ f.rs", false),
             ("cd x && grep foo f > out", false),
@@ -1023,15 +1078,21 @@ mod tests {
             ("find . -name '*.orig' -delete", false),
             ("find . -exec cargo fmt ;", false),
             ("find . -fprint out", false),
-            ("git branch -D topic", false),
-            ("git branch --delete topic", false),
-            ("git branch --move old new", false),
-            ("git branch --copy old new", false),
-            ("git branch --force topic", false),
-            ("git branch created", false),
-            ("git branch --list --no-list created", false),
-            ("git branch --format --list created", false),
-            ("git diff --output=x", false),
+            ("git -c core.fsmonitor=false branch -D topic", false),
+            ("git -c core.fsmonitor=false branch --delete topic", false),
+            ("git -c core.fsmonitor=false branch --move old new", false),
+            ("git -c core.fsmonitor=false branch --copy old new", false),
+            ("git -c core.fsmonitor=false branch --force topic", false),
+            ("git -c core.fsmonitor=false branch created", false),
+            (
+                "git -c core.fsmonitor=false branch --list --no-list created",
+                false,
+            ),
+            (
+                "git -c core.fsmonitor=false branch --format --list created",
+                false,
+            ),
+            ("git -c core.fsmonitor=false diff --output=x", false),
             ("grep x f\ncargo fmt", false),
             ("cat $(cargo fmt)", false),
             ("cat `cargo fmt`", false),

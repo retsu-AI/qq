@@ -302,3 +302,16 @@ newest last.
 - Latest helper source workspace gates pass: 2,277 tests, 0 failed,
   14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
   logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
+
+### 2026-10-14 — AB1 configured environment and native shell corrections
+
+- Test-first fixture reproduced the configured-Git false read. Git reads now
+  require canonical -c core.fsmonitor=false after optional-C; ripgrep reads
+  require --no-config. fd detailed listings and file decompression count work.
+- Unix quoted regex metacharacters are literal; unquoted metacharacters and
+  expansion inside double quotes remain work. Windows single quotes, expansion
+  and escape characters and native sort are conservative work. Windows-only
+  fixtures are present but have not been executed on this Linux host.
+- Six Linux focused regressions pass; independent final source review approves.
+  Full workspace rerun and fresh matched performance remain open.
+  Evidence target/qq-perf/ab1-2026-10-14/environment-helpers-{red,focused-final}.log.
