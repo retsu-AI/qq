@@ -602,6 +602,18 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   boundaries; parent contract and research qualification must account for
   these scopes before claiming instruction coverage.
 
+### 2026-10-14 — AB6.1 qualification tooling ownership
+
+- Reserve xtask/src/main.rs, existing CLI routing in xtask/src/providers.rs,
+  new xtask/src/action_bias.rs, xtask/Cargo.toml and Cargo.lock for the existing
+  workspace rusqlite dependency. The qq-core hidden classification support
+  wrapper in approval.rs exposes the actual progress-read predicate; ordinary
+  runtime requests add no work. Research/runbook and action-bias ledger owned.
+- Export reads SQLite in one read-only snapshot and never opens SessionRuntime
+  or applies migrations. Header binds schema/store/window/cutoff/cohort count.
+  Recount bounds input, rejects incomplete/duplicate/malformed exports and
+  leaves unclassified overflow unqualified. No paid or post-merge run claimed.
+
 ### 2026-10-14 — AB1 exact argv classification
 
 - Extend AB1 to sessions/approvals.rs solely to ignore the new cached read
@@ -615,6 +627,20 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   docs/runbooks/run-output-queries.md report predicate and src/docs_truth.rs
   regression for root-stall documentation. Schema/history and Goal 6's
   narrower slice-checkpoint cohort remain explicit. No runtime behavior change.
+
+- AB6.1 additionally reserves docs/README.md only for the new qualification
+  runbook index link. Existing documentation organization is preserved.
+
+
+- 2026-10-14 AB6 qualification repair owns a narrow parser bridge in
+  crates/qq-core/src/tools.rs, reusing the exact shell execution type without
+  changing dispatch or approval authority. Export format 2 binds the producing
+  binary and persisted depth-zero root role. Root is the sole writer.
+
+
+- 2026-10-14 AB6's exact parser bridge reads the existing private shell env
+  field through parent-module visibility, exporting only a requested-env
+  boolean. No dispatch or policy behavior is changed.
 ### 2026-10-14 — AB3 masked read admission
 
 - Reserve tools/output.rs shared allocation-free masked escaped-size measure
@@ -713,3 +739,22 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - AB2 owns `runtime/checkpoint.rs` for shared feedback/correction-notice bounds.
   Checkpoint-enabled tool history without the exact barrier fails only its
   reservation; recorded descriptor identity avoids per-turn archive scans.
+
+### 2026-10-14 — AB6 expanded execution-context ownership
+
+- User authorizes producer/context capture and verification, with historical
+  qualification unavailable. Root owns qq-core/build.rs/Cargo.toml, existing
+  tools/process_context.rs and its evidence/provenance children, process
+  dispatch/shell wiring, runtime/plan producer propagation, manifest caching,
+  receipt persistence tests and root RuntimeFactory source wiring.
+- Existing schema50 receipt column remains16KiB; no wire/descriptor/schema bump.
+  xtask format3 retains bounded shell+exec arguments/receipt/descriptor/identity
+  and uses one core validator with explicit deployed source/binary pins.
+  Private artifact handling and research acceptance gates remain explicit.
+
+- AB6 additionally owns sessions/runtime.rs for preserving configured producer
+  identity through the public LoadedRuntime embedding compiler. No schema or
+  public wire change; exact producer Arc is retained.
+
+- AB6 owns the tools/design cwd-contract amendment alongside shared Launch
+  root-underflow validation and the export/recount aggregate-byte budget repair.

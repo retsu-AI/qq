@@ -1062,6 +1062,12 @@ for both tools, and an argument like `rm -rf /` is a literal word, never a
 command. The system prompt steers the model to `exec` for single programs
 and `shell` for pipelines. Its header is `exec exit=<code> …`.
 
+Both tools accept an optional workspace-relative `cwd`. Launch validation
+rejects empty, NUL-containing, absolute or prefixed paths and parent traversal
+above the lexical workspace root. Within-root normalization such as `sub/..`
+is allowed. Process preparation also resolves and holds a contained directory,
+including checking symlink resolution.
+
 Shell is the one tool that cannot be contained by path checks — any command
 can touch anything the server process can. Containment is therefore the
 approval policy's job (§ Shell Classification), and the honest framing is

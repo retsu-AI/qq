@@ -1,6 +1,6 @@
 use super::*;
 use crate::tools::process_context::{
-    ContextVersion, CwdIdentity, ExecutionContextReceipt, ExecutionVerdict, Locale,
+    CwdIdentity, ExecutionContextFacts, ExecutionContextReceipt, ExecutionVerdict, Locale,
     UnverifiedReason, arguments_digest,
 };
 
@@ -48,8 +48,7 @@ async fn process_call_fixture(
         .await
         .unwrap();
     store.start_tool_call(&claimed, id).await.unwrap();
-    let receipt = ExecutionContextReceipt {
-        version: ContextVersion::V1,
+    let receipt = ExecutionContextReceipt::V1(ExecutionContextFacts {
         context_id: ToolCallId::generate().unwrap(),
         arguments_sha256: arguments_digest("exec", arguments).unwrap(),
         manifest_sha256: qq_protocol::ContentHash::from_bytes([1; 32]),
@@ -64,7 +63,7 @@ async fn process_call_fixture(
             reason: UnverifiedReason::UnapprovedProgram,
         },
         pid: 11,
-    };
+    });
     (claimed, id, receipt)
 }
 
@@ -73,7 +72,33 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
-    let (claimed, id, receipt) = process_call_fixture(&store, directory.path()).await;
+    let (claimed, id, legacy_receipt) = process_call_fixture(&store, directory.path()).await;
+    let images = crate::runtime::ApprovedReadImages::default();
+    let mut facts = legacy_receipt.facts().clone();
+    facts.context_id = id;
+    facts.manifest_sha256 = images.digest();
+    let receipt: ExecutionContextReceipt = serde_json::from_value(serde_json::json!({
+        "version":"2", "facts":facts, "manifest":[],
+        "policy_sha256": crate::tools::process_context::policy_digest(),
+        "producer":{"instance":ToolCallId::generate().unwrap(),"source":{"status":"unknown"},"executable_sha256":null,"platform":format!("{}-{}",std::env::consts::ARCH,std::env::consts::OS)}
+    })).unwrap();
+    let mut other_call = receipt.clone();
+    other_call.facts_mut().context_id = ToolCallId::generate().unwrap();
+    assert!(
+        store
+            .finish_tool_call(
+                &claimed,
+                id,
+                "uncommitted".to_owned(),
+                false,
+                Vec::new(),
+                None,
+                None,
+                Some(Box::new(other_call))
+            )
+            .await
+            .is_err()
+    );
     let before = store
         .call(Priority::Control, |connection| {
             Ok((
@@ -91,7 +116,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
         .await
         .unwrap();
     let mut invalid = receipt.clone();
-    invalid.pid = 0;
+    invalid.facts_mut().pid = 0;
     assert!(
         store
             .finish_tool_call(
@@ -108,7 +133,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
             .is_err()
     );
     let mut mismatch = receipt.clone();
-    mismatch.arguments_sha256 = qq_protocol::ContentHash::from_bytes([9; 32]);
+    mismatch.facts_mut().arguments_sha256 = qq_protocol::ContentHash::from_bytes([9; 32]);
     assert!(
         store
             .finish_tool_call(

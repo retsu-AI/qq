@@ -119,6 +119,7 @@ pub struct AgentProfile {
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
     approved_read_images: crate::runtime::ApprovedReadImages,
+    process_producer: Arc<crate::ProcessProducer>,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
@@ -168,6 +169,7 @@ impl AgentProfile {
             reasoning_effort: None,
             shell: ShellPolicy::default(),
             approved_read_images: crate::runtime::ApprovedReadImages::default(),
+            process_producer: Arc::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
@@ -269,6 +271,7 @@ impl AgentProfile {
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
             approved_read_images: runtime.approved_read_images.as_ref().clone(),
+            process_producer: Arc::clone(&runtime.process_producer),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
@@ -389,6 +392,13 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_audit(mut self, audit: AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Share one host producer's provenance across compiled plans and children.
+    #[must_use]
+    pub fn with_process_producer(mut self, producer: Arc<crate::ProcessProducer>) -> Self {
+        self.process_producer = producer;
         self
     }
 
@@ -622,6 +632,7 @@ impl CompiledAgentPlan {
             self.workspace.path().to_owned(),
         );
         profile.shell = self.runtime.shell.as_ref().clone();
+        profile.process_producer = Arc::clone(&self.runtime.process_producer);
         profile.network = self.runtime.network.as_ref().clone();
         profile.reasoning_effort = self.runtime.reasoning_effort;
         profile.output_ceiling = self.runtime.output_ceiling;
@@ -688,6 +699,7 @@ impl CompiledAgentPlan {
             reasoning_effort,
             shell,
             approved_read_images,
+            process_producer,
             network,
             turn_recovery,
             approval_delegate,
@@ -721,6 +733,7 @@ impl CompiledAgentPlan {
         .with_audit(audit)
         .with_shell_policy(shell)
         .with_approved_read_images(approved_read_images)
+        .with_process_producer(process_producer)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
         .with_approval_delegate(approval_delegate)

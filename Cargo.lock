@@ -5092,6 +5092,7 @@ dependencies = [
  "qq-protocol",
  "qq-provider",
  "qq-server",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

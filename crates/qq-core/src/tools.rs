@@ -16,6 +16,15 @@ mod tree;
 pub(crate) mod walk;
 mod write;
 
+/// Parse qualification envelopes with the same type used by shell dispatch.
+pub(crate) fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+    process_context::arguments_digest("shell", arguments)?;
+    match serde_json::from_str::<shell::ShellArgs>(arguments) {
+        Ok(arguments) => Some((arguments.command, !arguments.env.is_empty())),
+        Err(_) => None, // Malformed envelopes remain non-read without exposing their text.
+    }
+}
+
 #[cfg(test)]
 pub(crate) use dispatch::{execute, test_executions_started};
 

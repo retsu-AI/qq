@@ -124,9 +124,7 @@ pub(super) fn finish_tool_call(
                 [tool_call_id.to_string()],
                 |row| row.get(0),
             )?;
-            if crate::tools::process_context::arguments_digest(&tool_name, &arguments)
-                != Some(receipt.arguments_sha256)
-            {
+            if !receipt.bound_to(tool_call_id, &tool_name, &arguments) {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
             let json = serde_json::to_string(&receipt)?;

@@ -7,10 +7,11 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In review | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Published e93c4e8a; exact projection and review repairs qualified; fresh hosted/Codex and performance open |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
-| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Schema50 atomic migration qualified at c3618e8b; fresh parent grant repair, hosted review and performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | Merged (`62c65930`) | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | Merged (`62c65930`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Merged (`62c65930`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB5 | Root stall report asks for the next change | Merged (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; V2 context evidence/format3 implemented; hosted review and performance gates pending |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
@@ -696,6 +697,35 @@ newest last.
 - Integrated AB4 draft304 parent receipt with no production change. Matched
   performance and hosted review remain open; publish AB5 as draft.
 
+### 2026-10-14 — AB6.1 reproducible recount start
+
+- Isolated feat/eng-1043-ab6-qualification starts at AB5 a06fb868. ENG-1043
+  In Progress covers tooling now and seven-day qualification later. No named
+  runtime performance gate changes: hidden predicate wrapper plus explicit
+  xtask-only export/recount; provider/runtime paths remain inactive.
+- CLI test-first fixture precedes implementation. Ownership reserved in root
+  ledger, including the actual existing CLI router and manifest/lockfile.
+  Implementation, deterministic fixtures, independent review and all final
+  workspace gates remain open.
+
+- AB6.1 CLI red fixture reproduced absent command; explicit export/recount now
+  implements readonly snapshots, typed bounded JSONL and footer integrity,
+  all-state denominator preservation and pinned classifier-source/executable
+  identities. Six initial fixtures passed. Independent review caught arbitrary
+  cutoffs; a new fixture reproduced that gap, and export/recount now enforce
+  exact end+24hours and UTC-day alignment. Seven focused fixtures pass.
+- Independent final source review approves. New runbook documents local-only
+  exports, immutable build labels/hashes and treatment-cohort limitations.
+  Full immutable workspace gates and actual pinned baseline recount remain
+  open; post-deployment observation and paid evaluation are not performed.
+
+- AB6.1 immutable source 96afed7e passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Receipts:
+  target/qq-perf/ab6-2026-10-14/tooling-gate-{0,1,2,3}.log.
+- Export/recount source review approves; seven focused fixtures cover snapshot
+  cohorts, all shell states, bounds, tamper/truncation and exact UTC cutoff.
+  Final classifier recount and deployed seven-day candidate cohort remain open.
+
 - Fresh parent review alleged stale grants in uncompiled Runtime::run_messages.
   Current AB4 already replaces its empty placeholder gate after compilation
   using the compiled descriptor snapshot. Public first-poll regression now
@@ -802,12 +832,74 @@ newest last.
   Independent integration review approves; AB3's completed receipt integrated
   without production changes. Hosted review and matched performance remain open.
 
+- Integrated accepted AB1–AB5 source and notice documentation into AB6.1.
+  Indexed the qualification runbook. Freeze combined source for full checks;
+  final classifier export/recount and hosted review follow. No candidate
+  observation window or deployment is claimed.
+
+- Combined source 8cda0e3a passes workspace checks (2,324 tests, zero failures,
+  14 ignored; fmt/Clippy/build exit 0), but independent review found SQLite
+  command extraction accepts duplicate fields and wrongly typed cwd rejected
+  by the runtime parser. Qualification remains open; reproduce test-first and
+  validate bounded argument envelopes through the shared typed parsing seam.
+
+- Typed-envelope regression reproduces three false reads: duplicate command,
+  numeric cwd and duplicate cwd each become Read in SQLite extraction but
+  are rejected by the runtime parser. Red result: expected 3 malformed/0
+  reads, got 0 malformed/3 reads. Receipt typed-envelope-red.log.
+
+- Bounded export now validates the runtime's exact ShellArguments type before
+  emitting a command. Duplicate recognized fields and invalid cwd become
+  Malformed; accepted commands over the classifier ceiling retain their
+  proven bound-rejection status. No over-bound envelope enters Rust.
+- Eight focused AB6 fixtures pass, including all three typed-envelope
+  regressions. Independent final review and immutable full gates next.
+
 - Combined immutable source 38b3a374 passes workspace checks: 2,317 tests,
   zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
   target/qq-perf/ab5-2026-10-14/helper-discovery-notice-gate-{0,1,2,3}.log.
   Independent notice-documentation/integration review approves; exact SQL
   fixture and 24 docs-truth tests pass. Hosted review and matched performance
   remain open; no deployment or completed observation window is claimed.
+
+- Immutable typed-envelope source 08458f17 passes all workspace checks:
+  2,325 tests, zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab6-2026-10-14/typed-envelope-gate-{0,1,2,3}.log.
+  Eight focused fixtures and independent final typed-envelope review pass.
+  Publish tooling as draft; upstream review repairs, final classifier recount,
+  matched performance and deployed observation cohort remain open.
+
+- AB6.1 published as draft #306 on #305, source 08458f17/receipt 37012bd1.
+  Eight focused fixtures and all 2,325 workspace tests pass. ENG-1043 remains
+  In Progress for upstream integration, final recount and the deployed cohort.
+
+
+### 2026-10-14 — AB6 exact envelope, root role and exporter identity
+
+- Hosted review found that the approval envelope ignores execution-only
+  fields, parent deletion clears links without changing historical depth,
+  and an old exporter can transform evidence before a pinned recount.
+- Regression cases cover typed timeout/env, unknown and duplicate fields,
+  missing command and orphaned depth-one children. Export/recount must share
+  the execution parser and immutable identity; format-one evidence is retired.
+- Final source integration, qualification and observation remain in progress.
+
+
+- Exact execution parser, persisted depth-zero cohort and format-2 exporter
+  identity are implemented. Twelve focused AB6 tests pass; two independent
+  source reviews approve. Red receipts: execution-root-red.log and
+  export-identity-red.log; green: export-identity-green.log.
+- Read-only schema-45 fixed-window check finds zero orphaned child runs;
+  the historical counts are not changed by this specific cohort correction.
+  Full integrated gates, final pinned export/recount and observation remain open.
+
+
+- AB6 retains the exact parser's requested-env flag as a required field;
+  omitted/empty lists remain reads and nonempty lists count as nonreads.
+  Environment values/names are not exported. A missing-flag record is rejected
+  even with a recomputed valid footer. Thirteen focused fixtures pass;
+  independent source review approves. environment-red.log/green.log.
+- Final upstream integration and workspace/release qualification remain open.
 ### 2026-10-14 — AB4 prompt behavioral identity
 
 - Independent review confirms an unchanged read_file-only profile keeps the
@@ -1055,6 +1147,16 @@ newest last.
   115873674638, executes ab3_native_unicode_header_preserves_repaired_read_windows:
   one passed, zero failed, then completes the entire teardown job successfully.
   Matched performance and final hosted review remain open.
+
+
+- Immutable integrated AB6.1 source 196cd9fe passes 2,343 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab6-2026-10-14/final-envelope-integrated-
+  gate-{0,1,2,3}.log. Thirteen qualification fixtures cover exact execution
+  envelopes, immutable exporter identity, orphaned-child exclusion and
+  required environment disqualification metadata. Independent review approves.
+  New upstream review findings, final pinned baseline recount, matched
+  performance and the deployed seven-day candidate cohort remain open.
 ### 2026-10-14 — zero-row read windows
 
 - Valid long Windows paths can leave a positive body budget smaller than the
@@ -1168,6 +1270,24 @@ newest last.
   future-schema guards remain qualified. Logs: fresh-search-read-authority-
   integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
   Native Windows upstream gates pass. No user store migrated; performance open.
+
+
+- Fresh immutable complete-stack source 10d52022 passes 2,350 workspace
+  tests, zero failures, 14 ignored; fmt, all-target/all-feature Clippy and
+  build exit 0 after clearing every workspace package debug artifact.
+  Source remains clean/unchanged. Thirteen AB6.1 fixtures retain exact
+  execution parser/environment status, exporter identity and depth-zero role.
+  Logs: fresh-final-stack-integrated-{0,1,2,3,4}.log and source receipt.
+  This fresh receipt supersedes earlier cache uncertainty. Final pinned
+  baseline export/recount, matched performance, final hosted review and the
+  deployed seven-day candidate cohort remain open. No paid calls or deployment.
+
+- 2026-10-14 AB6 receipt semantics follow-up: rename read_share to
+  lexical_read_share and emit execution_effects_qualified=false. Historical
+  inherited PATH/TMPDIR and executable identity are unavailable, so command
+  shape counts cannot prove nonmutation. Fixture assertions pin the JSON field
+  names and the unavailable actual-effect qualification; runbook is explicit.
+  Existing provisional pinned baseline must be regenerated after this wave.
 - 2026-10-14 AB4 write-child follow-up: a public read-only root fixture with
   write_children configured reproduces the exposed write enum, while injected
   writes remain policy-denied. Cache a restricted spawn declaration at plan
@@ -1269,6 +1389,12 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab5-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+
+- AB6 final review wave immutable source 094e9ae23972df82d6027b8c543e2c3a9c18d6e5: fresh
+  workspace package-clean qualification 2356 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab6-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
 - AB1 execution-context test-first: a child test process captures PATH with a
   workspace-local executable named grep that actually writes written.txt.
   Existing literal exec classification calls it Read, so progress and audit
@@ -1368,6 +1494,23 @@ newest last.
 - Corrected the inherited receipt-reopen fixture's current-schema assertion
   from 47 to 48; its historical NULL and malformed claimed-47 rejection
   fixtures remain unchanged. AB5 qualification still awaits the parent.
+
+### 2026-10-14 — AB6 verified-context implementation preparation
+
+- Integrated AB5 source `3ce24f3d` and actual main schema sequencing through
+  schema 48. Parent qualification and descriptor golden propagation remain
+  in flight; this unqualified child is not being pushed.
+- User-approved scope expands this slice to retained process context,
+  semantic argument validation, accepted policy identity, manifest binding
+  and producer provenance with bounded shell/exec export/recount.
+- V1/NULL history remains unavailable without independent immutable mapping;
+  Work is not mutation proof. Format 3 generation and coverage counters
+  still need implementation and qualification. PR remains nondraft.
+
+- Test-first expansion for the open semantic-envelope finding adds zero/
+  oversized timeout, whitespace/NUL command, empty/absolute cwd, and invalid
+  environment-name envelopes. Execution of the red fixture waits for the
+  active parent gate run; production validation is not yet changed.
 ### 2026-10-14 — AB3 current-main/context integration qualification
 
 - Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
@@ -1431,6 +1574,10 @@ newest last.
   structural validators and notice compatibility. Nondraft publication and
   fresh hosted/Codex review follow; performance gates remain open.
 
+- Inherited qualified AB5 `6aefbfc7`, including all early schema-48 guards,
+  current descriptor 14/prompt 22 golden, successful 2,399-test workspace
+  receipt and real schema-47 refusal proof. AB6 format/provenance work and
+  fresh parent AB2 review repairs remain incomplete; no child push yet.
 ### 2026-10-14 — AB4 fresh review documentation repairs
 
 - Addressed prompt22 history and the architecture paragraph that still described
@@ -1741,6 +1888,43 @@ newest last.
 - This publication adds only the receipt. Parent304 has a new host grant
   provenance repair in progress; final hosted/Codex and named performance gates
   remain open. No entire-stack readiness claim.
+
+### 2026-10-14 — AB6 expanded-context parent integration
+
+- Integrated qualified schema50 parent c42882ee, including strict descriptor15
+  tool replay, bounded checkpoint corrections and atomic experimental48 upgrade.
+  Semantic shell-envelope regression remains test-first; provenance V2 and
+  export format3 work remain open, without historical qualification claims.
+
+- Two initial narrow commands targeted qq-core filters and ran zero cases; they
+  are not evidence. The actual xtask malformed-envelope regression runs15
+  cases and fails with5 lexical reads/9 malformed before the fix. Qualification
+  parsing now requires the dispatcher's pure Launch validation through canonical
+  argument digest, so invalid timeout/cwd/env/command cannot become reads.
+
+### 2026-10-14 — AB6 producer-bound execution receipts
+
+- User merged AB2–AB5; fetched main62c65930. PR306 targets main; integration
+  follows this owned core checkpoint before publication.
+- V2 carries actual tool-call ID, bounded canonical approved-image manifest,
+  build policy hash, shared producer instance/source/running executable hash.
+  Explicit deployed source/binary pin is required for qualification; V1/NULL,
+  unknown/dirty source and missing evidence remain unqualified. No schema bump:
+  the existing16KiB receipt column holds the ten-entry V2 proof.
+- Initial independent review reproduced producer loss during plan compile and
+  contradictory requested-env evidence. Both repaired; public builder→plan→
+  real exec source/identity, contradiction, call/manifest/plan/policy/producer
+  mismatch, max manifest, and transient cancelled-capture tests pass (5 cases).
+  Actual store rollback/reopen test now covers V2 and rejects swapped call ID.
+- Producer hashing is serialized on bounded preparation workers, cached after
+  successful/permanent capture, and cancellation/expiry are retryable. Manifest
+  bytes/digest and empty manifest are cached; no executable/source hash per call.
+  Format3 exporter/recount, concurrency/expiry tests, independent follow-up,
+  integrated checks and performance remain open.
+- At user request removed clean, confirmed merged AB1–AB5 worktrees. Preserved
+  evidence and actual47/48/49/50 binaries under main target/qq-perf/
+  merged-worktrees-2026-10-14T204742Z (manifest records original heads/paths).
+  Freed approximately65GiB; active306/performance and unrelated worktrees remain.
 ### 2026-10-14 — AB4 host grant provenance regression
 
 - Fresh Codex review identifies a later duplicate host grant authorizing the
@@ -1787,3 +1971,103 @@ newest last.
 - Includes qualified304 owner-bound grant fix and schema50 atomic notice
   migration. This commit adds only the receipt; fresh hosted/Codex,306
   propagation and named performance gates remain open.
+
+### 2026-10-14 — AB6 merged-main integration
+
+- Integrated actual origin/main62c65930 after user merged through305. Retained
+  qualified owner-bound catalog/descriptor grants and complete regression suite
+  alongside V2 producer propagation and call binding. Only bookkeeping conflicts
+  concatenate receipts; code selects qualified main grant admission.
+- PR306 already targets main. Final source qualification precedes push and
+  hosted conflict verification; current remote head still predates this merge.
+
+### 2026-10-14 — AB6 format3 bounded evidence qualification
+
+- Fourteen xtask qualification tests pass: shell+exec evidence, independent
+  producer pins, verified read versus recorded Work, V1 rejection, all states,
+  each SQL value bound/overflow with retained calls, no-clobber output, exact
+  parser validation, ordering/footer/build identity and worst escaping.
+- Format3 separates lexical shell share, verified context/read counts, recorded
+  Work accounting and closed coverage reasons. Missing/oversized/V1 evidence
+  leaves whole-cohort context qualification false and verified read share null.
+  Neither Work nor a NULL receipt is promoted to mutation/never-started proof.
+- Both passes use the same core validator and require externally pinned clean
+  runtime source/executable for new qualification. Final independent review,
+  integrated workspace/hosted checks, compatibility proof and measurements open.
+
+- Independent core post-repair review approves provenance propagation, requested
+  environment binding, cancellation/deadline contention and retryable capture.
+  Format3 review identifies ignored call state; a valid-footer state-tampering
+  regression reproduced qualification of a requested call. The shared validator
+  now requires Completed/Failed for V2; all other states stay in the denominator
+  with unsupported-call-state coverage. Both read and Work tampering cases pass.
+- Added concurrent producer capture coverage: simultaneous callers receive the
+  same complete cached identity. No observational or paid qualification claimed.
+
+### 2026-10-14 — AB6 full-gate deadline regression
+
+- Fresh workspace gate at73db0dbc fails two actual process-deadline cases:
+  duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirmed and
+  duration_stops_shell_while_output_persistence_is_blocked. Unknown-source
+  embedding runtimes were spending their short startup budgets hashing an
+  executable that cannot qualify against a clean source pin.
+- Unknown/dirty producers now retain explicit unavailable executable evidence
+  and skip that unnecessary I/O. Clean identified producers still capture the
+  running image once with cancellation/deadline bounds. Narrow deadline tests
+  and fresh integrated gates must rerun before any qualification/publication.
+
+- All12 narrow deadline cases pass after skipping unqualified producer hashes.
+  PR306 now carries hosted turn/H0 qualification directly: accepted main62c65930
+  is the immutable baseline and common official turn fixture; the actual PR
+  head is candidate. Preserve manual turn dispatch and existing native jobs.
+  Full/minimal H0 and unchanged budget checks run A/B plus same-binary A/A with
+  raw pressure/artifact receipts; no gate is waived. Process-path measurement
+  still needs a focused receipt/capture fixture before final qualification.
+
+### 2026-10-14 — AB6 final integrated source verification
+
+- Immutable source21a911f6fbd07e444902ec79644be2c0656aa859 passes fresh workspace-package clean/rebuild, workspace tests, formatting, all-target/all-feature Clippy with warnings denied, and workspace build. Gate receipt: target/qq-perf/ab6-2026-10-14/v2-deadline-repair-integrated-gate-receipt.json.
+- Workspace totals: 2438 passed, 0 failed, 14 ignored. Both previously failing process-deadline tests pass. Focused logs retained in focused-v2-format3/.
+- Independent read-only review approves the final producer/CI repair. Actionlint passes with pre-existing SC2129 style warning excluded; recorder/fixture Python tests pass16+4. Accepted main62c65930 is an ancestor of this head and remains the live remote main.
+- Publication, fresh hosted Codex/CI and performance qualification remain pending. Historical execution context and the deployed seven-day research cohort remain unavailable; no observational or performance completion is claimed.
+- Five clean merged AB1–AB5 worktrees removed after exact-head checks; performance evidence preserved under root target/qq-perf/merged-worktrees-2026-10-14T204742Z. Unrelated worktrees retained.
+
+### 2026-10-14 — hosted H0 fixture guard repair
+
+- Hosted job116122591431 failed before measurement because the guard compared nonexistent xtask/src/perf directories; the implemented H0 fixture is the single xtask/src/perf.rs file. Remove only that nonexistent-directory comparison, retaining exact source, toolchain and budget equality guards. No measurement/gate pass is inferred from this failure.
+
+### 2026-10-14 — H0 compiler setup correction
+
+- Job116124285386 reached recording but the unchanged baseline build failed: dependency rustc proxies selected runner-default stable1.99 while cargo1.97.1 was used, and concurrent rust-src downloads collided. Artifact retained at target/qq-perf/ab6-2026-10-14/hosted-run-38643410247/h0-baseline-build-failure.zip. No performance result exists.
+- Set the runner default to the exact matching repository toolchain before recording; the existing recorder clears RUSTUP_TOOLCHAIN/RUSTC overrides, so the default must also be pinned for dependency build-script compiler proxies. Fixture and budgets stay unchanged. Windows/wasm hosted checks passed; latest Codex/other CI remain active.
+
+### 2026-10-14 — hosted and Codex AB6 repairs
+
+- Codex6878b065 found two valid issues. Public LoadedRuntime reconstruction discarded a configured producer; real-process regression reproduces Unknown instead of Clean. Exec-only cohorts emitted lexical0 despite no shell denominator; an export/recount fixture reproduces it. Red logs: /tmp/qq-ab6-loaded-runtime-red.log and /tmp/qq-ab6-zero-shell-red.log.
+- Preserve the exact producer Arc through LoadedRuntime, emit null for zero-shell lexical shares, and document it. Empty cohorts continue to be rejected.
+- Hosted unit tests1067pass/2fail/3ignored: producer capture tests exhausted their10-second debug-image hashing budget under parallel load; the30-second concurrency case passed. Increase only test capture budgets to60seconds; production deadlines/cancellation are unchanged. Full local/hosted checks and independent review must verify these fixes before acceptance.
+- Focused green: six core AB6 cases pass (including public LoadedRuntime real exec), and all15 export/recount cases pass. Independent read-only review approves the loader, zero-denominator and test-budget fixes. Update the plan to record the user-authorized new-call capture scope while preserving historical unqualification. Fresh integrated source verification is next.
+
+### 2026-10-14 — AB6 review-repair integrated verification
+
+- Immutable sourceb5a3ebaacb3fc88e2393b80f5ff50ca61e5fe445 passes fresh workspace-package clean/rebuild, workspace tests, formatting, all-target/all-feature Clippy with warnings denied, and workspace build. Receipt: target/qq-perf/ab6-2026-10-14/loaded-producer-zero-shell-integrated-gate-receipt.json.
+- Workspace totals: 2439 passed, 0 failed, 14 ignored. Six focused core/15 export-recount regressions pass; independent review approves.
+- Previous hosted6878b065 passed controlled turn-overhead, Windows teardown and wasm; H0 baseline compiler setup and parallel debug-hash tests failed as recorded above. These repairs require latest-head hosted CI/Codex before readiness. No failed performance budget or observational gate is waived.
+
+### 2026-10-14 — H0 direct compiler path
+
+- Job116130357434 now avoids stable downloads but baseline convert_case selected its dependency-local1.83.0 toolchain via rustup proxies, producing incompatible rmeta. Pinning the default alone does not override per-directory toolchain files. Prepend the exact pinned toolchain binary directory to GITHUB_PATH before sanitized recorder builds; fixture/code/budgets remain unchanged. Failed artifact11931624160 retained; no performance comparison was produced.
+
+### 2026-10-14 — same-build producer restarts and capture measurement
+
+- Codex3ca513e1 mixed-instance finding conflates per-call execution_context_qualified with full treatment-cohort acceptance. Independent review confirms same pinned source/executable instances may restart; raw export retains instance IDs. Deployment continuity and process-free runs require separate evidence. Add regression with two instances on one pin (qualified call coverage) and one changed source/hash (unqualified); clarify runbook without rejecting legitimate restarts.
+- Focused release capture diagnostic on3ca513e1 plus retained measurement-only patch:30 first captures and30x10,000cached captures, same-binary repeat.29,967,568-byte fixture SHA3e7deaf982606ddd90a774596015708f4b190b42aacbb3538d03795b0f3ccb91. First p95=12.743ms/control12.800ms; cached p95=29ns/control31ns. Raw fixture, patch, pressure, logs and receipt at target/qq-perf/ab6-2026-10-14/capture-measurement/. Temporary measurement worktree removed; no production-first-shell or quiet-host performance acceptance claimed.
+- Same-build/mismatched-pin regression passes. Immutablee88d49fa passes workspace tests(2,439passed/0failed/14ignored),fmt/all-target-all-featureClippy/build; receipt compiler-path-and-restart-proof/receipt.json. Independent review approves directcompilerPATH and the same-build restart decision. Publication and latest hosted gates follow; no performance acceptance inferred.
+
+### 2026-10-14 — aggregate artifact and cwd traversal repairs
+
+- Codex928c1a63 found practical aggregate output growth and cwd-root traversal accepted by the pure parser. Regression reproduces both cwd forms as reads (17calls/2reads/15malformed) and missing export/recount aggregate checks; red log /tmp/qq-ab6-cwd-and-aggregate-red.log.
+- Cap complete export/recount at512MiB (including header/footer), reject before exceeding it, and preserve no-clobber/all-or-unqualified publication. Shared Launch validation rejects cwd lexical root-underflow; safe within-root parent normalization remains accepted, with filesystem/symlink containment still checked at preparation.
+- Pinned928 baseline completed:4,086calls(1,886shell/2,200exec),214lexicalreads(11.35%),all4,086contexts unqualified. Private artifacts at format3-baseline-928c1a63; a new pinned recount must supersede it after parser repair. Hosted928workspace/turn/Windows/wasm passed; H0 remains recording.
+- Focused green: all17 export/recount cases pass after cap/traversal fixes; safe cwd parent normalization remains accepted. Green log /tmp/qq-ab6-cwd-and-aggregate-green.log. Full gates and independent review remain required before push.
+- Immutable3587eee1 passes fresh workspace-package clean/rebuild: 2441 passed/0 failed/14 ignored;fmt/all-target-all-featureClippy/build pass. Receipt aggregate-and-cwd-integrated-gate-receipt.json. Independent review approves cap/publication/stream-growth and cwd traversal coverage. Latest hosted review/performance and superseding pinned baseline remain pending.
