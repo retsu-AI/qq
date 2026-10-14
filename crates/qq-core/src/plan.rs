@@ -740,19 +740,16 @@ impl CompiledAgentPlan {
         if let Some(cache) = context_cache {
             runtime = runtime.with_context_cache(cache);
         }
-        let mut config_grants = Vec::new();
         let mut host_handles = Vec::with_capacity(hosts.len());
         let mut contributions = Vec::with_capacity(hosts.len());
         for snapshot in hosts {
-            config_grants.extend(snapshot.host.config_grants());
             contributions.push(HostContribution {
                 name: snapshot.host.name().to_owned(),
                 catalog: snapshot.catalog,
+                config_grants: snapshot.host.config_grants(),
             });
             host_handles.push(snapshot.host);
         }
-        config_grants.sort();
-        config_grants.dedup();
         let host_handles: Arc<[Arc<dyn ExternalToolHost>]> = host_handles.into();
         runtime.hosts = Arc::clone(&host_handles);
 
@@ -996,7 +993,7 @@ impl CompiledAgentPlan {
                 );
             }
         }
-        let catalog = ToolCatalog::compile(static_tools, contributions, &config_grants);
+        let catalog = ToolCatalog::compile(static_tools, contributions);
 
         let descriptor = AgentPlanDescriptor {
             version: DESCRIPTOR_VERSION,
@@ -1015,7 +1012,7 @@ impl CompiledAgentPlan {
                 hosts: catalog.hosts().to_vec(),
                 excluded: catalog.excluded().to_vec(),
                 spawn_model_routes: runtime.spawn_model_routes.to_vec(),
-                config_grants,
+                config_grants: catalog.config_grants().map(str::to_owned).collect(),
             },
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),

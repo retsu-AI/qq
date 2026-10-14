@@ -1741,3 +1741,39 @@ newest last.
 - This publication adds only the receipt. Parent304 has a new host grant
   provenance repair in progress; final hosted/Codex and named performance gates
   remain open. No entire-stack readiness claim.
+### 2026-10-14 — AB4 host grant provenance regression
+
+- Fresh Codex review identifies a later duplicate host grant authorizing the
+  surviving first host. Independent investigation confirms both unattended
+  exposure and the effective descriptor must retain declaring-host provenance.
+  Add a regression covering all owner/later grant combinations and host dispatch
+  counters before changing admission. The original grant union predates AB4.
+
+- The owner regression fails against329c569c: a later-only grant appears in
+  the descriptor. Grants now travel with each host contribution and attach only
+  to admitted entries; the descriptor derives effective grants from those
+  surviving entries. Thirteen AB4 focused cases pass. Extend the regression to
+  normal Ask gates as well as unattended declarations and dispatch.
+
+### 2026-10-14 — AB4 declaring-host grant qualification
+
+- Immutable ef4403b1aefdad70cac00262b0fd01672034fe3a passes fresh workspace
+  2,410 tests, zero failed,14 ignored; formatting, all-target/all-feature Clippy
+  with warnings denied and workspace build pass. Thirteen focused AB4 cases pass.
+- Independent review approves declaring-host grants at admission and descriptor
+  derivation from surviving entries. Duplicate regression covers normalAsk and
+  unattended paths, all owner/later grant combinations and host call counters.
+  Historical descriptors and explicit human session grants remain authoritative.
+- Red/green and immutable gate evidence retained under
+  target/qq-perf/ab4-2026-10-14/host-grant-final-gate-*.
+  This publication adds only the receipt. Fresh hosted/Codex, child propagation
+  and named performance gates remain open.
+
+### 2026-10-14 — AB5 declaring-host parent propagation
+
+- Integrated qualified parent26bf4763: grants stay with the admitted declaring
+  host, and effective descriptor grants match normalAsk/unattended eligibility.
+  Schema50 atomic migration remains unchanged. Fresh integrated gates follow.
+- Actual retained experimental48 binary created an isolated store; qualified
+  schema50 upgrades it, adds projection storage and preserves store identity
+  across reopen. Evidence: actual48-upgrade50-receipt.json; zero model calls.

@@ -208,6 +208,7 @@ pub struct HostSummary {
 pub(crate) struct HostContribution {
     pub(crate) name: String,
     pub(crate) catalog: HostCatalog,
+    pub(crate) config_grants: Vec<String>,
 }
 
 /// The compiled catalog. Immutable; shared by every run of a plan.
@@ -273,11 +274,7 @@ impl ToolCatalog {
     /// Compiles the catalog. Static tools are trusted and never excluded;
     /// external tools are validated, bounded, deduplicated against
     /// everything already admitted, and ordered by host then declaration.
-    pub(crate) fn compile(
-        static_tools: Vec<StaticTool>,
-        hosts: Vec<HostContribution>,
-        config_grants: &[String],
-    ) -> Self {
+    pub(crate) fn compile(static_tools: Vec<StaticTool>, hosts: Vec<HostContribution>) -> Self {
         let mut entries = Vec::with_capacity(static_tools.len() + 16);
         let mut names = BTreeSet::new();
         let mut static_order = Vec::with_capacity(static_tools.len());
@@ -302,7 +299,9 @@ impl ToolCatalog {
         let mut excluded = Vec::new();
         let mut summaries = Vec::with_capacity(hosts.len());
         let mut external_schema_bytes = 0_u64;
-        for (host_index, host) in hosts.into_iter().enumerate() {
+        for (host_index, mut host) in hosts.into_iter().enumerate() {
+            host.config_grants.sort();
+            host.config_grants.dedup();
             let (ready, readiness_message) = match &host.catalog.readiness {
                 HostReadiness::Ready => (true, None),
                 HostReadiness::Degraded { message } => (true, Some(message.clone())),
@@ -367,13 +366,19 @@ impl ToolCatalog {
                 external_order.push(entries.len());
                 admitted += 1;
                 let schema_len = schema.len();
-                entries.push(ToolEntry::new(
+                let config_granted = host
+                    .config_grants
+                    .binary_search_by(|grant| grant.as_str().cmp(name))
+                    .is_ok();
+                let mut entry = ToolEntry::new(
                     tool.spec,
                     ToolHost::External { host: host_index },
                     EffectClass::External,
                     tool.hints,
                     schema_len,
-                ));
+                );
+                entry.config_granted = config_granted;
+                entries.push(entry);
             }
             summaries.push(HostSummary {
                 name: host.name,
@@ -432,12 +437,6 @@ impl ToolCatalog {
                 )
                 .collect::<Arc<[ToolSpec]>>()
         });
-        for entry in &mut sorted {
-            entry.config_granted = matches!(entry.host, ToolHost::External { .. })
-                && config_grants
-                    .binary_search_by(|name| name.as_str().cmp(entry.spec.name()))
-                    .is_ok();
-        }
         let granted_order: Vec<usize> = external_order
             .iter()
             .copied()
@@ -531,6 +530,13 @@ impl ToolCatalog {
             .binary_search_by(|entry| entry.spec.name().cmp(name))
             .ok()
             .map(|index| &self.entries[index])
+    }
+
+    pub(crate) fn config_grants(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.config_granted)
+            .map(|entry| entry.spec.name())
     }
 
     #[must_use]
@@ -923,6 +929,7 @@ mod tests {
     fn host(name: &str, tools: Vec<crate::hosts::HostTool>) -> HostContribution {
         HostContribution {
             name: name.to_owned(),
+            config_grants: Vec::new(),
             catalog: HostCatalog {
                 generation: 7,
                 tools,
@@ -936,7 +943,6 @@ mod tests {
         let catalog = ToolCatalog::compile(
             statics(),
             vec![host("srv", vec![external("mcp__srv__ping", "Ping it")])],
-            &[],
         );
         assert_eq!(catalog.exposure(), Exposure::Full);
         let base = catalog.base_specs(&StaticFilter {
@@ -980,7 +986,6 @@ mod tests {
                     },
                 ],
             )],
-            &[],
         );
         assert_eq!(catalog.external_len(), 1);
         let reasons: Vec<_> = catalog
@@ -1028,7 +1033,7 @@ mod tests {
                 "Deploy a service to production",
             )])
             .collect();
-        let catalog = ToolCatalog::compile(statics(), vec![host("srv", tools)], &[]);
+        let catalog = ToolCatalog::compile(statics(), vec![host("srv", tools)]);
         assert_eq!(catalog.exposure(), Exposure::Progressive);
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
@@ -1081,7 +1086,7 @@ mod tests {
                     .collect(),
             )
         };
-        let catalog = ToolCatalog::compile(statics(), vec![many("a", 300), many("b", 300)], &[]);
+        let catalog = ToolCatalog::compile(statics(), vec![many("a", 300), many("b", 300)]);
         assert_eq!(catalog.len(), MAX_CATALOG_TOOLS);
         assert!(
             catalog
@@ -1092,9 +1097,9 @@ mod tests {
         assert_eq!(catalog.hosts()[0].tool_count, 300);
         assert_eq!(catalog.hosts()[1].tool_count, MAX_CATALOG_TOOLS - 302);
 
-        let again = ToolCatalog::compile(statics(), vec![many("a", 300), many("b", 300)], &[]);
+        let again = ToolCatalog::compile(statics(), vec![many("a", 300), many("b", 300)]);
         assert_eq!(catalog.digest(), again.digest());
-        let smaller = ToolCatalog::compile(statics(), vec![many("a", 299), many("b", 300)], &[]);
+        let smaller = ToolCatalog::compile(statics(), vec![many("a", 299), many("b", 300)]);
         assert_ne!(catalog.digest(), smaller.digest());
     }
 
@@ -1106,7 +1111,7 @@ mod tests {
             ToolHost::SpawnAgent,
             EffectClass::ReadOnly,
         ));
-        let catalog = ToolCatalog::compile(tools, Vec::new(), &[]);
+        let catalog = ToolCatalog::compile(tools, Vec::new());
         let without = catalog.base_specs(&StaticFilter {
             spawn_agent: false,
             search_history: true,
@@ -1143,7 +1148,7 @@ mod tests {
             ToolHost::ReadToolResult,
             EffectClass::ReadOnly,
         ));
-        let catalog = ToolCatalog::compile(tools, Vec::new(), &[]);
+        let catalog = ToolCatalog::compile(tools, Vec::new());
         let exposed = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
@@ -1162,8 +1167,10 @@ mod tests {
             .collect();
         let catalog = ToolCatalog::compile(
             statics(),
-            vec![host("srv", tools)],
-            &["mcp__srv__tool03".to_owned()],
+            vec![HostContribution {
+                config_grants: vec!["mcp__srv__tool03".to_owned()],
+                ..host("srv", tools)
+            }],
         );
         assert_eq!(catalog.exposure(), Exposure::Progressive);
         let mut pins = PinSet::default();
@@ -1236,7 +1243,6 @@ mod tests {
                 "srv",
                 vec![reader, external("mcp__srv__deploy", "Deploy it")],
             )],
-            &[],
         );
         let everything = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
@@ -1297,6 +1303,7 @@ pub mod bench_support {
                 .into_iter()
                 .map(|(name, tools)| HostContribution {
                     name,
+                    config_grants: Vec::new(),
                     catalog: HostCatalog {
                         generation: 1,
                         tools,
@@ -1304,7 +1311,6 @@ pub mod bench_support {
                     },
                 })
                 .collect(),
-            &[],
         )
     }
 
@@ -1330,7 +1336,7 @@ mod measurement_tests {
 
     #[test]
     fn precomputed_measurements_equal_a_fresh_measurement() {
-        let catalog = ToolCatalog::compile(crate::tools::static_tools(), Vec::new(), &[]);
+        let catalog = ToolCatalog::compile(crate::tools::static_tools(), Vec::new());
         let base = catalog.base_specs(&StaticFilter {
             spawn_agent: true,
             search_history: true,
