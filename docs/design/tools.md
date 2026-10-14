@@ -1736,3 +1736,8 @@ dispatch overhead has a benchmark.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.
+
+A read continuation never suggests a start offset above 100,000. If the next
+unread line exceeds that bound, the result carries a terminal start-offset
+limit marker instead; no later starting offset is supported. Existing
+explicit ranges beginning within the bound retain their behavior.

@@ -763,9 +763,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let output = run_tool(&workspace, &FileState::default(), "read_file", r#"{"path":"many.txt","offset":99999}"#);
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"many.txt","offset":99999}"#,
+        );
         assert!(!output.is_error, "{}", output.model_text);
-        assert!(output.model_text.contains("start-offset limit 100000"), "{:?}", output.model_text.lines().last());
+        assert!(
+            output.model_text.contains("start-offset limit 100000"),
+            "{:?}",
+            output.model_text.lines().last()
+        );
         assert!(!output.model_text.contains("continue from offset="));
     }
 
