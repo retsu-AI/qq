@@ -876,9 +876,9 @@ impl App {
         // A replaced body already loaded through a newer cursor needs no
         // replay from this older response; keep its authoritative receipt.
         let body_is_current = |body: &qq_protocol::SessionSnapshot| {
-            self.sessions.get(&body.summary.id).is_none_or(|view| {
-                !view.is_warm() || view.loaded_through <= snapshot.cursor.sequence
-            })
+            self.sessions
+                .get(&body.summary.id)
+                .is_none_or(|view| view.loaded_through <= snapshot.cursor.sequence)
         };
         snapshot.included.retain(body_is_current);
         if snapshot
@@ -920,6 +920,13 @@ impl App {
         }
         if initial || snapshot_sequence >= self.last_sequence {
             for summary in snapshot.sessions {
+                if self
+                    .sessions
+                    .get(&summary.id)
+                    .is_some_and(|view| view.loaded_through > snapshot_sequence)
+                {
+                    continue;
+                }
                 self.sessions
                     .upsert_summary(summary, &self.models, snapshot_sequence);
             }

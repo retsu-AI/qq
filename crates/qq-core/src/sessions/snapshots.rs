@@ -479,6 +479,7 @@ pub(super) fn load_session_summary_with_accounting(
                      s.queued_prompts, s.model, s.context_tokens, s.updated_at_ms,
                      (SELECT outcome_json FROM runs
                       WHERE session_id = s.id AND outcome_json IS NOT NULL
+                        AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
