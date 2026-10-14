@@ -6,7 +6,7 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
+| AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Nondraft; batched-search cap repair in progress, performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
@@ -928,3 +928,12 @@ newest last.
   bounded model-facing bytes; ambiguous old identities cannot be backfilled
   from present code. Frontier repair must watermark only policy-skipped
   child subtrees, preserving eligible depth-64 files. Nothing is waived.
+
+### 2026-10-14 — AB1 merged and AB2 current-main reconciliation
+
+- User merged #301 as `007adcda75454958ed48ccc81d4cc66d663c80e9`; GitHub
+  retargeted #302 to main. Integrated this actual main head locally, keeping
+  AB2's prompt-20 identity and owned discovery/output/replay repairs.
+- #302 has real fresh Codex findings in progress. #303–#305 currently report
+  mergeable against their parents and CI passes at #302–#304 published heads;
+  #306 still needs parent/context implementation integration. No draft PRs.

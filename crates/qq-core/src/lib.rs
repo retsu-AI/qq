@@ -4113,10 +4113,20 @@ mod tests {
             "test-model",
             256,
         )
-        .unwrap()
-        .stall_exempt();
+        .unwrap();
         let events = runtime
-            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
+            .run_loop_with_spawner(
+                vec![Message::user("inspect")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).stall_exempt(),
+            )
             .collect::<Vec<_>>()
             .await;
         assert!(
