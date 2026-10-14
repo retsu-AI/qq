@@ -171,13 +171,16 @@ mod tests {
     #[tokio::test]
     async fn dropped_waiters_do_not_consume_the_live_waiters_wakeup() {
         let token = RunCancellation::new();
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let wake = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = futures_util::task::waker(std::sync::Arc::new(CountWake(wake.clone())));
+        let mut cx = std::task::Context::from_waker(&waker);
         let mut dropped = Box::pin(token.cancelled());
         let mut live = Box::pin(token.cancelled());
         assert_eq!(dropped.as_mut().poll(&mut cx), Poll::Pending);
         assert_eq!(live.as_mut().poll(&mut cx), Poll::Pending);
         drop(dropped);
         token.cancel();
+        assert_eq!(wake.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(live.as_mut().poll(&mut cx), Poll::Ready(()));
     }
 }
