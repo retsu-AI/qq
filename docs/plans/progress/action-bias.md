@@ -2003,3 +2003,23 @@ newest last.
   with unsupported-call-state coverage. Both read and Work tampering cases pass.
 - Added concurrent producer capture coverage: simultaneous callers receive the
   same complete cached identity. No observational or paid qualification claimed.
+
+### 2026-10-14 — AB6 full-gate deadline regression
+
+- Fresh workspace gate at73db0dbc fails two actual process-deadline cases:
+  duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirmed and
+  duration_stops_shell_while_output_persistence_is_blocked. Unknown-source
+  embedding runtimes were spending their short startup budgets hashing an
+  executable that cannot qualify against a clean source pin.
+- Unknown/dirty producers now retain explicit unavailable executable evidence
+  and skip that unnecessary I/O. Clean identified producers still capture the
+  running image once with cancellation/deadline bounds. Narrow deadline tests
+  and fresh integrated gates must rerun before any qualification/publication.
+
+- All12 narrow deadline cases pass after skipping unqualified producer hashes.
+  PR306 now carries hosted turn/H0 qualification directly: accepted main62c65930
+  is the immutable baseline and common official turn fixture; the actual PR
+  head is candidate. Preserve manual turn dispatch and existing native jobs.
+  Full/minimal H0 and unchanged budget checks run A/B plus same-binary A/A with
+  raw pressure/artifact receipts; no gate is waived. Process-path measurement
+  still needs a focused receipt/capture fixture before final qualification.

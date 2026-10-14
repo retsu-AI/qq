@@ -113,9 +113,15 @@ impl ProcessProducer {
             return Arc::clone(evidence);
         }
         let mut evidence = incomplete();
+        let executable_sha256 = if matches!(self.source, SourceRevision::Clean(_)) {
+            hash_executable(cancelled, deadline)
+        } else {
+            // Unknown/dirty source cannot satisfy a clean producer pin.
+            None
+        };
         Arc::get_mut(&mut evidence)
             .expect("new evidence is exclusively owned")
-            .executable_sha256 = hash_executable(cancelled, deadline);
+            .executable_sha256 = executable_sha256;
         if evidence.executable_sha256.is_some()
             || (!cancelled.is_cancelled() && Instant::now() < deadline)
         {
