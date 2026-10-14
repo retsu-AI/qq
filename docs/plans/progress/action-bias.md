@@ -80,3 +80,19 @@ newest last.
   tolerant arguments. AB5 now specifies schema 45→46; historical schema-44
   research stays unchanged. Stack must integrate current main before its
   final qualification; no runtime code changed yet.
+
+
+### 2026-10-14 — baseline test diagnosis and main integration
+
+- Old-base workspace test gate failed: qq-core 933 passed, 5 failed,
+  3 ignored; all five failures were 30-second fixture waits. Other gates
+  after the test command were not run. Same compiled failing checkpoint
+  test passed alone on disk in 14.13 s. All five unchanged binaries passed
+  serially with test stores on task-owned tmpfs (under one second combined).
+  Evidence: `target/qq-perf/ab1-2026-10-14/old-failures-tmpfs.log` in the
+  plan worktree. I/O pressure was 43.63% some / 42.22% full avg10.
+- Integrated `origin/main` (`7de994b1`) as merge `2ffb0a1a`, retaining both
+  the updated autonomous-core index and action-bias priority row. No
+  runtime fix was needed for this timing reproduction. Requalifying the
+  integrated source with task-owned tmpfs test stores; disk latency remains
+  unqualified by that correctness run.
