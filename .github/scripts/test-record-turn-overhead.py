@@ -11,7 +11,16 @@ import time
 import unittest
 
 RECORDER = Path(__file__).with_name("record-turn-overhead.py")
-FIXTURE_DIGEST = "c" * 64
+FIXTURE_SOURCES = [{"path": path, "bytes": 7, "sha256": hashlib.sha256(b"fixture").hexdigest()}
+                   for path in ("crates/qq-core/benches/turn_overhead.rs", "crates/qq-core/tests/support/soak.rs")]
+_fixture_hash = hashlib.sha256(b"qq-turn-fixture-v1\0")
+for entry in FIXTURE_SOURCES:
+    encoded = entry["path"].encode()
+    _fixture_hash.update(len(encoded).to_bytes(8, "big"))
+    _fixture_hash.update(encoded)
+    _fixture_hash.update(entry["bytes"].to_bytes(8, "big"))
+    _fixture_hash.update(bytes.fromhex(entry["sha256"]))
+FIXTURE_DIGEST = _fixture_hash.hexdigest()
 
 
 class RecorderTests(unittest.TestCase):
@@ -38,7 +47,7 @@ class RecorderTests(unittest.TestCase):
             receipt = {"format_version": 1, "compiled_fixture_verified": True,
                        "production_sha": sha, "fixture_sha": "e" * 40,
                        "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                       "effective_fixture": {"sha256": FIXTURE_DIGEST}}
+                       "effective_fixture": {"sha256": FIXTURE_DIGEST, "sources": FIXTURE_SOURCES}}
             if arm == "candidate" and receipt_changes:
                 receipt.update(receipt_changes)
             (self.root / f"{arm}-fixture.json").write_text(json.dumps(receipt))
@@ -57,7 +66,8 @@ class RecorderTests(unittest.TestCase):
     def test_verified_build_receipts_are_required_before_execution(self):
         for changes in (None, {"compiled_fixture_verified": False},
                         {"production_sha": "f" * 40}, {"binary_sha256": "0" * 64},
-                        {"effective_fixture": {"sha256": "d" * 64}}):
+                        {"effective_fixture": {"sha256": "d" * 64}},
+                        {"effective_fixture": {"sha256": FIXTURE_DIGEST}}):
             with self.subTest(changes=changes):
                 result = self.run_recorder(fixture_receipts=changes is not None, receipt_changes=changes)
                 self.assertNotEqual(result.returncode, 0)
