@@ -273,7 +273,10 @@ q "SELECT t.name, t.state, count(*) FROM tool_calls t
 
 ### Supplemental qualification queries (AB6)
 
-These metrics were missing from the original snapshot. Use explicit UTC
+These metrics were missing from the original snapshot. Qualification fixes
+observation to `end + 24 hours` for both windows; wait until `ready=1`.
+`RR_STARTS` is every started run, while `RR` is only runs terminal before
+that cutoff. Later completion never becomes completed-by-cutoff. Use explicit UTC
 `start` and `end` dates, not a rolling relative date. The historical window
 is `[2026-09-13, 2026-10-13)`; the candidate window is seven full days after
 all AB1–AB4 merge commits. Keep the store open read-only and record its
@@ -282,9 +285,25 @@ schema. The following redefines `RR` for **all** queries above as well.
 ```sh
 start="2026-09-13"
 end="2026-10-13"
-RR="SELECT r.id, s.parent_id IS NOT NULL child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
+# Qualification is only valid after this fixed observation cutoff.
+q "SELECT datetime('$end', '+1 day') cutoff_utc, strftime('%s','now') >= strftime('%s','$end','+1 day') ready;"
+RR_STARTS="SELECT r.id, s.parent_id IS NOT NULL child, r.status FROM runs r JOIN sessions s ON s.id = r.session_id
     WHERE r.kind = 'prompt' AND r.started_at_ms >= strftime('%s','$start') * 1000
       AND r.started_at_ms < strftime('%s','$end') * 1000"
+RR="$RR_STARTS AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000"
+
+# Qualification reads before first actual edit (root): runs, median, p90.
+# The historical query above included previews; use this corrected query
+# for both baseline and candidate qualification.
+q "WITH rr AS ($RR), t AS (SELECT t.run_id, t.name, t.state, t.arguments_json,
+     t.turn_ordinal * 100000 + t.call_ordinal k
+     FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE rr.child = 0),
+   f AS (SELECT run_id, min(k) fe FROM t WHERE name IN ('edit_file','write_file')
+     AND state = 'completed' AND coalesce(json_extract(arguments_json, '\$.dry_run'), 0) = 0 GROUP BY 1),
+   c AS (SELECT f.run_id, (SELECT count(*) FROM t WHERE t.run_id = f.run_id AND t.k < f.fe
+     AND t.name IN ('read_file','search','tree')) n FROM f)
+   SELECT count(*), (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) / 2 FROM c)),
+          (SELECT n FROM c ORDER BY n LIMIT 1 OFFSET (SELECT count(*) * 9 / 10 FROM c)) FROM c;"
 
 # Root edit calls: failed, executed terminal calls, failure share.
 # Denied/interrupted calls are reported separately and excluded from this
@@ -294,13 +313,14 @@ q "WITH rr AS ($RR) SELECT sum(t.state = 'failed'),
      1.0 * sum(t.state = 'failed') / nullif(sum(t.state IN ('completed','failed')), 0),
      sum(t.state = 'denied'), sum(t.state = 'interrupted')
    FROM tool_calls t JOIN rr ON rr.id = t.run_id
-   WHERE rr.child = 0 AND t.name IN ('edit_file','write_file');"
+   WHERE rr.child = 0 AND t.name IN ('edit_file','write_file')
+     AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0;"
 
-# Root completion: completed, all started roots, completed share.
-# Also expose unfinished runs; do not silently drop ongoing/queued roots.
-q "WITH rr AS ($RR) SELECT sum(rr.status = 'completed'), count(*),
-     1.0 * sum(rr.status = 'completed') / nullif(count(*), 0),
-     sum(r.finished_at_ms IS NULL)
+# Root completion by the fixed cutoff: completed, all started roots,
+# completed share, not terminal by cutoff (including later completions).
+q "WITH rr AS ($RR_STARTS) SELECT sum(rr.status = 'completed' AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000), count(*),
+     1.0 * sum(rr.status = 'completed' AND r.finished_at_ms < strftime('%s','$end','+1 day') * 1000) / nullif(count(*), 0),
+     sum(r.finished_at_ms IS NULL OR r.finished_at_ms >= strftime('%s','$end','+1 day') * 1000)
    FROM rr JOIN runs r ON r.id = rr.id WHERE rr.child = 0;"
 
 # Instruction names searches per root that successfully edits below root.
@@ -312,6 +332,7 @@ q "WITH rr AS ($RR), paths AS (
      SELECT t.run_id, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
+       AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0
      UNION ALL
      SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id
@@ -327,8 +348,18 @@ q "WITH rr AS ($RR), paths AS (
      (SELECT count(*) FROM paths WHERE path GLOB './*' OR path GLOB '/*') FROM counts;"
 ```
 
+Corrected qualification baseline (schema 45, fixed window and cutoff above):
+109 root runs with an actual edit, median **9** reads and p90 **57**.
+The preview exclusion preserves the original 9/57 thresholds. A deterministic
+fixture with two reads, a dry-run preview, forty reads, then a real edit
+returns 42 reads; a preview-only run is excluded. Evidence is recorded in
+`target/qq-perf/ab-plan-2026-10-14/first-actual-edit.json`.
+
 Instruction columns: qualifying roots, names-search attempts, maximum per
-root, roots exceeding one, paths requiring normalization. If the last
+run, runs exceeding one, paths requiring normalization. This is the raw
+per-run diagnostic; runs over one require the scope query below, because
+one search per distinct discovery root is allowed. Dry-run previews are
+excluded from the editing cohort. If the last
 column is nonzero, normalize those paths against each run's persisted
 workspace before qualification; this query alone is insufficient. Zero
 searches may mean instructions were already supplied; this count cannot
@@ -352,3 +383,50 @@ one, 0 paths requiring normalization. Root-only edit counts differ from
 the original all-run `edit_file` figures because this metric includes
 `write_file` and excludes children. These are supplemental measurements,
 not rewritten original evidence.
+
+
+For the scope exception, use the same terminal editing cohort and count
+instruction-name searches by `(run_id, normalized path)` (absent path is
+`.`). Record each run's distinct roots and count of roots searched more
+than once. A multi-root exception is valid only when the searches cover
+every edited target and its instruction ancestors. Coverage is reviewed
+separately; fewer searches cannot prove compliance. Keep the original
+per-run-over-one diagnostic alongside scope counts rather than relabelling
+all such runs as passing.
+
+```sh
+# Scope counts: runs, distinct roots, searches, repeated roots, affected runs, maximum roots in one run.
+q "WITH rr AS ($RR), paths AS (
+     SELECT t.run_id, json_extract(e.value, '\$.path') path
+     FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
+     WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
+       AND coalesce(json_extract(t.arguments_json, '\$.dry_run'), 0) = 0
+     UNION ALL
+     SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
+     FROM tool_calls t JOIN rr ON rr.id = t.run_id
+     WHERE rr.child = 0 AND t.name = 'write_file' AND t.state = 'completed'),
+   qualifying AS (SELECT DISTINCT run_id FROM paths
+     WHERE instr(path, '/') > 0 AND path NOT GLOB './*' AND path NOT GLOB '/*'),
+   discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
+     FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
+     WHERE t.name = 'search' AND json_extract(t.arguments_json, '\$.mode') = 'names'
+       AND coalesce(json_extract(t.arguments_json, '\$.cursor'), '') = ''
+       AND (instr(json_extract(t.arguments_json, '\$.query'), 'AGENTS') > 0
+         OR instr(json_extract(t.arguments_json, '\$.query'), 'CLAUDE') > 0)
+     GROUP BY 1, 2),
+   per_run AS (SELECT q.run_id, count(d.path) roots, coalesce(sum(d.n),0) searches,
+     coalesce(sum(d.n > 1),0) repeated_roots FROM qualifying q LEFT JOIN discovery d ON d.run_id = q.run_id GROUP BY 1)
+   SELECT count(*), sum(roots), sum(searches), sum(repeated_roots), sum(repeated_roots > 0), max(roots) FROM per_run;"
+```
+
+Paths with `./`, doubled separators or symlink aliases require canonical
+normalization against the run workspace before qualification. The query
+normalizes absent paths and trailing slashes only; record unresolved
+normalization as unqualified, never as a distinct-root allowance.
+
+Workspace-root discovery covers nonignored ancestors for every target.
+Ignored targets also require discovery from their highest ignored ancestor
+below the workspace. These are the permitted discovery roots. Arbitrary
+per-directory paths do not qualify as distinct-root exceptions. Cursor
+pages continue one discovery; the scope query counts only new starts,
+while the raw diagnostic above retains physical call counts.
