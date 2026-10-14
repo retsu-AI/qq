@@ -729,3 +729,15 @@ newest last.
 - Integrated accepted AB1 exact-argv/Git-helper and AB2 instruction discovery
   repairs through the AB3 parent. AB4 authority implementation is unchanged.
   Rerun immutable combined workspace gates; hosted review and performance open.
+
+- Combined immutable source 0d82d86f passes all workspace gates: 2,303 tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
+  Independent integration review approves; read-window behavior unchanged.
+  Matched performance and final hosted review remain open.
+
+- Combined immutable source 265a4e21 passes workspace checks: 2,311 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab4-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
+  Independent integration review approves; AB3's completed receipt integrated
+  without production changes. Hosted review and matched performance remain open.
