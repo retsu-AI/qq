@@ -1071,7 +1071,7 @@ mod tests {
                     .count();
                 bytes += result.model_text.len();
                 let mut projected = result.model_text;
-                cuts += usize::from(budget.admit(&mut projected, ResultRecall::None));
+                cuts += usize::from(budget.admit("read_file", &mut projected, ResultRecall::None));
                 reads += 1;
             }
             assert!(shown > 0);

@@ -958,3 +958,8 @@ newest last.
   review approves. Logs: fresh-complete-page-final-{0,1,2,3,4}.log; receipt
   fresh-complete-page-final-receipt.json under AB2 target/qq-perf. This fresh
   source-specific receipt supersedes earlier cache uncertainty. Performance open.
+
+- AB3 integration updates its existing read-window budget fixture to supply
+  actual read_file identity to AB2's shared projection signature. Initial
+  fresh integration compile failure is retained in fresh-zero-row-integrated-
+  1.log; the corrected combined source is qualified before publishing.
