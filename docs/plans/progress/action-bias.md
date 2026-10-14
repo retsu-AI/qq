@@ -741,3 +741,13 @@ newest last.
   target/qq-perf/ab4-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
   Independent integration review approves; AB3's completed receipt integrated
   without production changes. Hosted review and matched performance remain open.
+
+### 2026-10-14 — AB4 prompt behavioral identity
+
+- Independent review confirms an unchanged read_file-only profile keeps the
+  same descriptor/catalog fields while AB4 changes its authority text. Public
+  compiled-plan regression reproduces the same digest as its prompt-20
+  predecessor. Receipt prompt21-descriptor-red.log.
+- Bump AB4's base prompt identity to 21, preserving ordinary actionable auto
+  prompt bytes. Retain historical version-20 digest coverage; AB6 must pin
+  the deployed version-21 runtime, not infer treatment from prompt 20.

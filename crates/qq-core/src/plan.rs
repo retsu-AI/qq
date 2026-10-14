@@ -1677,6 +1677,18 @@ mod tests {
     }
 
     #[test]
+    fn ab4_inspection_only_descriptor_differs_from_prompt20_identity() {
+        let workspace = canonical_temp();
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        let mut predecessor = plan.descriptor().as_ref().clone();
+        predecessor.prompt_version = PromptVersion::new(20).unwrap();
+        assert_ne!(plan.digest(), predecessor.digest().unwrap());
+    }
+
+    #[test]
     fn canonical_encoding_and_digest_are_stable() {
         let descriptor = golden_descriptor();
         let bytes = descriptor.canonical_bytes().unwrap();
