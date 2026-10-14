@@ -735,9 +735,23 @@ When both are given, `ranges` wins and the header carries
 `note=offset_ignored`; a comma inside one range (`"370,470"`) reads as
 `-`. Models that fill every optional field send both, nearly always with
 `offset` equal to the first range's start, so refusing cost a turn for
-nothing (tool-layer D9). A read is never cut mid-line: the 32
-KiB default budget stops on a whole row, the header says
-`truncated=bytes`, and the marker names `offset=<next>` to continue from.
+nothing (tool-layer D9). With no `limit`, the window runs to the end of
+file, bounded by 32 KiB and 4,000 rendered lines. Prefer one larger read
+over repeated small slices. The renderer reserves room for its header
+and continuation marker and never cuts a row in half. Row and header admission
+measure the masked escaped output, including argument-repair notes, so secret
+masking expansion cannot invalidate the contiguous window.
+Repairs reserve a possible separate note row and its escaped newline, because
+placement uses the raw header before masking. This also covers native Unicode
+paths whose UTF-8 text exceeds the rendered line cap. The 2,000-byte
+content ceiling applies before the gutter; dispatch retains complete rendered
+rows. A byte or rendered-
+line stop carries `truncated=bytes` or `truncated=lines`, with a contiguous
+`continue from offset=<next>` marker. An explicit `limit` ending before
+EOF names the remaining lines and next offset. For a file beyond the
+4 MiB scan cap, the remainder count is unknown and the marker names that
+cap rather than claiming an exact count. Explicit `ranges` retain
+the requested intervals without treating their endpoints as EOF paging.
 The gutter is deliberate — dropping it saves tokens and costs edit
 anchors, which is the wrong trade for a tool whose purpose is to set up an
 edit.
@@ -1792,6 +1806,14 @@ dispatch overhead has a benchmark.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.
 
+A read continuation never suggests a start offset above 100,000. If the next
+unread line exceeds that bound, the result carries a terminal start-offset
+limit marker instead; no later starting offset is supported. Existing
+explicit ranges beginning within the bound retain their behavior.
+
+A read whose header leaves insufficient room for its first requested row returns
+an explicit output-limit error, recommending a nearer workspace root. It emits
+no continuation for a window that admitted no rows.
 Search pages retain their complete bounded content during per-turn projection.
 Their cursor advances past every emitted match, so a second generic head/tail
 cut would skip matches on continuation. The turn charges the complete page.

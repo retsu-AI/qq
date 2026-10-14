@@ -4101,6 +4101,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab3_parallel_default_reads_recover_every_line_under_the_turn_budget() {
+        struct State {
+            turn: usize,
+            seen: Vec<Vec<bool>>,
+            results: std::collections::HashSet<String>,
+            cuts: usize,
+            calls: usize,
+        }
+        struct BatchReader(Arc<Mutex<State>>);
+        impl Provider for BatchReader {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut state = self.0.lock().unwrap();
+                for block in request
+                    .messages()
+                    .iter()
+                    .flat_map(|message| message.content())
+                {
+                    if let ContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        is_error,
+                    } = block
+                    {
+                        if !state.results.insert(call_id.clone()) {
+                            continue;
+                        }
+                        assert!(!is_error, "{content}");
+                        state.cuts += usize::from(content.contains("turn budget reached"));
+                        let file = content
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap();
+                        let index: usize = file.strip_prefix("batch-").unwrap().parse().unwrap();
+                        for row in content.lines().skip(1) {
+                            if let Some((number, _)) = row.split_once('\t')
+                                && let Ok(number) = number.trim().parse::<usize>()
+                            {
+                                assert!((1..=1_000).contains(&number));
+                                state.seen[index][number - 1] = true;
+                            }
+                        }
+                    }
+                }
+                if state.seen.iter().all(|file| file.iter().all(|seen| *seen)) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "all lines read".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                assert!(
+                    state.turn < 20,
+                    "bounded fixture failed to recover every line"
+                );
+                let turn = state.turn;
+                state.turn += 1;
+                let mut events = Vec::new();
+                for index in 0..6 {
+                    if let Some(offset) = state.seen[index].iter().position(|seen| !seen) {
+                        state.calls += 1;
+                        let id = format!("batch-{turn}-{index}");
+                        events.push(Ok(ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "read_file".to_owned(),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(r#"{{"path":"batch-{index}","offset":{}}}"#, offset + 1),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                    }
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..6 {
+            std::fs::write(
+                directory.path().join(format!("batch-{index}")),
+                "012345678901234567890123456789\n".repeat(1_000),
+            )
+            .unwrap();
+        }
+        let state = Arc::new(Mutex::new(State {
+            turn: 0,
+            seen: vec![vec![false; 1_000]; 6],
+            results: Default::default(),
+            cuts: 0,
+            calls: 0,
+        }));
+        let runtime = Runtime::new(BatchReader(Arc::clone(&state)), "gpt-test", 256).unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("read all six files")],
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let state = state.lock().unwrap();
+        assert!(state.seen.iter().all(|file| file.iter().all(|seen| *seen)));
+        assert!(state.calls <= 30);
+        assert!(
+            state.cuts == 0 || state.calls < 30,
+            "more cuts must buy fewer calls"
+        );
+        eprintln!(
+            "AB3 parallel runtime: calls={} turn_budget_cuts={}",
+            state.calls, state.cuts
+        );
+    }
+
+    #[tokio::test]
     async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
@@ -10228,13 +10349,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // AB2 changes four descriptions and widens the cursor length bound.
+        // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
         // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
         let spawn = specs.last().unwrap();
         assert!(

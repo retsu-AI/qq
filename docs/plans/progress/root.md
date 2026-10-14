@@ -553,6 +553,16 @@ role-contract assertions in `sessions/tests/delegation.rs`. No descriptor
 encoding or session production behavior changes; prompt version 20 changes
 its digest, and write/read child assertions must pin the new action bullet.
 
+### 2026-10-14 — AB3 public read regression fixture ownership
+
+AB3 owns `tools.rs` focused read-window and turn-budget projection tests,
+using the existing dispatch helper; production scope remains read.rs/specs.rs.
+
+### 2026-10-14 — AB3 parallel runtime regression ownership
+
+AB3 owns one `lib.rs` six-parallel-read runtime regression and its existing
+schema-identity assertion. The provider accounts for only model-visible
+rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 ### 2026-10-14 — AB2 filtered tool description ownership
 
 - AB2 owns `plan.rs` compilation of filtered builtin descriptions: shell
@@ -577,6 +587,18 @@ its digest, and write/read child assertions must pin the new action bullet.
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
 
+### 2026-10-14 — AB3 masked read admission
+
+- Reserve tools/output.rs shared allocation-free masked escaped-size measure
+  and tools/dispatch.rs actual repaired-argument note byte reservation. Read
+  construction uses post-mask costs and retains unmasked spill semantics.
+  Returned line bounds preserve manually clipped complete rows and gutters.
+
+
+- 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
+  for the native Unicode-path contiguous-window regression. The existing job
+  selected teardown tests only. A test-only read/output hook exercises the
+  actual dispatch mask/bound pipeline using valid Windows metadata on Linux.
 
 - 2026-10-14 AB2 reserves tools/output.rs and live/replay turn-projection
   call sites in runtime/run_loop.rs and sessions/{transcript,tests}.rs.

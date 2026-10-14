@@ -510,8 +510,8 @@ mod tests {
             assert!(
                 result
                     .model_text
-                    .lines()
-                    .any(|line| line == "note=cwd_ignored"),
+                    .split_whitespace()
+                    .any(|field| field == "note=cwd_ignored"),
                 "{}",
                 result.model_text
             );
@@ -658,12 +658,432 @@ mod tests {
         let hash = content_hash(b"one\ntwo\nthree\n");
         assert_eq!(
             read.model_text,
-            format!("read b.txt L2/3 h:{}\n2\ttwo\n", &hash[..12])
+            format!(
+                "read b.txt L2/3 h:{}\n2\ttwo\n…[qq: 1 more lines; continue from offset=3]…\n",
+                &hash[..12]
+            )
         );
         let update = read.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "b.txt");
         assert_eq!(update.hash, hash);
         assert_eq!(state.recorded("b.txt"), Some(update.hash));
+    }
+
+    #[test]
+    fn ab3_default_reads_fill_the_budget_and_explicit_limits_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, lines, content) in [
+            ("small", 300, "x\n"),
+            ("short", 3_000, "x\n"),
+            ("large", 3_000, "012345678901234567890123456789\n"),
+        ] {
+            fs::write(directory.path().join(path), content.repeat(lines)).unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for (path, expected) in [("small", 300), ("short", 3_000)] {
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"{path}"}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(result.model_text.lines().skip(1).count(), expected);
+            assert!(!result.model_text.contains(MARKER_PREFIX));
+        }
+        let large = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"large"}"#,
+        );
+        let rows = large
+            .model_text
+            .lines()
+            .skip(1)
+            .filter(|row| !row.starts_with(MARKER_PREFIX))
+            .count();
+        assert!(rows > 200 && rows < 3_000, "{rows}");
+        assert!(
+            large
+                .model_text
+                .contains(&format!("continue from offset={}", rows + 1))
+        );
+        let limited = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","limit":20}"#,
+        );
+        assert!(
+            limited
+                .model_text
+                .ends_with("…[qq: 280 more lines; continue from offset=21]…\n"),
+            "{}",
+            limited.model_text
+        );
+        let ranged = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","ranges":["1-20"]}"#,
+        );
+        assert!(!ranged.model_text.contains(MARKER_PREFIX));
+    }
+
+    #[test]
+    fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let path = format!("{prefix}/notes.txt");
+        std::fs::write(
+            directory.path().join(&path),
+            ("x".repeat(80) + "\n").repeat(2_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            &serde_json::json!({"path":path}).to_string(),
+        );
+        assert!(!output.is_error, "{}", output.model_text);
+        let rows: Vec<usize> = output
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(number, _)| number.trim().parse().ok())
+            })
+            .collect();
+        assert!(rows.len() > 200);
+        assert!(
+            rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "visible rows have a gap"
+        );
+        assert!(!output.model_text.contains("not stored"));
+    }
+
+    #[test]
+    fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
+        let directory = tempfile::tempdir().unwrap();
+        let content = "x".repeat(output::MAX_LINE_BYTES);
+        fs::write(directory.path().join("row.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"row.txt"}"#,
+        );
+        assert!(!result.is_error);
+        let row = result
+            .model_text
+            .lines()
+            .find_map(|line| line.split_once('\t'))
+            .unwrap();
+        assert_eq!(row.1, content);
+    }
+
+    #[test]
+    fn ab3_secret_masking_preserves_contiguous_default_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let long_path = format!("{prefix}/{}notes.txt", "SECRET=abcdefgh ".repeat(8));
+        for path in ["notes.txt", long_path.as_str()] {
+            fs::write(
+                directory.path().join(path),
+                "SECRET=abcdefgh\n".repeat(2_500),
+            )
+            .unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            let mut offset = 1;
+            while offset <= 2_500 {
+                let arguments = serde_json::json!({"path":path,"offset":offset,
+                    "ranges":"[]","cwd":".","include_ignored":true})
+                .to_string();
+                let result = run_tool(&workspace, &state, "read_file", &arguments);
+                assert!(!result.is_error, "{}", result.model_text);
+                assert!(result.spill.is_none(), "read window must survive masking");
+                assert!(!result.model_text.contains("SECRET=abcdefgh"));
+                let rows = result
+                    .model_text
+                    .lines()
+                    .filter_map(|line| {
+                        line.split_once('\t')
+                            .and_then(|(number, _)| number.trim().parse::<usize>().ok())
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!rows.is_empty());
+                assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+                let last = *rows.last().unwrap();
+                if last == 2_500 {
+                    break;
+                }
+                let next = result
+                    .model_text
+                    .split("offset=")
+                    .nth(1)
+                    .unwrap()
+                    .split(|ch: char| !ch.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(next, last + 1);
+                offset = next;
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab3_native_zero_row_window_returns_a_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for _ in 0..110 {
+            let name = "界".repeat(95);
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", format!("{}\n", "x".repeat(2_000)))
+            .unwrap();
+        drop(dir);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let args = serde_json::json!({"path":format!("{}/f.txt",components.join("/"))}).to_string();
+        let result = run_tool(&workspace, &state, "read_file", &args);
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("output_limit:"));
+        assert!(!result.model_text.contains("offset=0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab3_native_unicode_header_preserves_repaired_read_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for index in 0..110 {
+            let name = if index == 0 {
+                format!("SECRET={}", "界".repeat(100))
+            } else {
+                "界".repeat(100)
+            };
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", "\n".repeat(5_000)).unwrap();
+        drop(dir);
+        let path = format!("{}/f.txt", components.join("/"));
+        assert!(path.len() > read::READ_BOUNDS.max_bytes);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let mut offset = 1;
+        while offset <= 5_000 {
+            let args = serde_json::json!({"path":path,"offset":offset,"cwd":"."}).to_string();
+            let result = run_tool(&workspace, &state, "read_file", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result.spill.is_none(),
+                "native read must preserve its contiguous window"
+            );
+            let rows = result
+                .model_text
+                .lines()
+                .filter_map(|line| {
+                    line.split_once('\t')
+                        .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+                })
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty());
+            assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+            offset += rows.len();
+            if offset <= 5_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+            }
+        }
+        assert_eq!(offset, 5_001);
+    }
+
+    #[test]
+    fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"many.txt","offset":99999}"#,
+        );
+        assert!(!output.is_error, "{}", output.model_text);
+        assert!(
+            output.model_text.contains("start-offset limit 100000"),
+            "{:?}",
+            output.model_text.lines().last()
+        );
+        assert!(!output.model_text.contains("continue from offset="));
+    }
+
+    #[test]
+    fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("empty"), "\n".repeat(4_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut calls = 0;
+        while offset <= 4_000 {
+            calls += 1;
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"empty","offset":{offset}}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(result.model_text.lines().count() <= 4_000);
+            assert!(!result.model_text.contains("not stored"));
+            let rows: Vec<_> = result
+                .model_text
+                .lines()
+                .skip(1)
+                .filter(|row| !row.starts_with(MARKER_PREFIX))
+                .collect();
+            assert!(!rows.is_empty());
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.trim().parse::<usize>().unwrap(), offset + index);
+            }
+            offset += rows.len();
+            if offset <= 4_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+                assert!(rows.len() > 200);
+            } else {
+                assert!(!result.model_text.contains(MARKER_PREFIX));
+            }
+        }
+        assert_eq!(offset, 4_001);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn ab3_scan_cap_continuation_does_not_claim_an_exact_remainder() {
+        let directory = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "x".repeat(1_023));
+        fs::write(directory.path().join("capped"), line.repeat(4_097)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for arguments in [r#"{"path":"capped"}"#, r#"{"path":"capped","limit":2}"#] {
+            let result = run_tool(&workspace, &FileState::default(), "read_file", arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            let marker = result.model_text.lines().last().unwrap();
+            assert!(marker.contains("count unknown"), "{marker}");
+            assert!(marker.contains("4 MiB scan cap"), "{marker}");
+            assert!(marker.contains("continue from offset="), "{marker}");
+            assert!(!marker.contains("4094 more lines"));
+        }
+    }
+
+    #[test]
+    fn ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("capped"),
+            format!("{}\n", "x".repeat(99)).repeat(52_429),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for path in ["capped", "single"] {
+            let mut offset = 1;
+            for call in 0..256 {
+                let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
+                let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
+                assert!(!result.is_error, "offset={offset}: {}", result.model_text);
+                let marker = result.model_text.lines().last().unwrap();
+                if let Some((_, next)) = marker.split_once("continue from offset=") {
+                    let next = next.split(']').next().unwrap().parse::<usize>().unwrap();
+                    assert!(next > offset);
+                    offset = next;
+                } else {
+                    assert!(
+                        marker.contains("file continues past the 4 MiB scan cap"),
+                        "{marker}"
+                    );
+                    break;
+                }
+                assert!(call < 255, "scan prefix did not terminate");
+            }
+        }
+    }
+
+    #[test]
+    fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
+        use super::output::{ResultRecall, TurnOutputBudget};
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("batch"),
+            "012345678901234567890123456789\n".repeat(1_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut reads = 0;
+        let mut cuts = 0;
+        let mut bytes = 0;
+        while offset <= 1_000 {
+            let mut budget = TurnOutputBudget::new();
+            let mut shown = 0;
+            for _ in 0..6 {
+                let result = run_tool(
+                    &workspace,
+                    &FileState::default(),
+                    "read_file",
+                    &format!(r#"{{"path":"batch","offset":{offset}}}"#),
+                );
+                assert!(!result.is_error);
+                shown = result
+                    .model_text
+                    .lines()
+                    .skip(1)
+                    .filter(|row| !row.starts_with(MARKER_PREFIX))
+                    .count();
+                bytes += result.model_text.len();
+                let mut projected = result.model_text;
+                cuts += usize::from(budget.admit("read_file", &mut projected, ResultRecall::None));
+                reads += 1;
+            }
+            assert!(shown > 0);
+            offset += shown;
+        }
+        eprintln!(
+            "AB3 six-result batches: reads={reads} turn_budget_cuts={cuts} mean_read_bytes={}",
+            bytes / reads
+        );
+        assert!(reads <= 30);
+        assert!(cuts == 0 || reads < 30, "cuts must buy fewer read calls");
     }
 
     #[test]
@@ -2483,7 +2903,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
     }
 
