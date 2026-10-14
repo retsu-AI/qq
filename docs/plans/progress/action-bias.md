@@ -320,3 +320,8 @@ newest last.
   git status, now intentionally work because of configured fsmonitor. Update
   its read case to canonical git -c core.fsmonitor=false status; keep its
   report assertion. Core957 passed,one failed,three ignored before correction.
+
+- Corrected immutable sourcebb106e3f passes workspace gates: 2,278 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-helpers-final-gate-{0,1,2,3}.log.
+  Windows-only execution and final matched performance remain open.
