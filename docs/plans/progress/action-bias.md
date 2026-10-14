@@ -375,3 +375,9 @@ newest last.
   sorting, and history reads force no patch/merge-diff generation. Approval
   previews, grants and decisions are unchanged. Initial focused green: eight
   tests passed; independent final review and immutable workspace gates next.
+
+- Immutable source 4bd16392 passes workspace checks: 2,280 tests, zero failed,
+  14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/configured-git-exact-exec-gate-{0,1,2,3}.log.
+  Independent final read-only review approves; eight focused regressions pass.
+  Matched performance remains open; no readiness claim.
