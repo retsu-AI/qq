@@ -562,3 +562,10 @@ using the existing dispatch helper; production scope remains read.rs/specs.rs.
 AB3 owns one `lib.rs` six-parallel-read runtime regression and its existing
 schema-identity assertion. The provider accounts for only model-visible
 rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
+
+### 2026-10-14 — AB4 shared eligibility ownership
+
+- AB4 owns `runtime/run_loop.rs` and `sessions/execution.rs` capability/filter
+  propagation in addition to plan/catalog/prompt/direct entrypoints. Reserve
+  `docs/design/architecture.md`, `docs/design/protocol.md`, ADR-0059 and its
+  index amendment for shipped behavior; no mutable approval mode in cache keys.

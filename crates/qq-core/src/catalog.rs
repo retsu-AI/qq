@@ -1027,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_runs_are_never_offered_schemas_their_policy_denies() {
+    fn ab4_read_only_runs_are_never_offered_schemas_their_policy_denies() {
         let mut tools = statics();
         tools.extend([
             StaticTool::new(
@@ -1076,10 +1076,8 @@ mod tests {
             read_only: true,
         });
         let names: Vec<&str> = read_only.iter().map(ToolSpec::name).collect();
-        // Mutating and shell built-ins go; externals stay only when their
-        // host declared them read-only. The digest is unchanged: filtering is
-        // per request, the compiled catalog is the same.
-        assert_eq!(names, ["read_file", "mcp__srv__lookup"]);
+        // Host hints grant nothing under strict ReadOnly.
+        assert_eq!(names, ["read_file"]);
     }
 }
 

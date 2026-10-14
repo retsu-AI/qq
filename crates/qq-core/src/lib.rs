@@ -10553,6 +10553,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![Vec::new()],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .run(RunCommand::new("make the requested change"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        let names = tool_names(&requests[0]);
+        for denied in [
+            "edit_file",
+            "write_file",
+            "shell",
+            "exec",
+            "ask_user",
+            "fetch",
+        ] {
+            assert!(
+                !names.contains(&denied),
+                "denied schema {denied}: {names:?}"
+            );
+        }
+        assert!(names.contains(&"read_file"));
+        let prompt = requests[0].system().unwrap();
+        assert!(
+            !prompt.contains("- Do the work. Decide what done looks like"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("This unattended run"), "{prompt}");
+    }
+
+    #[tokio::test]
     async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
         for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
             let directory = tempfile::tempdir().unwrap();

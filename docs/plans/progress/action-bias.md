@@ -9,7 +9,7 @@ newest last.
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; performance qualification open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In progress | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
@@ -386,3 +386,14 @@ newest last.
   Integrated parent docs only; production source remains qualified.
 - Matched performance qualification remains open; prior candidate binary
   predates the helper fix and cannot qualify this head.
+
+### 2026-10-14 — AB4 baseline and test-first start
+
+- Isolated branch `fix/eng-1041-ab4-run-authority`, AB3 parent `93cef811`.
+  Loaded-host baseline catalog compile 664,763 ns/500 iterations, selection
+  18,393 ns/10,000, host plan compile 58,587 ns/500; not qualification.
+  Raw baseline lives in AB3 `target/qq-perf/ab4-2026-10-14/baseline-catalog.log`.
+- Both new regressions fail: direct request declares denied edit_file;
+  strict ReadOnly retains a hinted external tool. Test-first log under
+  this worktree `target/qq-perf/ab4-2026-10-14/test-first.log`.
+- Snapshot eligibility/gates and prefix authority implementation next.
