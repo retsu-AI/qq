@@ -9,7 +9,7 @@ newest last.
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In progress | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) (draft) | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | In progress | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
@@ -672,3 +672,26 @@ newest last.
 - Independent final plan review approves. Docs truth23 passed; fmt and diff
   checks passed. Parent production source is unchanged from its qualified
   source; no acceptance or performance gate is waived.
+
+- Integrated immutable AB4 workspace gates pass:2,305 tests,zero failed,
+  14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab4-2026-10-14/authority-qualified-gate-{0,1,2,3}.log.
+- Integrated immutable AB3 workspace gates pass:2,298 tests,zero failed,
+  14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab3-2026-10-14/discovery-qualified-gate-{0,1,2,3}.log.
+  Independent source/integration review approves. Matched performance and
+  hosted review remain open; publish as draft without a readiness claim.
+
+- AB4 published as draft PR304, stacked on303; LinearENG-1041 In Review.
+  Hosted review requested. Parent source0dc6f436 receipt integrated; no
+  production change after full2305-test qualification. Matched performance
+  remains open; no merge or readiness claim.
+
+- Immutable integrated source185f983e passes full workspace gates:2,310 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/integrated-root-notice-gate-{0,1,2,3}.log.
+  NO_COLOR removed, task-owned tmpfs temporaries, incremental off; dev/test
+  debug symbols disabled to bound task-owned build storage (debug assertions
+  retained). These are correctness gates, not performance measurements.
+- Integrated AB4 draft304 parent receipt with no production change. Matched
+  performance and hosted review remain open; publish AB5 as draft.
