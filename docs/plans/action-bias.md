@@ -17,7 +17,9 @@ When a run is asked for a change, it makes the change, verifies it and
 reports, without reading the same material repeatedly first. Specifically:
 
 - **Root runs reach their first edit sooner.** Built-in reads before the
-  first edit: median 9 → ≤ 6, p90 57 → ≤ 30.
+  first observed built-in edit: median 9 → ≤ 6, p90 57 → ≤ 30.
+  Unknown shell/exec/external mutation paths or ordering leave the whole-run
+  first-edit and instruction-coverage gates unqualified.
 - **Fewer re-reads.** Same-path re-reads fall from 44 % of root `read_file`
   calls (historical argument-spelling proxy: 1,631 of 3,669) to ≤ 25%.
   Qualification groups successful reads by persisted canonical file identity;
@@ -38,6 +40,9 @@ reports, without reading the same material repeatedly first. Specifically:
   records one discovery start across 108 qualifying roots, no repeated roots.
   Path/page/read coverage remains
   unqualified; the historical raw argument counts are separate context.
+  The built-in nested-edit subset is diagnostic. Malformed discovery paths and
+  shell/exec/external calls without immutable mutation-path evidence leave
+  whole-cohort qualification open, including shell-only edits.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
   receives a stall report. Today `cd … && grep` and `sed -n` count as work,
   so this never happened in the window: 0 root stall reports in 30 days
@@ -85,7 +90,7 @@ described in AB6.
 
 | ID | Goal | Finding | Size | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand or compressor helper) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (bounded shell/argv read recognition), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
+| AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `uniq` (no real output operand) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (bounded shell/argv read recognition), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
 | AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`/`exec`, `tools/search.rs` bounded names discovery and depth reporting, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; exact basename matching excludes NOTAGENTS.md; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
 | AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit carries an admissible continuation or a terminal offset-bound marker; ordinarily `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a 3,000-line short-line file fitting the byte and rendered-line bounds returns whole; a 4,000-empty-line file gets contiguous offset continuation before generic bounding; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
 | AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`/`fetch`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass; public `Runtime::run_messages` grant changes between stream construction and first poll use the newly compiled snapshot for declarations and execution |
@@ -142,8 +147,9 @@ The rule:
      `--`. Unknown switches and patch/stat/raw/remerge/format overrides count
      as work. Explicit disables also prevent configured merge-diff behavior;
    - `cargo metadata`/`cargo tree` are work even with `--locked`/`--frozen`:
-     configured compiler wrappers may execute. Only exact `cargo --version`
-     is a read;
+     configured compiler wrappers may execute. `cargo --version` and
+     `rustc --version` are also work: rustup proxies may install a missing
+     workspace-selected toolchain;
    - `rg` reads require leading `--no-config`, then reject `--pre`, hostname helpers (`--hostname-bin`) and compressed
      search (`-z`, short clusters containing `z`, `--search-zip`);
    - `fd` excludes `-x`/`-X` (including short clusters), `--exec` and
@@ -164,11 +170,11 @@ The rule:
      command or substitution `w`/`e` flag. Parse field delimiters/escapes before
      separators, so literal semicolons inside patterns/replacements are data;
    - `nl`, `cut`;
-   - `sort` without `-o` (including attached `-oFILE`), `-T` (including clusters),
-     `--temporary-directory`, `--output`,
-     `--compress-program` or accepted abbreviations such as `--o=FILE` and
-     `--compress=./mutate` or `--temporary=.`; `uniq` with at most one
-     input operand and an optional second operand `-` for stdout;
+   - `sort` is work: its spills may write inside inherited TMPDIR, even without
+     explicit temporary-directory, output or compressor options. No lexical
+     command form here proves that inherited context safe;
+   - `uniq` with at most one input operand and an optional second operand `-`
+     for stdout;
    - `git -C DIR` followed by a read under the same rules, and
      `git worktree list`.
 
@@ -182,7 +188,7 @@ The rule:
 | `git status`, `git diff --stat`, `rg needle f`, `fd -l`, `file -Sz sample.Z` | no |
 | `rg --no-config 'foo(bar)' f.rs` | yes on Unix |
 | `echo 'x & cargo fmt & echo x'`, `sort input.txt /o output.txt` | no on Windows |
-| `cd x && cargo test -p y` | no (work) |
+| `cd x && cargo test -p y`, `cargo --version`, `rustc --version`, `sort input` | no (work) |
 | `sed -i s/a/b/ f.rs` | no |
 | `cd x && grep foo f > out` | no |
 | `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
@@ -503,7 +509,7 @@ prerequisite slice adds an explicit AB2-treatment mode. Build both arms
 from the same accepted AB1–AB5 runtime source; a reviewed counterfactual
 patch changes only AB2's prompt treatment and four descriptions, retaining
 identical AB3 schemas/behavior and AB4/AB5 authority/notice behavior, including
-base prompt version 21. Label
+base prompt version 22. Label
 this prompt-19-versus-20 treatment on a fixed runtime, not a comparison to
 the historical released prompt-19 runtime. Record the exact expected pairs
 for source revision, binary hash, prompt/system hashes, tool-schema hash and

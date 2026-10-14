@@ -557,3 +557,16 @@ newest last.
   inherited temporary storage and rustup installation cannot be neutralized
   by this lexical predicate. Focused run: 18 pass, 0 fail. Retain PATH identity
   as an explicit lexical limitation; no approval authority is expanded.
+- 2026-10-14 qualification follow-up: typed discovery paths cannot become
+  scopes through SQLite coercion. The diagnostic now exposes invalid scopes
+  and executed shell/exec/external runs with unproven mutation paths. Fixtures
+  cover numeric/array/object roots and a shell-only sed edit. Historical scope
+  diagnostic is 108/1/1/0/0/1, invalid scopes 0, unproven mutation runs 208;
+  the whole editing cohort remains unqualified. First-edit ordering has the
+  same immutable mutation-evidence requirement.
+
+- AB1 scope correction: sort remains Work because ordinary spills can write
+  through inherited TMPDIR; explicit -T rejection alone is insufficient.
+  Cargo/rustc version queries are Work because rustup proxies can install
+  missing workspace-selected toolchains. These are known program semantics,
+  distinct from unqualified arbitrary executable identity.
