@@ -623,7 +623,8 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                 args
             };
             // Working-tree reads may run a configured fsmonitor hook.
-            let Some(args) = args.strip_prefix(&["-c", "core.fsmonitor=false"]) else {
+            let Some(args) = args.strip_prefix(&["--no-lazy-fetch", "-c", "core.fsmonitor=false"])
+            else {
                 return false;
             };
             let Some((subcommand, args)) = args.split_first() else {
@@ -679,8 +680,16 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                 }
                 // Working-tree reads can invoke configured clean/process filters.
                 "status" | "diff" | "blame" => false,
-                "rev-parse" => true,
-                "worktree" => args.first() == Some(&"list"),
+                "rev-parse" => matches!(
+                    args,
+                    ["HEAD"]
+                        | ["--short", "HEAD"]
+                        | ["--show-toplevel"]
+                        | ["--git-dir"]
+                        | ["--show-prefix"]
+                        | ["--is-inside-work-tree"]
+                ),
+                "worktree" => matches!(args, ["list"] | ["list", "--porcelain"]),
                 _ => false,
             }
         }
@@ -751,7 +760,7 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                                 };
                                 position += end + 2;
                             } else if bytes[position].is_ascii_digit()
-                                || matches!(bytes[position], b',' | b' ')
+                                || matches!(bytes[position], b',' | b' ' | b'$')
                             {
                                 position += 1;
                             } else {
@@ -774,11 +783,8 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
             }
             quiet && script && !expect_script
         }
-        // Other JJ commands may snapshot the working copy or run configured diff tools.
-        "jj" => {
-            args == ["--ignore-working-copy", "--no-pager", "status"]
-                || args == ["--no-pager", "--ignore-working-copy", "status"]
-        }
+        // Repository loading may reconcile and persist divergent operation heads.
+        "jj" => false,
         // Locked metadata/tree still invoke configured compiler wrappers.
         "cargo" => args == ["--version"],
         "rustc" => args.first() == Some(&"--version"),
@@ -801,13 +807,19 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                 })
         }
         "file" => !args.iter().any(|arg| {
-            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z'])) || {
-                let option = arg.split('=').next().unwrap_or(arg);
-                option.len() > 2
-                    && ["--compile", "--uncompress", "--uncompress-noreport"]
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['C', 'z', 'Z', 'p']))
+                || {
+                    let option = arg.split('=').next().unwrap_or(arg);
+                    option.len() > 2
+                        && [
+                            "--compile",
+                            "--uncompress",
+                            "--uncompress-noreport",
+                            "--preserve-date",
+                        ]
                         .iter()
                         .any(|name| name.starts_with(option))
-            }
+                }
         }),
         "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "pwd" | "echo" | "which" | "stat"
         | "du" | "df" | "nl" | "cut" => true,
@@ -984,7 +996,7 @@ mod tests {
                 false,
             ),
             (
-                "git -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD",
+                "git --no-lazy-fetch -c core.fsmonitor=false show --no-ext-diff --no-textconv --no-patch --diff-merges=off --no-show-signature --format=oneline HEAD",
                 true,
             ),
             ("rg -z needle f.gz", false),
@@ -994,7 +1006,7 @@ mod tests {
             ("sed -n -e 1p -e 's/x/y/e' f.rs", false),
             ("jj diff --tool ./mutate", false),
             ("jj status", false),
-            ("jj --ignore-working-copy --no-pager status", true),
+            ("jj --ignore-working-copy --no-pager status", false),
             ("cd crates/x && grep -n foo y.rs", true),
             ("cd crates/x; sed -n 1,80p y.rs", true),
             ("sed -n 1,80p f.rs | nl", true),
@@ -1002,12 +1014,15 @@ mod tests {
                 "git -C .worktrees/a -c core.fsmonitor=false diff --stat",
                 false,
             ),
-            ("git -c core.fsmonitor=false worktree list", true),
+            (
+                "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
+                true,
+            ),
             ("cut -f 1 f.rs | sort | uniq", !cfg!(windows)),
             ("grep 'a;b' f | wc -l", !cfg!(windows)),
             ("sed -n '/write/p' f", !cfg!(windows)),
             (
-                "git -c core.fsmonitor=false branch --list --sort=refname 'topic*'",
+                "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname 'topic*'",
                 !cfg!(windows),
             ),
             ("find . -de\"lete\"", false),
@@ -1157,7 +1172,7 @@ mod tests {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
         assert!(super::read_only_shell_command(
-            "git -c core.fsmonitor=false branch --list --sort=refname"
+            "git --no-lazy-fetch -c core.fsmonitor=false branch --list --sort=refname"
         ));
     }
 
@@ -1185,6 +1200,16 @@ mod tests {
                 !triggers.fires(crate::runtime::AuditMode::Heuristic),
                 "{args}"
             );
+        }
+    }
+
+    #[test]
+    fn ab1_git_help_is_not_a_progress_read() {
+        for command in [
+            "git --no-lazy-fetch -c core.fsmonitor=false rev-parse --help",
+            "git --no-lazy-fetch -c core.fsmonitor=false worktree list --help",
+        ] {
+            assert!(!super::read_only_shell_command(command), "{command}");
         }
     }
 

@@ -455,9 +455,12 @@ through a native shell to decide progress. Build/test commands and unknown
 forms count as work. Git working-tree status, diff and blame count as work
 because configured clean/process filters may execute helpers. Recognized Git
 history reads disable patch generation, merge diffs, external diff/textconv and
-signature display with a fixed oneline format; branch reads require explicit
+signature display with a fixed oneline format and global `--no-lazy-fetch`;
+branch reads require explicit
 refname sorting and reject custom formats or alternative sorts. These verdicts
-never grant execution authority.
+never grant execution authority. JJ repository loading counts as work because
+operation reconciliation may persist state. File timestamp-restoring modes
+count as work; Unix sed supports a literal last-line print address.
 
 Each returns complete domain output within its own scan and count limits;
 the model-facing text is then bounded at dispatch (§ Output Bounding).

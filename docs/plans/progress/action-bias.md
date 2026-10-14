@@ -404,3 +404,8 @@ newest last.
 - Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
   confirms the side effects. Constrain canonical Git reads, classify JJ as
   work, and exclude timestamp-restoring file modes; approval unchanged.
+
+- Nine focused fixtures pass after lazy-fetch/operation/timestamp repairs.
+  Additional test-first Git --help case reproduces a false read: repository
+  help settings may launch a browser/helper. rev-parse and worktree listing
+  now use closed suffixes. Receipt git-help-red.log; final focused run next.
