@@ -451,3 +451,26 @@ newest last.
   depth-hint-red.log under target/qq-perf/ab2-2026-10-14.
 - Full workspace gates, upstream integration and fresh matched performance
   remain open. Parent plan qualification corrections are being reconciled.
+
+### 2026-10-14 — AB1 configured environment and native shell corrections
+
+- Test-first fixture reproduced the configured-Git false read. Git reads now
+  require canonical -c core.fsmonitor=false after optional-C; ripgrep reads
+  require --no-config. fd detailed listings and file decompression count work.
+- Unix quoted regex metacharacters are literal; unquoted metacharacters and
+  expansion inside double quotes remain work. Windows single quotes, expansion
+  and escape characters and native sort are conservative work. Windows-only
+  fixtures are present but have not been executed on this Linux host.
+- Six Linux focused regressions pass; independent final source review approves.
+  Full workspace rerun and fresh matched performance remain open.
+  Evidence target/qq-perf/ab1-2026-10-14/environment-helpers-{red,focused-final}.log.
+
+- Initial full rerun found one existing live progress fixture using plain
+  git status, now intentionally work because of configured fsmonitor. Update
+  its read case to canonical git -c core.fsmonitor=false status; keep its
+  report assertion. Core957 passed,one failed,three ignored before correction.
+
+- Corrected immutable sourcebb106e3f passes workspace gates: 2,278 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-helpers-final-gate-{0,1,2,3}.log.
+  Windows-only execution and final matched performance remain open.
