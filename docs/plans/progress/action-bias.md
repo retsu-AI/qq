@@ -457,3 +457,10 @@ newest last.
 - Latest helper source workspace gates pass: 2,277 tests, 0 failed,
   14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
   logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
+
+### 2026-10-14 — AB3 long-header regression
+
+- Hosted source review supplied a valid 615-byte path. Fixed 256-byte
+  header reservation allows generic bounding to drop middle rows while
+  reporting contiguous offsets. The model-visible row-contiguity fixture
+  fails before correction; budget the rendered header before the body.
