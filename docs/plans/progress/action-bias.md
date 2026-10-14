@@ -369,3 +369,7 @@ newest last.
   read_file-specific ranges in no-tools prompts. Extend captured subsets
   with shell-only interactive requests and description/ranges assertions.
   Test-first fails on no-tools range guidance before production correction.
+- Independent final review approved conditional ranges and compiled
+  descriptions. Seven focused tests pass, including shell-only/edit-only
+  captured profiles after the common-path allocation adjustment. Full
+  builtin schema remains unchanged; workspace requalification follows.
