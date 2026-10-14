@@ -85,3 +85,15 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
   progress and final discovery over three pages with a deterministic 70-entry
   budget and a tiny tree. No production bounds or assertions were relaxed.
   Added parsing of nextest's actual FLKY-FL status observed in CI.
+
+
+#### 2026-10-14 CI follow-through
+
+- CI exposed three additional retried-pass fixtures. Search pagination now
+  uses a thread-local, panic-safe test entry budget of 128 instead of creating
+  50,000 entries; production bounds unchanged, original assertions retained.
+- Blocking preparation deadline test freezes time until the hold hook enters,
+  then advances past the deadline before asserting cleanup holds RunFinished.
+  This removes the admission-vs-500ms race; attachment/guidance/skill all pass.
+- Focused regressions pass; full CI-profile gate passes in 181.1s. Continuing
+  until remote CI and Codex are green, not treating local gates as completion.
