@@ -55,9 +55,21 @@ Tool declarations tell the model what it may call; they do not tell it
 that it is an agent. `ModelRequest` carries a system-prompt field, and
 `qq-core` owns a base agent prompt assembled per run: what the workspace
 is, which tools are available, and the working conventions — read a file
-before editing it, prefer `search` over guessing paths, cite paths
-relative to the workspace root, establish observable completion criteria,
-verify resulting state, and report remaining failures honestly. The prompt is
+before editing it, define what done looks like, inspect only what the next
+action needs, make requested changes, verify resulting state, and report
+remaining failures honestly. Analysis-only requests produce findings without
+file changes. The prompt discourages re-reading retained context except
+changed/new lines and pruned stubs, maps shell reads to the built-ins, and
+finds scoped instruction files once per discovery root, following cursor
+pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
+targets also use their highest ignored ancestor with `include_ignored=true`,
+covering instructions within that subtree and multiple worktrees. Targets deeper
+than 64 directory components use additional target-ancestor discovery roots at each
+64-component boundary. Search/tree calls into ignored roots include both path
+and include_ignored=true. Tool-specific header descriptions and working conventions
+are emitted only for declared tools, including restricted and no-tools profiles.
+A read_file plus write_file profile describes whole-file replacement with its
+current hash, without advertising absent anchor-edit or old-match semantics. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own
@@ -78,6 +90,13 @@ version plus a validated SHA-256 hash of the prepared root path and bytes (or
 the empty-selection hash). Historical runs and runs that fail before
 preparation keep no identity. Nested instruction reads stay in the durable tool
 transcript and do not retroactively change the pre-provider identity.
+
+Names discovery includes exact `AGENTS.md` and `CLAUDE.md` basenames despite
+file-level ignores inside visible directories, including contained file links.
+Directory ignores remain in force unless an explicit discovery scope uses
+`include_ignored=true`. Completed-directory scan watermarks skip only fully
+visited subtrees; a depth-limited subtree cannot suppress watermarks in later
+completed directories. Depth exclusions remain explicit in the header.
 
 ### Explicit Commands And Skills
 
@@ -273,15 +292,23 @@ dependency); clean text is returned without allocation.
 
 **Per-turn budget.** The sum of `model_text` across one turn's tool calls is
 capped at 96 KiB (`MAX_TURN_TOOL_OUTPUT_BYTES`). Results enter context in
-call order; a result that would overshoot is re-bounded to the remainder
-(never below 4 KiB) and its marker adds `turn budget reached`. The
+call order. Before execution, the runtime reserves complete search pages and
+short replies for every requested call. Searches that cannot fit return
+`turn_output_budget` without executing; retry the same arguments on the next
+turn. Admitted search pages retain all rows and their continuation cursor.
+Ordinary results that would overshoot are re-bounded to the remaining space,
+including their recall marker, which adds `turn budget reached`. The
 persisted `tool_calls.result` row keeps the call's own bounded text; the
-budget is a **projection** over those rows (`TurnOutputBudget`) that both
-the live run and context assembly (`append_run_turns`) apply, in call
-order, so a replayed turn — follow-up run, reopened store, compaction
-summarizer input — is byte-identical to the request the model saw live.
-Nothing extra is persisted: the projection is a pure function of the stored
-rows. A budget cut always names a recall path in its marker: the spill
+budget is a **projection** over those rows (`TurnOutputBudget`). After all
+checkpoint annotations, session execution commits the exact ordered projected
+replies and correction notice before sending another provider request. Replay,
+reopen and compaction input use this stored projection verbatim. Descriptor 15
+records the strict policy for unchecked incomplete turns that stopped before
+that barrier; checkpoint-enabled tool turns require the exact projection even
+for final-only reviewers, otherwise reconstruction fails closed;
+known pre-AB2 plans retain the original generic projector. Ambiguous prompt-20
+history without exact replies or policy evidence returns an actionable error.
+A budget cut always names a recall path in its marker: the spill
 handle when the call spilled, else a handle over the stored result row
 itself (`t:<tool>:<call8>:<digest8>`, the digest being that of the stored
 result text, with `read_tool_result offset=` pointing at the first omitted
@@ -320,7 +347,10 @@ where a `SpillReader` is installed; it is `ReadOnly`, concurrent, and
 prunable. A handle resolves first against `tool_spills`; when no spill
 row matches the call prefix and digest, the call's own `tool_calls.result`
 answers if its digest agrees — the recall path for a result only the
-per-turn budget cut. Failures: `handle_invalid`, `spill_missing` (no row,
+per-turn budget cut. A handle with both eight-digit components zero returns
+`handle_placeholder` before any store lookup: copy the handle from the result's
+`…[qq: … t:…]…` marker. This is an argument correction, and examples use the
+symbolic `t:<tool>:<call8>:<digest8>` form. Failures: `handle_invalid`, `spill_missing` (no row,
 or the digest disagrees), `spill_evicted`, `handle_foreign_session`,
 `invalid_regex`, `invalid_offset`, `invalid_limit`, `range_out_of_bounds`.
 
@@ -445,8 +475,51 @@ and keeps the schema for each tool in one place:
   to markdown and JSON formatted, gated by host grants and SSRF rules
   (§ Network Tools).
 
+Progress and heuristic audits share a bounded read recognizer distinct from
+execution approval. Shell strings undergo quote-aware syntax checks; `exec`
+arguments remain literal. The cached verdict avoids rendering literal arguments
+through a native shell to decide progress. Build/test commands and unknown
+forms count as work. Git working-tree status, diff and blame count as work
+because configured clean/process filters may execute helpers. Recognized Git
+history reads disable patch generation, merge diffs, external diff/textconv and
+signature display with a fixed oneline format and global `--no-lazy-fetch`;
+branch reads require explicit
+refname sorting and reject custom formats or alternative sorts. These verdicts
+never grant execution authority. A final semicolon after validated reads is
+accepted; incomplete conjunctions/pipelines are work. Literal sed scripts use
+only supported addresses, printing and pattern-space substitutions with safe
+flags; delimiter escapes and embedded semicolons are parsed before separators.
+Any nonempty requested shell/exec environment counts as work, including benign
+names conservatively. An additional environment view only disqualifies read
+candidates, preserving command/cwd parsing and approval previews even when the
+environment field is malformed or duplicated. JJ repository loading counts as work because
+operation reconciliation may persist state. File timestamp-restoring modes
+count as work; Unix sed supports a literal last-line print address.
+
 Each returns complete domain output within its own scan and count limits;
-the model-facing text is then bounded once at dispatch (§ Output Bounding).
+the model-facing text is then bounded at dispatch (§ Output Bounding).
+Read/tree/search carry their complete domain text and selected bounds to
+dispatch. Repair notes are added before the single masking/bounding pass.
+
+Read-only argument decoding first uses the strict typed shape. Only a failed
+shape takes the repair path: `search.include`/`exclude` and `read_file.ranges`
+may be JSON arrays encoded as strings, provided every element is a string.
+For these three tools, an extra `cwd:"."` is the existing workspace root;
+for `search`, an extra `offset:0` requests no skipped matches. They are
+ignored with deterministic `note=` tokens. A boolean `read_file.include_ignored`
+is also irrelevant to reading a named file and is dropped with a note. Other
+types remain invalid. A non-neutral value, duplicate
+field, other unknown field or malformed authority field still refuses.
+Mutation, shell, exec, approval and path validation do not take this repair
+path. Existing array/count/output caps and the `search.context` clamp hold.
+
+Repair notes are added to the result header alongside tool-specific notes,
+ahead of search cursors. If the resulting header would exceed the line cap
+or search’s 512-byte pruning-header cap, notes use a separate line immediately
+after the unchanged header. Execution errors retain their error flag and
+repair notes. The complete noted output is bounded once for persistence. Full
+spill text, its digest/omission metadata and file-state updates stay consistent
+with that header; valid calls do not parse or format a repair record.
 
 Read-only tools (`read_file`, `tree`, `search`) never require approval
 inside the workspace and may execute concurrently. `ask_user` is
@@ -567,6 +640,18 @@ refusal would cost a turn for nothing. Anything else that does not decode
 fails `cursor_invalid`, and the message says to omit `cursor` for the first
 page or pass the exact `next=` value from a previous result; the tool
 description and the `cursor` schema property say the same.
+Names searches may report a symlink pathname when its resolved target is a
+regular file inside the workspace. Content searches and directory traversal
+exclude symlinks. A matching AGENTS.md/CLAUDE.md link that is broken, escapes
+or resolves to a nonfile returns an actionable error rather than disappearing.
+
+The walk descends at most 64 directory levels from the selected root.
+`partial=depth` reports omitted deeper directories without an unusable cursor;
+when another limit also stops the page, `depth_limited=64` reports that omission.
+Target ancestors at 64-component intervals give complete bounded instruction
+coverage for deep edit targets. Cursor pages resume output/scan bounds but do
+not recover omitted deeper directories.
+
 `partial=scan|bytes|time` names a scan bound (50 000
 entries, 64 MiB, 5 s) that stopped the walk, with a cursor past the last
 file scanned. A case-sensitive content search that finds nothing reports
@@ -580,6 +665,15 @@ an empty unused `old`/`insert_*` form carries `note=empty_form_ignored`.
 The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
 and hands back a cursor, so no match is lost between pages.
+Cursor paths are capped at 4,096 UTF-8 bytes, including a completed-directory
+slash; their base64url tokens and the cursor schema maxLength are capped at 5,476
+bytes. This widens the former 512-byte schema ceiling. The walk reserves the
+current frontier's full cursor before admitting body text, and dispatch keeps
+the complete header. A longer path produces `search_path_budget`; a first
+match that cannot fit with its cursor produces `search_output_budget`.
+Selecting a nearer workspace root shortens cursor paths; reducing context can
+also make a content match fit. These explicit limits do not claim a universal
+filesystem path maximum.
 
 **`tree`.** Fills breadth-first so the top level is complete before any
 deeper level appears — a model asking about a repository sees every
@@ -641,9 +735,23 @@ When both are given, `ranges` wins and the header carries
 `note=offset_ignored`; a comma inside one range (`"370,470"`) reads as
 `-`. Models that fill every optional field send both, nearly always with
 `offset` equal to the first range's start, so refusing cost a turn for
-nothing (tool-layer D9). A read is never cut mid-line: the 32
-KiB default budget stops on a whole row, the header says
-`truncated=bytes`, and the marker names `offset=<next>` to continue from.
+nothing (tool-layer D9). With no `limit`, the window runs to the end of
+file, bounded by 32 KiB and 4,000 rendered lines. Prefer one larger read
+over repeated small slices. The renderer reserves room for its header
+and continuation marker and never cuts a row in half. Row and header admission
+measure the masked escaped output, including argument-repair notes, so secret
+masking expansion cannot invalidate the contiguous window.
+Repairs reserve a possible separate note row and its escaped newline, because
+placement uses the raw header before masking. This also covers native Unicode
+paths whose UTF-8 text exceeds the rendered line cap. The 2,000-byte
+content ceiling applies before the gutter; dispatch retains complete rendered
+rows. A byte or rendered-
+line stop carries `truncated=bytes` or `truncated=lines`, with a contiguous
+`continue from offset=<next>` marker. An explicit `limit` ending before
+EOF names the remaining lines and next offset. For a file beyond the
+4 MiB scan cap, the remainder count is unknown and the marker names that
+cap rather than claiming an exact count. Explicit `ranges` retain
+the requested intervals without treating their endpoints as EOF paging.
 The gutter is deliberate — dropping it saves tokens and costs edit
 anchors, which is the wrong trade for a tool whose purpose is to set up an
 edit.
@@ -767,8 +875,9 @@ rejected outright rather than re-rooted, so the model learns the real
 addressing scheme instead of being silently corrected. Each path is then
 canonicalized inside the capability: `..` traversal that escapes the root
 fails there, and a resolved path that still carries a parent component is
-rejected as a belt-and-suspenders check. `search` never follows symlinks
-at all. Paths outside the workspace remain not an error class the agent
+rejected as a belt-and-suspenders check. Content search never follows symlinks;
+names search resolves only matching file links within the capability and never
+traverses directory links. Paths outside the workspace remain not an error class the agent
 can approve its way through by default — wider access is an explicit
 per-session grant, off by default.
 
@@ -793,13 +902,31 @@ drift within a batch), diffs in `model_text`.
 ```
 
 **Two phases.** Phase 1, without the lock: group by path, read, prove
-currency (a recorded read of this exact content, or `if_hash` equal to the
-12-hex hash `read_file`'s header shows — the proof an `@`-mentioned file
-needs), and apply every edit in memory in order, so later edits see earlier
-results. A replacement whose match lands inside text an earlier edit wrote
+currency, and apply every edit in memory in order, so later edits see
+earlier results. Currency is a recorded read of this exact content, or
+`if_hash` equal to the 12-hex hash `read_file`'s header shows (the proof an
+`@`-mentioned file needs); every `if_hash` in the batch is checked, and a
+mismatch is `stale_file`. A file with neither (never read, or read at other
+content) takes only edits whose `old` occurs exactly once, byte for byte, in
+the plan-time content and in the text as earlier edits left it, counting
+overlapping occurrences (`aa` occurs twice in `aaa`)
+([ADR-0058](../adr/0058-edit-freshness-by-exact-match.md)): the model
+reproduced the bytes it replaces, so it has that region. An insert by
+anchor alone, an `old` that needs the fuzzy cascade, an absent `old`, and a
+repeated `old` (even under `replace_all`) prove nothing, and fail
+`not_read` for an unread file or `stale_file` for a changed one, never
+`ambiguous` or `not_found`. The header then says `note=unread` or
+`note=changed_since_read`. The note reflects every edit the exception
+admitted, even when a later edit's `if_hash` proves the file. A refusal,
+including an `if_hash` mismatch on either tool, names the fix (extend `old` until it is
+exact and unique, or read the lines around the edit) but never the file's
+current hash: passed back as `if_hash`, it would apply the refused edit
+without the model seeing any content. A replacement whose match lands inside text an earlier edit wrote
 is `conflicting_edits{a, b}`: the model is rewriting its own edit. Phase 2,
-under `apply_lock` for microseconds: re-hash every file, then temp+rename
-each in path order. A rename failure midway is reported as
+under `apply_lock` for microseconds: re-hash every file against its
+plan-time hash, then temp+rename each in path order. A file that changed
+between the phases fails the batch with `stale_file`, whichever way currency
+was proven. A rename failure midway is reported as
 `partial_apply{applied, failed}` — the applied files are written and their
 new hashes recorded, the rest are untouched. `dry_run` runs phase 1 only
 and returns the same result shape plus the diff.
@@ -829,7 +956,8 @@ the retry needs no read.
 
 **Result.** `edit ok files=2 edits=3` then one line per file in path order:
 `<path> h:<new12> L96 -1+1 | L140 -0+6 via=indent_flexible` (`x3` marks a
-`replace_all` count). The unified diff of what changed on disk — not of
+`replace_all` count). Notes join with a comma in the header
+(`note=empty_form_ignored,unread`). The unified diff of what changed on disk — not of
 what the model asked — rides in `ui_payload` for every file; the approval
 preview renders the request grouped by path with anchors as context.
 Failures abort the whole batch and name the edit index: `not_read`,
@@ -840,7 +968,10 @@ Failures abort the whole batch and name the edit index: `not_read`,
 **`write_file`** creates missing parents (≤ 8 components, never through
 `..`), refuses an existing file under `create_only` (`exists`), accepts
 `if_hash` as currency proof without a prior read, and answers
-`write <path> created|replaced bytes= lines= h:<new12>`. When the new
+`write <path> created|replaced bytes= lines= h:<new12>`. Overwriting an
+existing file still needs a recorded read of its content or a matching
+`if_hash`: no `old` vouches for the text it replaces. Like `edit_file`'s,
+its `not_read` and `stale_file` do not name the current hash. When the new
 content keeps more than 80 % of the old file's lines (line LCS, both under
 4 000 lines) the header adds `hint=use_edit_file`: the rewrite would have
 cost a fraction of the tokens as an edit. Rejected: `append` (an
@@ -853,19 +984,29 @@ long-held locks:
 
 1. `read_file` records the file's content hash in the session's file-state
    map.
-2. `edit_file` and `write_file` (of an existing file) require a prior read in
-   the same session, or an `if_hash` equal to the file's current hash.
+2. `write_file` of an existing file requires a prior read of its current
+   content in the same session, or an `if_hash` equal to the file's current
+   hash. `edit_file` requires the same, except that an edit whose `old`
+   occurs exactly once in the current content applies without either and
+   says `note=unread` or `note=changed_since_read` (§ Edit Semantics,
+   ADR-0058). An `if_hash` that does not match is always `stale_file`.
 3. At apply time, under a short per-workspace exclusive section, the current
-   content is re-hashed. If it no longer matches what the session last read,
-   the call fails with a stale-file error and the agent re-reads.
+   content is re-hashed. If it no longer matches the content phase 1
+   planned against, the call fails with a stale-file error and the agent
+   re-reads.
 4. The apply itself writes a temp file in the same directory, preserves
    permissions, and renames atomically — per file, in path order for a batch.
 
 The exclusive section covers only the hash-check-and-rename — microseconds —
 so read-heavy parallelism across sessions is untouched and two writing
-sessions interleave safely at file granularity. Semantic conflicts surface as
-stale-file errors to the losing agent, which is the correct outcome: the
-model re-reads and reconciles, exactly as a human would after a rebase.
+sessions interleave safely at file granularity. When another session has
+already written the file, the losing agent's edit applies only if its `old`
+still occurs exactly once in the new content. That is a clean rebase of a
+disjoint change, and `note=changed_since_read` tells the model so. Any
+other edit fails `stale_file`, and the model re-reads and reconciles,
+exactly as a human would after a rebase. A writer that lands between
+planning and applying always fails the edit, because the apply re-hashes
+against the planned content.
 
 Concurrent sessions therefore share a checkout safely at file granularity.
 Worktree isolation for editing subagents is deferred (§ Intentionally
@@ -898,8 +1039,18 @@ Deferred).
   `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,
   `ls|tree` → `tree`, `curl|wget` → `fetch`), `hint` (the default) runs it
   and appends one `hint: use … instead of …` line; `strict` refuses before
-  execution with `use_builtin` — the arm the ablation harness uses to
-  measure what shell habit costs; `off` says nothing.
+  execution with `use_builtin` for a plain unprefixed command with relative
+  operands containing no parent-directory component — the arm the ablation
+  harness uses to measure what shell habit costs; `off` says nothing.
+  One leading `cd DIR &&` is skipped for hints only, when `DIR` is an unquoted,
+  unescaped relative word with no parent-directory component or shell syntax.
+  This prefix never enables strict refusal: lexical checks cannot prove it is
+  not a symlink out of the workspace. `cd DIR;` is not skipped. A replaceable
+  program later in a list or pipeline gets no hint or refusal. Absolute or
+  parent-directory operands, shell expansions, quoting, and compound commands
+  may hint at the first program but are not refused. Strict can still refuse
+  an unprefixed relative operand through a symlink; this accepted ablation
+  limitation can require the model to recover using the shell form.
 
 **`exec`** runs one program with an argument list (`program`, `args` ≤ 64 ×
 4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`, `env`) with no
@@ -926,16 +1077,128 @@ over every simple command anywhere in the tree (ADR-0020):
 
 | tier | reached by | under `auto` | under `full` |
 | --- | --- | --- | --- |
-| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, harmless redirects only) whose every command is a listed read/build shape with workspace-relative operands | executes | executes |
+| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, stream-only redirects) whose every command, once launchers are peeled, is a listed read/build shape with workspace-relative operands | executes | executes |
 | `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
 | `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | refused | **refused** |
 
 `Forbidden` is refused under every mode as a tool error naming the rule and
 an alternative; only a grant that quotes the exact command string lifts it
-(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep (`env
-nice nohup time timeout stdbuf xargs sudo`; `sh -c STRING` is reparsed) so
-the inner command is judged too. Commands over 16 KiB skip parsing and
-prompt. The rules are a static table in `approval/rules.rs` whose
+(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep so the
+inner command is judged too. Past that depth, what is left counts as nested
+and is never allowed. Commands over 16 KiB skip parsing and prompt. Literal assignment substitution
+inside `env -S` reads the original string once, with the last assignment winning;
+inserted values are never recursively expanded. Expanded text is capped at
+16 KiB. Expansion overflow is Forbidden (`command_too_long`) even under `full`,
+because the unexamined tail can contain a forbidden program or flag. The bounded
+prefix is still classified for specific refusal reasons.
+
+**Launchers** are a closed set: `timeout`, `time`, `nice`, `nohup`, and
+`stdbuf`. They are judged by the command they launch. A launcher qualifies
+when it has only its own options and an inner command follows:
+
+- `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, and
+  `--preserve-status`, then a duration. `--foreground` is excluded because
+  it leaves the command's children untimed (a float such as `30`, `1e3`, or
+  `inf`, with an optional `s`/`m`/`h`/`d` suffix).
+- `nice`: `-n N` or `--adjustment=N`.
+- `stdbuf`: `-i/-o/-e MODE`.
+- `time`: `-p`.
+- `nohup`: no options.
+
+A qualifying launcher is replaced by its inner command at the same level,
+so it adds no tier. `timeout 300 cargo test` is `Allow`, `nice rm -rf
+target` is `Prompt`, and `timeout 5 sudo ls` is `Forbidden`. A launcher
+with any other option, or with nothing to launch, is `unlisted`. A
+path-qualified launcher (`/usr/bin/timeout`, `./nice`) is not treated as
+the launcher, because it may be any file. It stays `unlisted`, but its
+apparent inner command is still judged, as nested, so `/usr/bin/timeout 5
+sudo ls` is `Forbidden`.
+
+The other wrappers are recorded as commands of their own, and the command
+they wrap is recorded as nested. It is judged, so a `Forbidden` inner
+command is found, but it is never allowed. These are `env`, `xargs`,
+`sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset`. For `chrt` and
+`taskset`, every suffix of the arguments is judged as the command,
+because options and the positional may be dynamic. This over-reports
+(`taskset 0x1 echo sudo` is `Forbidden`) rather than miss a buried
+command. `env -S STRING` (`--split-string`) builds its command by `env`'s
+own splitting rules, so it is an unknown program, and every suffix of its
+unquoted, `\_`-split words is judged too. Past 8 wrappers, any further
+launchers are skipped to the program they launch, which is judged nested
+(`Prompt`), so `nice` ×9 `sudo ls` is `Forbidden` while `nice` ×9 `echo
+sudo` is not. A tail that is not a clean launcher chain is judged at every
+suffix, including the command at the boundary itself. Every suffix enumeration judges at most 16 starts, each whole (so a
+`--force` deep in the argv is seen), and classification stays linear in
+the command. `env NAME=VALUE cmd` carries its
+assignments to `cmd`. Because
+GNU `timeout` creates its own process group, shell cancellation can leave
+it running. That predates T18 and is ENG-1032.
+
+Any assignment before a command keeps it from `Allow` unless it is in a
+short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,
+`RUST_TEST_THREADS`, `RUST_MIN_STACK`, `NO_COLOR`, `CLICOLOR*`, `TERM`,
+`COLUMNS`, `LINES`, `LANG`, `LC_ALL`, `TZ`, `CI`, `NEXTEST_PROFILE`,
+`QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and
+`QQ_SOAK_EXPECT_COMPLETED`. `QQ_*` as a whole is not inert:
+`QQ_UPDATE_FIXTURES` rewrites checked-in fixtures, as `INSTA_UPDATE` does
+snapshots. Many variables name a program the tool will
+run (`RUSTDOC`, `CC`, `GIT_EXTERNAL_DIFF`), so this is an allowlist. An
+`export` or `declare -x` is a construct and was never `Allow`. `ionice`, `chrt`, and `taskset` are not launchers
+because they can retarget a running process; with `-p` they launch
+nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
+reparsed. 
+
+A redirect writes nothing when its target is exactly `/dev/null`,
+`/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `/dev/fd/0`–`2`, or when it
+duplicates a standard descriptor (`2>&1`, `>&2`). A prefix such as
+`/dev/stdout-copy` is a file. `>&3` copies an inherited descriptor, which
+may be a file or a socket, so it is a write. `> 1` writes a file named `1`. A
+list or pipeline whose redirects all write nothing (`cd src && cargo test
+2>&1 | grep FAILED`) is judged like the same list without them. Any other
+redirected construct counts as nested.
+
+Globs stay dynamic (`dynamic_word`), including workspace-relative ones. A
+glob expands to filenames the workspace controls, and a filename can be
+program syntax: a file named `e touch PWN` turns `sed -n *` into a script
+that runs a command.
+
+`git -C <dir>` is skipped before the subcommand is read, so `git -C sub
+push --force` is still `Forbidden`. A `-C` command is never `Allow`. A hop
+that escapes lexically is `Prompt` with `path_outside_workspace`. One that
+looks contained is `Prompt` too, because a workspace symlink can point
+anywhere and the gates have no root to resolve it against. `git worktree
+list` and `git branch --list [pattern]` are reads.
+
+Containment of ordinary operands (`cat link/x`, `cd link`) is still
+lexical and does not resolve symlinks. That predates T18 and is tracked
+separately. `-C` is closed here because it changes which repository git
+acts on.
+
+`git fetch` keeps `git_remote` in every form. With no refspec on the
+command line git applies `remote.<name>.fetch` from its configuration,
+which the classifier cannot read and which may update local branches.
+
+A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
+`Allow`, because the allow tables name programs reached through `PATH`
+and a path names whatever file sits there.
+
+Git's global options before the subcommand (`-C`, `-c`, `--git-dir`,
+`--work-tree`, `--exec-path`, `--config-env`, `--attr-source`, `--bare`,
+and any other dash word, known or not) are all skipped, so the subcommand
+rules apply: `git -C sub -c k=v push --force`
+is `Forbidden`. Any of them except `--no-pager`, `-P`, and
+`--no-optional-locks` makes the command `Prompt`. `git -C` into `/tmp` is an escape:
+the writable-temporary exception covers scratch files, not other
+repositories. `git branch` is a read only when every option is a listing
+option. Git's last option wins (`--list --no-list name` creates `name`),
+so the check is an allowlist.
+
+The approval gates and the approval preview classify without the
+workspace root, so every absolute operand counts as an escape, including
+one inside the workspace. This fails closed. Only the bench and the rule
+tests pass a root.
+
+The rules are a static table in `approval/rules.rs` whose
 `match`/`not_match` examples run as one unit test. `ShellCommandPreview`
 carries `verdict` and `reasons` (rule ids) so a client can show why it is
 asking. Cost: 3–10 µs on ordinary commands, ~165 µs on a 1 KiB one-liner
@@ -1328,8 +1591,8 @@ escalation or delegate cut-off with one — so a slow delegate never eats into
 it. Headless `qq run` has no human and does not rely on either clock: an
 `auto` hold with no delegate configured is denied the moment it is
 published, and with a delegate it is denied 20 s after the request unless
-the delegate settled it first (§ Headless Contract). This is the RR9 policy
-from the run-reliability plan, shipped here.
+the delegate settled it first (§ Headless Contract). This approval-wait policy
+shipped in delegated-approval DA2 (#150).
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL
@@ -1542,3 +1805,21 @@ dispatch overhead has a benchmark.
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.
+
+A read continuation never suggests a start offset above 100,000. If the next
+unread line exceeds that bound, the result carries a terminal start-offset
+limit marker instead; no later starting offset is supported. Existing
+explicit ranges beginning within the bound retain their behavior.
+
+A read whose header leaves insufficient room for its first requested row returns
+an explicit output-limit error, recommending a nearer workspace root. It emits
+no continuation for a window that admitted no rows.
+Search pages retain their complete bounded content during per-turn projection.
+Their cursor advances past every emitted match, so a second generic head/tail
+cut would skip matches on continuation. The turn charges the complete page.
+
+Before ordered search traversal, each directory listing admits at most 100,000
+entries and 32MiB of retained name/path bytes. Cancellation and the search
+deadline are checked during enumeration and after sorting. An incomplete listing
+returns an explicit search-listing-limit error with nearer-root advice and no
+continuation cursor; an unsorted prefix cannot prove an ordered frontier.

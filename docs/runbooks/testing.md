@@ -39,6 +39,10 @@ Runs only what your change can affect:
 If the merge-base with `--base` cannot be found, the command fails rather
 than checking only the working tree. Fetch the base, or pass `--full`.
 
+`--full` skips merge-base discovery. Evidence binds to HEAD and a SHA-256
+snapshot of index, working-tree diffs, and untracked file contents, not only
+the dirty flag. A tree change during the gate invalidates the run.
+
 An affected run builds a subset of packages, so Cargo's feature
 unification can differ from a `--workspace` build. A rare feature-only
 breakage passes the affected gate and fails the full gate in the merge
@@ -124,7 +128,7 @@ Auditing existing tests (flakes, sleeps, mutation testing, duplicates) is
 | --- | --- |
 | `default` | runs everything; reports slow tests (60 s) and kills them at 180 s |
 | `quick` | stops at the first failure |
-| `ci` | one retry, with flaky passes reported; writes JUnit to `target/nextest/ci/junit.xml` |
+| `ci` | one diagnostic retry; flaky passes fail the gate; writes JUnit to `target/nextest/ci/junit.xml` |
 
 The long `qq-core` session suites are given priority so they start first and
 overlap the fast tests. This repository has no doctests, so nextest covers

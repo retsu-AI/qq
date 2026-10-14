@@ -13,7 +13,7 @@ for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
 | Provider prompt-cache breakpoints | [Providers](../design/providers.md), prompt-cache discussion | Cross-turn cache-hit rate, prefix stability, or savings across compaction |
 | Bounded delegation and experimental worker/depth arms | [Delegation plan](../plans/supervised-delegation.md); `benchmarks/arms/` | That more agents beat root-only work on tokens or dollars per pass |
 | Durable history and bounded model-facing tool output | [Transcript](../design/transcript.md); [ADR-0019](../adr/0019-spill-handles.md) | A shared cross-agent evidence protocol or arbitrary permission to read another session |
-| In-run compaction at safe boundaries | [ADR-0039](../adr/0039-in-run-compaction.md); [run-reliability plan](../plans/run-reliability.md) | Real-model constraint retention over repeated summaries |
+| In-run compaction at safe boundaries | [ADR-0039](../adr/0039-in-run-compaction.md); [autonomous-core plan](../plans/autonomous-core.md) | Real-model constraint retention over repeated summaries |
 | Evaluation comparison and usage accounting | [Delegation evaluation](../plans/supervised-delegation.md); [evaluation program ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | A complete, deduplicated task-tree waste report with uncertain usage explicitly represented |
 
 These are source/document observations, not fresh benchmark results. Tracker
@@ -42,7 +42,7 @@ prompt-component attribution is not provider billing.
 ## Opportunity hypotheses
 
 1. **Avoid contract-repair turns.** Optional fields and mutually exclusive read
-   modes should be easy to express correctly. Existing RR10 owns tolerant
+   modes should be easy to express correctly. Existing AC17 owns tolerant
    decoding; schema/prompt ergonomics need separate evidence before changes.
 2. **Return actionable evidence, not bulk logs.** Bounded test/build summaries
    can retain failure location, exit status and a full-output reference. Parser

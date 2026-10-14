@@ -173,6 +173,7 @@ struct RuntimeFactoryInner {
     config: ConfigLoader,
     credentials: CredentialStore,
     mode: RuntimeMode,
+    approved_read_images: qq_core::ApprovedReadImages,
     providers: ProviderCompiler,
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
@@ -235,10 +236,21 @@ fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
 }
 
 impl RuntimeFactory {
-    pub fn system() -> Result<Self, RuntimeBuildError> {
-        Self::new(ConfigLoader::system()?, CredentialStore::system()?)
+    pub fn system_with_read_images(
+        images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
+        Self::new_with_read_images(ConfigLoader::system()?, CredentialStore::system()?, images)
     }
 
+    pub fn new_with_read_images(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
+        Self::with_mode_and_images(config, credentials, RuntimeMode::Standard, images)
+    }
+
+    #[cfg(test)]
     pub fn new(
         config: ConfigLoader,
         credentials: CredentialStore,
@@ -283,11 +295,26 @@ impl RuntimeFactory {
         credentials: CredentialStore,
         mode: RuntimeMode,
     ) -> Result<Self, RuntimeBuildError> {
+        Self::with_mode_and_images(
+            config,
+            credentials,
+            mode,
+            qq_core::ApprovedReadImages::default(),
+        )
+    }
+
+    fn with_mode_and_images(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        mode: RuntimeMode,
+        approved_read_images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
                 config,
                 credentials,
                 mode,
+                approved_read_images,
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
@@ -1741,6 +1768,7 @@ impl RuntimeFactory {
                 .with_delegation(delegation)
                 .with_audit(audit)
                 .with_shell_policy(shell)
+                .with_approved_read_images(self.inner.approved_read_images.clone())
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
                 .with_approval_delegate_identity(
@@ -3237,7 +3265,8 @@ impl ServerHandler for RuntimeHandler {
 
 fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
     match error {
-        error @ (SessionRuntimeError::EmptyWorkspace
+        error @ (SessionRuntimeError::ToolProjectionUnavailable { .. }
+        | SessionRuntimeError::EmptyWorkspace
         | SessionRuntimeError::InvalidWorkspace
         | SessionRuntimeError::EmptyPrompt
         | SessionRuntimeError::PromptTooLarge
@@ -4021,6 +4050,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn ab2_unresolved_projection_keeps_the_server_recovery_message() {
+        let error = SessionRuntimeError::ToolProjectionUnavailable {
+            run: "historical-run".to_owned(),
+        };
+        let expected = error.to_string();
+        assert!(
+            matches!(map_session_runtime_error(error), ServerHandlerError::InvalidRequest(message) if message == expected && message.contains("start a new session"))
+        );
+    }
+
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::stream;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
@@ -8009,6 +8050,39 @@ mod tests {
     }
 
     #[test]
+    fn ab1_factory_clones_profiles_and_cache_keep_host_read_approvals() {
+        let fixture = RuntimeFixture::new();
+        let request = fixture.request(r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test")})}, profiles: {"worker": Profile(model: Some("custom/test"))})"#);
+        let manifest = qq_core::ApprovedReadImages::new(vec![
+            format!("grep:{}", "01".repeat(32)).parse().unwrap(),
+        ])
+        .unwrap();
+        let factory = RuntimeFactory::new_with_read_images(
+            ConfigLoader::new(ConfigPaths::new(
+                fixture.path("global"),
+                fixture.path("data"),
+                fixture.path("managed"),
+            )),
+            CredentialStore::with_paths(CredentialPaths::new(fixture.path("data"))),
+            manifest,
+        )
+        .unwrap();
+        let first = factory.plan_for(&request).unwrap();
+        let cached = factory.clone().plan_for(&request).unwrap();
+        assert!(Arc::ptr_eq(&first, &cached));
+        let identity = first.descriptor().approved_read_images;
+        assert!(identity.is_some());
+        let worker = factory
+            .clone()
+            .plan_for_profile(&request, &AgentProfileId::new("worker").unwrap())
+            .unwrap();
+        assert_eq!(worker.descriptor().approved_read_images, identity);
+        let ordinary = fixture.factory().plan_for(&request).unwrap();
+        assert!(ordinary.descriptor().approved_read_images.is_none());
+        assert_ne!(ordinary.digest(), first.digest());
+    }
+
+    #[test]
     fn source_changes_during_plan_admission_do_not_certify_stale_configuration() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -8577,7 +8651,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v13\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v15\0{"));
     }
 
     #[test]

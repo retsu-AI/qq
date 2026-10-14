@@ -334,10 +334,11 @@ async fn spawn_agent_runs_a_read_only_child_and_returns_its_final_text() {
         "{spawned_system}"
     );
     assert!(spawned_system.contains("You cannot change files or run commands"));
-    assert!(!spawned_system.contains("- Implement requested changes"));
+    assert!(!spawned_system.contains("- Do the work."));
     let follow_up_system = child_reqs[2].system().unwrap();
     assert!(!follow_up_system.contains("Sub-agent:"));
-    assert!(follow_up_system.contains("- Implement requested changes"));
+    assert!(!follow_up_system.contains("- Do the work."));
+    assert!(follow_up_system.contains("This run cannot change files or run commands"));
     assert!(
         !child_reqs[2]
             .tools()
@@ -2203,6 +2204,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         },
         messages: Vec::new(),
         message_effects: Vec::new(),
+        unresolved_tool_projection: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2369,7 +2371,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
     // tells it to implement the change rather than describe it.
     let child_system = child_reqs[0].system().unwrap();
     assert!(child_system.contains("\n\nSub-agent:\n"), "{child_system}");
-    assert!(child_system.contains("- Implement requested changes"));
+    assert!(child_system.contains("- Do the work."));
     assert!(!child_system.contains("You cannot change files or run commands"));
     // The spawn itself was a mutating call under the parent's Auto policy
     // and executed without a prompt.
@@ -4928,6 +4930,330 @@ async fn sequential_children_receive_the_remaining_budget_after_prior_spend() {
 }
 
 #[tokio::test]
+async fn owned_compaction_receipt_preserves_bounds_unknown_and_exact_ownership() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (_, session, parent) = create_claimed_parent(&store, directory.path()).await;
+    let owner = parent.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            let outcome = serde_json::to_string(&RunOutcome::Completed).unwrap();
+            connection.execute(
+                "UPDATE runs SET status = 'completed', outcome_json = ?2,
+                 usage_json = ?3, estimated_cost_usd_nanos = 10 WHERE id = ?1",
+                params![owner.to_string(), outcome, serde_json::to_string(&usage(2, 3)).unwrap()],
+            )?;
+            let count = u64::from(MAX_DESCENDANTS_PER_ROOT) + 2;
+            let mut last = owner;
+            for _ in 0..count {
+                last = insert_accounting_run(connection, session, "completed", Some(usage(1, 1)), Some(4));
+                connection.execute(
+                    "UPDATE runs SET kind = 'compaction', auto_compaction_for_run_id = ?2,
+                     outcome_json = ?3 WHERE id = ?1",
+                    params![last.to_string(), owner.to_string(), outcome],
+                )?;
+            }
+            // Manual and another prompt's summaries never enter this receipt.
+            for unrelated_owner in [None, Some(RunId::generate().unwrap().to_string())] {
+                let unrelated = insert_accounting_run(connection, session, "running", None, None);
+                connection.execute(
+                    "UPDATE runs SET kind = 'compaction', auto_compaction_for_run_id = ?2 WHERE id = ?1",
+                    params![unrelated.to_string(), unrelated_owner],
+                )?;
+            }
+            let known = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(known.usage, Some(usage(2 + count, 3 + count)));
+            assert_eq!(known.cost_usd_nanos, Some(10 + count * 4));
+            connection.execute("UPDATE runs SET estimated_cost_usd_nanos = NULL WHERE id = ?1", [last.to_string()])?;
+            let unknown_cost = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(unknown_cost.usage, known.usage);
+            assert_eq!(unknown_cost.cost_usd_nanos, None);
+            connection.execute("UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = 4 WHERE id = ?1", [last.to_string()])?;
+            let unknown_usage = super::super::deliveries::owned_run_spend(connection, owner)?;
+            assert_eq!(unknown_usage.usage, None);
+            assert_eq!(unknown_usage.cost_usd_nanos, known.cost_usd_nanos);
+            connection.execute("UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1", [last.to_string()])?;
+            assert_eq!(super::super::deliveries::owned_run_spend(connection, owner)?, SpawnAgentSpend::UNKNOWN);
+            connection.execute("UPDATE runs SET status = 'running', outcome_json = NULL WHERE id = ?1", [last.to_string()])?;
+            assert!(matches!(super::super::deliveries::owned_run_spend(connection, owner), Err(SessionRuntimeError::AccountingUnavailable)));
+            connection.execute(
+                "UPDATE runs SET status = 'completed', outcome_json = ?2,
+                 usage_json = ?3, estimated_cost_usd_nanos = 4 WHERE id = ?1",
+                params![last.to_string(), outcome, serde_json::to_string(&usage(1, 1)).unwrap()],
+            )?;
+            assert_eq!(super::super::deliveries::owned_run_spend(connection, owner)?, known);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn child_compaction_spend_reduces_the_next_child_allowance() {
+    let parent: Arc<dyn Provider> = Arc::new(UsageProvider {
+        inner: Arc::new(MultiSpawnProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            spawns: 2,
+            arguments: |_| {
+                r#"{"task":"research","model":"test/child","authority":"write"}"#.to_owned()
+            },
+            turn: StdMutex::new(0),
+        }),
+        usage: Some(usage(10, 5)),
+    });
+    let child: Arc<dyn Provider> = Arc::new(AutoCompactProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        served: StdMutex::new(0),
+        script: AutoCompactScript::Measured {
+            script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                // The smaller minimal-profile tool catalog must also cross
+                // a compaction boundary before this child finishes.
+                turns: 48,
+                text: "child done".to_owned(),
+                summary: valid_summary("child work"),
+            }),
+            bytes_per_token: 4,
+        },
+    });
+    let mut harness = child_budget_harness_with_window(
+        parent,
+        child,
+        true,
+        crate::runtime::AuditMode::Off,
+        Some(16 * 1_024),
+    )
+    .await;
+    let limits = RunLimits {
+        // Two 48-turn children must finish; this test checks exact spend
+        // inheritance rather than exhausting the parent on prompt growth.
+        max_total_tokens: Some(2_000_000),
+        max_cost_usd_nanos: Some(5_000_000_000),
+        ..RunLimits::default()
+    };
+    let root = submit_child_budget_prompt(&harness, limits).await;
+    let events = collect_until_run_finished(&mut harness.events, root).await;
+    let children: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.event {
+            SessionEvent::PromptQueued { session, run, .. }
+                if session.parent_id == Some(harness.session_id) =>
+            {
+                Some((index, session.id, run.id, run.limits.clone().unwrap()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(children.len(), 2, "{events:#?}");
+    let (second_index, _, _, second_limits) = &children[1];
+    let (_, first_session, first_prompt, _) = &children[0];
+    let mut prompt_tokens = 0_u64;
+    let mut summary_tokens = 0_u64;
+    let mut prompt_cost = 0_u64;
+    let mut summary_cost = 0_u64;
+    for event in &events[..*second_index] {
+        if event.session_id != *first_session {
+            continue;
+        }
+        if let SessionEvent::ModelTurnCompleted {
+            run_id,
+            usage: Some(usage),
+            estimated_cost_usd_nanos: Some(cost),
+            ..
+        } = &event.event
+        {
+            let tokens = usage.input_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_write_input_tokens
+                + usage.output_tokens;
+            if run_id == first_prompt {
+                prompt_tokens += tokens;
+                prompt_cost += cost;
+            } else {
+                summary_tokens += tokens;
+                summary_cost += cost;
+            }
+        }
+    }
+    assert!(
+        events.iter().any(|event| event.session_id == *first_session
+            && matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "first child must really compact"
+    );
+    assert!(summary_tokens > 0 && summary_cost > 0);
+    assert_eq!(
+        second_limits.max_total_tokens,
+        Some(2_000_000 - 15 - prompt_tokens - summary_tokens)
+    );
+    assert_eq!(
+        second_limits.max_cost_usd_nanos,
+        Some(5_000_000_000 - 20_000 - prompt_cost - summary_cost)
+    );
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(*first_session),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    let direct = snapshot.focused.unwrap().summary.accounting.unwrap().direct;
+    assert_eq!(
+        direct.estimated_cost_usd_nanos,
+        Some(prompt_cost + summary_cost)
+    );
+    assert_eq!(finished_outcome(&events, root), Some(RunOutcome::Completed));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() {
+    for deadline in [false, true] {
+        let parent: Arc<dyn Provider> = Arc::new(MultiSpawnProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            spawns: 1,
+            arguments: |_| {
+                r#"{"task":"research","model":"test/child","authority":"write"}"#.to_owned()
+            },
+            turn: StdMutex::new(0),
+        });
+        let child: Arc<dyn Provider> = Arc::new(AutoCompactProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            served: StdMutex::new(0),
+            script: AutoCompactScript::Measured {
+                script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+                    turns: 48,
+                    text: "child done".to_owned(),
+                    summary: "__STALL__".to_owned(),
+                }),
+                bytes_per_token: 4,
+            },
+        });
+        let mut harness = child_budget_harness_with_window(
+            parent,
+            child,
+            true,
+            crate::runtime::AuditMode::Off,
+            Some(16 * 1024),
+        )
+        .await;
+        let root = submit_child_budget_prompt(
+            &harness,
+            RunLimits {
+                max_duration_ms: deadline.then_some(5000),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        let observed = collect_until(&mut harness.events, |event| matches!(event,
+        SessionEvent::RunStarted { session, run_id, .. } if session.parent_id == Some(harness.session_id) && session.active_run_id != Some(*run_id)
+    )).await;
+        let SessionEvent::RunStarted {
+            session,
+            run_id: summary,
+            ..
+        } = &observed.last().unwrap().event
+        else {
+            panic!("summary start");
+        };
+        let child_prompt = session.active_run_id.unwrap();
+        let (entered, release) = crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
+        let summary_id = *summary;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let sent = harness
+                    .runtime
+                    .inner
+                    .store
+                    .call(Priority::AwaitControl, move |connection| {
+                        Ok(connection.query_row(
+                            "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
+                            [summary_id.to_string()],
+                            |row| row.get::<_, bool>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                if sent {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if !deadline {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun {
+                        run_id: child_prompt,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = collect_until_run_finished(&mut harness.events, root).await;
+        let ids: Vec<_> = finished
+            .iter()
+            .filter_map(|event| match event.event {
+                SessionEvent::RunFinished { run_id, .. } => Some(run_id),
+                _ => None,
+            })
+            .collect();
+        let summary_index = ids.iter().position(|run| run == summary).unwrap();
+        let child_index = ids.iter().position(|run| *run == child_prompt).unwrap();
+        assert!(summary_index < child_index, "{ids:?}");
+        let child_outcome = finished_outcome(&finished, child_prompt).unwrap();
+        assert!(matches!(
+            child_outcome,
+            RunOutcome::Cancelled | RunOutcome::BudgetExhausted { .. }
+        ));
+        let root_outcome = finished_outcome(&finished, root).unwrap();
+        if deadline {
+            assert!(matches!(root_outcome, RunOutcome::BudgetExhausted { .. }));
+        } else {
+            assert_eq!(root_outcome, RunOutcome::Completed);
+        }
+        let (_, spend) = harness
+            .runtime
+            .inner
+            .store
+            .run_outcome(child_prompt)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spend.cost_usd_nanos, None);
+        assert!(!*harness.runtime.inner.failed.borrow());
+        release.send(()).unwrap();
+        let next = queue_prompt(
+            &harness.runtime,
+            harness.session_id,
+            "still usable".to_owned(),
+        )
+        .await;
+        let next_events = collect_until_run_finished(&mut harness.events, next).await;
+        assert_eq!(
+            finished_outcome(&next_events, next),
+            Some(RunOutcome::Completed)
+        );
+        assert!(!next_events.iter().any(|event| matches!(event.event, SessionEvent::RunFinished { run_id, .. } if run_id == *summary)));
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_balanced_child_of_a_max_effort_parent_is_admitted_at_medium() {
     // RR8.4 regression: children inherited the parent's pin verbatim, so a
     // read-only worker under `max` spent ~14 k reasoning tokens per read.
@@ -5286,6 +5612,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
                     },
                     write_children: false,
                     audit: crate::runtime::AuditMode::Off,
+                    child_context_window: None,
                 },
                 first: AtomicBool::new(false),
                 entered: Arc::clone(&entered),

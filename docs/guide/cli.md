@@ -11,7 +11,22 @@ Accepted by every command:
 | `--model PROVIDER/MODEL` | override the configured route for this invocation |
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
+| `--approve-self-contained-read-image FAMILY:SHA256` | attest exact self-contained native read behavior for progress/audit accounting; repeat for up to ten families |
 | `-V`, `--version` | `qq 0.1.6 (fef41a4 2026-10-08)` |
+
+Read-image approvals are process-start host decisions for `ask`, `run`, `serve`
+and interactive execution. The flag attests read behavior for admitted
+argv/stdin in a C/POSIX or unset locale, independent of HOME/TERM and without
+executable helpers or configuration-driven code. Approvals remain immutable
+through profile, child and cached plans. Existing-server attachment and the
+isolated TUI QA fixture reject nonempty approvals explicitly.
+
+Verified reads currently require literal Linux exec, an approved self-contained
+static native image, a held workspace cwd and sealed image binding. Supported
+families are cat, head, tail, wc, grep, nl, cut, pwd, echo and uniq. Other process
+contexts count as Work. Ordinary approval policy still controls execution;
+built-in reads keep their existing accounting. See [ADR-0060](../adr/0060-process-context-for-progress.md)
+for the host contract and receipt boundary.
 
 ## `qq` — interactive
 
@@ -25,7 +40,8 @@ Requires a terminal on stdin and stdout; in a pipe use `qq ask` or `qq run`.
 
 ## `qq ask PROMPT`
 
-One streamed answer, no tools, no session. [Headless](headless.md#qq-ask--one-answer).
+One streamed answer with workspace read tools and configuration-granted external
+tools; no approval questions or persisted session. [Headless](headless.md#qq-ask--one-answer).
 
 ## `qq run [FLAGS] PROMPT`
 

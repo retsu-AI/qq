@@ -89,9 +89,12 @@ evidence path.
 .qq/skills/verify-qq/qq-home.sh stop my-check
 ```
 
-Stops only the fake and any `qq serve` this home started (tracked PIDs in
-`$QQ_HOME/pids`). It keeps `evidence/`; `qq-home.sh rm my-check` deletes the
-whole home. Never `pkill qq`: other agents run qq on this machine.
+Stops only the fake and any `qq serve` this home started. Linux `/proc`
+start times and pidfds verify the process instance before signaling it;
+old PID-only records are never signaled. Automatic cleanup requires Linux
+and Python pidfd support; other hosts fail closed and need manual cleanup.
+It keeps `evidence/`; `qq-home.sh rm my-check` deletes the whole home.
+Never `pkill qq`: other agents run qq on this machine.
 
 ## Isolation and concurrency
 

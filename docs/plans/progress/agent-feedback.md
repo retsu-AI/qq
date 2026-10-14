@@ -59,3 +59,21 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - Still unverified: the tmux recipe (tmux is not installed here),
   `QQ_CONTEXT_WINDOW` auto-compaction, and the CI workflow itself (it
   runs on the PR).
+
+
+#### 2026-10-14 PR #282 merge-readiness
+
+- Merged current main without rewriting the shared PR branch; preserved the
+  newer review rules in the AGENTS router. Addressed all 15 review findings:
+  flaky CI fails, content-bound evidence, full-mode fallback, Windows paths,
+  lint coverage, smoke assertions/deduplication/async logging, pidfd cleanup,
+  and ordinary `.agents/skills` compatibility copies.
+- Independent review found two missing docs_truth input mappings; both now
+  select qq. Focused xtask tests: 95/95. Smoke: 6/6; repeated --only: 1/1.
+  Full CI-profile gate: pass in 146.1s, including doctests and minimal provider.
+- First unconstrained full run hit two delegation timeouts; both passed alone.
+  Bound nextest to eight processes; full run passed with flaky-result=fail.
+  Their expensive compaction fixtures remain AF6 candidates, not waived flakes.
+- Corrected sleep baseline to 78: one compound-cfg sleep and three test-function
+  sleeps previously missed, plus four existing sleeps from main; no new sleeps.
+  Real verify-home fake/ask/stop passed. Windows and macOS not run locally.

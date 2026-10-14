@@ -81,10 +81,12 @@ pub(super) fn write_file(
             match (&arguments.if_hash, file_state.recorded(&key)) {
                 (Some(if_hash), _) => {
                     if if_hash[2..] != current_hash[..12] {
+                        // The current hash is not named (ADR-0058): passed
+                        // back as if_hash it would authorize an overwrite of
+                        // content the model never saw.
                         return ToolOutput::error(format!(
-                            "stale_file: {} is h:{} now, not {if_hash}; read it again",
-                            arguments.path,
-                            &current_hash[..12]
+                            "stale_file: {} is not {if_hash} now; read_file it again",
+                            arguments.path
                         ));
                     }
                 }

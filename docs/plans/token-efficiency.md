@@ -27,7 +27,7 @@ lossy history deletion, or paid evaluation is authorized by this plan PR.
 | Paid evaluation budget and scheduling | [ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | All live trials require its explicit spend/credential approval |
 | D6b delegation arms and default decisions | [ENG-812](https://linear.app/retsu-ai/issue/ENG-812), [delegation plan](supervised-delegation.md) | TE3 consumes results; does not recreate this work |
 | T13 tool ablations | [ENG-813](https://linear.app/retsu-ai/issue/ENG-813), [tool-layer plan](tool-layer.md) | Reuse fixtures/reports for TE1, TE2 and TE4 |
-| RR10 tolerant argument decode | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872), [reliability plan](run-reliability.md) | TE2 owns only additional schema ergonomics after reconciliation |
+| AC17 tolerant argument decode | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872), [autonomous-core AC17](autonomous-core.md) | TE2 owns only additional schema ergonomics after reconciliation |
 | Cache determinism and affinity controls | [ENG-833](https://linear.app/retsu-ai/issue/ENG-833), [ENG-800](https://linear.app/retsu-ai/issue/ENG-800) | TE7 synthesizes their evidence; no duplicate cache implementation |
 | T14 tool selection | [ENG-818](https://linear.app/retsu-ai/issue/ENG-818) | TE7 compares stable exposure against progressive selection |
 | Live context and summary quality | [ENG-810](https://linear.app/retsu-ai/issue/ENG-810), [ENG-807](https://linear.app/retsu-ai/issue/ENG-807) | TE6 requires retention evidence, not just shrinkage |
@@ -43,7 +43,7 @@ an unbounded rewrite. All production changes amend their as-built design docs.
 | --- | --- | --- | --- | --- |
 | TE0 | Baseline, roadmap, proposed decision, tracker links | Source/tracker inventory | This plan, design inventory, ADR-0043, indexes, ledger | Links, ownership, scope and tracker reviewed; no implementation claims |
 | TE1 | Task-tree efficiency report and offline fixtures | TE0 | `xtask/src/eval.rs`, existing accounting under `crates/qq-core/src/`, `benchmarks/arms/`; design inventory | Deduplicated usage/outcomes, unknowns and category overlap tested; fixed-suite baseline |
-| TE2 | Model-facing tool-schema ergonomics | TE1; RR10 ownership reconciliation | `crates/qq-core/src/tools/`, schema assembly in `src/`; `design/tools.md` | Reproduced contract failures, valid-call compatibility, no weakened mutation/approval validation; paired invalid-call rate |
+| TE2 | Model-facing tool-schema ergonomics | TE1; AC17 ownership reconciliation | `crates/qq-core/src/tools/`, schema assembly in `src/`; `design/tools.md` | Reproduced contract failures, valid-call compatibility, no weakened mutation/approval validation; paired invalid-call rate |
 | TE3 | Bounded discovery briefs and task-shaped delegation guidance | TE1 and D6b/ENG-812 receipt | Existing delegation prompts/config in `src/`, `crates/qq-core/src/sessions/subagents.rs`, `benchmarks/arms/`; delegation docs | Brief/result bounds and no recursion escalation; per-class economics measured before default changes |
 | TE4 | One compact diagnostic-output path | TE1 and T13 fixture availability | Existing tool output handling in `crates/qq-core/src/tools/`; `design/tools.md` | One measured test/build format, bounded parser, exit/status fidelity, raw fallback and exact output retrieval |
 | TE5 | Scoped evidence reuse experiment | TE1; accepted authority/retention contract before code | Existing spills/attachments/delegation in `crates/qq-core/src/`; tools/transcript design | One workspace-read evidence kind, stale/unauthorized/evicted cases, hard bounds and duplicate-read comparison |
@@ -111,7 +111,7 @@ model/effort, arm/config fingerprint, source/task revisions, outcome and verifie
 
 TE2 begins with traces and schema snapshots. Test omitted fields, null/empty
 values, range-mode conflicts, malformed cursors and provider-supported schema
-subsets. Do not silently reinterpret a destructive command. RR10 owns coercion;
+subsets. Do not silently reinterpret a destructive command. AC17 owns coercion;
 this slice makes legal invocation easier and errors smaller/actionable. Claims
 from an external tool host must be reproduced against QQ before filing a bug.
 

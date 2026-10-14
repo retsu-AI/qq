@@ -156,13 +156,13 @@ impl FakeProvider {
                         .expect("request log lock is never poisoned")
                         .push(request);
                     // Evidence only; a failed append loses detail, not the result.
-                    if let Ok(mut file) = fs::OpenOptions::new()
+                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&log_path)
+                        .await
                     {
-                        use std::io::Write as _;
-                        let _ = file.write_all(entry.as_bytes());
+                        let _ = file.write_all(entry.as_bytes()).await;
                     }
                     // A client that hung up early is the scenario's failure to
                     // report, not the fake's; the write result is irrelevant.
@@ -521,9 +521,9 @@ async fn run_provider_401(home: &Home) -> Result<(), String> {
     let outcome = outcome(&records);
     ensure!(
         outcome.is_some_and(|value| value["status"] == "task_failed"
-            && value["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("401"))),
+            && value["message"].as_str().is_some_and(
+                |message| message.contains("401") && message.contains("smoke: bad key")
+            )),
         "outcome: {outcome:?}"
     );
     ensure!(
@@ -593,8 +593,10 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
         requests.len()
     );
     ensure!(
-        requests[1].contains("remember: blue") && requests[1].contains("first answer"),
-        "the resumed request lacks the prior turn"
+        requests[1].contains("remember: blue")
+            && requests[1].contains("first answer")
+            && requests[1].contains("what colour?"),
+        "the resumed request lacks the prior turn or new prompt"
     );
     Ok(())
 }
@@ -836,7 +838,14 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
         let mut selected = Vec::new();
         for name in &args.only {
             match SCENARIOS.iter().find(|scenario| scenario.name == name) {
-                Some(scenario) => selected.push(scenario),
+                Some(scenario) => {
+                    if !selected
+                        .iter()
+                        .any(|item: &&Scenario| item.name == scenario.name)
+                    {
+                        selected.push(scenario);
+                    }
+                }
                 None => return Err(SmokeError::UnknownScenario(name.clone())),
             }
         }
@@ -861,7 +870,9 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             if !status.success() {
                 return Err(SmokeError::BuildFailed);
             }
-            target_dir(&root).join("debug/qq")
+            target_dir(&root)
+                .join("debug")
+                .join(if cfg!(windows) { "qq.exe" } else { "qq" })
         }
     };
     // Evidence stays in this checkout even when `CARGO_TARGET_DIR` is shared.
