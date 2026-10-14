@@ -11,6 +11,11 @@ on:
         required: false
         default: ''
         type: string
+      perf_fixture_sha:
+        description: Immutable common benchmark fixture commit (defaults to dispatch commit)
+        required: false
+        default: ''
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,7 +34,9 @@ jobs:
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
-        run: python3 .github/scripts/test-record-turn-overhead.py
+        run: |
+          python3 .github/scripts/test-record-turn-overhead.py
+          python3 .github/scripts/test-turn-fixture.py
       - name: install.sh against a local fixture release
         run: bash tests/install_sh.sh
       - name: Clippy
@@ -126,6 +133,7 @@ jobs:
     env:
       BASELINE_SHA: ${{ inputs.perf_baseline_sha }}
       CANDIDATE_SHA: ${{ github.sha }}
+      FIXTURE_SHA: ${{ inputs.perf_fixture_sha || github.sha }}
       CARGO_BUILD_JOBS: '2'
     steps:
       - name: Require immutable inputs
@@ -133,6 +141,7 @@ jobs:
         run: |
           [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$FIXTURE_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$BASELINE_SHA" == "$CANDIDATE_SHA" ]]; then
             echo 'baseline and candidate must name distinct commits' >&2
             exit 1
@@ -147,8 +156,15 @@ jobs:
           ref: ${{ inputs.perf_baseline_sha }}
           path: baseline
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.perf_fixture_sha || github.sha }}
+          path: fixture
+          persist-credentials: false
       - name: Recorder CLI regression tests
-        run: python3 candidate/.github/scripts/test-record-turn-overhead.py
+        run: |
+          python3 candidate/.github/scripts/test-record-turn-overhead.py
+          python3 candidate/.github/scripts/test-turn-fixture.py
       - name: Pin both arms to the candidate toolchain
         shell: bash
         run: |
@@ -169,10 +185,12 @@ jobs:
           cargo --version >> "$RUNNER_TEMP/turn-recording/toolchain.txt"
           for arm in baseline candidate; do
             cd "$GITHUB_WORKSPACE/$arm"
-            [[ "$(git rev-parse HEAD)" == "$(if [[ "$arm" == baseline ]]; then echo "$BASELINE_SHA"; else echo "$CANDIDATE_SHA"; fi)" ]]
+            production_sha="$CANDIDATE_SHA"
+            if [[ "$arm" == baseline ]]; then production_sha="$BASELINE_SHA"; fi
+            python3 "$GITHUB_WORKSPACE/candidate/.github/scripts/turn-fixture.py" prepare --production-root "$PWD" --fixture-root "$GITHUB_WORKSPACE/fixture" --production-sha "$production_sha" --fixture-sha "$FIXTURE_SHA" --receipt "$RUNNER_TEMP/turn-recording/$arm-fixture.json"
             CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo bench --locked -p qq-core --bench turn_overhead --no-run --message-format=json > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
             python3 - "$arm" <<'PYTHON'
-          import json, os, shutil, sys
+          import json, os, shutil, subprocess, sys
           from pathlib import Path
           arm = sys.argv[1]
           root = Path(os.environ['RUNNER_TEMP']) / 'turn-recording'
@@ -187,6 +205,9 @@ jobs:
           with Path(artifact['executable']).open('rb') as source, (root / f'{arm}-bin').open('xb') as target:
               shutil.copyfileobj(source, target)
           (root / f'{arm}-bin').chmod(0o755)
+          subprocess.run([sys.executable, str(Path(os.environ['GITHUB_WORKSPACE']) / 'candidate/.github/scripts/turn-fixture.py'),
+                          'verify', '--production-root', str(Path.cwd()), '--receipt', str(root / f'{arm}-fixture.json'),
+                          '--dep-info', str(Path(artifact['executable']).with_suffix('.d')), '--binary', str(root / f'{arm}-bin')], check=True)
           (root / f'{arm}-artifact.json').write_text(json.dumps(artifact, indent=2))
           if arm == 'candidate':
               baseline = json.loads((root / 'baseline-artifact.json').read_text())
@@ -197,7 +218,7 @@ jobs:
       - name: Record thirty alternating and same-binary pairs
         shell: bash
         run: |
-          python3 candidate/.github/scripts/record-turn-overhead.py --baseline "$RUNNER_TEMP/turn-recording/baseline-bin" --candidate "$RUNNER_TEMP/turn-recording/candidate-bin" --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" --output "$RUNNER_TEMP/turn-recording/samples"
+          python3 candidate/.github/scripts/record-turn-overhead.py --baseline "$RUNNER_TEMP/turn-recording/baseline-bin" --candidate "$RUNNER_TEMP/turn-recording/candidate-bin" --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" --baseline-fixture-sha256 "$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"] + "/turn-recording/baseline-fixture.json"))["effective_fixture"]["sha256"])')" --candidate-fixture-sha256 "$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"] + "/turn-recording/candidate-fixture.json"))["effective_fixture"]["sha256"])')" --baseline-fixture-receipt "$RUNNER_TEMP/turn-recording/baseline-fixture.json" --candidate-fixture-receipt "$RUNNER_TEMP/turn-recording/candidate-fixture.json" --output "$RUNNER_TEMP/turn-recording/samples"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
