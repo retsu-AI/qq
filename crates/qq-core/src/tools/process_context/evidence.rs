@@ -43,14 +43,14 @@ mod tests {
         let runtime = Runtime::new(NeverProvider, "test", 256)
             .unwrap()
             .with_process_producer(Arc::clone(&producer));
-        let plan = tokio::task::spawn_blocking(move || {
-            crate::plan::CompiledAgentPlan::compile_blocking(crate::plan::AgentProfile::embedded(
-                &runtime, workspace,
-            ))
-            .unwrap()
-        })
+        let plan = crate::LoadedRuntime::from_runtime(
+            runtime,
+            qq_protocol::AgentProfileId::default(),
+            workspace,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .plan;
         let call = ToolCallId::generate().unwrap();
         let arguments = r#"{"program":"true","args":[]}"#;
         let result = crate::tools::dispatch::execute_with_images(

@@ -1124,6 +1124,48 @@ mod tests {
     }
 
     #[test]
+    fn ab6_zero_shell_denominator_has_no_lexical_share() {
+        for exec_only in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (store, connection) = fixture(directory.path());
+            if exec_only {
+                call(
+                    &connection,
+                    1,
+                    1,
+                    "completed",
+                    r#"{"program":"true","args":[]}"#,
+                );
+                connection
+                    .execute("UPDATE tool_calls SET name='exec'", [])
+                    .unwrap();
+            }
+            let path = directory.path().join("zero-shell.jsonl");
+            let exported = export(
+                &test_identity(),
+                &store,
+                DAY_MS,
+                2 * DAY_MS,
+                3 * DAY_MS,
+                &path,
+                None,
+            );
+            if !exec_only {
+                assert!(matches!(
+                    exported,
+                    Err(ActionBiasError::Unqualified(Validation::Count))
+                ));
+                continue;
+            }
+            exported.unwrap();
+            let result = recount(&test_identity(), &path, None).unwrap();
+            assert_eq!(result.shell_calls, 0);
+            assert_eq!(result.exec_calls, u64::from(exec_only));
+            assert!(serde_json::to_value(&result).unwrap()["lexical_read_share"].is_null());
+        }
+    }
+
+    #[test]
     fn ab6_malformed_shell_envelopes_cannot_become_reads() {
         let directory = tempfile::tempdir().unwrap();
         let (store, connection) = fixture(directory.path());
