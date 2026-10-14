@@ -771,3 +771,10 @@ newest last.
   Combined AB3 tool identity is 2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27;
   both canonical goldens reflect the observed declaration identity. No
   production description or schema change beyond the upstream cursor bound.
+
+
+- Integrated workspace test found a legacy repair-note fixture requiring a
+  separate row even when the complete read header now fits. It now checks
+  visibility as a complete token for both inline and separate-line rendering.
+  The note text and public visibility contract remain asserted. Fresh gates
+  follow this fixture correction; no failed check is waived.

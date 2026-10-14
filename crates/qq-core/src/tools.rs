@@ -509,8 +509,8 @@ mod tests {
             assert!(
                 result
                     .model_text
-                    .lines()
-                    .any(|line| line == "note=cwd_ignored"),
+                    .split_whitespace()
+                    .any(|field| field == "note=cwd_ignored"),
                 "{}",
                 result.model_text
             );
