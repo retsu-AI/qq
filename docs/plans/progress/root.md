@@ -551,3 +551,10 @@ AB2 additionally owns test-only golden prompt identity in `plan.rs` and
 role-contract assertions in `sessions/tests/delegation.rs`. No descriptor
 encoding or session production behavior changes; prompt version 20 changes
 its digest, and write/read child assertions must pin the new action bullet.
+
+### 2026-10-14 — AB2 filtered tool description ownership
+
+- AB2 owns `plan.rs` compilation of filtered builtin descriptions: shell
+  recommendations name only present companion tools; edit-only profiles
+  refer to a content hash without naming unavailable read_file. Descriptions
+  are adjusted once after catalog-input policy filtering, off requests.

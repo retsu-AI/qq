@@ -362,3 +362,10 @@ newest last.
   Logs: `target/qq-perf/ab2-2026-10-14/subset-final-gate-{0,1,2,3}.log`.
 - Fixed prefix 5,299 bytes; builtin schema unchanged. Matched plan compilation
   performance remains unqualified; draft source review continues.
+
+### 2026-10-14 — AB2 shell-only and range guidance regressions
+
+- Hosted review found absent companion tools in shell-only descriptions and
+  read_file-specific ranges in no-tools prompts. Extend captured subsets
+  with shell-only interactive requests and description/ranges assertions.
+  Test-first fails on no-tools range guidance before production correction.
