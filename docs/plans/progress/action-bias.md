@@ -545,3 +545,9 @@ newest last.
   cannot qualify historical discovery identity. Shell qualification is explicitly
   lexical_read_share; inherited executable/environment effects remain unqualified.
   Updated the sort temporary-directory and uniq stdout contracts to match AB1.
+
+- AB1 immutable follow-up source 5f989e64dc5d12850599d00b19dd2d5753e8c18b:
+  fresh workspace package-clean qualification passed 2,289 tests, 0 failures,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace build
+  exit 0. Receipts fresh-regex-tree-integrated-{0..4}.log and receipt.json.
+  Performance qualification remains open; shared-host pressure is not waived.
