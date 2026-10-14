@@ -721,3 +721,43 @@ newest last.
   Existing caller API remains shared; no unsorted-prefix pagination is used.
   Focused listing regression fails before enforcement:
   directory-listing-final-red.log. Final checks and integration remain open.
+### 2026-10-14 — output-only shell reads and workspace temporaries
+
+- Focused regressions reproduce Work for sed line-number printing/uniq
+  stdout and Read for workspace sort temporary-directory options. Receipts
+  extra-output-red.log and sort-temporary-red.log. Accept output-only `=`
+  sed scripts and uniq's second-operand stdout sentinel; reject sort's
+  temporary-directory options, including clusters and long abbreviations.
+  Approval authority remains unchanged. Full integration/performance open.
+
+
+- Immutable source 218cb185 passes 2,287 workspace tests, zero failures,
+  14 ignored; fmt, Clippy and build exit 0. Fifteen focused classifiers pass.
+  Logs: target/qq-perf/ab1-2026-10-14/output-temporary-gate-{0,1,2,3}.log.
+  Latest shell-read repairs retain authority and preview behavior. Matched
+  performance remains open; downstream integration is pending.
+### 2026-10-14 — whole-run discovery repetition and export inputs
+
+- Repetition counts now include starts after the first below-root edit;
+  coverage retains separate successful pre-edit/per-target requirements.
+  Executable fixture adds successful and failed placeholder starts after
+  edits: [1,2,16,1,1,2]. Fixed baseline remains [108,1,1,0,0,1].
+  Receipt: post-edit-discovery-starts.json. Independent query review agrees.
+- AB6 contract requires exact runtime-envelope parsing, typed requested-env
+  status and pinned exporter/recount identity. AB4 explicitly tests feature-
+  enabled fetch exclusion; current unattended Network filtering already
+  excludes it, so the hosted exposure claim is stale. AB2 acceptance bounds
+  pre-budget directory enumeration and rejects incomplete sorted-page proof.
+
+- Fresh parent docs-truth verification passes 23 tests after invalidating
+  qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
+  change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
+  current fixed-window recount retain the baseline above.
+
+
+- Fresh immutable source 2a59cfeb passes 2,287 workspace tests (0 failures,
+  14 ignored), fmt, all-target/all-feature Clippy and build after explicitly
+  cleaning every workspace package's debug artifacts. The source remained
+  clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
+  logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
+  supersedes earlier shared-cache qualification uncertainty. Performance open.
