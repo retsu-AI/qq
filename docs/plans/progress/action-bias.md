@@ -872,3 +872,14 @@ newest last.
 - AB6.1 published as draft #306 on #305, source 08458f17/receipt 37012bd1.
   Eight focused fixtures and all 2,325 workspace tests pass. ENG-1043 remains
   In Progress for upstream integration, final recount and the deployed cohort.
+
+
+### 2026-10-14 — AB6 exact envelope, root role and exporter identity
+
+- Hosted review found that the approval envelope ignores execution-only
+  fields, parent deletion clears links without changing historical depth,
+  and an old exporter can transform evidence before a pinned recount.
+- Regression cases cover typed timeout/env, unknown and duplicate fields,
+  missing command and orphaned depth-one children. Export/recount must share
+  the execution parser and immutable identity; format-one evidence is retired.
+- Final source integration, qualification and observation remain in progress.

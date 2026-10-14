@@ -488,7 +488,7 @@ mod tests {
     fn fixture(directory: &Path) -> (PathBuf, Connection) {
         let path = directory.join("store.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions(id TEXT PRIMARY KEY,parent_id TEXT); CREATE TABLE runs(id TEXT PRIMARY KEY,session_id TEXT,kind TEXT,started_at_ms INTEGER,finished_at_ms INTEGER); CREATE TABLE tool_calls(id TEXT PRIMARY KEY,run_id TEXT,state TEXT,name TEXT,arguments_json TEXT);").unwrap();
+        connection.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE sessions(id TEXT PRIMARY KEY,parent_id TEXT,depth INTEGER NOT NULL); CREATE TABLE runs(id TEXT PRIMARY KEY,session_id TEXT,kind TEXT,started_at_ms INTEGER,finished_at_ms INTEGER); CREATE TABLE tool_calls(id TEXT PRIMARY KEY,run_id TEXT,state TEXT,name TEXT,arguments_json TEXT);").unwrap();
         connection
             .execute("INSERT INTO metadata VALUES ('schema_version','45')", [])
             .unwrap();
@@ -500,7 +500,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO sessions VALUES ('root',NULL),('child','root')",
+                "INSERT INTO sessions VALUES ('root',NULL,0),('child','root',1)",
                 [],
             )
             .unwrap();
@@ -620,6 +620,11 @@ mod tests {
             r#"{"command":"pwd","command":"cargo test"}"#,
             r#"{"command":"pwd","cwd":42}"#,
             r#"{"command":"pwd","cwd":".","cwd":"other"}"#,
+            r#"{"command":"pwd","timeout_seconds":"bad"}"#,
+            r#"{"command":"pwd","env":42}"#,
+            r#"{"command":"pwd","unknown":true}"#,
+            r#"{"command":"pwd","timeout_seconds":1,"timeout_seconds":2}"#,
+            r#"{"cwd":"."}"#,
         ]
         .iter()
         .enumerate()
@@ -635,7 +640,7 @@ mod tests {
                 result.read_calls,
                 result.malformed_commands
             ),
-            (3, 0, 3)
+            (8, 0, 8)
         );
     }
 
@@ -669,6 +674,34 @@ mod tests {
         let path = directory.path().join("cohort.jsonl");
         export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
         assert_eq!(recount(&path).unwrap().total_calls, 1);
+    }
+
+    #[test]
+    fn ab6_orphaned_child_retains_its_historical_role() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        call(
+            &connection,
+            1,
+            1,
+            "completed",
+            r#"{"command":"cargo test"}"#,
+        );
+        connection
+            .execute(
+                "INSERT INTO runs VALUES (?1,'child','prompt',86400000,86400001)",
+                [RunId::from_bytes([2; 16]).to_string()],
+            )
+            .unwrap();
+        call(&connection, 2, 2, "completed", r#"{"command":"pwd"}"#);
+        // Parent deletion clears the link; the persisted depth remains one.
+        connection
+            .execute("UPDATE sessions SET parent_id=NULL WHERE id='child'", [])
+            .unwrap();
+        let path = directory.path().join("cohort.jsonl");
+        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        let result = recount(&path).unwrap();
+        assert_eq!((result.total_calls, result.read_calls), (1, 0));
     }
 
     #[test]
