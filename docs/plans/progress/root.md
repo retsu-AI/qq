@@ -536,6 +536,13 @@ AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order
 
 AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
 
+### 2026-10-13 — AC0.2.1 controlled CI recorder ownership (ENG-1044)
+
+User's full autonomous-core goal owns CI diagnostic recording in isolated `.worktrees/autonomous-perf-ci`, branch `ci/eng-1044-turn-overhead-recording`, stacked on draft AC3 #296 at a76b7cd9. Reserve `.github/workflows/ci.yml`, focused `.github/scripts/record-turn-overhead.py` and its CLI tests, performance runbook/inventory and autonomous ledger. Add an explicitly dispatched job using immutable 40-hex SHAs, separate baseline/candidate target directories, saved optimized binaries and 30 A/B +30 A/A pairs with raw artifacts. Contents-read permissions, no persisted checkout credentials or provider calls; regular PR CI behavior unchanged. This is AC0.2.1's concrete diagnostic seam, not completion of H0 registration, concurrency/fsync or live gates. Existing AC0.1 ENG-986 remains Done; new issue ENG-1044 tracks this work. No protocol/schema/descriptor/prompt reservation.
+
+### 2026-10-13 — AC0.2.1 compiled fixture identity review repair
+
+Recorder review reproduces materially different included soak fixtures across earlier A/B arms. Extend this slice to the concrete `turn_overhead.rs` benchmark, source-manifest/dep-info verification script and tests. Pin its two direct source files from one immutable fixture checkout in both production arms; embedded source SHA-256 binds each sample to the compiled fixture. Production crates remain the comparison variable. Earlier recordings are retained as confounded whole-build diagnostics, not attributed runtime measurements. No new dependency, public protocol or schema change.
 ### 2026-10-14 — AC3/main schema integration and G0 reservation shift
 
 Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
