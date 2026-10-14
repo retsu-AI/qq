@@ -23,6 +23,15 @@ pub mod bench_support {
         super::read_only_shell_command(command)
     }
 
+    /// The runtime's typed shell envelope parser, including duplicate-field checks.
+    #[must_use]
+    pub fn parsed_shell_command(arguments: &str) -> Option<String> {
+        match serde_json::from_str::<super::ShellArguments>(arguments) {
+            Ok(arguments) => Some(arguments.command),
+            Err(_) => None, // Invalid envelopes count as malformed, without exposing their text.
+        }
+    }
+
     /// Classifies `command` and returns the decision's name.
     #[must_use]
     pub fn classify(command: &str) -> &'static str {
@@ -422,17 +431,18 @@ fn spawn_class(arguments: &str) -> ToolClass {
     }
 }
 
+#[derive(Deserialize)]
+struct ShellArguments {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 /// The shell class for `shell` (a command string) or `exec` (an argv). An
 /// `exec` uses literal argv for progress reads. Its command-line rendering
 /// remains the shared approval preview and prefix-grant shape.
 fn shell_class(name: &str, arguments: &str) -> ToolClass {
-    #[derive(Deserialize)]
-    struct ShellArguments {
-        #[serde(default)]
-        command: String,
-        #[serde(default)]
-        cwd: Option<String>,
-    }
     #[derive(Deserialize)]
     struct ExecArguments {
         #[serde(default)]

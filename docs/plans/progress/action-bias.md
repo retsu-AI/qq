@@ -847,3 +847,10 @@ newest last.
   numeric cwd and duplicate cwd each become Read in SQLite extraction but
   are rejected by the runtime parser. Red result: expected 3 malformed/0
   reads, got 0 malformed/3 reads. Receipt typed-envelope-red.log.
+
+- Bounded export now validates the runtime's exact ShellArguments type before
+  emitting a command. Duplicate recognized fields and invalid cwd become
+  Malformed; accepted commands over the classifier ceiling retain their
+  proven bound-rejection status. No over-bound envelope enters Rust.
+- Eight focused AB6 fixtures pass, including all three typed-envelope
+  regressions. Independent final review and immutable full gates next.

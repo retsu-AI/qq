@@ -10,6 +10,8 @@ The start/end window is half-open. Cutoff is exactly end plus 24 hours; all thre
 boundaries are UTC midnights and cutoff must have elapsed. Children, side
 questions, runs starting outside the window and runs not finished before cutoff
 are excluded. Every shell-call state in the cohort remains in the denominator.
+Duplicate recognized fields or invalid typed shell envelopes (including cwd)
+are checked by the runtime's own parser and count as malformed.
 Malformed command input and commands provably rejected by the classifier's own
 byte ceiling count as nonreads. An oversized argument envelope that prevents
 inspection leaves the export unqualified rather than manufacturing a nonread.
@@ -46,7 +48,7 @@ commit only count/identity receipts appropriate for the project ledger.
   --output /tmp/qq-action-bias-baseline-recount.json
 ```
 
-Each line is bounded to 128 KiB, inspection envelopes to 256 KiB and cohorts to one
+Each line is bounded to 128 KiB, typed inspection envelopes to 256 KiB and cohorts to one
 million calls. The export represents command strings only through the pinned
 classifier's 16 KiB input ceiling, retaining larger strings as provably rejected
 with their original byte count. Worst-case JSON escaping still fits the record

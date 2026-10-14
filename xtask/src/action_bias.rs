@@ -316,16 +316,10 @@ fn export(
     let mut digest = Sha256::new();
     write_line(out.as_file_mut(), &ExportLine::Header(header), &mut digest)?;
     let query = format!(
-        "WITH cohort AS (SELECT t.id,t.run_id,t.state,t.arguments_json {COHORT}), inputs AS (SELECT id,run_id,state,length(CAST(arguments_json AS BLOB)) envelope_bytes, CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json,'$.command') END END command_type, CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN CASE WHEN json_valid(arguments_json) THEN json_extract(arguments_json,'$.command') END END command_value FROM cohort) SELECT CASE WHEN length(CAST(id AS BLOB))=32 THEN id END,CASE WHEN length(CAST(run_id AS BLOB))=32 THEN run_id END,CASE WHEN state IN ('requested','awaiting_approval','running','completed','failed','denied','interrupted') THEN state END,envelope_bytes,command_type,CASE WHEN command_type='text' THEN length(CAST(command_value AS BLOB)) END, CASE WHEN command_type='text' AND length(CAST(command_value AS BLOB))<=?5 THEN command_value END FROM inputs ORDER BY id COLLATE BINARY"
+        "WITH cohort AS (SELECT t.id,t.run_id,t.state,t.arguments_json {COHORT}) SELECT CASE WHEN length(CAST(id AS BLOB))=32 THEN id END,CASE WHEN length(CAST(run_id AS BLOB))=32 THEN run_id END,CASE WHEN state IN ('requested','awaiting_approval','running','completed','failed','denied','interrupted') THEN state END,length(CAST(arguments_json AS BLOB)),CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json,'$.command') END END,CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN arguments_json END FROM cohort ORDER BY id COLLATE BINARY"
     );
     let mut statement = transaction.prepare(&query)?;
-    let mut rows = statement.query(params![
-        start_ms,
-        end_ms,
-        cutoff_ms,
-        MAX_ARGUMENT_BYTES,
-        MAX_READ_COMMAND_BYTES as u64
-    ])?;
+    let mut rows = statement.query(params![start_ms, end_ms, cutoff_ms, MAX_ARGUMENT_BYTES])?;
     let mut records = 0;
     let mut last = None;
     while let Some(row) = rows.next()? {
@@ -352,11 +346,15 @@ fn export(
         let command = if command_type.as_deref() != Some("text") {
             CommandInput::Malformed
         } else {
-            let command_bytes: u64 = row.get(5)?;
-            if command_bytes > MAX_READ_COMMAND_BYTES as u64 {
-                CommandInput::ClassifierRejected { command_bytes }
-            } else {
-                CommandInput::Command { text: row.get(6)? }
+            let arguments: String = row.get(5)?;
+            match qq_core::classify_bench::parsed_shell_command(&arguments) {
+                Some(text) if text.len() > MAX_READ_COMMAND_BYTES => {
+                    CommandInput::ClassifierRejected {
+                        command_bytes: text.len() as u64,
+                    }
+                }
+                Some(text) => CommandInput::Command { text },
+                None => CommandInput::Malformed,
             }
         };
         write_line(
