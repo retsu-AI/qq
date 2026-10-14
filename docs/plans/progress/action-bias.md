@@ -1286,3 +1286,14 @@ newest last.
 - Descriptor15/schema49 and exact projection/legacy replay/reservation isolation
   are inherited; window, masking and repair reservations remain the AB3 change.
   Fresh source gates and independent integration review precede publication.
+
+### 2026-10-14 — AB3 durable projection qualification
+
+- Immutable source `cddc1fa4c826f1566ba65e483957ab799b009431` integrates qualified
+  AB2e93c4e8a/main007adcda. Fresh workspace: 2,394passed,0failed,14ignored
+  (38blocks); formatting, all-target/all-feature Clippy and build exit0.
+- Logs: `target/qq-perf/ab3-2026-10-14/durable-projection-integrated-gate-{0,1,2,3,4}.log`.
+  Independent integration review approves byte windows/masking/repair reservations
+  and preservation of both complete runtime regressions after conflict resolution.
+- This publication adds only the ledger receipt. Fresh hosted/Codex and named
+  performance gates remain open; no performance gate is waived.
