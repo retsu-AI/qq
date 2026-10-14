@@ -200,3 +200,21 @@ newest last.
   Evidence `target/qq-perf/ab-plan-2026-10-14/typed-preview-preedit.json`.
 - Docs truth23passed; fmt/diff checks pass. Production parent unchanged
   from qualified source; sixth-review corrections ready for hosted review.
+
+### 2026-10-14 — seventh hosted plan review reconciliation
+
+- Clarified canonical Git/ripgrep configuration disables, native Windows
+  uncertainty, read-child findings, ignored-walk overrides, safe instruction
+  links/depth windows, terminal scan-cap markers and compiled grant lifetime.
+  Source regressions and independent reviews cover the corresponding slices.
+- Export overflow makes qualification unqualified unless the pinned classifier
+  itself rejects the command. Canonical persisted read identity replaces
+  argument spelling for re-read qualification; unresolved aliases remain open.
+- Exact SQL fixture retains a failed boolean-true preview (one failure/two
+  attempts) and accepts discovery between root-level and below-root edits.
+  Corrected fixed-window baseline:211 failures/1,228 attempts,17.1824%;
+  below-root early scopes108/18/25/7/5/5,still unqualified for path/page/read
+  coverage. Evidence completed-preview-below-root.json under the plan receipts.
+- Independent final plan review approves. Docs truth23 passed; fmt and diff
+  checks passed. Parent production source is unchanged from its qualified
+  source; no acceptance or performance gate is waived.

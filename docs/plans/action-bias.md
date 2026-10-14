@@ -19,13 +19,17 @@ reports, without reading the same material repeatedly first. Specifically:
 - **Root runs reach their first edit sooner.** Built-in reads before the
   first edit: median 9 → ≤ 6, p90 57 → ≤ 30.
 - **Fewer re-reads.** Same-path re-reads fall from 44 % of root `read_file`
-  calls (1,631 of 3,669) to ≤ 25 %.
+  calls (historical argument-spelling proxy: 1,631 of 3,669) to ≤ 25%.
+  Qualification groups successful reads by persisted canonical file identity;
+  unresolved historical aliases make the cohort unqualified. Remeasure both
+  windows with the same extractor before comparing.
 - **Reads go through the built-ins.** Root shell calls whose program (after
   an optional leading `cd DIR`) is a read fall from 38 % of root `shell`
   calls (725 of 1,886) to ≤ 15 %.
 - **No per-directory instruction walk.** Each run that actually edits below root starts at most one instruction
   names search per permitted discovery root (workspace root plus applicable
-  highest ignored subtrees); cursor pages continue that search. The historical
+  highest ignored subtrees, plus justified target ancestors at 64-component
+  boundaries for deeper targets); cursor pages continue that search. The historical
   271 physical probes remain context; the scope baseline records 40 starts,
   10 repeated roots across seven runs, before path normalization and coverage audit.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
@@ -76,7 +80,7 @@ described in AB6.
 | ID | Goal | Finding | Size | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand or compressor helper) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (`read_only_shell_command` only), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
-| AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; exact basename matching excludes NOTAGENTS.md; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
+| AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`/`exec`, `tools/search.rs` bounded names discovery and depth reporting, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; exact basename matching excludes NOTAGENTS.md; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
 | AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit carries an admissible continuation or a terminal offset-bound marker; ordinarily `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a 3,000-line short-line file fitting the byte and rendered-line bounds returns whole; a 4,000-empty-line file gets contiguous offset continuation before generic bounding; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
 | AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
 | AB5 | A root's stall report asks for the next action, not a status summary: a new `TurnNotice::RootStallReport` with its own wording; children keep `StallReport` | AB-F1 | S | AB1 | `crates/qq-core/src/lib.rs` (notice constant), `runtime/events.rs` (`TurnNotice`, `from_stored`), `runtime/run_loop.rs` (choose by `StallPolicy`), `sessions/store/schema` (`STORE_SCHEMA_VERSION` 45 → 46, version-only migration; root request), `docs/design/protocol.md` store schema history, guide `troubleshooting.md` and `providers.md` schema mentions (checked by `docs_truth`) | A root fixture gets `root_stall_report` on request 65 and its continuation; a replayed pre-AB5 root run still renders `stall_report` byte-identically; live/replayed read-only roots receive the same authority-neutral notice; a child fixture is unchanged; a schema-45 binary refuses a schema-46 store at open instead of failing per session with `CODEC` |
@@ -104,15 +108,21 @@ The rule:
    without shell metacharacters; quoted or escaped operands are not
    stripped. This is the same lexical test T20 uses for its nudge, without
    T20's containment requirement, because nothing here grants authority.
-2. A redirection (`>`) still makes the command not a read.
-3. A newline, `$(`, a backtick or `<(` makes the command not a read. The
+2. Unquoted redirection or shell metacharacters make the command work.
+   Unix single-quoted literals retain regex characters; double-quoted
+   expansion still counts as work. On Windows, single quotes and cmd
+   expansion/escape characters (`^`, `%`, `!`) count as work; native sort
+   counts as work because its output flags differ from GNU sort.
+3. A newline, unquoted `$(`, a backtick or `<(` makes the command not a read. The
    splitter today ignores `\n`, so `grep x f` + newline + `cargo fmt` is
    misread as a read. That is fixed here.
 4. Every remaining `|`, `;`, `&&` segment must start with a read prefix.
    The current list is kept with these narrowings, which close shapes that
    pass today and write:
    - `find` without `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint*`, `-fls` and execution-action abbreviations;
-   - `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, or their long aliases
+   - Git reads use canonical `git [-C DIR] -c core.fsmonitor=false <read>`;
+     bare working-tree commands may run configured filesystem-monitor hooks.
+     `git branch` without `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, or their long aliases
      `--delete`, `--move`, `--copy`, `--force`; creation/reset operands
      also count as work (only listing/filter operands are reads);
    - `git diff`, `git log` and `git show` reject output/helper/signature
@@ -122,17 +132,16 @@ The rule:
      must be options, never operands after `--` or values of another option.
      `log`/`show` additionally use explicit `--format=oneline`, rejecting later
      format overrides and signature-verification placeholders. A configured
-     default pretty format is not trusted. Exact `git diff --stat` also reads; its mode skips diff/textconv drivers;
+     default pretty format is not trusted. Exact `git -c core.fsmonitor=false diff --stat` also reads; its mode skips diff/textconv drivers;
    - `git blame` starts with `--no-textconv`, with no enabling aliases;
    - `cargo metadata`/`cargo tree` are work even with `--locked`/`--frozen`:
      configured compiler wrappers may execute. Only exact `cargo --version`
      is a read;
-   - `rg` rejects `--pre`, hostname helpers (`--hostname-bin`) and compressed
+   - `rg` reads require leading `--no-config`, then reject `--pre`, hostname helpers (`--hostname-bin`) and compressed
      search (`-z`, short clusters containing `z`, `--search-zip`);
    - `fd` excludes `-x`/`-X` (including short clusters), `--exec` and
-     `--exec-batch`; `tree` excludes `-o` (including attached operands) and
-     output-option spellings; `file` excludes `-C`/`--compile` and accepted
-     long-option abbreviations;
+     `--exec-batch`, detailed listings (`-l`/`--list-details`, including short clusters); `tree` excludes `-o` (including attached operands) and
+     output-option spellings; `file` excludes `-C`/`--compile`, decompression (`-z`/`-Z`, including clusters, and uncompress forms) and accepted long-option abbreviations;
    - JJ reads use only canonical `jj --ignore-working-copy --no-pager status`
      (global switches may swap order); bare commands may snapshot the working
      copy and diff-producing commands may execute configured formatters.
@@ -153,7 +162,10 @@ The rule:
 | `cd crates/x && grep -n foo y.rs` | yes |
 | `cd crates/x; sed -n 1,80p y.rs` | yes |
 | `sed -n 1,80p f.rs \| nl` | yes |
-| `git -C .worktrees/a diff --stat` | yes |
+| `git -C .worktrees/a -c core.fsmonitor=false diff --stat` | yes |
+| `git status`, `git diff --stat`, `rg needle f`, `fd -l`, `file -Sz sample.Z` | no |
+| `rg --no-config 'foo(bar)' f.rs` | yes on Unix |
+| `echo 'x & cargo fmt & echo x'`, `sort input.txt /o output.txt` | no on Windows |
 | `cd x && cargo test -p y` | no (work) |
 | `sed -i s/a/b/ f.rs` | no |
 | `cd x && grep foo f > out` | no |
@@ -204,13 +216,14 @@ is reviewed in the PR; these bullets are the contract.
   - "Preserve unrelated work in the files you change."
 
   The first bullet is dropped for read children, keyed exactly as the
-  implement line is today (ADR-0054 § 5). AB4 replaces it for read-only
+  implement line is today (ADR-0054 § 5). Their exploration bullet asks
+  for findings and omits the second demand to make the change. AB4 replaces it for read-only
   roots.
 - **Replace** the shell-preference bullet with: "Read with the built-ins:
   read_file instead of cat, head, tail, or sed -n; search instead of grep or
   rg; tree instead of ls or find. They accept a path inside ignored
   directories, such as a worktree under target/ or .worktrees/: pass path
-  rather than cd."
+  and include_ignored=true to search or tree rather than cd."
 - **Replace** the AGENTS.md walk with: "Instructions from nested AGENTS.md
   files (CLAUDE.md where there is none) apply below their directory, more
   specific first. Before editing below the root, find them once per distinct search root
@@ -220,7 +233,12 @@ is reviewed in the PR; these bullets are the contract.
   directory, also search its highest ignored ancestor below the workspace
   with path and include_ignored=true, covering instructions within that subtree. Search each distinct
   discovery root once, covering every edit target; read only applicable
-  instruction files. Cursor continuations belong to that discovery; do not
+  instruction files. Targets deeper than 64 directory components also use
+  target-ancestor roots at each 64-component boundary, with path and
+  include_ignored=true. Names discovery reports safe instruction-file links;
+  broken, escaping or nonfile instruction links block editing. partial=depth
+  or depth_limited requires these bounded scopes, not a cursor into skipped
+  directories. Cursor continuations belong to that discovery; do not
   restart it unchanged. The host supplies workspace-root instructions."
 - **Shorten** "mode=outline to see a file's shape before reading it" to "mode=outline
   for the shape of a long file". The rest of the T19 bullet is unchanged.
@@ -240,12 +258,13 @@ is reviewed in the PR; these bullets are the contract.
   - Descriptions are part of the tool-schema hash, and the PR records that
     hash change.
 
-The nested-instruction search must find a file name inside an ignored
-directory when given `path`. The research probe confirmed this for content
-search: `search` with an explicit path into `.worktrees/x` returns matches.
-The walk never applies ignore rules to its own root
-(`tools/walk.rs:128-156`), and names mode uses the same walk
-(`tools/search.rs:888`). The slice adds regression tests for both modes.
+Nested names discovery includes safe in-workspace instruction-file symlinks,
+without traversing directory links; invalid instruction links return a blocker.
+Ignored search/tree calls require both path and include_ignored=true.
+The bounded walk reports depth omissions, and targets deeper than 64 directory
+components use justified ancestor roots at 64-component intervals. Test safe,
+broken, escaping and directory-target links, paginated names and scan-budget
+continuations, plus instructions at depths 64, 65, 128 and 130.
 
 ### AB3 — read window
 
@@ -260,7 +279,9 @@ file beyond that boundary. A read that stops on its line limit
 before the end of the file now gets the same marker, with the remaining
 line count when the entire file was scanned. Beyond the 4 MiB scan cap,
 remaining count is unknown: use an unknown-count marker naming the cap and
-next offset rather than an exact prefix remainder. Test both bounded-default
+an accepted next offset only while unread scanned-prefix rows remain. Once
+that prefix is exhausted, emit a terminal scan-cap marker without a cursor.
+A single over-cap line is also terminal. Test both bounded-default
 and explicit-limit reads of a file beyond the scan cap. Explicit `ranges` are unchanged. The read loop reserves rendered lines
 for its header and continuation marker before admitting body rows; generic
 head/tail truncation must never replace a contiguous offset continuation.
@@ -301,7 +322,9 @@ projection is deterministic (F23).
     direct runs. Snapshot configuration-granted tool names at plan compile
     time, so eligibility lookup performs no configuration work on requests.
     Use that same eligibility for declarations, pins, index and selection.
-    Grants are constant for a plan (`Runtime::config_grants`, `lib.rs:1407`).
+    The direct-run gate uses the same immutable compiled snapshot. Host grants
+    may change; a plan retains its compiled authority until replaced. Test
+    both grant removal and addition after compilation.
   - `StaticFilter` and `PromptPrefixKey` stay `Copy` and the prefix
     cache stays bounded. Its bound comment (`plan.rs:516-519`: "2⁵ … (198)")
     is updated to the new count.
@@ -389,7 +412,10 @@ approval `classify`. Export in a consistent read transaction: version, schema,
 start/end/cutoff, root terminal-by-cutoff cohort and expected record count;
 records carry every shell call ID/run/state/command and malformed/oversized
 status. Keep every qualifying shell call in the denominator; invalid or
-oversized commands count as nonreads explicitly, never truncated or skipped.
+commands rejected by the classifier's own input bound count as nonreads
+explicitly, never silently truncated or skipped. An unclassified export-size
+failure makes the gate unqualified; size the serialization bound to cover
+all classifier-admitted commands, including worst-case JSON escaping.
 Stream recount with bounded record bytes/count; reject malformed, incomplete
 and duplicate-call exports. Record immutable classifier build SHA and binary
 hash; recount both windows with that same binary. Test cohort boundaries and
@@ -419,7 +445,9 @@ permits at most one new names-search discovery per root; cursor pages are contin
 not a repeated discovery. Ordinary single-root runs still
 allow one; multi-root runs must cover every target scope. Record per-run
 roots/discovery starts, physical calls and every repeated root; an average cannot hide repeated
-probes. Exclude dry-run previews from the actual editing cohort. The historical global
+probes. Exclude only completed edit_file calls whose dry_run is JSON boolean
+true from the actual editing cohort. Failed previews remain executed edit
+attempts, and must remain in failure numerator and denominator. The historical global
 probe count remains context, with its separate denominator stated.
 
 Paid paired comparison requires ENG-809 authorization and an evaluator

@@ -248,7 +248,8 @@ q "WITH rr AS ($RR), c AS (SELECT json_extract(t.arguments_json, '\$.command') c
    v AS (SELECT cd, p IN ('grep','egrep','rg','sed','cat','head','tail','ls','find','fd','nl','wc','awk') rd FROM w)
    SELECT count(*), sum(cd), sum(rd), sum(cd AND rd) FROM v;"
 
-# Same-path re-reads: reads, re-reads, byte-identical re-reads
+# Historical argument-spelling proxy only: reads, re-reads, byte-identical arguments.
+# Not a qualification query; canonical file identity is required below.
 q "WITH rr AS ($RR), x AS (SELECT rr.child, t.run_id, json_extract(t.arguments_json, '\$.path') p, count(*) c, count(DISTINCT t.arguments_json) d
      FROM tool_calls t JOIN rr ON rr.id = t.run_id WHERE t.name = 'read_file' GROUP BY 1, 2, 3)
    SELECT CASE child WHEN 1 THEN 'child' ELSE 'root' END, sum(c), sum(c - 1), sum(c - d) FROM x GROUP BY 1;"
@@ -314,7 +315,7 @@ q "WITH rr AS ($RR) SELECT sum(t.state = 'failed'),
      sum(t.state = 'denied'), sum(t.state = 'interrupted')
    FROM tool_calls t JOIN rr ON rr.id = t.run_id
    WHERE rr.child = 0 AND t.name IN ('edit_file','write_file')
-     AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true');"
+     AND (t.name <> 'edit_file' OR t.state <> 'completed' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true');"
 
 # Root completion by the fixed cutoff: completed, all started roots,
 # completed share, not terminal by cutoff (including later completions).
@@ -381,8 +382,9 @@ not this per-root names-search gate.
 The earlier supplemental 211/1,230 edit-failure figure (17.1545%) used
 obsolete preview handling and must not be a comparison baseline. The
 corrected fixed-window query, read-only schema 45 on 2026-10-14, reports
-205 failed / 1,222 executed terminal calls (16.7758%), 0 denied and 0
-interrupted. Only actual `edit_file` boolean-true previews are excluded;
+211 failed / 1,228 executed terminal calls (17.1824%), 0 denied and 0
+interrupted. Only completed `edit_file` boolean-true previews are excluded;
+failed previews remain executed edit attempts in numerator and denominator;
 `write_file` has no preview mode, so its unknown dry_run field remains a
 schema failure. Roots: 190/254 completed by cutoff (74.8031%), 0 unfinished
 at cutoff. Historical instruction diagnostics: 44 attempts across 108
@@ -396,9 +398,10 @@ instruction-name searches by `(run_id, normalized path)` (absent path is
 `.`). Record each run's distinct roots and count of roots searched more
 than once. A multi-root exception is valid only when the searches cover
 every edited target and its instruction ancestors. Only successful discovery
-results available to the model before the first actual edit qualify; same-turn
+results available to the model before the relevant below-root edit qualify; same-turn
 parallel search/edit calls do not prove the model had instruction evidence.
-The query conservatively counts starts in earlier turns. Later-discovered new
+The query conservatively counts starts in turns earlier than the first
+below-root edit; an earlier root-level edit does not move that cutoff. Later-discovered new
 targets require separate per-target ordering evidence rather than automatic
 qualification. Coverage is reviewed separately, including completed cursor
 pages and applicable instruction reads before each affected target's edit; fewer searches cannot prove compliance. Keep the original
@@ -408,19 +411,17 @@ all such runs as passing.
 ```sh
 # Scope counts: runs, distinct roots, searches, repeated roots, affected runs, maximum roots in one run.
 q "WITH rr AS ($RR), paths AS (
-     SELECT t.run_id, json_extract(e.value, '\$.path') path
+     SELECT t.run_id, t.turn_ordinal, json_extract(e.value, '\$.path') path
      FROM tool_calls t JOIN rr ON rr.id = t.run_id JOIN json_each(t.arguments_json, '\$.edits') e
      WHERE rr.child = 0 AND t.name = 'edit_file' AND t.state = 'completed'
        AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
      UNION ALL
-     SELECT t.run_id, json_extract(t.arguments_json, '\$.path')
+     SELECT t.run_id, t.turn_ordinal, json_extract(t.arguments_json, '\$.path')
      FROM tool_calls t JOIN rr ON rr.id = t.run_id
      WHERE rr.child = 0 AND t.name = 'write_file' AND t.state = 'completed'),
-   qualifying AS (SELECT p.run_id, min(t.turn_ordinal) first_edit_turn
-     FROM paths p JOIN tool_calls t ON t.run_id = p.run_id
+   qualifying AS (SELECT p.run_id, min(p.turn_ordinal) first_edit_turn
+     FROM paths p
      WHERE instr(p.path, '/') > 0 AND p.path NOT GLOB './*' AND p.path NOT GLOB '/*'
-       AND t.name IN ('edit_file','write_file') AND t.state = 'completed'
-       AND (t.name <> 'edit_file' OR coalesce(CASE WHEN json_valid(t.arguments_json) THEN json_type(t.arguments_json, '\$.dry_run') END, '') <> 'true')
      GROUP BY p.run_id),
    discovery AS (SELECT t.run_id, coalesce(nullif(rtrim(json_extract(t.arguments_json, '\$.path'), '/'), ''), '.') path, count(*) n
      FROM tool_calls t JOIN qualifying q ON q.run_id = t.run_id
@@ -442,7 +443,9 @@ normalization as unqualified, never as a distinct-root allowance.
 
 Workspace-root discovery covers nonignored ancestors for every target.
 Ignored targets also require discovery from their highest ignored ancestor
-below the workspace. These are the permitted discovery roots. Arbitrary
+below the workspace. Targets deeper than 64 directory components additionally
+use justified target ancestors at each 64-component boundary, with
+include_ignored=true. These are the permitted discovery roots. Arbitrary
 per-directory paths do not qualify as distinct-root exceptions. Cursor
 pages continue one discovery; the scope query counts only new starts,
 while the raw diagnostic above retains physical call counts.
@@ -452,3 +455,25 @@ one pinned AB1 classifier binary for both windows. The program-name SQL above
 is a historical proxy: it misses git -C, cut, sort and uniq and does not
 model the classifier's write exclusions. Its 725/1,886 figure is context,
 not the corrected baseline; classifier baseline recount remains open.
+
+### Canonical re-read qualification
+
+The argument-spelling query above is a historical proxy. Successful reads of
+`src/lib.rs` and `./src/lib.rs`, or safe symlink spellings, share one file
+identity. Before grouping, recover the canonical workspace-relative identity
+recorded by each successful read's persisted header. That identity was resolved
+at the call, unlike the current filesystem, which may have changed. Where
+legacy output cannot establish that identity, record the affected cohort as
+unqualified; do not count aliases as independent files. Keep the historical
+proxy counts separately and remeasure both windows with the same extractor.
+
+Only completed boolean-true edit_file previews are excluded from executed-edit
+failure qualification. Failed preview attempts, including an invalid edits
+array with correctly typed dry_run=true, remain in numerator and denominator.
+The prior 205/1,222 receipt used the earlier typed-preview filter; the corrected
+fixed-window recount is 211/1,228. The root-level edit at turn 1, successful
+discovery at turn 2, then below-root edit at turn 3 fixture records one valid
+early discovery. Below-root baseline scope counts remain 108 roots, 18 scopes,
+25 starts, 7 repeated scopes across 5 runs, maximum 5 scopes. These counts remain
+unqualified for canonical path, completed-page and instruction-read coverage.
+Evidence: target/qq-perf/ab-plan-2026-10-14/completed-preview-below-root.json.
