@@ -778,3 +778,10 @@ newest last.
   visibility as a complete token for both inline and separate-line rendering.
   The note text and public visibility contract remain asserted. Fresh gates
   follow this fixture correction; no failed check is waived.
+
+
+- Immutable integrated source 5581e55c passes 2,311 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/masked-cursor-final-gate-{0,1,2,3}.log.
+  Ten focused masked-read regressions pass; independent repair and integration
+  reviews approve. Matched dispatch/output performance remains open.
