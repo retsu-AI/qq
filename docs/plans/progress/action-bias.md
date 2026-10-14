@@ -834,3 +834,9 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab1-2026-10-14/fresh-final-review-wave-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+
+- Fresh AB2 integration caught a non-test build error: checkpoint text limit
+  was previously re-exported only under cfg(test). Split the export so the
+  production turn floor uses the same constant; reviewer-count test export
+  remains test-only. Prior focused tests were green; the failed full run is
+  retained and nothing from this AB2 wave has been pushed. Rerun all gates.
