@@ -20,6 +20,7 @@ use time::{Date, OffsetDateTime};
 const FORMAT: u16 = 3;
 const DAY_MS: i64 = 86_400_000;
 const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARGUMENT_BYTES: u64 = 256 * 1024;
 const MAX_RECORDS: u64 = 1_000_000;
 const COHORT: &str = "FROM tool_calls t JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id WHERE s.depth = 0 AND r.kind='prompt' AND r.started_at_ms>=?1 AND r.started_at_ms<?2 AND r.finished_at_ms<?3 AND t.name IN ('shell','exec')";
@@ -90,6 +91,8 @@ pub(crate) enum Validation {
     Call,
     #[error("a record exceeds the serialization bound")]
     RecordBound,
+    #[error("the complete export exceeds the 512 MiB byte budget")]
+    AggregateBound,
     #[error("every record must end in a newline")]
     Newline,
     #[error("header, calls and footer must occur once in that order")]
@@ -1231,6 +1234,8 @@ mod tests {
             r#"{"command":"pwd\u0000"}"#,
             r#"{"command":"pwd","cwd":""}"#,
             r#"{"command":"pwd","cwd":"/tmp"}"#,
+            r#"{"command":"pwd","cwd":".."}"#,
+            r#"{"command":"pwd","cwd":"sub/../../"}"#,
             r#"{"command":"pwd","env":{"bad=name":"value"}}"#,
         ]
         .iter()
@@ -1256,7 +1261,7 @@ mod tests {
                 result.read_calls,
                 result.malformed_commands
             ),
-            (15, 0, 15)
+            (17, 0, 17)
         );
     }
 
@@ -1617,6 +1622,37 @@ mod tests {
         assert!(matches!(
             recount(&test_identity(), &huge, None),
             Err(ActionBiasError::Unqualified(Validation::RecordBound))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab6_export_total_bytes_are_bounded_before_writing() {
+        use std::io::{Seek, SeekFrom};
+        let mut output = tempfile::NamedTempFile::new().unwrap();
+        output
+            .as_file_mut()
+            .seek(SeekFrom::Start(MAX_EXPORT_BYTES))
+            .unwrap();
+        let footer = ExportLine::Footer {
+            records: 1,
+            snapshot_sha256: "0".repeat(64),
+        };
+        assert!(matches!(
+            write_line(output.as_file_mut(), &footer, &mut Sha256::new()),
+            Err(ActionBiasError::Unqualified(Validation::AggregateBound))
+        ));
+        assert_eq!(output.as_file().metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab6_recount_rejects_total_bytes_before_parsing() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        input.as_file().set_len(MAX_EXPORT_BYTES + 1).unwrap();
+        assert!(matches!(
+            recount(&test_identity(), input.path(), None),
+            Err(ActionBiasError::Unqualified(Validation::AggregateBound))
         ));
     }
 
