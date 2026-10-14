@@ -512,3 +512,9 @@ newest last.
   in the side-question migration fixture (980 core tests passed, one failed).
   Verify actual reopened metadata equals the current schema instead; rerun
   workspace gates on the corrected commit.
+
+- Corrected immutable source05044927 passes full workspace gates: 2,301 tests,
+  zero failed,14 ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/root-notice-final-gate-{0,1,2,3}.log.
+  This qualifies the local slice against its current parent only; newer
+  parent integration, measurement and publication remain open.
