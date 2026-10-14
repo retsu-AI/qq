@@ -278,7 +278,8 @@ Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
 correction notice before the next provider request. The internal barrier adds
 no wire event. Descriptor 15 records the strict projector policy; historical
 13/14 encodings remain unchanged. Known pre-AB2 histories use their original
-projector; ambiguous histories require evidence. The AB2 reader refuses the
+projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
+without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
 experimental schema-48 AB5 build because it lacks that build's root-notice
 codec; the final AB5 reader migrates both 48 and 49 at schema 50.
 

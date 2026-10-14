@@ -2690,10 +2690,10 @@ impl RunState {
                                 .saturating_add(measure_message(&assistant));
                             Arc::make_mut(messages).push(assistant);
                             run.live_turns.push(turn_ordinal);
-                            let notice = format!(
+                            let notice = runtime::bounded_checkpoint_correction_notice(format!(
                                 "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
-                                verdict.outcome.label(), verdict.feedback
-                            );
+                                verdict.outcome.label(), runtime::bounded_checkpoint_text(&verdict.feedback)
+                            ));
                             Arc::make_mut(messages).push(Message::user(notice));
                             window.irreducible_message_bytes = window.irreducible_message_bytes
                                 .saturating_add(measure_message(messages.last().expect("just pushed")));
@@ -3536,17 +3536,17 @@ impl RunState {
                                 if !verdict.outcome.allows_progress()
                                     && verdict.outcome != runtime::CheckpointOutcome::Unavailable
                                 {
-                                    correction.push(format!("{}: {}", call.name, verdict.feedback));
+                                    correction.push(format!("{}: {}", call.name, runtime::bounded_checkpoint_text(&verdict.feedback)));
                                 }
                             }
                             // Both correction attempts spent: the RED markers stay on
                             // the results as evidence and the model proceeds without
                             // another redirect, instead of the run failing.
                             if !correction.is_empty() && context.repair() {
-                                checkpoint_correction_notice = Some(format!(
+                                checkpoint_correction_notice = Some(runtime::bounded_checkpoint_correction_notice(format!(
                                     "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
                                     correction.join("\n- ")
-                                ));
+                                )));
                             }
                         }
 

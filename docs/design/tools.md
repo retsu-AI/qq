@@ -303,7 +303,9 @@ budget is a **projection** over those rows (`TurnOutputBudget`). After all
 checkpoint annotations, session execution commits the exact ordered projected
 replies and correction notice before sending another provider request. Replay,
 reopen and compaction input use this stored projection verbatim. Descriptor 15
-records the strict policy for incomplete turns that stopped before that barrier;
+records the strict policy for unchecked incomplete turns that stopped before
+that barrier; checkpoint-enabled tool turns require the exact projection even
+for final-only reviewers, otherwise reconstruction fails closed;
 known pre-AB2 plans retain the original generic projector. Ambiguous prompt-20
 history without exact replies or policy evidence returns an actionable error.
 A budget cut always names a recall path in its marker: the spill

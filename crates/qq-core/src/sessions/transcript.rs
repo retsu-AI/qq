@@ -441,7 +441,12 @@ fn assemble_model_context(
                          THEN 1 ELSE 0 END,
                     CASE WHEN t.tool_results_projection_json IS NULL THEN NULL
                          WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
-                    length(CAST(t.tool_results_projection_json AS BLOB))
+                    length(CAST(t.tool_results_projection_json AS BLOB)),
+                    CASE WHEN json_valid(r.plan_descriptor_json)
+                         THEN CASE WHEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
+                                        OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
+                                   THEN 0 ELSE 1 END
+                         ELSE 1 END
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -471,6 +476,7 @@ fn assemble_model_context(
         remaining_turn_bytes -= projection_bytes;
         let turn = StoredTurn {
             strict_projection: row.get(6)?,
+            checkpoint_projection_required: row.get(9)?,
             projection_json: row.get(7)?,
             run_id: row.get(0)?,
             legacy_projection: row.get(5)?,
@@ -1446,6 +1452,7 @@ pub(super) fn assembled_context_bytes(
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
     pub(super) strict_projection: bool,
+    pub(super) checkpoint_projection_required: bool,
     pub(super) projection_json: Option<String>,
     pub(super) run_id: String,
     pub(super) legacy_projection: bool,
@@ -1531,6 +1538,7 @@ pub(super) fn append_run_turns(
     }
     for StoredTurn {
         strict_projection,
+        checkpoint_projection_required,
         projection_json,
         run_id,
         legacy_projection,
@@ -1585,7 +1593,9 @@ pub(super) fn append_run_turns(
             if !saved.matches_calls(call_ids.clone()) {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
-        } else if !legacy_projection && !strict_projection && call_ids.clone().next().is_some() {
+        } else if (checkpoint_projection_required || (!legacy_projection && !strict_projection))
+            && call_ids.clone().next().is_some()
+        {
             return Err(SessionRuntimeError::ToolProjectionUnavailable { run: run_id });
         }
         let result_message_index = context.len() + 1;
@@ -1823,6 +1833,7 @@ mod action_bias_tests {
         append_run_turns(
             vec![StoredTurn {
                 strict_projection: true,
+                checkpoint_projection_required: false,
                 projection_json: None,
                 run_id: "fixture".to_owned(),
                 legacy_projection: false,
@@ -1891,6 +1902,7 @@ mod action_bias_tests {
         }
         let turn = StoredTurn {
             strict_projection: true,
+            checkpoint_projection_required: false,
             projection_json: None,
             run_id: "fixture".to_owned(),
             legacy_projection: false,

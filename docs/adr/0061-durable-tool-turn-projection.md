@@ -46,8 +46,11 @@ prompt identity alone cannot identify which text a historical model saw.
 6. A known historical pre-AB2 descriptor 10–14 with matching identity and
    prompt 1–19 uses the preserved original generic
    projector, including its 4 KiB remainder floor. An incomplete future turn
-   before the barrier is recoverable using its explicit strict policy and
-   interrupted results. That reconstruction is distinct from a committed
+   without a checkpoint reviewer is recoverable using its explicit strict policy
+   and interrupted results. Any checkpoint-enabled tool turn without its exact
+   projection refuses reconstruction, including final-only reviewers: its recorded
+   identity cannot prove that durable annotations or feedback are absent. This
+   conservative refusal avoids scanning the workspace event archive. That reconstruction is distinct from a committed
    projection. Ambiguous unversioned history requires immutable policy
    evidence or an actionable unresolved-projection result; present code or
    configuration cannot assign its history retrospectively.
