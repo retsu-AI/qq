@@ -869,3 +869,10 @@ newest last.
   prompt-20 expectation. Updated that public output assertion to 21; the
   canonical descriptor and historical prompt-20 goldens remain distinct.
   Fresh integrated gates follow; no failed check is waived.
+
+
+- Full AB4 gate reproduced an inherited shared-semaphore fixture race: B
+  settled when the test assumed A would be released. Independent diagnosis
+  traces unchanged fixture code to #257. Separate explicit model gates now
+  release A and B deterministically and select B by model, preserving the
+  answer-before-interim-report and replay assertions. No production change.

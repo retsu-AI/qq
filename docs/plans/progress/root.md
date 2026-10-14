@@ -607,3 +607,8 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 - 2026-10-14 AB4 owns the prompt-version assertion in src/headless.rs for
   JSONL provenance: the expected current value follows the version-21 bump.
   No production CLI behavior is changed; root is the sole writer.
+
+
+- 2026-10-14 AB4 qualification owns a narrow inherited fixture repair in
+  sessions/tests/nonblocking.rs: separate child gates remove shared-semaphore
+  arrival-order assumptions. No production session behavior is changed.
