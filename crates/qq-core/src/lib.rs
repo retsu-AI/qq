@@ -10901,3 +10901,24 @@ mod tests {
         assert_eq!(plan.descriptor().skills.indexed, 2);
     }
 }
+
+#[cfg(test)]
+mod ab1_audit_regression {
+    #[test]
+    fn an_in_place_sed_write_triggers_a_short_run_heuristic_audit() {
+        let mut triggers = crate::runtime::AuditTriggers::default();
+        let call = crate::runtime::RuntimeToolCall {
+            id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+            turn_ordinal: 0,
+            call_ordinal: 0,
+            provider_call_id: "ab1-write".to_owned(),
+            rejection: None,
+            name: "shell".to_owned(),
+            arguments: r#"{"command":"sed -ni s/a/b/ f.rs"}"#.to_owned(),
+            effect: crate::catalog::EffectClass::Shell,
+        };
+        let result = crate::tools::bounded_result("shell exit=0\n".to_owned(), false);
+        crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
+        assert!(triggers.fires(crate::runtime::AuditMode::Heuristic));
+    }
+}

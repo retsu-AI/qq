@@ -26,6 +26,7 @@ struct Scripted {
     on_report: Reply,
     on_final: Reply,
     issued: Mutex<usize>,
+    calls_per_turn: usize,
     requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
@@ -36,6 +37,7 @@ impl Scripted {
             on_report: Reply::Text("report: nothing new yet"),
             on_final: Reply::Text("final answer: the brief's answer"),
             issued: Mutex::new(0),
+            calls_per_turn: MAX_TOOL_CALLS_PER_TURN,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -98,7 +100,7 @@ impl Provider for Scripted {
             .script
             .len()
             .saturating_sub(first)
-            .min(MAX_TOOL_CALLS_PER_TURN);
+            .min(self.calls_per_turn);
         *issued += count;
         drop(issued);
         if count == 0 {
@@ -160,6 +162,8 @@ async fn run(
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -563,6 +567,8 @@ async fn denied_calls_count_toward_the_report() {
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     struct DenyAll;
     impl ToolGate for DenyAll {
         fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
@@ -649,6 +655,8 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop(
             vec![Message::user("work")],
@@ -737,6 +745,8 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -840,6 +850,8 @@ async fn an_interrupted_final_answer_stays_final() {
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -956,6 +968,8 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
     let runtime = Runtime::new(CostlyFinal(Scripted::new(reads(400))), "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
         .run_loop_with_spawner(
             vec![Message::user("work")],
@@ -987,5 +1001,25 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
         ),
         "{:?}",
         events.last()
+    );
+}
+
+#[tokio::test]
+async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
+    let mut provider = Scripted::new(vec![
+        ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
+        64
+    ]);
+    provider.calls_per_turn = 1;
+    let (events, requests) = run(provider, RunCapabilities::user(None)).await;
+    assert_eq!(completed_text(&events).as_deref(), Some("done"));
+    assert_eq!(last_notice(&requests[64]), Some(STALL_REPORT_NOTICE));
+    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
+    assert_eq!(
+        notices(&events),
+        [
+            runtime::TurnNotice::StallReport,
+            runtime::TurnNotice::Continuation
+        ]
     );
 }

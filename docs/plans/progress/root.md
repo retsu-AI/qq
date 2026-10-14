@@ -515,3 +515,11 @@ User-authorized docs-only slice owns autonomous-core plan/ledger, retirement of 
 ### 2026-10-13 — Full autonomous-core implementation stack
 
 User authorizes completing the entire autonomous-core plan as stacked PRs, including its referenced goal slices and review repairs until Codex bot approval on each opening description. Isolated `.worktrees/autonomous-core-stack` begins on consolidation #291 (`ee8bffa5`); this intentionally uses the reviewed parent branch rather than claiming it merged. AC17/ENG-872 starts first; source, safety caps and shipped fast-path behavior remain explicit gates. AC3 in `.worktrees/ac3` remains separately owned; coordinate its reviewed branch before dependent run-loop changes. Root/shared protocol, schema, CI and design changes belong to the respective documented stack slices, with reservations recorded before editing. Full goal retains resource/performance, live AP5/G5/Goal7 evidence and final design/doc collapse; no qualification is waived by source completion.
+
+
+### 2026-10-14 — AB1 regression harness ownership
+
+- AB1 acceptance needs a scripted one-call-per-turn root run. Extend test
+  ownership to `crates/qq-core/src/tests/progress.rs` for a fixture knob,
+  deterministic subdirectory input and the request-65 regression. The
+  production classifier remains limited to `read_only_shell_command`.

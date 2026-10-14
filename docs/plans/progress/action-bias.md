@@ -6,7 +6,7 @@ newest last.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| AB1 | Shell reads after a leading `cd` are reads for progress and audit | Planned | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
+| AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | Planned | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Planned | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | | After AB2 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
@@ -96,3 +96,26 @@ newest last.
   runtime fix was needed for this timing reproduction. Requalifying the
   integrated source with task-owned tmpfs test stores; disk latency remains
   unqualified by that correctness run.
+
+
+### 2026-10-14 — AB1 regression start
+
+- Branch `fix/eng-1038-ab1-shell-reads` inherits integrated plan `a9dc6e80`.
+  Pre-change tmpfs diagnostic on unchanged classifier: 212,429 / 163,549 /
+  176,586 ns per turn at 10/100/1,000 (one iteration, unqualified).
+  Original disk baseline recording remains live; do not confuse its handle
+  with this separate storage diagnostic. Final matched performance gate is
+  still open, including a baseline on the integrated immutable source.
+- Added command-table and short-run sed audit regressions before the fix.
+  No approval permission changes are intended; reads affect only progress
+  reports and heuristic audit selection. Linear ENG-1038 is In Progress.
+
+- Test-first result on integrated source: `cargo test -p qq-core ab1_
+  --no-default-features` (tmpfs stores) gives 1 passed / 2 failed: command
+  table and `ab1_cd_prefixed_reads_report_on_request_sixty_five` reproduce
+  the intended failures. Log: `target/qq-perf/ab1-2026-10-14/ab1-red.log`.
+  Short-run in-place sed audit preservation already passes.
+- Original disk baseline completed, exit 0, three iterations: medians
+  82,124,330 / 81,953,505 / 101,346,859 ns per turn at 10/100/1,000.
+  Heavy storage contention and the pre-integration build make this
+  characterization only; matched integrated-source qualification stays open.

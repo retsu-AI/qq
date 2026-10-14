@@ -642,6 +642,55 @@ pub(crate) fn evaluate(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ab1_shell_read_verdicts_preserve_progress_and_audit() {
+        let cases = [
+            ("cd crates/x && grep -n foo y.rs", true),
+            ("cd crates/x; sed -n 1,80p y.rs", true),
+            ("sed -n 1,80p f.rs | nl", true),
+            ("git -C .worktrees/a diff --stat", true),
+            ("git worktree list", true),
+            ("cut -f 1 f.rs | sort | uniq", true),
+            ("cd x && cargo test -p y", false),
+            ("sed -i s/a/b/ f.rs", false),
+            ("cd x && grep foo f > out", false),
+            ("cd 'a b' && grep x f", false),
+            ("sed -ni s/a/b/ f.rs", false),
+            ("sed -n --in-place s/a/b/ f.rs", false),
+            ("sed -n '1,5w out' f", false),
+            ("sed -n '1,5e' f", false),
+            ("sort -o f.rs f.rs", false),
+            ("sort -oout f.rs", false),
+            ("sort --output=out f.rs", false),
+            ("sort --output out f.rs", false),
+            ("uniq in out", false),
+            ("find . -name '*.orig' -delete", false),
+            ("find . -exec cargo fmt ;", false),
+            ("find . -fprint out", false),
+            ("git branch -D topic", false),
+            ("git branch --delete topic", false),
+            ("git branch --move old new", false),
+            ("git branch --copy old new", false),
+            ("git branch --force topic", false),
+            ("git branch created", false),
+            ("git branch --list --no-list created", false),
+            ("git branch --format --list created", false),
+            ("git diff --output=x", false),
+            ("grep x f\ncargo fmt", false),
+            ("cat $(cargo fmt)", false),
+            ("cat `cargo fmt`", false),
+            ("cat <(cargo fmt)", false),
+        ];
+        let failures: Vec<_> = cases
+            .into_iter()
+            .filter(|(command, read)| super::read_only_shell_command(command) != *read)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "wrong shell read verdicts: {failures:?}"
+        );
+    }
     #[cfg(feature = "tool-fetch")]
     use std::sync::Arc;
 
