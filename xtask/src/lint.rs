@@ -182,7 +182,12 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
                 previous = line;
                 continue;
             }
-            if code.starts_with("#[ignore]") {
+            let ignore_reason_empty = code.starts_with("#[ignore")
+                && line
+                    .split_once('=')
+                    .and_then(|(_, value)| value.split_once(']'))
+                    .is_some_and(|(value, _)| value.trim().trim_matches('"').trim().is_empty());
+            if code.starts_with("#[ignore]") || ignore_reason_empty {
                 findings.push(Finding {
                     rule: Rule::IgnoreNeedsReason,
                     path: path.to_owned(),

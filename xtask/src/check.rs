@@ -931,11 +931,13 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         print!("{}", evidence_markdown(&report));
         return Ok(());
     }
-    // A failed run must never leave the previous run's report behind.
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(CheckError::Write(path, error)),
+    // Dry-run discovery must not destroy evidence from a real gate.
+    if !args.dry_run {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CheckError::Write(path, error)),
+        }
     }
     if !hooks_enabled(&root) {
         println!(
