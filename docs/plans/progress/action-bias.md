@@ -481,3 +481,31 @@ newest last.
 - Latest helper source workspace gates pass: 2,277 tests, 0 failed,
   14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
   logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
+
+### 2026-10-14 — AB3 long-header regression
+
+- Hosted source review supplied a valid 615-byte path. Fixed 256-byte
+  header reservation allows generic bounding to drop middle rows while
+  reporting contiguous offsets. The model-visible row-contiguity fixture
+  fails before correction; budget the rendered header before the body.
+- Rendered header upper bound now reserves actual escaped path and metadata
+  bytes plus header rows. All seven focused AB3 tests pass; independent
+  final review approved. Workspace requalification follows.
+
+- Retained the historical 256-byte minimum reservation while reserving the
+  full rendered header for longer paths. This preserves ordinary read-window
+  sizes and the existing replay-budget fixture without weakening bounds.
+  Seven focused AB3 regressions and the exact replay fixture pass; independent
+  final review approves this compatibility adjustment. Full workspace rerun
+  remains open, along with fresh scan-cap review and matched performance.
+
+- Fresh hosted scan-cap claim checked against current source: the exhaustive
+  5 MiB fixture follows every advertised offset successfully until the
+  existing terminal scan-cap marker. A single over-cap line is also terminal.
+  Regression passes without a production change; the older draft contract
+  needs to state this existing terminal behavior explicitly.
+
+- Immutable source0eaf8dd2 workspace gates pass: 2,292 tests, zero failed,
+  14 ignored; fmt, Clippy and build all exit0. Logs
+  target/qq-perf/ab3-2026-10-14/header-final-gate-{0,1,2,3}.log.
+  Matched performance and newer upstream integration remain open.

@@ -759,6 +759,43 @@ mod tests {
     }
 
     #[test]
+    fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let path = format!("{prefix}/notes.txt");
+        std::fs::write(
+            directory.path().join(&path),
+            ("x".repeat(80) + "\n").repeat(2_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            &serde_json::json!({"path":path}).to_string(),
+        );
+        assert!(!output.is_error, "{}", output.model_text);
+        let rows: Vec<usize> = output
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(number, _)| number.trim().parse().ok())
+            })
+            .collect();
+        assert!(rows.len() > 200);
+        assert!(
+            rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "visible rows have a gap"
+        );
+        assert!(!output.model_text.contains("not stored"));
+    }
+
+    #[test]
     fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
@@ -836,6 +873,39 @@ mod tests {
             assert!(marker.contains("4 MiB scan cap"), "{marker}");
             assert!(marker.contains("continue from offset="), "{marker}");
             assert!(!marker.contains("4094 more lines"));
+        }
+    }
+
+    #[test]
+    fn ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("capped"),
+            format!("{}\n", "x".repeat(99)).repeat(52_429),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for path in ["capped", "single"] {
+            let mut offset = 1;
+            for call in 0..256 {
+                let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
+                let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
+                assert!(!result.is_error, "offset={offset}: {}", result.model_text);
+                let marker = result.model_text.lines().last().unwrap();
+                if let Some((_, next)) = marker.split_once("continue from offset=") {
+                    let next = next.split(']').next().unwrap().parse::<usize>().unwrap();
+                    assert!(next > offset);
+                    offset = next;
+                } else {
+                    assert!(
+                        marker.contains("file continues past the 4 MiB scan cap"),
+                        "{marker}"
+                    );
+                    break;
+                }
+                assert!(call < 255, "scan prefix did not terminate");
+            }
         }
     }
 
