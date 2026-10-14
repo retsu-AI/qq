@@ -3479,3 +3479,60 @@ fn version_forty_four_reads_existing_holds_as_waiting_for_a_human() {
         Err(SessionRuntimeError::CONSTRAINT)
     ));
 }
+
+#[test]
+fn ab5_store_open_rejects_the_next_schema_before_loading_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    let future = STORE_SCHEMA_VERSION + 1;
+    connection
+        .execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+            [future.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        open_database(&path),
+        Err(SessionRuntimeError::CONSTRAINT)
+    ));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        future.to_string()
+    );
+}
+
+#[test]
+fn ab5_schema_forty_five_migrates_once_to_forty_six() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (connection, _) = open_database(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE metadata SET value='45' WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, _) = open_database(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "46"
+        );
+    }
+}

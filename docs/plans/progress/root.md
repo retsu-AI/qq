@@ -578,3 +578,11 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   recommendations name only present companion tools; edit-only profiles
   refer to a content hash without naming unavailable read_file. Descriptions
   are adjusted once after catalog-input policy filtering, off requests.
+
+### 2026-10-14 — AB5 schema and notice ownership
+
+- Reserve `sessions/store/schema.rs` version-only45→46 migration and
+  historical skip lists, `sessions/tests/migrations.rs`, root progress/
+  replay fixtures and protocol/guide schema mentions. Preserve every old
+  notice byte; reject46 at open in the pinned45 binary. Branch
+  `feat/eng-1042-ab5-root-stall-action` stacks on AB4, source qualification open.

@@ -1039,3 +1039,43 @@ async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
         "the executed test restarts the count"
     );
 }
+
+#[test]
+fn ab5_root_notice_mapping_is_new_and_legacy_wording_is_stable() {
+    assert_eq!(
+        runtime::TurnNotice::from_stored("root_stall_report").map(|notice| notice.as_str()),
+        Some("root_stall_report")
+    );
+    assert_eq!(
+        runtime::TurnNotice::from_stored("stall_report")
+            .unwrap()
+            .text(),
+        "[QQ runtime notice; not a user instruction]\nThe last 64 tool calls changed nothing and produced no answer. Do not call tools in this reply. Write a short report: what is established (with path:line evidence), what is still unknown, and the one next action. QQ keeps this report and continues the same run with tools available again."
+    );
+}
+
+#[tokio::test]
+async fn ab5_live_roots_receive_action_notice_and_continue_after_call_sixty_four() {
+    for capabilities in [
+        RunCapabilities::user(None),
+        RunCapabilities::user(None).read_only(),
+    ] {
+        let mut provider = Scripted::new(reads(64));
+        provider.calls_per_turn = 1;
+        let (events, requests) = run(provider, capabilities).await;
+        assert_eq!(completed_text(&events).as_deref(), Some("done"));
+        assert!(
+            last_notice(&requests[64])
+                .unwrap()
+                .contains("next action permitted by this task and run")
+        );
+        assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
+        assert_eq!(
+            notices(&events)
+                .iter()
+                .map(|notice| notice.as_str())
+                .collect::<Vec<_>>(),
+            ["root_stall_report", "continuation"]
+        );
+    }
+}
