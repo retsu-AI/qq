@@ -11,7 +11,7 @@ newest last.
 | AB3 | `read_file` window fills the byte budget; line-limit marker | Merged (`62c65930`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Merged (`62c65930`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
 | AB5 | Root stall report asks for the next change | Merged (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
-| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; context evidence and provenance format 3 in progress |
+| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; V2 context evidence/format3 implemented; hosted review and performance gates pending |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
 ## Entries
@@ -2040,3 +2040,10 @@ newest last.
 
 - Job116124285386 reached recording but the unchanged baseline build failed: dependency rustc proxies selected runner-default stable1.99 while cargo1.97.1 was used, and concurrent rust-src downloads collided. Artifact retained at target/qq-perf/ab6-2026-10-14/hosted-run-38643410247/h0-baseline-build-failure.zip. No performance result exists.
 - Set the runner default to the exact matching repository toolchain before recording; the existing recorder clears RUSTUP_TOOLCHAIN/RUSTC overrides, so the default must also be pinned for dependency build-script compiler proxies. Fixture and budgets stay unchanged. Windows/wasm hosted checks passed; latest Codex/other CI remain active.
+
+### 2026-10-14 — hosted and Codex AB6 repairs
+
+- Codex6878b065 found two valid issues. Public LoadedRuntime reconstruction discarded a configured producer; real-process regression reproduces Unknown instead of Clean. Exec-only cohorts emitted lexical0 despite no shell denominator; an export/recount fixture reproduces it. Red logs: /tmp/qq-ab6-loaded-runtime-red.log and /tmp/qq-ab6-zero-shell-red.log.
+- Preserve the exact producer Arc through LoadedRuntime, emit null for zero-shell lexical shares, and document it. Empty cohorts continue to be rejected.
+- Hosted unit tests1067pass/2fail/3ignored: producer capture tests exhausted their10-second debug-image hashing budget under parallel load; the30-second concurrency case passed. Increase only test capture budgets to60seconds; production deadlines/cancellation are unchanged. Full local/hosted checks and independent review must verify these fixes before acceptance.
+- Focused green: six core AB6 cases pass (including public LoadedRuntime real exec), and all15 export/recount cases pass. Independent read-only review approves the loader, zero-denominator and test-budget fixes. Update the plan to record the user-authorized new-call capture scope while preserving historical unqualification. Fresh integrated source verification is next.

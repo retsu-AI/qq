@@ -449,11 +449,15 @@ The wording of a stored notice is part of every run that carried it
 
 Qualification uses the same pinned AB1 classifier for both windows to
 recount lexical shell-read shapes (`lexical_read_share`), not the historical
-program-name SQL proxy. Inherited PATH/TMPDIR and executable provenance are
-not captured; this receipt cannot qualify actual nonmutation. A fake `grep`
-on inherited PATH may write, and `sort -S1K` may spill inside an inherited
-TMPDIR even without an explicit `-T`. Execution trust requires separate
-authoritative call-time evidence and is outside this lexical metric. Add a
+program-name SQL proxy. Historical calls cannot recover inherited PATH/TMPDIR
+or executable provenance and remain unqualified for execution trust. The user
+expanded AB6.1 to capture bounded V2 call-time context and producer evidence for
+new calls and verify it against an independently supplied clean source/executable
+pin, approved image manifest, typed arguments and persisted runtime-plan identity.
+An inherited fake `grep` may write, and `sort -S1K` may spill inside TMPDIR;
+lexical shape alone never establishes trusted execution. Retain every selected
+shell/exec call and report unavailable, mismatched and nonfinal evidence as
+unqualified. Recorded Work is accounting evidence, not mutation proof. Add a
 bounded read-only JSONL export/recount tool (AB6.1) before qualification,
 using the existing hidden support seam to call `read_only_shell_command`, not
 approval `classify`. Export in a consistent read transaction: version, schema,

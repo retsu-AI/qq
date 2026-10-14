@@ -82,7 +82,8 @@ consistency, identifiers/states, strict call ordering, count and header-inclusiv
 footer digest. Unknown fields, incomplete exports, duplicate/extra records,
 unsupported schemas or altered identities fail qualification.
 
-`lexical_read_share` measures validated shell command shape over shell calls.
+`lexical_read_share` measures validated shell command shape over shell calls;
+it is null when the cohort has no shell calls. Empty cohorts are unqualified.
 Invalid timeout/cwd/env/command envelopes count as malformed, and explicitly
 requested environments remain nonreads. Exec calls are counted separately.
 `verified_read_calls` and `qualified_recorded_work_calls` require complete V2

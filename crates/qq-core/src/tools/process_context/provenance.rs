@@ -188,12 +188,12 @@ mod tests {
         cancellation.cancel();
         let first = producer.capture(
             &ToolCancellation::new(cancellation),
-            Instant::now() + std::time::Duration::from_secs(10),
+            Instant::now() + std::time::Duration::from_secs(60),
         );
         assert!(first.executable_sha256.is_none());
         let second = producer.capture(
             &ToolCancellation::new(crate::RunCancellation::new()),
-            Instant::now() + std::time::Duration::from_secs(10),
+            Instant::now() + std::time::Duration::from_secs(60),
         );
         assert!(second.executable_sha256.is_some());
     }
@@ -235,7 +235,7 @@ mod tests {
             assert_eq!(ProcessProducer::new(input).source, SourceRevision::Unknown);
         }
         let cancelled = ToolCancellation::new(crate::RunCancellation::new());
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
         let first = clean.capture(&cancelled, deadline);
         let second = clean.capture(&cancelled, deadline);
         assert!(Arc::ptr_eq(&first, &second));

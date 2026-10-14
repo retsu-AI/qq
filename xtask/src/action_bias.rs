@@ -168,7 +168,7 @@ struct Recount {
     classifier_rejected: u64,
     malformed_commands: u64,
     environment_disqualified: u64,
-    lexical_read_share: f64,
+    lexical_read_share: Option<f64>,
     execution_effects_qualified: bool,
     shell_calls: u64,
     exec_calls: u64,
@@ -712,11 +712,8 @@ fn recount(
                     classifier_rejected: rejected,
                     malformed_commands: malformed,
                     environment_disqualified,
-                    lexical_read_share: if shell_calls == 0 {
-                        0.0
-                    } else {
-                        reads as f64 / shell_calls as f64
-                    },
+                    lexical_read_share: (shell_calls > 0)
+                        .then(|| reads as f64 / shell_calls as f64),
                     shell_calls,
                     exec_calls,
                     verified_read_calls: verified_reads,

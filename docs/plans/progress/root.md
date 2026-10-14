@@ -751,3 +751,7 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   xtask format3 retains bounded shell+exec arguments/receipt/descriptor/identity
   and uses one core validator with explicit deployed source/binary pins.
   Private artifact handling and research acceptance gates remain explicit.
+
+- AB6 additionally owns sessions/runtime.rs for preserving configured producer
+  identity through the public LoadedRuntime embedding compiler. No schema or
+  public wire change; exact producer Arc is retained.
