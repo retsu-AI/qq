@@ -969,3 +969,11 @@ newest last.
   Logs: target/qq-perf/ab3-2026-10-14/native-note-gate-{0,1,2,3,4}.log.
   Actionlint passes excluding the pre-existing SC2129 release-size style
   diagnostic. Native Windows execution and matched performance remain open.
+
+
+- Immutable integrated AB4 source bca83a30 passes 2,324 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab4-2026-10-14/native-note-integrated-gate-
+  {0,1,2,3}.log. Prompt provenance is version 21; the deterministic child
+  fixture retains separate gates. Independent integration review approves.
+  Native Windows execution, matched performance and hosted review remain open.
