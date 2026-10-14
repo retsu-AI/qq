@@ -904,6 +904,42 @@ mod tests {
     }
 
     #[test]
+    fn ab6_requested_process_environments_remain_nonreads() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        for (index, arguments) in [
+            r#"{"command":"pwd"}"#,
+            r#"{"command":"pwd","env":[]}"#,
+            r#"{"command":"pwd","env":["LANG"]}"#,
+            r#"{"command":"pwd","env":["LD_PRELOAD"]}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            call(&connection, index as u8 + 1, 1, "completed", arguments);
+        }
+        let path = directory.path().join("cohort.jsonl");
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+        )
+        .unwrap();
+        let result = recount(&test_identity(), &path).unwrap();
+        assert_eq!(
+            (
+                result.total_calls,
+                result.read_calls,
+                result.malformed_commands
+            ),
+            (4, 2, 0)
+        );
+    }
+
+    #[test]
     fn ab6_envelope_overflow_is_unqualified_and_exact_command_bound_is_retained() {
         let directory = tempfile::tempdir().unwrap();
         let (store, connection) = fixture(directory.path());
