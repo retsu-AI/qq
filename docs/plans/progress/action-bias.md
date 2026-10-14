@@ -636,3 +636,9 @@ newest last.
 - Independent final plan review approves. Docs truth23 passed; fmt and diff
   checks passed. Parent production source is unchanged from its qualified
   source; no acceptance or performance gate is waived.
+
+- Integrated immutable AB4 workspace gates pass:2,305 tests,zero failed,
+  14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab4-2026-10-14/authority-qualified-gate-{0,1,2,3}.log.
+  Independent source/integration review approves. Matched performance and
+  hosted review remain open; publish as draft without a readiness claim.
