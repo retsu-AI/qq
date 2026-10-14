@@ -826,11 +826,17 @@ impl CompiledAgentPlan {
                 });
             }
         }
-        static_tools.push(StaticTool::new(
-            spawn_spec,
-            ToolHost::SpawnAgent,
-            EffectClass::ReadOnly,
-        ));
+        let mut spawn_tool =
+            StaticTool::new(spawn_spec, ToolHost::SpawnAgent, EffectClass::ReadOnly);
+        if runtime.delegation.write_children {
+            let mut read_only_delegation = (*runtime.delegation).clone();
+            read_only_delegation.write_children = false;
+            spawn_tool.read_only_spec = Some(tools::spawn_agent_spec(
+                &runtime.spawn_model_routes,
+                &read_only_delegation,
+            ));
+        }
+        static_tools.push(spawn_tool);
         // Waiting for and cancelling the run's own background children
         // change nothing outside it (ADR-0054 § 4).
         static_tools.push(StaticTool::new(
@@ -1701,9 +1707,15 @@ mod tests {
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 13 and prompt 21: authority contract, AB4).
+        // changing the encoding (descriptor 13 and prompt 22: read-only child authority, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
+            "c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92"
+        );
+        let mut prompt21 = descriptor.clone();
+        prompt21.prompt_version = PromptVersion::new(21).unwrap();
+        assert_eq!(
+            prompt21.digest().unwrap().to_string(),
             "6ac21a27f741953eb66c4e8f4d92c2ff8d32e46ca23058a2b7d4a5835facaded"
         );
         let mut prompt20 = descriptor.clone();

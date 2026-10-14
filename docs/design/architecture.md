@@ -1051,10 +1051,13 @@ A read-only session is not offered the mutating, shell, or non-read external
 schemas its policy would deny, and a spawned child's approval mode can be
 lowered but never raised by a client command.
 
-Base prompt identity 21 includes the authority wording for read-only,
+Base prompt identity 22 includes the authority wording for read-only,
 unattended and inspection-only tool sets. Ordinary actionable interactive
 wording is unchanged from version 20, but the version distinguishes the
-changed restricted prompts in otherwise identical plan descriptors.
+changed restricted prompts in otherwise identical plan descriptors. A read-only
+root retains read-only delegation, with a cached restricted spawn schema that
+omits write authority even when the configured roster permits write children.
+Injected write requests remain denied by policy.
 
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
