@@ -1,24 +1,28 @@
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
 use clap::{Args, Subcommand};
-use qq_core::classify_bench::{MAX_READ_COMMAND_BYTES, read_only_shell_command};
-use qq_protocol::{RunId, StoreId, ToolCallId, ToolCallState};
+use qq_core::classify_bench::{
+    MAX_READ_COMMAND_BYTES, ProcessEvidenceStatus, ProcessProducerPin, read_only_shell_command,
+    recorded_work_receipt, validate_process_evidence,
+};
+use qq_protocol::{ContentHash, RunId, StoreId, ToolCallId, ToolCallState};
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
 
-const FORMAT: u16 = 2;
+const FORMAT: u16 = 3;
 const DAY_MS: i64 = 86_400_000;
-const MAX_RECORD_BYTES: usize = 128 * 1024;
+const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARGUMENT_BYTES: u64 = 256 * 1024;
 const MAX_RECORDS: u64 = 1_000_000;
-const COHORT: &str = "FROM tool_calls t JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id WHERE s.depth = 0 AND r.kind='prompt' AND r.started_at_ms>=?1 AND r.started_at_ms<?2 AND r.finished_at_ms<?3 AND t.name='shell'";
+const COHORT: &str = "FROM tool_calls t JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id WHERE s.depth = 0 AND r.kind='prompt' AND r.started_at_ms>=?1 AND r.started_at_ms<?2 AND r.finished_at_ms<?3 AND t.name IN ('shell','exec')";
 
 #[derive(Debug, Args)]
 pub(crate) struct ActionBiasArgs {
@@ -28,7 +32,7 @@ pub(crate) struct ActionBiasArgs {
 
 #[derive(Debug, Subcommand)]
 enum ActionBiasCommand {
-    /// Export all shell calls in a fixed root prompt cohort from a read-only snapshot.
+    /// Export process calls and bounded evidence from a fixed root prompt snapshot.
     Export {
         #[arg(long)]
         store: PathBuf,
@@ -40,6 +44,10 @@ enum ActionBiasCommand {
         cutoff: String,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long, requires = "producer_sha256")]
+        producer_source: Option<String>,
+        #[arg(long, requires = "producer_source")]
+        producer_sha256: Option<ContentHash>,
     },
     /// Recount a complete export with this immutable classifier executable.
     Recount {
@@ -47,6 +55,10 @@ enum ActionBiasCommand {
         input: PathBuf,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long, requires = "producer_sha256")]
+        producer_source: Option<String>,
+        #[arg(long, requires = "producer_source")]
+        producer_sha256: Option<ContentHash>,
     },
 }
 
@@ -74,10 +86,6 @@ pub(crate) enum Validation {
     Metadata,
     #[error("the cohort is empty or exceeds the bounded record count")]
     Count,
-    #[error(
-        "an argument envelope exceeds the inspection bound; no read-share result can be issued"
-    )]
-    Envelope,
     #[error("a stored call ID or state is invalid")]
     Call,
     #[error("a record exceeds the serialization bound")]
@@ -96,6 +104,8 @@ pub(crate) enum Validation {
     BuildIdentity,
     #[error("exporter identity differs from this pinned recount executable")]
     ExportIdentity,
+    #[error("the deployed producer pin is invalid or differs from the export")]
+    ProducerPin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,9 +119,10 @@ struct Header {
     cutoff_ms: i64,
     expected_records: u64,
     exporter: BuildIdentity,
+    producer: Option<ProcessProducerPin>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum CommandInput {
     Command {
@@ -122,6 +133,7 @@ enum CommandInput {
         command_bytes: u64,
     },
     Malformed,
+    NotShell,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,6 +145,12 @@ enum ExportLine {
         run_id: RunId,
         state: ToolCallState,
         command: CommandInput,
+        tool: String,
+        arguments_json: Option<String>,
+        execution_context_json: Option<String>,
+        plan_descriptor_json: Option<String>,
+        plan_identity_json: Option<String>,
+        oversized_inputs: u8,
     },
     Footer {
         records: u64,
@@ -152,6 +170,17 @@ struct Recount {
     environment_disqualified: u64,
     lexical_read_share: f64,
     execution_effects_qualified: bool,
+    shell_calls: u64,
+    exec_calls: u64,
+    verified_read_calls: u64,
+    qualified_recorded_work_calls: u64,
+    unqualified_calls: u64,
+    oversized_input_calls: u64,
+    unsupported_v1_calls: u64,
+    execution_context_qualified: bool,
+    verified_read_share: Option<f64>,
+    recorded_work_calls: u64,
+    execution_evidence_counts: BTreeMap<ProcessEvidenceStatus, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,10 +217,20 @@ fn compiled_identity() -> Result<BuildIdentity, ActionBiasError> {
         include_str!("../../crates/qq-core/src/approval/classify.rs"),
         include_str!("../../crates/qq-core/src/tools/shell.rs"),
         include_str!("../../crates/qq-core/src/tools.rs"),
+        include_str!("../../crates/qq-core/src/tools/process_context.rs"),
+        include_str!("../../crates/qq-core/src/tools/process_context/evidence.rs"),
+        include_str!("../../crates/qq-core/src/tools/process_context/provenance.rs"),
+        include_str!("../../crates/qq-core/src/runtime/shell_policy.rs"),
+        include_str!("../../crates/qq-core/src/plan/descriptor.rs"),
     ] {
         classifier.update((source.len() as u64).to_le_bytes());
         classifier.update(source.as_bytes());
     }
+    classifier.update(
+        qq_core::classify_bench::process_policy_digest()
+            .to_string()
+            .as_bytes(),
+    );
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -224,21 +263,97 @@ pub(crate) fn run(args: ActionBiasArgs) -> Result<(), ActionBiasError> {
             end,
             cutoff,
             output,
+            producer_source,
+            producer_sha256,
         } => {
             let start_ms = midnight(&start)?;
             let end_ms = midnight(&end)?;
             let cutoff_ms = midnight(&cutoff)?;
             validate_window(start_ms, end_ms, cutoff_ms)?;
-            export(&identity, &store, start_ms, end_ms, cutoff_ms, &output)
+            export(
+                &identity,
+                &store,
+                start_ms,
+                end_ms,
+                cutoff_ms,
+                &output,
+                producer_pin(producer_source, producer_sha256)?.as_ref(),
+            )
         }
-        ActionBiasCommand::Recount { input, output } => {
-            let recount = recount(&identity, &input)?;
+        ActionBiasCommand::Recount {
+            input,
+            output,
+            producer_source,
+            producer_sha256,
+        } => {
+            let recount = recount(
+                &identity,
+                &input,
+                producer_pin(producer_source, producer_sha256)?.as_ref(),
+            )?;
             let receipt = Receipt { identity, recount };
             let mut out = temporary_output(&output)?;
             serde_json::to_writer_pretty(out.as_file_mut(), &receipt)?;
             out.as_file_mut().write_all(b"\n")?;
             publish(out, &output)
         }
+    }
+}
+
+fn producer_pin(
+    source: Option<String>,
+    executable: Option<ContentHash>,
+) -> Result<Option<ProcessProducerPin>, ActionBiasError> {
+    match (source, executable) {
+        (None, None) => Ok(None),
+        (Some(source_revision), Some(executable_sha256))
+            if source_revision.len() == 40
+                && source_revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) =>
+        {
+            Ok(Some(ProcessProducerPin {
+                source_revision,
+                executable_sha256,
+            }))
+        }
+        _ => Err(ActionBiasError::Unqualified(Validation::ProducerPin)),
+    }
+}
+
+fn column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, ActionBiasError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn command_input(tool: &str, arguments: Option<&str>) -> CommandInput {
+    if tool != "shell" {
+        return CommandInput::NotShell;
+    }
+    let Some(arguments) = arguments else {
+        return CommandInput::Malformed;
+    };
+    match qq_core::classify_bench::parsed_shell_command(arguments) {
+        Some((text, _)) if text.len() > MAX_READ_COMMAND_BYTES => {
+            CommandInput::ClassifierRejected {
+                command_bytes: text.len() as u64,
+            }
+        }
+        Some((text, has_requested_env)) => CommandInput::Command {
+            text,
+            has_requested_env,
+        },
+        None => CommandInput::Malformed,
     }
 }
 
@@ -299,6 +414,7 @@ fn export(
     end_ms: i64,
     cutoff_ms: i64,
     output: &Path,
+    producer: Option<&ProcessProducerPin>,
 ) -> Result<(), ActionBiasError> {
     validate_window(start_ms, end_ms, cutoff_ms)?;
     let mut connection = Connection::open_with_flags(store, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -308,7 +424,7 @@ fn export(
     let schema: u16 = schema
         .parse()
         .map_err(|_| ActionBiasError::Unqualified(Validation::Metadata))?;
-    if !matches!(schema, 45 | 46) {
+    if !matches!(schema, 45..=50) {
         return Err(ActionBiasError::Unqualified(Validation::Metadata));
     }
     let store_id: String = transaction.query_row(
@@ -336,15 +452,37 @@ fn export(
         cutoff_ms,
         expected_records,
         exporter: identity.clone(),
+        producer: producer.cloned(),
     };
     let mut out = temporary_output(output)?;
     let mut digest = Sha256::new();
     write_line(out.as_file_mut(), &ExportLine::Header(header), &mut digest)?;
+    let receipt = if column_exists(&transaction, "tool_calls", "execution_context_json")? {
+        "t.execution_context_json"
+    } else {
+        "NULL"
+    };
+    let descriptor = if column_exists(&transaction, "runs", "plan_descriptor_json")? {
+        "r.plan_descriptor_json"
+    } else {
+        "NULL"
+    };
+    let plan_identity = if column_exists(&transaction, "runs", "plan_identity_json")? {
+        "r.plan_identity_json"
+    } else {
+        "NULL"
+    };
     let query = format!(
-        "WITH cohort AS (SELECT t.id,t.run_id,t.state,t.arguments_json {COHORT}) SELECT CASE WHEN length(CAST(id AS BLOB))=32 THEN id END,CASE WHEN length(CAST(run_id AS BLOB))=32 THEN run_id END,CASE WHEN state IN ('requested','awaiting_approval','running','completed','failed','denied','interrupted') THEN state END,length(CAST(arguments_json AS BLOB)),CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN CASE WHEN json_valid(arguments_json) THEN json_type(arguments_json,'$.command') END END,CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN arguments_json END FROM cohort ORDER BY id COLLATE BINARY"
+        "WITH cohort AS (SELECT t.id,t.run_id,t.state,t.name,t.arguments_json,{receipt} AS receipt,{descriptor} AS descriptor,{plan_identity} AS identity {COHORT}) SELECT CASE WHEN length(CAST(id AS BLOB))=32 THEN id END,CASE WHEN length(CAST(run_id AS BLOB))=32 THEN run_id END,CASE WHEN state IN ('requested','awaiting_approval','running','completed','failed','denied','interrupted') THEN state END,name,CASE WHEN length(CAST(arguments_json AS BLOB))<=?4 THEN arguments_json END,CASE WHEN length(CAST(receipt AS BLOB))<=?5 THEN receipt END,CASE WHEN length(CAST(descriptor AS BLOB))<=?4 THEN descriptor END,CASE WHEN length(CAST(identity AS BLOB))<=?5 THEN identity END,(COALESCE(length(CAST(arguments_json AS BLOB)),0)>?4)+2*(COALESCE(length(CAST(receipt AS BLOB)),0)>?5)+4*(COALESCE(length(CAST(descriptor AS BLOB)),0)>?4)+8*(COALESCE(length(CAST(identity AS BLOB)),0)>?5) FROM cohort ORDER BY id COLLATE BINARY"
     );
     let mut statement = transaction.prepare(&query)?;
-    let mut rows = statement.query(params![start_ms, end_ms, cutoff_ms, MAX_ARGUMENT_BYTES])?;
+    let mut rows = statement.query(params![
+        start_ms,
+        end_ms,
+        cutoff_ms,
+        MAX_ARGUMENT_BYTES,
+        16 * 1024
+    ])?;
     let mut records = 0;
     let mut last = None;
     while let Some(row) = rows.next()? {
@@ -363,28 +501,13 @@ fn export(
             return Err(ActionBiasError::Unqualified(Validation::Order));
         }
         last = Some(id);
-        let envelope_bytes: u64 = row.get(3)?;
-        if envelope_bytes > MAX_ARGUMENT_BYTES {
-            return Err(ActionBiasError::Unqualified(Validation::Envelope));
-        }
-        let command_type: Option<String> = row.get(4)?;
-        let command = if command_type.as_deref() != Some("text") {
-            CommandInput::Malformed
-        } else {
-            let arguments: String = row.get(5)?;
-            match qq_core::classify_bench::parsed_shell_command(&arguments) {
-                Some((text, _)) if text.len() > MAX_READ_COMMAND_BYTES => {
-                    CommandInput::ClassifierRejected {
-                        command_bytes: text.len() as u64,
-                    }
-                }
-                Some((text, has_requested_env)) => CommandInput::Command {
-                    text,
-                    has_requested_env,
-                },
-                None => CommandInput::Malformed,
-            }
-        };
+        let tool: String = row.get(3)?;
+        let arguments_json: Option<String> = row.get(4)?;
+        let execution_context_json: Option<String> = row.get(5)?;
+        let plan_descriptor_json: Option<String> = row.get(6)?;
+        let plan_identity_json: Option<String> = row.get(7)?;
+        let oversized_inputs: u8 = row.get(8)?;
+        let command = command_input(&tool, arguments_json.as_deref());
         write_line(
             out.as_file_mut(),
             &ExportLine::Call {
@@ -392,6 +515,12 @@ fn export(
                 run_id,
                 state,
                 command,
+                tool,
+                arguments_json,
+                execution_context_json,
+                plan_descriptor_json,
+                plan_identity_json,
+                oversized_inputs,
             },
             &mut digest,
         )?;
@@ -412,7 +541,11 @@ fn export(
     publish(out, output)
 }
 
-fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBiasError> {
+fn recount(
+    identity: &BuildIdentity,
+    input: &Path,
+    producer: Option<&ProcessProducerPin>,
+) -> Result<Recount, ActionBiasError> {
     let mut reader = BufReader::new(File::open(input)?);
     let mut bytes = Vec::new();
     let mut header = None;
@@ -423,6 +556,17 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
     let mut malformed = 0;
     let mut environment_disqualified = 0;
     let mut last = None;
+    let (
+        mut shell_calls,
+        mut exec_calls,
+        mut verified_reads,
+        mut work,
+        mut unqualified,
+        mut oversized,
+        mut unsupported_v1,
+    ) = (0, 0, 0, 0, 0, 0, 0);
+    let mut evidence_counts = BTreeMap::new();
+    let mut recorded_work = 0;
     loop {
         bytes.clear();
         let count = (&mut reader)
@@ -440,8 +584,11 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
         let line: ExportLine = serde_json::from_slice(&bytes)?;
         match line {
             ExportLine::Header(value) if header.is_none() && total == 0 => {
-                if value.format != FORMAT || !matches!(value.schema, 45 | 46) {
+                if value.format != FORMAT || !matches!(value.schema, 45..=50) {
                     return Err(ActionBiasError::Unqualified(Validation::Metadata));
+                }
+                if value.producer.as_ref() != producer {
+                    return Err(ActionBiasError::Unqualified(Validation::ProducerPin));
                 }
                 if value.exporter != *identity {
                     return Err(ActionBiasError::Unqualified(Validation::ExportIdentity));
@@ -452,7 +599,63 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                 }
                 header = Some(value);
             }
-            ExportLine::Call { id, command, .. } if header.is_some() => {
+            ExportLine::Call {
+                id,
+                state,
+                command,
+                tool,
+                arguments_json,
+                execution_context_json,
+                plan_descriptor_json,
+                plan_identity_json,
+                oversized_inputs,
+                ..
+            } if header.is_some() => {
+                if !matches!(tool.as_str(), "shell" | "exec")
+                    || oversized_inputs > 15
+                    || command != command_input(&tool, arguments_json.as_deref())
+                {
+                    return Err(ActionBiasError::Unqualified(Validation::Call));
+                }
+                for (bit, value, limit) in [
+                    (1, arguments_json.as_ref(), 256 * 1024),
+                    (2, execution_context_json.as_ref(), 16 * 1024),
+                    (4, plan_descriptor_json.as_ref(), 256 * 1024),
+                    (8, plan_identity_json.as_ref(), 16 * 1024),
+                ] {
+                    if value.is_some_and(|value| value.len() > limit)
+                        || (oversized_inputs & bit != 0 && value.is_some())
+                    {
+                        return Err(ActionBiasError::Unqualified(Validation::RecordBound));
+                    }
+                }
+                shell_calls += u64::from(tool == "shell");
+                exec_calls += u64::from(tool == "exec");
+                oversized += u64::from(oversized_inputs != 0);
+                let qualification = validate_process_evidence(
+                    id,
+                    state,
+                    &tool,
+                    arguments_json.as_deref(),
+                    execution_context_json.as_deref(),
+                    plan_descriptor_json.as_deref(),
+                    plan_identity_json.as_deref(),
+                    producer,
+                );
+                *evidence_counts.entry(qualification).or_insert(0) += 1;
+                recorded_work += u64::from(recorded_work_receipt(
+                    state,
+                    execution_context_json.as_deref(),
+                ));
+                match qualification {
+                    ProcessEvidenceStatus::VerifiedRead => verified_reads += 1,
+                    ProcessEvidenceStatus::RecordedWork => work += 1,
+                    ProcessEvidenceStatus::UnsupportedV1 => {
+                        unsupported_v1 += 1;
+                        unqualified += 1;
+                    }
+                    _ => unqualified += 1,
+                }
                 if total >= MAX_RECORDS
                     || total >= header.as_ref().expect("header checked").expected_records
                 {
@@ -481,6 +684,7 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                         rejected += 1;
                     }
                     CommandInput::Malformed => malformed += 1,
+                    CommandInput::NotShell => {}
                 }
             }
             ExportLine::Footer {
@@ -508,8 +712,24 @@ fn recount(identity: &BuildIdentity, input: &Path) -> Result<Recount, ActionBias
                     classifier_rejected: rejected,
                     malformed_commands: malformed,
                     environment_disqualified,
-                    lexical_read_share: reads as f64 / total as f64,
+                    lexical_read_share: if shell_calls == 0 {
+                        0.0
+                    } else {
+                        reads as f64 / shell_calls as f64
+                    },
+                    shell_calls,
+                    exec_calls,
+                    verified_read_calls: verified_reads,
+                    qualified_recorded_work_calls: work,
+                    unqualified_calls: unqualified,
+                    oversized_input_calls: oversized,
+                    unsupported_v1_calls: unsupported_v1,
+                    execution_context_qualified: unqualified == 0 && producer.is_some(),
+                    verified_read_share: (unqualified == 0 && producer.is_some())
+                        .then_some(verified_reads as f64 / total as f64),
                     execution_effects_qualified: false,
+                    recorded_work_calls: recorded_work,
+                    execution_evidence_counts: evidence_counts,
                 });
             }
             _ => return Err(ActionBiasError::Unqualified(Validation::Framing)),
@@ -564,7 +784,7 @@ mod tests {
     fn call(connection: &Connection, index: u8, run: u8, state: &str, arguments: &str) {
         connection
             .execute(
-                "INSERT INTO tool_calls VALUES (?1,?2,?3,'shell',?4)",
+                "INSERT INTO tool_calls(id,run_id,state,name,arguments_json) VALUES (?1,?2,?3,'shell',?4)",
                 params![
                     ToolCallId::from_bytes([index; 16]).to_string(),
                     RunId::from_bytes([run; 16]).to_string(),
@@ -573,6 +793,222 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    struct NeverProvider;
+    impl qq_provider::Provider for NeverProvider {
+        fn stream(&self, _: qq_provider::ModelRequest) -> qq_provider::ProviderStream {
+            panic!("qualification never calls a provider")
+        }
+    }
+
+    #[test]
+    fn ab6_format3_requires_independent_producer_pins_and_revalidates_both_process_tools() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        connection.execute_batch("UPDATE metadata SET value='50' WHERE key='schema_version'; ALTER TABLE tool_calls ADD COLUMN execution_context_json TEXT; ALTER TABLE runs ADD COLUMN plan_descriptor_json TEXT; ALTER TABLE runs ADD COLUMN plan_identity_json TEXT;").unwrap();
+        let image = qq_core::ApprovedReadImage {
+            family: qq_core::ReadImageFamily::Grep,
+            sha256: ContentHash::from_bytes([7; 32]),
+            contract: qq_core::ReadImageContract::SelfContainedReadV1,
+        };
+        let images = qq_core::ApprovedReadImages::new(vec![image.clone()]).unwrap();
+        let runtime = qq_core::Runtime::new(NeverProvider, "test", 256)
+            .unwrap()
+            .with_approved_read_images(images);
+        let plan = qq_core::plan::CompiledAgentPlan::compile_blocking(
+            qq_core::plan::AgentProfile::embedded(
+                &runtime,
+                fs::canonicalize(directory.path()).unwrap(),
+            ),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2",
+                params![
+                    serde_json::to_string(plan.descriptor()).unwrap(),
+                    serde_json::to_string(&plan.identity()).unwrap()
+                ],
+            )
+            .unwrap();
+        let pin = ProcessProducerPin {
+            source_revision: "a".repeat(40),
+            executable_sha256: ContentHash::from_bytes([8; 32]),
+        };
+        let exec_arguments = r#"{"program":"/usr/bin/grep","args":["x","f"],"cwd":null,"stdin":null,"timeout_seconds":null,"env":[]}"#;
+        let shell_arguments = r#"{"command":"pwd","cwd":null,"timeout_seconds":null,"env":[]}"#;
+        let mut receipts = Vec::new();
+        for (index, tool, arguments, verdict) in [
+            (
+                1,
+                "exec",
+                exec_arguments,
+                serde_json::json!({"kind":"verified_read","family":"grep","sealed_image_sha256":image.sha256}),
+            ),
+            (
+                2,
+                "shell",
+                shell_arguments,
+                serde_json::json!({"kind":"work","reason":"shell"}),
+            ),
+        ] {
+            let id = ToolCallId::from_bytes([index; 16]);
+            let receipt = serde_json::json!({"version":"2","facts":{"context_id":id,"arguments_sha256":ContentHash::from_bytes(Sha256::digest(arguments.as_bytes()).into()),"manifest_sha256":plan.descriptor().approved_read_images.unwrap(),"base_env_present":1,"requested_env":false,"locale":"c","cwd":{"kind":"held_directory","device":1,"inode":2},"verdict":verdict,"pid":11},"manifest":[image.clone()],"policy_sha256":qq_core::classify_bench::process_policy_digest(),"producer":{"instance":ToolCallId::from_bytes([9;16]),"source":{"status":"clean","revision":pin.source_revision},"executable_sha256":pin.executable_sha256,"platform":format!("{}-{}",std::env::consts::ARCH,std::env::consts::OS)}});
+            connection.execute("INSERT INTO tool_calls(id,run_id,state,name,arguments_json,execution_context_json) VALUES (?1,?2,'completed',?3,?4,?5)",params![id.to_string(),RunId::from_bytes([1;16]).to_string(),tool,arguments,receipt.to_string()]).unwrap();
+            receipts.push(receipt);
+        }
+        let path = directory.path().join("v2.jsonl");
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &path,
+            Some(&pin),
+        )
+        .unwrap();
+        let result = recount(&test_identity(), &path, Some(&pin)).unwrap();
+        assert_eq!(
+            (
+                result.total_calls,
+                result.shell_calls,
+                result.exec_calls,
+                result.verified_read_calls,
+                result.qualified_recorded_work_calls,
+                result.recorded_work_calls
+            ),
+            (2, 1, 1, 1, 1, 1)
+        );
+        assert!(result.execution_context_qualified);
+        assert_eq!(result.verified_read_share, Some(0.5));
+        assert!(
+            !result.execution_effects_qualified,
+            "Work is not proof of mutation"
+        );
+        assert!(matches!(
+            recount(&test_identity(), &path, None),
+            Err(ActionBiasError::Unqualified(Validation::ProducerPin))
+        ));
+        let mut wrong = pin.clone();
+        wrong.executable_sha256 = ContentHash::from_bytes([6; 32]);
+        assert!(recount(&test_identity(), &path, Some(&wrong)).is_err());
+        let original = fs::read_to_string(&path).unwrap();
+        for call_index in [1, 2] {
+            for state in [
+                "requested",
+                "awaiting_approval",
+                "running",
+                "denied",
+                "interrupted",
+            ] {
+                let mut lines = original
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .collect::<Vec<_>>();
+                lines[call_index]["state"] = state.into();
+                let mut bytes = Vec::new();
+                for line in &lines[..lines.len() - 1] {
+                    serde_json::to_writer(&mut bytes, line).unwrap();
+                    bytes.push(b'\n');
+                }
+                lines.last_mut().unwrap()["snapshot_sha256"] =
+                    format!("{:x}", Sha256::digest(&bytes)).into();
+                serde_json::to_writer(&mut bytes, lines.last().unwrap()).unwrap();
+                bytes.push(b'\n');
+                let altered = directory
+                    .path()
+                    .join(format!("state-{call_index}-{state}.jsonl"));
+                fs::write(&altered, bytes).unwrap();
+                let result = recount(&test_identity(), &altered, Some(&pin)).unwrap();
+                assert_eq!(result.total_calls, 2);
+                assert!(
+                    !result.execution_context_qualified,
+                    "{state} cannot qualify settled process evidence"
+                );
+                assert_eq!(result.unqualified_calls, 1);
+            }
+        }
+        let mut legacy = receipts[1]["facts"].clone();
+        legacy["version"] = "1".into();
+        connection
+            .execute(
+                "UPDATE tool_calls SET execution_context_json=?1 WHERE name='shell'",
+                [legacy.to_string()],
+            )
+            .unwrap();
+        let legacy_path = directory.path().join("v1.jsonl");
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &legacy_path,
+            Some(&pin),
+        )
+        .unwrap();
+        let result = recount(&test_identity(), &legacy_path, Some(&pin)).unwrap();
+        assert_eq!(result.unsupported_v1_calls, 1);
+        assert_eq!(
+            result.recorded_work_calls, 1,
+            "V1 retains its recorded accounting verdict"
+        );
+        assert!(!result.execution_context_qualified);
+        assert!(result.verified_read_share.is_none());
+    }
+
+    #[test]
+    fn ab6_format3_bounds_each_sql_input_without_dropping_the_call() {
+        for (field, limit, bit) in [
+            ("arguments_json", 256 * 1024, 1),
+            ("execution_context_json", 16 * 1024, 2),
+            ("plan_descriptor_json", 256 * 1024, 4),
+            ("plan_identity_json", 16 * 1024, 8),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (store, connection) = fixture(directory.path());
+            call(&connection, 1, 1, "failed", r#"{"command":"pwd"}"#);
+            connection.execute_batch("UPDATE metadata SET value='50' WHERE key='schema_version'; ALTER TABLE tool_calls ADD COLUMN execution_context_json TEXT; ALTER TABLE runs ADD COLUMN plan_descriptor_json TEXT; ALTER TABLE runs ADD COLUMN plan_identity_json TEXT;").unwrap();
+            let table = if field.starts_with("plan_") {
+                "runs"
+            } else {
+                "tool_calls"
+            };
+            connection
+                .execute(
+                    &format!("UPDATE {table} SET {field}=?1"),
+                    ["x".repeat(limit + 1)],
+                )
+                .unwrap();
+            let path = directory.path().join("bounded.jsonl");
+            export(
+                &test_identity(),
+                &store,
+                DAY_MS,
+                2 * DAY_MS,
+                3 * DAY_MS,
+                &path,
+                None,
+            )
+            .unwrap();
+            let result = recount(&test_identity(), &path, None).unwrap();
+            assert_eq!(
+                (
+                    result.total_calls,
+                    result.oversized_input_calls,
+                    result.unqualified_calls
+                ),
+                (1, 1, 1)
+            );
+            assert!(result.verified_read_share.is_none());
+            let line: serde_json::Value =
+                serde_json::from_str(fs::read_to_string(&path).unwrap().lines().nth(1).unwrap())
+                    .unwrap();
+            assert_eq!(line["oversized_inputs"], bit);
+            assert!(line[field].is_null());
+        }
     }
 
     #[test]
@@ -640,6 +1076,7 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &export_path,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -647,7 +1084,7 @@ mod tests {
             before,
             "export must not migrate or modify the database"
         );
-        let result = recount(&test_identity(), &export_path).unwrap();
+        let result = recount(&test_identity(), &export_path, None).unwrap();
         assert_eq!(
             (
                 result.total_calls,
@@ -672,13 +1109,14 @@ mod tests {
                 DAY_MS,
                 2 * DAY_MS,
                 3 * DAY_MS,
-                &export_path
+                &export_path,
+                None
             )
             .is_err(),
             "existing exports must not be overwritten"
         );
         assert_eq!(
-            recount(&test_identity(), &export_path)
+            recount(&test_identity(), &export_path, None)
                 .unwrap()
                 .snapshot_sha256,
             result.snapshot_sha256
@@ -719,9 +1157,10 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        let result = recount(&test_identity(), &path).unwrap();
+        let result = recount(&test_identity(), &path, None).unwrap();
         assert_eq!(
             (
                 result.total_calls,
@@ -767,9 +1206,13 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        assert_eq!(recount(&test_identity(), &path).unwrap().total_calls, 1);
+        assert_eq!(
+            recount(&test_identity(), &path, None).unwrap().total_calls,
+            1
+        );
     }
 
     #[test]
@@ -802,9 +1245,10 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        let result = recount(&test_identity(), &path).unwrap();
+        let result = recount(&test_identity(), &path, None).unwrap();
         assert_eq!((result.total_calls, result.read_calls), (1, 0));
     }
 
@@ -821,11 +1265,12 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-        assert_eq!(header["format"], 2);
+        assert_eq!(header["format"], 3);
         for field in [
             "source_commit",
             "classifier_source_sha256",
@@ -856,6 +1301,8 @@ mod tests {
                 end: "1970-01-03".to_owned(),
                 cutoff: "1970-01-04".to_owned(),
                 output: output.clone(),
+                producer_source: None,
+                producer_sha256: None,
             },
         });
         assert!(matches!(
@@ -884,9 +1331,13 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        assert_eq!(recount(&test_identity(), &path).unwrap().read_calls, 0);
+        assert_eq!(
+            recount(&test_identity(), &path, None).unwrap().read_calls,
+            0
+        );
         let original = fs::read_to_string(&path).unwrap();
         for field in [
             "source_commit",
@@ -926,7 +1377,7 @@ mod tests {
             bytes.push(b'\n');
             let bad = directory.path().join(format!("{field}.jsonl"));
             fs::write(&bad, bytes).unwrap();
-            let error = recount(&test_identity(), &bad).unwrap_err();
+            let error = recount(&test_identity(), &bad, None).unwrap_err();
             match field {
                 "missing" | "missing_env" => assert!(matches!(error, ActionBiasError::Json(_))),
                 "format" => assert!(matches!(
@@ -964,9 +1415,10 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        let result = recount(&test_identity(), &path).unwrap();
+        let result = recount(&test_identity(), &path, None).unwrap();
         assert_eq!(
             (
                 result.total_calls,
@@ -998,9 +1450,10 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
-        let counted = recount(&test_identity(), &path).unwrap();
+        let counted = recount(&test_identity(), &path, None).unwrap();
         assert_eq!((counted.read_calls, counted.classifier_rejected), (1, 0));
         call(
             &connection,
@@ -1011,18 +1464,21 @@ mod tests {
                 .to_string(),
         );
         let overflow = directory.path().join("overflow.jsonl");
-        assert!(matches!(
-            export(
-                &test_identity(),
-                &store,
-                DAY_MS,
-                2 * DAY_MS,
-                3 * DAY_MS,
-                &overflow
-            ),
-            Err(ActionBiasError::Unqualified(Validation::Envelope))
-        ));
-        assert!(!overflow.exists());
+        export(
+            &test_identity(),
+            &store,
+            DAY_MS,
+            2 * DAY_MS,
+            3 * DAY_MS,
+            &overflow,
+            None,
+        )
+        .unwrap();
+        let counted = recount(&test_identity(), &overflow, None).unwrap();
+        assert_eq!(counted.total_calls, 2);
+        assert_eq!(counted.oversized_input_calls, 1);
+        assert!(!counted.execution_context_qualified);
+        assert!(counted.verified_read_share.is_none());
     }
 
     #[test]
@@ -1045,6 +1501,7 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
         let original = fs::read_to_string(&path).unwrap();
@@ -1062,14 +1519,14 @@ mod tests {
             let bad_path = directory.path().join(name);
             fs::write(&bad_path, bad).unwrap();
             assert!(
-                recount(&test_identity(), &bad_path).is_err(),
+                recount(&test_identity(), &bad_path, None).is_err(),
                 "accepted {name}"
             );
         }
         let huge = directory.path().join("huge");
         fs::write(&huge, vec![b'x'; MAX_RECORD_BYTES + 1]).unwrap();
         assert!(matches!(
-            recount(&test_identity(), &huge),
+            recount(&test_identity(), &huge, None),
             Err(ActionBiasError::Unqualified(Validation::RecordBound))
         ));
     }
@@ -1093,6 +1550,7 @@ mod tests {
             2 * DAY_MS,
             3 * DAY_MS,
             &path,
+            None,
         )
         .unwrap();
         assert!(
@@ -1101,6 +1559,9 @@ mod tests {
                 .split(|byte| *byte == b'\n')
                 .all(|line| line.len() < MAX_RECORD_BYTES)
         );
-        assert_eq!(recount(&test_identity(), &path).unwrap().total_calls, 1);
+        assert_eq!(
+            recount(&test_identity(), &path, None).unwrap().total_calls,
+            1
+        );
     }
 }

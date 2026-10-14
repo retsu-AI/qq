@@ -739,3 +739,15 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - AB2 owns `runtime/checkpoint.rs` for shared feedback/correction-notice bounds.
   Checkpoint-enabled tool history without the exact barrier fails only its
   reservation; recorded descriptor identity avoids per-turn archive scans.
+
+### 2026-10-14 — AB6 expanded execution-context ownership
+
+- User authorizes producer/context capture and verification, with historical
+  qualification unavailable. Root owns qq-core/build.rs/Cargo.toml, existing
+  tools/process_context.rs and its evidence/provenance children, process
+  dispatch/shell wiring, runtime/plan producer propagation, manifest caching,
+  receipt persistence tests and root RuntimeFactory source wiring.
+- Existing schema50 receipt column remains16KiB; no wire/descriptor/schema bump.
+  xtask format3 retains bounded shell+exec arguments/receipt/descriptor/identity
+  and uses one core validator with explicit deployed source/binary pins.
+  Private artifact handling and research acceptance gates remain explicit.

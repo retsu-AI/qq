@@ -7,10 +7,10 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In review | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Published e93c4e8a; exact projection and review repairs qualified; fresh hosted/Codex and performance open |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Nondraft; latest parent integration checks in progress; performance open |
-| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | In review | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Nondraft; verified-context integration checks in progress |
-| AB5 | Root stall report asks for the next change | In review | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Schema50 atomic migration qualified at c3618e8b; fresh parent grant repair, hosted review and performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | Merged (`62c65930`) | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | Merged (`62c65930`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Merged (`62c65930`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB5 | Root stall report asks for the next change | Merged (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
 | AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; context evidence and provenance format 3 in progress |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
 
@@ -1980,3 +1980,26 @@ newest last.
   concatenate receipts; code selects qualified main grant admission.
 - PR306 already targets main. Final source qualification precedes push and
   hosted conflict verification; current remote head still predates this merge.
+
+### 2026-10-14 — AB6 format3 bounded evidence qualification
+
+- Fourteen xtask qualification tests pass: shell+exec evidence, independent
+  producer pins, verified read versus recorded Work, V1 rejection, all states,
+  each SQL value bound/overflow with retained calls, no-clobber output, exact
+  parser validation, ordering/footer/build identity and worst escaping.
+- Format3 separates lexical shell share, verified context/read counts, recorded
+  Work accounting and closed coverage reasons. Missing/oversized/V1 evidence
+  leaves whole-cohort context qualification false and verified read share null.
+  Neither Work nor a NULL receipt is promoted to mutation/never-started proof.
+- Both passes use the same core validator and require externally pinned clean
+  runtime source/executable for new qualification. Final independent review,
+  integrated workspace/hosted checks, compatibility proof and measurements open.
+
+- Independent core post-repair review approves provenance propagation, requested
+  environment binding, cancellation/deadline contention and retryable capture.
+  Format3 review identifies ignored call state; a valid-footer state-tampering
+  regression reproduced qualification of a requested call. The shared validator
+  now requires Completed/Failed for V2; all other states stay in the denominator
+  with unsupported-call-state coverage. Both read and Work tampering cases pass.
+- Added concurrent producer capture coverage: simultaneous callers receive the
+  same complete cached identity. No observational or paid qualification claimed.

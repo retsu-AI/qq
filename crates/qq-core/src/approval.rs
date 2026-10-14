@@ -15,7 +15,7 @@ pub use rules::RuleId;
 #[doc(hidden)]
 pub mod bench_support {
     pub use crate::tools::process_context::{
-        ProcessEvidenceStatus, ProcessProducerPin, validate_process_evidence,
+        ProcessEvidenceStatus, ProcessProducerPin, recorded_work_receipt, validate_process_evidence,
     };
 
     pub fn process_policy_digest() -> qq_protocol::ContentHash {

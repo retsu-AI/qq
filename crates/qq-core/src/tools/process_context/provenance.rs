@@ -193,6 +193,33 @@ mod tests {
     }
 
     #[test]
+    fn ab6_concurrent_producer_capture_shares_one_complete_identity() {
+        let producer = Arc::new(ProcessProducer::new(&"a".repeat(40)));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let producer = Arc::clone(&producer);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    producer.capture(
+                        &ToolCancellation::new(crate::RunCancellation::new()),
+                        Instant::now() + std::time::Duration::from_secs(30),
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let mut results = handles.into_iter().map(|handle| handle.join().unwrap());
+        let first = results.next().unwrap();
+        let second = results.next().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.instance.is_some());
+        #[cfg(target_os = "linux")]
+        assert!(first.executable_sha256.is_some());
+    }
+
+    #[test]
     fn ab6_producer_source_is_closed_and_capture_is_shared() {
         let clean = ProcessProducer::new(&"a".repeat(40));
         let dirty = ProcessProducer::new(&format!("{}-dirty", "a".repeat(40)));

@@ -1,29 +1,18 @@
 # Action-bias qualification
 
 `cargo xtask action-bias` exports and recounts a fixed observation cohort without
-contacting a model or opening the migrating session runtime. The export reads
-one SQLite snapshot in read-only mode. It records the store ID, schema, UTC
-window and cutoff, every root prompt shell-call ID/run/state and command status,
-and a footer count and digest. Format 2 records the exporting build identity
-in the hashed header. Schema 45 and 46 are supported.
+contacting a model or opening the migrating session runtime. Export reads one
+SQLite snapshot in read-only mode. Format 3 records the store ID, schema, UTC
+window/cutoff, exporter identity, optional deployed producer pin, and every root
+prompt shell or exec call. Schemas 45 through 50 are supported.
 
 The start/end window is half-open. Cutoff is exactly end plus 24 hours; all three
-boundaries are UTC midnights and cutoff must have elapsed. Children, side
-questions, runs starting outside the window and runs not finished before cutoff
-are excluded. Root role uses persisted depth=0, so orphaning a child by
-deleting its parent cannot change the cohort. Every shell-call state in the cohort remains in the denominator.
-Missing command, unknown or duplicate fields and invalid typed shell envelopes
-(including cwd, timeout_seconds and env) are checked with the exact execution
-argument type and count as malformed.
-Typed commands retain a required has_requested_env flag; any explicit nonempty
-process environment counts as nonread, matching runtime progress classification.
-The receipt counts these separately from malformed input. Environment names and
-values are not exported. Malformed command input and commands provably rejected by the classifier's own
-byte ceiling count as nonreads. An oversized argument envelope that prevents
-inspection leaves the export unqualified rather than manufacturing a nonread.
+boundaries are UTC midnights and cutoff must have elapsed. Persisted depth=0
+identifies roots, including after a child loses its parent. Children, side
+questions, runs outside the window and runs not finished before cutoff are
+excluded. Every process-call state remains in the denominator.
 
-Build one immutable classifier executable for both baseline and candidate.
-The source must be committed and clean before building:
+Build one immutable exporter/recount executable from committed, clean source:
 
 ```sh
 QQ_ACTION_BIAS_SOURCE_SHA="<full source commit>" cargo build -p xtask --release
@@ -31,21 +20,19 @@ cp target/release/xtask /tmp/qq-action-bias-classifier
 sha256sum /tmp/qq-action-bias-classifier
 ```
 
-The compiled source identity covers the actual progress-read recognizer and
-its shared rules/bounds and the exact shell execution-envelope parser. Both
-commands require a pinned build identity, hash the running executable and
-record platform and architecture. Recount requires the exporter identity to
-equal its own before counting calls; old format-1 or identity-less exports
-must be regenerated. A valid footer cannot excuse a different exporter. The build commit label alone is not evidence; retain
-the clean source/build receipt and compare the executable and classifier-source
-hashes in both recount receipts. Linux hashes `/proc/self/exe`, so replacing a
-pathname cannot substitute a different image's hash for the running process.
+The exporter identity covers the actual recognizer, execution argument parser,
+receipt validator, image contracts, producer capture, descriptor encoding and
+build policy digest. Both commands hash their running executable and record
+platform/architecture. Recount requires the same exporter identity. Older export
+formats must be regenerated; a recomputed footer cannot excuse another exporter.
+Retain the clean source/build receipt. Linux hashes `/proc/self/exe`, so replacing
+an executable pathname cannot replace the running image's identity.
 
-Use the pinned executable for both exports and recounts. Explicitly select the
-store path reported by `qq config paths`; the following path is the Linux
-example. Outputs must be new files: the tool publishes them without overwriting
-existing artifacts. Keep exports local because they contain command text;
-commit only count/identity receipts appropriate for the project ledger.
+Select the store reported by `qq config paths`. Outputs must be new files and
+are published without overwriting artifacts. Exports contain raw argument,
+receipt and plan JSON, which can include sensitive request text. Keep them local;
+temporary artifacts use private permissions. Commit appropriate count/identity
+receipts only.
 
 ```sh
 /tmp/qq-action-bias-classifier action-bias export \
@@ -57,24 +44,62 @@ commit only count/identity receipts appropriate for the project ledger.
   --output /tmp/qq-action-bias-baseline-recount.json
 ```
 
-Each line is bounded to 128 KiB, typed inspection envelopes to 256 KiB and cohorts to one
-million calls. The export represents command strings only through the pinned
-classifier's 16 KiB input ceiling, retaining larger strings as provably rejected
-with their original byte count. Worst-case JSON escaping still fits the record
-bound. Recount rejects unknown fields, invalid identifiers/states, duplicate or
-out-of-order call IDs, missing/extra records, altered footer digests, mismatched
-counts, unsupported schemas and zero denominators. Any such error leaves the
-result unqualified.
+Without a producer pin, context qualification remains unavailable. To verify a
+new deployed cohort, establish the clean full source revision and executable
+SHA256 from the accepted build/deployment receipt. Supply the same independent
+pin to export and recount; do not derive it from the rows being evaluated:
 
-The recount reports `lexical_read_share` and sets
-`execution_effects_qualified=false`. This measures pinned command shape; inherited
-PATH/TMPDIR and executable identity are unavailable. A replacement `grep` or
-`sort -S1K` spilling inside inherited TMPDIR can write despite a recognized shape.
-Actual nonmutation remains unqualified. This receipt does not prove a treatment
-cohort or mark AB6 accepted. The candidate observation window requires AB1–AB5 on main,
-installation of one pinned runtime build, retirement of prior writers and
-verifiable build provenance for every included run. A merge date or prompt version
-alone cannot prove the treatment. Mixed or unverifiable runtime builds leave
-the candidate window unqualified. Qualification also needs the research
-appendix's other metrics, canonical persisted read identity and instruction
-coverage evidence. Paid evaluations require ENG-809 authorization.
+```sh
+/tmp/qq-action-bias-classifier action-bias export \
+  --store "$HOME/.local/share/qq/sessions.sqlite3" \
+  --start 2026-10-15 --end 2026-10-22 --cutoff 2026-10-23 \
+  --producer-source "<accepted clean full source revision>" \
+  --producer-sha256 "<accepted runtime executable SHA256>" \
+  --output /tmp/qq-action-bias-candidate.jsonl
+/tmp/qq-action-bias-classifier action-bias recount \
+  --input /tmp/qq-action-bias-candidate.jsonl \
+  --producer-source "<same accepted clean full source revision>" \
+  --producer-sha256 "<same accepted runtime executable SHA256>" \
+  --output /tmp/qq-action-bias-candidate-recount.json
+```
+
+V2 execution receipts bind the actual tool-call ID and canonical arguments to
+captured process inputs. They retain the bounded canonical approved-image
+manifest, its descriptor-bound digest, the compiled execution policy hash and
+producer instance/source/running image identity. Export and recount use the same
+core validator. VerifiedRead additionally requires image-family/hash membership,
+held-directory identity, a supported locale, empty requested environment and
+admitted argv. Recorded Work is an accounting verdict, not proof of mutation.
+Producer identity is shared across plans and children; executable hashing occurs
+once on bounded process-preparation workers. Cancelled or expired capture can
+retry. Unknown or dirty source cannot satisfy a clean deployed producer pin.
+
+Each line is bounded to 4 MiB and cohorts to one million calls. Before copying
+SQLite values, export bounds arguments/descriptor JSON to 256 KiB each and
+receipt/plan identity JSON to 16 KiB each. Oversized fields remain explicit
+coverage gaps on retained calls. Recount rechecks these bounds, lexical command
+consistency, identifiers/states, strict call ordering, count and header-inclusive
+footer digest. Unknown fields, incomplete exports, duplicate/extra records,
+unsupported schemas or altered identities fail qualification.
+
+`lexical_read_share` measures validated shell command shape over shell calls.
+Invalid timeout/cwd/env/command envelopes count as malformed, and explicitly
+requested environments remain nonreads. Exec calls are counted separately.
+`verified_read_calls` and `qualified_recorded_work_calls` require complete V2
+proof and the independent producer pin. `execution_evidence_counts` explains
+coverage gaps. `recorded_work_calls` retains valid recorded Work verdicts even
+from V1, without promoting them to qualified evidence. The overall
+`execution_context_qualified` flag requires coverage for every included call;
+`verified_read_share` remains null otherwise. `execution_effects_qualified` stays
+false: these receipts do not prove which mutations occurred.
+
+Historical NULL/V1 receipts cannot recover inherited PATH/TMPDIR or producer
+provenance and remain unqualified. No current manifest or build identity is
+attached retrospectively. A missing receipt does not prove a process never ran.
+
+A tooling receipt does not establish the seven-day treatment cohort or mark AB6
+research accepted. Observation requires one pinned deployed runtime build,
+retirement of earlier writers, seven complete UTC days and the research appendix's
+other metrics, read identity and instruction coverage evidence. Mixed or
+unverifiable producers leave the cohort unqualified. Paid evaluations require
+ENG-809 authorization.

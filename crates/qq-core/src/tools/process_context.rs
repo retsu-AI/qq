@@ -1,7 +1,9 @@
 mod evidence;
 mod provenance;
 
-pub use evidence::{ProcessEvidenceStatus, ProcessProducerPin, validate_process_evidence};
+pub use evidence::{
+    ProcessEvidenceStatus, ProcessProducerPin, recorded_work_receipt, validate_process_evidence,
+};
 
 pub use provenance::ProcessProducer;
 

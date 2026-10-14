@@ -270,8 +270,15 @@ attempts do not consume the child-count or depth allowance. No wire shape change
 
 Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
 The process executor's receipt commits with its result and finished event;
-historical rows remain NULL and cannot qualify execution effects. No wire
-shape changes. Older binaries refuse the upgraded store at open.
+historical rows remain NULL and cannot qualify execution context. No wire
+shape changes. Older binaries refuse the upgraded store at open. Receipt V2
+uses the existing16KiB column: it binds the actual call ID and canonical
+arguments, retains the bounded approved-image manifest and policy digest, and
+records shared producer instance/source/running executable identity. V1 remains
+decodable for recorded accounting; qualification requires V2 and independent
+clean source/binary pins. Readers replaying tools ignore receipt JSON, so V2
+requires no new store schema or descriptor encoding. Work does not attest
+mutation, and absent evidence does not establish that execution never began.
 
 Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
 2 MiB. It commits the exact ordered model-facing tool replies and optional

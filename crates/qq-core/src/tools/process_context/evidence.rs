@@ -1,4 +1,4 @@
-use qq_protocol::{ContentHash, RunPlanIdentity, ToolCallId};
+use qq_protocol::{ContentHash, RunPlanIdentity, ToolCallId, ToolCallState};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -201,6 +201,7 @@ mod tests {
         let verify = |proof: &ExecutionContextProof, call| {
             validate_process_evidence(
                 call,
+                ToolCallState::Completed,
                 "exec",
                 Some(arguments),
                 Some(&serde_json::to_string(&ExecutionContextReceipt::V2(proof.clone())).unwrap()),
@@ -218,6 +219,7 @@ mod tests {
         assert_eq!(
             validate_process_evidence(
                 id,
+                ToolCallState::Completed,
                 "exec",
                 Some(arguments),
                 Some(&json),
@@ -230,6 +232,7 @@ mod tests {
         assert_eq!(
             validate_process_evidence(
                 id,
+                ToolCallState::Completed,
                 "exec",
                 Some(arguments),
                 None,
@@ -244,6 +247,7 @@ mod tests {
         assert_eq!(
             validate_process_evidence(
                 id,
+                ToolCallState::Completed,
                 "exec",
                 Some(arguments),
                 Some(&legacy),
@@ -260,6 +264,7 @@ mod tests {
         assert_eq!(
             validate_process_evidence(
                 id,
+                ToolCallState::Completed,
                 "exec",
                 Some(contradictory_args),
                 Some(&serde_json::to_string(&ExecutionContextReceipt::V2(contradictory)).unwrap()),
@@ -301,6 +306,7 @@ mod tests {
         assert_eq!(
             validate_process_evidence(
                 id,
+                ToolCallState::Completed,
                 "exec",
                 Some(arguments),
                 Some(&json),
@@ -313,13 +319,14 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessEvidenceStatus {
     MissingArguments,
     InvalidArguments,
     MissingReceipt,
     UnsupportedV1,
+    UnsupportedCallState,
     InvalidReceipt,
     UnresolvedPlan,
     UnsupportedPolicy,
@@ -328,12 +335,29 @@ pub enum ProcessEvidenceStatus {
     VerifiedRead,
 }
 
+/// A recorded accounting verdict, independent of producer qualification. It
+/// establishes neither mutation nor historical execution provenance.
+pub fn recorded_work_receipt(state: ToolCallState, receipt: Option<&str>) -> bool {
+    if !matches!(state, ToolCallState::Completed | ToolCallState::Failed) {
+        return false;
+    }
+    let Some(receipt) = receipt.filter(|value| value.len() <= super::MAX_EXECUTION_CONTEXT_BYTES)
+    else {
+        return false;
+    };
+    match serde_json::from_str::<ExecutionContextReceipt>(receipt) {
+        Ok(receipt) => receipt.valid() && receipt.is_work(),
+        Err(_) => false,
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "bounded persisted inputs and the independently pinned producer are distinct evidence"
 )]
 pub fn validate_process_evidence(
     call_id: ToolCallId,
+    state: ToolCallState,
     tool: &str,
     arguments: Option<&str>,
     receipt: Option<&str>,
@@ -360,6 +384,9 @@ pub fn validate_process_evidence(
     let ExecutionContextReceipt::V2(proof) = &receipt else {
         return Status::UnsupportedV1;
     };
+    if !matches!(state, ToolCallState::Completed | ToolCallState::Failed) {
+        return Status::UnsupportedCallState;
+    }
     if !receipt.bound_to(call_id, tool, arguments) {
         return Status::InvalidReceipt;
     }
