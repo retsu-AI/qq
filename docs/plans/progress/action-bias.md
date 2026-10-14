@@ -595,3 +595,41 @@ newest last.
   long-header pagination. long-cursor-final.log; independent review approves.
 - Read/write-only prompt guidance excludes absent anchor-edit semantics.
   Full integrated gates and matched performance remain pending.
+### 2026-10-14 — lazy fetch, operation merge and timestamp regressions
+
+- Test-first hosted regressions reproduce Git history lazy fetching, JJ
+  operation reconciliation and file's explicit timestamp restoration as false
+  reads. The same fixture requires Unix sed's literal last-line address.
+- Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
+  confirms the side effects. Constrain canonical Git reads, classify JJ as
+  work, and exclude timestamp-restoring file modes; approval unchanged.
+
+- Nine focused fixtures pass after lazy-fetch/operation/timestamp repairs.
+  Additional test-first Git --help case reproduces a false read: repository
+  help settings may launch a browser/helper. rev-parse and worktree listing
+  now use closed suffixes. Receipt git-help-red.log; final focused run next.
+
+### 2026-10-14 — ninth hosted plan review reconciliation
+
+- Instruction-scope qualification now requires the exact anchored basename
+  regex and JSON boolean regex=true. The fixed-window recount is 108 roots,
+  one scope/start, zero repeats; the 25-start substring proxy remains context.
+  The deterministic query fixture rejects NOTAGENTS, mistyped regex flags,
+  literal searches and continuation pages; anchored-scope-query.json.
+- AB1 acceptance requires --no-lazy-fetch, closed Git inspection forms,
+  JJ classified as work and file preserve-date excluded. AB4 records version
+  21; historical 19/20 are AB2 treatment labels on the same accepted runtime.
+- Coverage, matched performance, final classifier recount and deployed
+  candidate observation remain open; no deployment or paid calls performed.
+
+- Docs truth passes 23 tests; formatting and diff checks pass. Independent
+  review caught and corrected the branch-list acceptance example's missing
+  no-lazy-fetch switch. Source is unchanged; slice-specific source gates
+  remain tracked independently.
+
+
+- Immutable integrated source 007d6728 passes 2,282 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
+  Ten focused classifier fixtures pass; independent source review approves.
+  Matched performance and final hosted review remain open.
