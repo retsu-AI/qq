@@ -1147,3 +1147,13 @@ newest last.
   115873674638, executes ab3_native_unicode_header_preserves_repaired_read_windows:
   one passed, zero failed, then completes the entire teardown job successfully.
   Matched performance and final hosted review remain open.
+
+
+- Immutable integrated AB6.1 source 196cd9fe passes 2,343 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab6-2026-10-14/final-envelope-integrated-
+  gate-{0,1,2,3}.log. Thirteen qualification fixtures cover exact execution
+  envelopes, immutable exporter identity, orphaned-child exclusion and
+  required environment disqualification metadata. Independent review approves.
+  New upstream review findings, final pinned baseline recount, matched
+  performance and the deployed seven-day candidate cohort remain open.
