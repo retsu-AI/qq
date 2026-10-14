@@ -215,3 +215,7 @@ newest last.
   assertions under inherited `NO_COLOR=1`. The same compiled binary passes
   all render tests (6) and highlighted-frame test (1) with NO_COLOR removed.
   Re-run full gates with that test environment; no TUI code change needed.
+- Final v20 source before basename follow-up: 2,282 passed, 0 failed,
+  14 ignored; fmt/Clippy/build exit 0. Independent review approved identities
+  and child contracts. Third hosted plan review requires exact-basename
+  instruction search; added NOTAGENTS.md rejection, requalification next.
