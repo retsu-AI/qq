@@ -703,3 +703,67 @@ fn image_mime(path: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {
+        // Valid Windows component/UTF-16 lengths can exceed the UTF-8 line cap.
+        let path = format!(
+            "SECRET={}/f.txt",
+            std::iter::repeat_n("界".repeat(100), 110)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = vec![b'\n'; 5_000];
+        let hash = content_hash(&bytes);
+        let loaded = Loaded {
+            path,
+            size: bytes.len() as u64,
+            bytes,
+            hash: Some(hash.clone()),
+            perms: "rw".to_owned(),
+        };
+        let mut output = lines(
+            &loaded,
+            &hash[..SHORT_HASH_LEN],
+            5_000,
+            &[Range {
+                start: 1,
+                end: 5_000,
+            }],
+            true,
+            HeaderNotes {
+                offset_ignored: false,
+                argument_note_bytes: " note=cwd_ignored".len(),
+            },
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        );
+        let end = output.text.find('\n').unwrap();
+        assert!(end > READ_BOUNDS.max_bytes);
+        // This raw header requires the dispatch convention's separate note row.
+        output.text.insert_str(end, "\nnote=cwd_ignored");
+        let bounded = super::super::ToolOutput::bounded(output.text, &output.bounds, false);
+        assert!(
+            bounded.spill.is_none(),
+            "the contiguous window must survive the extra row"
+        );
+        let rows = bounded
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+            })
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty());
+        assert_eq!(rows, (1..=rows.len()).collect::<Vec<_>>());
+        assert!(
+            bounded
+                .model_text
+                .contains(&format!("continue from offset={}", rows.len() + 1))
+        );
+    }
+}

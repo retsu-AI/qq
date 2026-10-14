@@ -852,3 +852,14 @@ newest last.
   target/qq-perf/ab3-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
   Masked-read behavior is unchanged by the qualified environment-aware upstream
   integration. Matched dispatch/output performance and hosted review stay open.
+
+
+### 2026-10-14 — native long-header repair-note rows
+
+- Source-supported Windows input can have >32KiB UTF-8 path bytes while
+  fitting its UTF-16/component limits. Credential masking shortens the header,
+  but dispatch may still add a separate repair-note row based on raw length.
+- Renderer/output-bound regression uses that valid metadata shape; a native
+  Windows public-dispatch regression checks all 5,000 blank rows exactly once.
+  Linux native paths reject this shape; native Windows execution remains a
+  separate hosted verification requirement.
