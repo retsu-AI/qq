@@ -8,7 +8,7 @@ newest last.
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft; performance qualification open |
 | AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; subset correction qualified, performance open |
-| AB3 | `read_file` window fills the byte budget; line-limit marker | In progress | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | `perf/eng-1040-ab3-read-window` | Correctness locally qualified; performance open |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | In review | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) (draft) | Latest parent integration checks in progress; performance open |
 | AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Planned | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | | After AB2; ADR-0059 reserved |
 | AB5 | Root stall report asks for the next change | Planned | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | | After AB1 |
 | AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
@@ -669,3 +669,7 @@ newest last.
   Fifteen focused AB2 fixtures pass; independent final review approves the
   depth/empty-directory continuation fix, instruction file-ignore handling
   and write-only contract. Matched performance and hosted review remain open.
+
+- Integrated accepted AB1 helper/exec fixes and AB2 discovery fixes with their
+  qualified receipts. AB3 production read-window behavior is unchanged; rerun
+  immutable workspace gates on the combined source before updating draft #303.
