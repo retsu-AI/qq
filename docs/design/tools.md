@@ -64,7 +64,8 @@ finds scoped instruction files once per discovery root, following cursor
 pages without restarting the same search. All targets use workspace-root discovery for nonignored ancestors; ignored
 targets also use their highest ignored ancestor with `include_ignored=true`,
 covering instructions within that subtree and multiple worktrees. Explicit paths reach
-ignored worktrees; only declared recall/spill tools appear in the read header. The prompt is
+ignored worktrees. Tool-specific header descriptions and working conventions
+are emitted only for declared tools, including restricted and no-tools profiles. The prompt is
 versioned in code, not user-editable configuration for now, so behavior
 changes ship as reviewed diffs rather than config drift. Each provider maps the
 field to its native system/instructions slot; no codec invents its own

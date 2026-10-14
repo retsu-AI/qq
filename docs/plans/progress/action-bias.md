@@ -317,3 +317,8 @@ newest last.
   stacked on #301. Fourth plan review identified fixed body conventions for
   omitted tools. Captured read_file-only/no-tools regression fails before
   correction (no-tools prompt still names read_file); test-first followup.
+- Custom-subset fix now renders builtin/file/command/instruction/recall
+  conventions from declared tools. Captured no-tools and read_file-only
+  requests pass; prompt tests 59 passed. Historical v14 prompt digest remains
+  unchanged after reversing only the reviewed v20 changes. Prefix fixture
+  5,299 bytes; schema unchanged. Single-tool matrix and final gates next.
