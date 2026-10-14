@@ -509,3 +509,10 @@ newest last.
   14 ignored; fmt, Clippy and build all exit0. Logs
   target/qq-perf/ab3-2026-10-14/header-final-gate-{0,1,2,3}.log.
   Matched performance and newer upstream integration remain open.
+
+- Integrated qualified AB3 read-window source837786c9 (merge b1a61680).
+  Added captured direct requests where an external host changes its grants
+  after compilation, testing both grant-removal and grant-addition directions.
+  Execution and declaration remain tied to the compiled snapshot; focused
+  regression passes without a production change. Final parent integration
+  and immutable workspace gates remain open.

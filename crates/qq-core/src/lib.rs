@@ -10172,6 +10172,7 @@ mod tests {
         read_only_hint: bool,
         /// Whether the host declares configuration grants for its tools.
         granted: bool,
+        live_granted: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl WideHost {
@@ -10183,6 +10184,7 @@ mod tests {
                 failure: None,
                 read_only_hint: false,
                 granted: true,
+                live_granted: None,
             }
         }
     }
@@ -10221,7 +10223,9 @@ mod tests {
         }
 
         fn config_grants(&self) -> Vec<String> {
-            if !self.granted {
+            if !self.live_granted.as_ref().map_or(self.granted, |granted| {
+                granted.load(std::sync::atomic::Ordering::SeqCst)
+            }) {
                 return Vec::new();
             }
             (0..self.count)
@@ -10658,6 +10662,55 @@ mod tests {
             })
             .await
             .unwrap();
+            let events = plan
+                .run(RunCommand::new("perform the requested operation"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
+        for granted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            let live_granted = Arc::new(std::sync::atomic::AtomicBool::new(granted));
+            host.live_granted = Some(Arc::clone(&live_granted));
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                    &runtime, workspace,
+                ))
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            live_granted.store(!granted, std::sync::atomic::Ordering::SeqCst);
             let events = plan
                 .run(RunCommand::new("perform the requested operation"))
                 .collect::<Vec<_>>()
