@@ -980,7 +980,7 @@ impl App {
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            let refreshes = self.sessions.replay_event(
+            let replayed = self.sessions.replay_event(
                 &event,
                 ReduceContext {
                     focused: self.view().transcript(),
@@ -991,17 +991,27 @@ impl App {
                     caused_by_me: false,
                 },
             );
-            if !refreshes.is_empty()
-                && let Some(index) = rewarmed_sessions
-                    .iter()
-                    .position(|session| *session == event.session_id)
-            {
-                // Live reduction could not refresh this receipt while cold.
-                // One latest body fetch covers every replayed terminal event.
-                rewarmed_sessions.swap_remove(index);
-                for request in refreshes {
-                    effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+            for effect in replayed {
+                match effect {
+                    StateEffect::RequestSnapshot(request) => {
+                        if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        } else if let Some(index) = rewarmed_sessions
+                            .iter()
+                            .position(|session| *session == event.session_id)
+                        {
+                            // One latest body fetch covers all retained terminal events.
+                            rewarmed_sessions.swap_remove(index);
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        }
+                    }
+                    structural => {
+                        effects.extend(self.apply_state_effects(std::iter::once(structural)))
+                    }
                 }
+            }
+            if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                self.refresh_session_picker();
             }
         }
         effects
@@ -1028,6 +1038,36 @@ impl App {
                 caused_by_me,
             },
         );
+        let effects = self.apply_state_effects(reduced);
+        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
+            && side_question.state != SideQuestionState::Running
+            && self
+                .acknowledged_side_questions
+                .get(&side_question.session_id)
+                == Some(&side_question.id)
+        {
+            self.acknowledged_side_questions
+                .remove(&side_question.session_id);
+        }
+        // Summaries and deletions reshape the tree the picker lists.
+        if matches!(
+            envelope.event,
+            SessionEvent::SessionCreated { .. }
+                | SessionEvent::SessionUpdated { .. }
+                | SessionEvent::SessionDeleted { .. }
+                | SessionEvent::PromptQueued { .. }
+                | SessionEvent::RunStarted { .. }
+                | SessionEvent::CancellationRequested { .. }
+                | SessionEvent::SessionCompacted { .. }
+                | SessionEvent::SessionCompactionRolledBack { .. }
+                | SessionEvent::RunFinished { .. }
+        ) {
+            self.refresh_session_picker();
+        }
+        effects
+    }
+
+    fn apply_state_effects(&mut self, reduced: impl IntoIterator<Item = StateEffect>) -> Effects {
         let mut effects = Effects::none();
         for effect in reduced {
             match effect {
@@ -1071,31 +1111,6 @@ impl App {
                     }
                 }
             }
-        }
-        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
-            && side_question.state != SideQuestionState::Running
-            && self
-                .acknowledged_side_questions
-                .get(&side_question.session_id)
-                == Some(&side_question.id)
-        {
-            self.acknowledged_side_questions
-                .remove(&side_question.session_id);
-        }
-        // Summaries and deletions reshape the tree the picker lists.
-        if matches!(
-            envelope.event,
-            SessionEvent::SessionCreated { .. }
-                | SessionEvent::SessionUpdated { .. }
-                | SessionEvent::SessionDeleted { .. }
-                | SessionEvent::PromptQueued { .. }
-                | SessionEvent::RunStarted { .. }
-                | SessionEvent::CancellationRequested { .. }
-                | SessionEvent::SessionCompacted { .. }
-                | SessionEvent::SessionCompactionRolledBack { .. }
-                | SessionEvent::RunFinished { .. }
-        ) {
-            self.refresh_session_picker();
         }
         effects
     }
