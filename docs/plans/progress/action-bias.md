@@ -1081,3 +1081,12 @@ newest last.
 - Native Windows proof for the final AB3 repair: run38576567373 at fbbb9985
   passes both zero-row and separate repair-note exact tests and completes
   the entire Windows teardown job successfully; wasm also passes.
+
+- 2026-10-14 AB4 write-child follow-up: a public read-only root fixture with
+  write_children configured reproduces the exposed write enum, while injected
+  writes remain policy-denied. Cache a restricted spawn declaration at plan
+  compilation and select it for read-only exposure; keep read delegation and
+  ordinary actionable declarations. Public green fixture passes. Advance prompt
+  identity 21 to 22, retaining golden historical 20/21 descriptors. Current
+  version-22 golden is c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92.
+  Full integrated qualification follows before publication.

@@ -225,6 +225,7 @@ pub struct ToolCatalog {
     /// Specs of the static tools, shared into every request under
     /// progressive exposure with no pins (the common case).
     static_specs: Arc<[ToolSpec]>,
+    read_only_spawn_spec: Option<ToolSpec>,
     /// Measurement of `static_specs`, computed once from the schemas already
     /// serialized at compile so a run start does not re-serialize them.
     static_measurement: ToolSchemaMeasurement,
@@ -254,11 +255,17 @@ pub(crate) struct StaticTool {
     pub(crate) spec: ToolSpec,
     pub(crate) host: ToolHost,
     pub(crate) effect: EffectClass,
+    pub(crate) read_only_spec: Option<ToolSpec>,
 }
 
 impl StaticTool {
     pub(crate) const fn new(spec: ToolSpec, host: ToolHost, effect: EffectClass) -> Self {
-        Self { spec, host, effect }
+        Self {
+            spec,
+            host,
+            effect,
+            read_only_spec: None,
+        }
     }
 }
 
@@ -274,7 +281,11 @@ impl ToolCatalog {
         let mut entries = Vec::with_capacity(static_tools.len() + 16);
         let mut names = BTreeSet::new();
         let mut static_order = Vec::with_capacity(static_tools.len());
+        let mut read_only_spawn_spec = None;
         for tool in static_tools {
+            if tool.host == ToolHost::SpawnAgent {
+                read_only_spawn_spec = tool.read_only_spec;
+            }
             names.insert(tool.spec.name().to_owned());
             static_order.push(entries.len());
             let schema_len = tool.spec.input_schema().get().len();
@@ -506,6 +517,7 @@ impl ToolCatalog {
             digest: ContentHash::from_bytes(digest.finalize().into()),
             external_schema_bytes,
             static_specs,
+            read_only_spawn_spec,
             static_measurement,
             full_specs,
             full_measurement,
@@ -634,7 +646,13 @@ impl ToolCatalog {
                 self.lookup(spec.name())
                     .is_some_and(|entry| include.allows(entry))
             })
-            .cloned()
+            .map(|spec| {
+                if include.read_only && spec.name() == "spawn_agent" {
+                    self.read_only_spawn_spec.as_ref().unwrap_or(spec).clone()
+                } else {
+                    spec.clone()
+                }
+            })
             .collect()
     }
 

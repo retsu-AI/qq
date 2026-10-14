@@ -12,7 +12,7 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(21) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(22) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
@@ -630,7 +630,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 21);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 22);
     }
 
     #[test]

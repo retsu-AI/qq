@@ -10875,6 +10875,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_read_only_root_hides_write_child_authority_and_denies_injection() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let spawner = Arc::new(StubSpawner::new(
+            SpawnAgentOutcome {
+                content: "must not run".to_owned(),
+                is_error: false,
+                spend: SpawnAgentSpend::NONE,
+                session_id: None,
+                detached: false,
+            },
+            Arc::new(Mutex::new(Vec::new())),
+        ));
+        let runtime = Runtime::new(TurnScript {
+            turns: vec![vec![("spawn_agent", r#"{"task":"edit a file","authority":"write","reviewer_model":"test-model"}"#.to_owned())], Vec::new()],
+            requests: Arc::clone(&requests),
+        }, "test-model", 256).unwrap().with_delegation(DelegationRoster {
+            write_children: true, ..DelegationRoster::default()
+        });
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![Message::user("inspect")],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::clone(&plan.runtime.network),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>))
+                    .read_only(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert!(spawner.requests.lock().unwrap().is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::ToolCallDenied { .. }))
+        );
+        for request in requests.lock().unwrap().iter() {
+            let spec = request
+                .tools()
+                .iter()
+                .find(|spec| spec.name() == "spawn_agent")
+                .unwrap();
+            let schema: serde_json::Value =
+                serde_json::from_str(spec.input_schema().get()).unwrap();
+            assert!(schema["properties"]["authority"].is_null(), "{schema}");
+            let prompt = request.system().unwrap();
+            assert!(prompt.contains("read-only sub-agent"), "{prompt}");
+            assert!(!prompt.contains("Choose authority: write"), "{prompt}");
+        }
+    }
+
+    #[tokio::test]
     async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
