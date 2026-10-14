@@ -4135,6 +4135,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_late_direct_search_preserves_complete_pages_and_continuation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::iter::repeat_n("a".repeat(240), 8)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            std::fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            directory.path().join("big.txt"),
+            format!("{}\n", "b".repeat(1_900)).repeat(17),
+        )
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    (
+                        "search",
+                        r#"{"query":"x{10}","regex":true,"mode":"names"}"#.to_owned(),
+                    ),
+                ]],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let recorded = events
+            .iter()
+            .filter_map(|e| match e {
+                RuntimeEvent::ToolCallFinished { result, .. } if result.starts_with("search ") => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recorded.len(), 1);
+        let mut page = {
+            let captured = requests.lock().unwrap();
+            let results = captured[1].messages()[2].content();
+            let ContentBlock::ToolResult { content, .. } = &results[3] else {
+                panic!("search result");
+            };
+            assert_eq!(
+                content, &recorded[0],
+                "live projection must retain every page row and its cursor"
+            );
+            assert!(!content.contains("turn budget reached"));
+            assert!(content.len() > 4 * 1024);
+            content.clone()
+        };
+        let workspace = workspace::Workspace::open(directory.path()).unwrap();
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            for path in page.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate match");
+            }
+            let next = page
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|f| f.strip_prefix("next="));
+            let Some(next) = next else {
+                break;
+            };
+            let result = tools::execute(
+                workspace.clone(),
+                Arc::new(workspace::FileState::default()),
+                "search".to_owned(),
+                serde_json::json!({"query":"x{10}","regex":true,"mode":"names","cursor":next})
+                    .to_string(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+            .await;
+            assert!(!result.is_error, "{}", result.model_text);
+            page = result.model_text;
+        }
+        assert_eq!(found.len(), 10);
+    }
+
+    #[tokio::test]
     async fn a_turns_tool_output_is_capped_and_persisted_results_stay_whole() {
         // Four reads of ~28 KiB each: per call every one fits its own 32 KiB
         // bound, together they exceed the 96 KiB turn budget. The fourth

@@ -1874,6 +1874,23 @@ mod tests {
             assert!(!result.is_error, "{}", result.model_text);
             assert!(!result.model_text.contains("…+"), "{}", result.model_text);
             assert!(output::escaped_len(&result.model_text) <= 12 * 1024);
+            for recall in [
+                ResultRecall::None,
+                ResultRecall::StoredResult {
+                    tool: "search",
+                    call: qq_protocol::ToolCallId::from_bytes([0x31; 16]),
+                },
+            ] {
+                let mut budget = TurnOutputBudget::new();
+                let mut prior = "x".repeat(93 * 1024);
+                budget.admit("other", &mut prior, ResultRecall::None);
+                let mut projected = result.model_text.clone();
+                assert!(!budget.admit("search", &mut projected, recall));
+                assert_eq!(
+                    projected, result.model_text,
+                    "search pages cannot lose rows before their continuation"
+                );
+            }
             for path in result.model_text.lines().skip(1) {
                 assert!(found.insert(path.to_owned()), "duplicate path");
             }

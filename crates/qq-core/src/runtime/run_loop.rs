@@ -3474,7 +3474,7 @@ impl RunState {
                                     },
                                     (None, false) => tools::ResultRecall::None,
                                 };
-                                output_scope.budget.admit(&mut content, recall);
+                                output_scope.budget.admit(&call.name,&mut content, recall);
                                 run.budget.charge_tool_output(content.len());
                                 ContentBlock::ToolResult {
                                     call_id: call.provider_call_id.clone(),

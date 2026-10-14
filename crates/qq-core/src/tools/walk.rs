@@ -17,6 +17,7 @@ use ignore::{
     overrides::{Override, OverrideBuilder},
 };
 
+use super::dispatch::ToolCancellation;
 use crate::workspace::Workspace;
 
 /// Directories qq never lists or searches by default, regardless of ignore
@@ -90,6 +91,49 @@ pub(crate) enum ListError {
         #[source]
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ListingStop {
+    #[error("search_listing_limit: directory entry bound exceeded; select a narrower search root")]
+    Entries,
+    #[error(
+        "search_listing_limit: directory name/path byte bound exceeded; select a narrower search root"
+    )]
+    Bytes,
+    #[error("search_listing_limit: tool execution was cancelled; select a narrower search root")]
+    Cancelled,
+    #[error("search_listing_limit: search deadline elapsed; select a narrower search root")]
+    Time,
+}
+
+pub(super) struct ListingLimits<'a> {
+    pub(super) max_entries: usize,
+    pub(super) max_bytes: usize,
+    pub(super) deadline: Instant,
+    pub(super) cancelled: &'a ToolCancellation,
+    #[cfg(test)]
+    pub(super) observe: Option<&'a dyn Fn(usize)>,
+}
+
+impl ListingLimits<'_> {
+    fn check(&self, dir: &str, entries: usize, bytes: usize) -> Result<(), ListError> {
+        let reason = if self.cancelled.is_cancelled() {
+            ListingStop::Cancelled
+        } else if Instant::now() >= self.deadline {
+            ListingStop::Time
+        } else if entries > self.max_entries {
+            ListingStop::Entries
+        } else if bytes > self.max_bytes {
+            ListingStop::Bytes
+        } else {
+            return Ok(());
+        };
+        Err(ListError::ReadDir {
+            path: dir.to_owned(),
+            source: std::io::Error::other(reason),
+        })
+    }
 }
 
 /// Why a scan stopped before the subtree was exhausted.
@@ -251,6 +295,19 @@ pub(crate) fn list_children(
     stack: &mut IgnoreStack,
     unreadable: &mut usize,
 ) -> Result<Vec<Child>, ListError> {
+    list_children_bounded(workspace, dir, stack, unreadable, None)
+}
+
+pub(super) fn list_children_bounded(
+    workspace: &Workspace,
+    dir: &str,
+    stack: &mut IgnoreStack,
+    unreadable: &mut usize,
+    limits: Option<ListingLimits<'_>>,
+) -> Result<Vec<Child>, ListError> {
+    if let Some(limits) = &limits {
+        limits.check(dir, 0, 0)?;
+    }
     let entries = workspace
         .root()
         .read_dir(dir)
@@ -262,7 +319,18 @@ pub(crate) fn list_children(
         stack.matchers.push(directory_matcher(workspace, dir));
     }
     let mut children = Vec::new();
+    let mut listed = 0;
+    let mut retained_bytes = 0_usize;
     for entry in entries {
+        listed += 1;
+        #[cfg(test)]
+        if let Some(observe) = limits.as_ref().and_then(|limits| limits.observe) {
+            observe(listed);
+        }
+        if let Some(limits) = &limits {
+            limits.check(dir, listed, retained_bytes)?;
+        }
+
         let entry = entry.map_err(|source| ListError::ReadDir {
             path: dir.to_owned(),
             source,
@@ -271,6 +339,14 @@ pub(crate) fn list_children(
             *unreadable += 1;
             continue;
         };
+        retained_bytes = retained_bytes.saturating_add(
+            name.len()
+                .saturating_mul(2)
+                .saturating_add(if dir == "." { 0 } else { dir.len() + 1 }),
+        );
+        if let Some(limits) = &limits {
+            limits.check(dir, listed, retained_bytes)?;
+        }
         let file_type = entry.file_type().map_err(|source| ListError::Inspect {
             path: join(dir, &name),
             source,
@@ -303,7 +379,13 @@ pub(crate) fn list_children(
             ignored,
         });
     }
+    if let Some(limits) = &limits {
+        limits.check(dir, listed, retained_bytes)?;
+    }
     children.sort_unstable_by(|a, b| a.order().cmp(b.order()));
+    if let Some(limits) = &limits {
+        limits.check(dir, listed, retained_bytes)?;
+    }
     Ok(children)
 }
 
@@ -398,7 +480,7 @@ pub(crate) struct ScanBudget {
     max_entries: usize,
     pub(crate) bytes: u64,
     max_bytes: u64,
-    deadline: Instant,
+    pub(super) deadline: Instant,
     pub(super) skipped_large: usize,
     pub(super) skipped_binary: usize,
     pub(crate) unreadable: usize,
@@ -445,6 +527,95 @@ impl ScanBudget {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ab2_directory_listing_stops_at_mid_enumeration_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["c", "a", "b"] {
+            std::fs::write(directory.path().join(name), "").unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = crate::RunCancellation::new();
+        let cancelled = ToolCancellation::new(run.clone());
+        let seen = std::cell::Cell::new(0);
+        let observe = |n| {
+            seen.set(n);
+            if n == 2 {
+                run.cancel();
+            }
+        };
+        let error = list_children_bounded(
+            &workspace,
+            ".",
+            &mut IgnoreStack::open(&workspace, ".", true),
+            &mut 0,
+            Some(ListingLimits {
+                max_entries: 100,
+                max_bytes: 100_000,
+                deadline: Instant::now() + std::time::Duration::from_secs(10),
+                cancelled: &cancelled,
+                observe: Some(&observe),
+            }),
+        )
+        .unwrap_err();
+        let ListError::ReadDir { source, .. } = error else {
+            panic!("listing error");
+        };
+        assert!(matches!(
+            source
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<ListingStop>()),
+            Some(ListingStop::Cancelled)
+        ));
+        assert_eq!(
+            seen.get(),
+            2,
+            "enumeration must stop before the third child"
+        );
+    }
+
+    #[test]
+    fn ab2_directory_listing_is_bounded_before_ordered_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["c", "a", "b"] {
+            std::fs::write(directory.path().join(name), "").unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = crate::RunCancellation::new();
+        let cancelled = ToolCancellation::new(run.clone());
+        for (max_entries, max_bytes, expired, cancel) in [
+            (2, usize::MAX, false, false),
+            (10, 2, false, false),
+            (10, usize::MAX, true, false),
+            (10, usize::MAX, false, true),
+        ] {
+            if cancel {
+                run.cancel();
+            }
+            let mut stack = IgnoreStack::open(&workspace, ".", true);
+            let deadline = if expired {
+                Instant::now()
+            } else {
+                Instant::now() + std::time::Duration::from_secs(10)
+            };
+            assert!(
+                list_children_bounded(
+                    &workspace,
+                    ".",
+                    &mut stack,
+                    &mut 0,
+                    Some(ListingLimits {
+                        max_entries,
+                        max_bytes,
+                        deadline,
+                        cancelled: &cancelled,
+                        observe: None,
+                    })
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn an_ignore_file_swapped_for_a_fifo_or_link_after_listing_is_not_read() {
