@@ -2223,7 +2223,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85"
+            "f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed"
         );
     }
 

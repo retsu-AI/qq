@@ -474,3 +474,8 @@ newest last.
   zero failed,14ignored; fmt, Clippy and build exit0. Logs
   target/qq-perf/ab1-2026-10-14/environment-helpers-final-gate-{0,1,2,3}.log.
   Windows-only execution and final matched performance remain open.
+
+- Initial immutable integrated workspace run:969 core tests passed,one failed,
+  three ignored. The remaining failure was the second builtin declaration
+  golden retaining the old description identity. Update it to measured
+  f34eb03a…; schemas remain unchanged. Full immutable gates rerun next.
