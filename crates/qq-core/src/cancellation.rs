@@ -111,17 +111,30 @@ mod tests {
             .iter()
             .map(|token| Box::pin(token.cancelled()))
             .collect::<Vec<_>>();
-        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let waker = futures_util::task::waker(std::sync::Arc::new(CountWake(wakes.clone())));
-        let mut cx = std::task::Context::from_waker(&waker);
-        for wait in &mut waits {
+        let wakes = (0..16)
+            .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let wakers = wakes
+            .iter()
+            .map(|count| futures_util::task::waker(std::sync::Arc::new(CountWake(count.clone()))))
+            .collect::<Vec<_>>();
+        for (wait, waker) in waits.iter_mut().zip(&wakers) {
+            let mut cx = std::task::Context::from_waker(waker);
             assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
         }
         token.cancel();
-        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 16);
-        for wait in &mut waits {
+        for (index, count) in wakes.iter().enumerate() {
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "waiter {index} must be notified independently"
+            );
+        }
+        for (wait, waker) in waits.iter_mut().zip(&wakers) {
+            let mut cx = std::task::Context::from_waker(waker);
             assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(()));
         }
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(token.is_cancelled());
         assert_eq!(format!("{token:?}"), "RunCancellation { cancelled: true }");
         token.cancel();
