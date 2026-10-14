@@ -133,7 +133,7 @@ impl BuiltInTool {
             ),
             Self::Tree => ToolSpec::new(
                 "tree",
-                "Show a depth-bounded, ignore-aware directory tree with sizes and counts. Use instead of ls or find; pass path to inspect an ignored worktree.",
+                "Show a depth-bounded, ignore-aware directory tree with sizes and counts. Use instead of ls or find; pass path and include_ignored=true to inspect an ignored worktree.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -148,7 +148,7 @@ impl BuiltInTool {
             ),
             Self::Search => ToolSpec::new(
                 "search",
-                "Search workspace file contents or names, ignore-aware. Use instead of grep or rg; pass path to search inside an ignored worktree. Modes: content (default), names, definition, references. Omit cursor for the first page; pass the header's next= value to continue.",
+                "Search workspace file contents or names, ignore-aware. Use instead of grep or rg; pass path and include_ignored=true to search inside an ignored worktree. Modes: content (default), names, definition, references. Omit cursor for the first page; pass the header's next= value to continue.",
                 json!({
                     "type": "object",
                     "properties": {

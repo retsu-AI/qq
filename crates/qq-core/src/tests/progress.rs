@@ -363,7 +363,10 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
 #[tokio::test]
 async fn a_read_only_command_is_not_progress() {
     let mut script = reads(64);
-    script[59] = ("shell", r#"{"command":"git status"}"#);
+    script[59] = (
+        "shell",
+        r#"{"command":"git -c core.fsmonitor=false status"}"#,
+    );
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(
         calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),

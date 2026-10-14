@@ -516,3 +516,84 @@ newest last.
   Execution and declaration remain tied to the compiled snapshot; focused
   regression passes without a production change. Final parent integration
   and immutable workspace gates remain open.
+- Integrated description/range correction workspace gates pass: 2,284
+  tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0. Logs
+  `target/qq-perf/ab2-2026-10-14/description-final-gate-{0,1,2,3}.log`.
+  Source and full builtin schema are independently reviewed; performance open.
+
+### 2026-10-14 — AB2 child, ignored-walk and exec-only guidance
+
+- Three test-first assertions reproduced read-child edit demand, incomplete
+  ignored-path guidance and exec-only absent-shell references. Read children
+  now return findings; ignored search/tree calls require path plus
+  include_ignored=true in prompts and declarations; exec-only descriptions
+  preserve literal arguments and cleared-environment semantics.
+- Eight focused AB2 tests and61 prompt-filtered tests pass. Independent
+  final review approves the prompt/compiler correction; declaration wording
+  is covered by captured search/tree requests. Full input schemas are unchanged;
+  corrected descriptions change canonical full tool identity to
+  f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed.
+  Full fixture prefix5342bytes. Historical prompt14 golden remains unchanged.
+- New symlink/depth discovery findings and upstream integration remain open;
+  workspace qualification and matched performance follow immutable final source.
+
+- Correction to the prior prompt-filter receipt:61 passed before updating
+  the two ignored-walk declarations. The next run was60 passed,one failed:
+  its canonical tool-identity assertion retained the old description hash.
+  Update that assertion to the measured f34eb03a… identity; historical
+  prompt14 digest itself still passed unchanged. Final rerun follows.
+
+### 2026-10-14 — AB2 bounded instruction discovery completion
+
+- Test-first safe-link and depth fixtures reproduced omission; names searches
+  now report regular-file symlinks resolved inside the workspace. Content
+  searches and directory traversal retain link exclusion. Matching broken,
+  escaping or nonfile instruction links return a blocker.
+- Depth omissions are explicit (partial=depth, or depth_limited=64 alongside
+  another stop); targeted ancestor roots at each64-component boundary cover
+  deep edits. No unusable depth cursor is emitted.
+- Independent review caught a charged nonmatching-link cursor gap. The public
+  50,000-link fixture reproduced it; every considered link now advances the
+  scan watermark. Paginated matching links, cancellation and incomplete hint
+  counts retain their contracts.
+- Twelve focused AB2 tests pass; independent final review approves. Fixture
+  prefix5728bytes; canonical full schema identity remains f34eb03a… after
+  the earlier declaration corrections. Historical prompt14 remains pinned.
+  Logs instruction-discovery-{red,final}.log, symlink-budget-red.log and
+  depth-hint-red.log under target/qq-perf/ab2-2026-10-14.
+- Full workspace gates, upstream integration and fresh matched performance
+  remain open. Parent plan qualification corrections are being reconciled.
+
+### 2026-10-14 — AB1 configured environment and native shell corrections
+
+- Test-first fixture reproduced the configured-Git false read. Git reads now
+  require canonical -c core.fsmonitor=false after optional-C; ripgrep reads
+  require --no-config. fd detailed listings and file decompression count work.
+- Unix quoted regex metacharacters are literal; unquoted metacharacters and
+  expansion inside double quotes remain work. Windows single quotes, expansion
+  and escape characters and native sort are conservative work. Windows-only
+  fixtures are present but have not been executed on this Linux host.
+- Six Linux focused regressions pass; independent final source review approves.
+  Full workspace rerun and fresh matched performance remain open.
+  Evidence target/qq-perf/ab1-2026-10-14/environment-helpers-{red,focused-final}.log.
+
+- Initial full rerun found one existing live progress fixture using plain
+  git status, now intentionally work because of configured fsmonitor. Update
+  its read case to canonical git -c core.fsmonitor=false status; keep its
+  report assertion. Core957 passed,one failed,three ignored before correction.
+
+- Corrected immutable sourcebb106e3f passes workspace gates: 2,278 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-helpers-final-gate-{0,1,2,3}.log.
+  Windows-only execution and final matched performance remain open.
+
+- Initial immutable integrated workspace run:969 core tests passed,one failed,
+  three ignored. The remaining failure was the second builtin declaration
+  golden retaining the old description identity. Update it to measured
+  f34eb03a…; schemas remain unchanged. Full immutable gates rerun next.
+
+- Integrated current AB2 bounded instruction discovery and helper-qualified
+  AB1 source. Declaration identity now combines AB2 corrected descriptions
+  with AB3's removed default200: a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323.
+  Keep both corresponding golden assertions in sync with the measured full
+  catalog. Parent source integration requires fresh immutable workspace gates.
