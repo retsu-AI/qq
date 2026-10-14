@@ -365,7 +365,7 @@ async fn a_read_only_command_is_not_progress() {
     let mut script = reads(64);
     script[59] = (
         "shell",
-        r#"{"command":"git -c core.fsmonitor=false rev-parse HEAD"}"#,
+        r#"{"command":"git --no-lazy-fetch -c core.fsmonitor=false rev-parse HEAD"}"#,
     );
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(

@@ -9783,13 +9783,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // AB2 updates guidance; AB3 also removes the fixed read-limit default.
+        // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
         // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10563,6 +10563,7 @@ mod tests {
             vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
             vec!["write_file".to_owned()],
+            vec!["read_file".to_owned(), "write_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10622,6 +10623,11 @@ mod tests {
                         .description()
                         .contains("path and include_ignored=true")
                 );
+            }
+            if expected == ["read_file", "write_file"] {
+                for absent in ["old matches", "note=unread", "extend old", "anchor"] {
+                    assert!(!prompt.contains(absent), "{absent}: {prompt}");
+                }
             }
             if expected == ["write_file"] {
                 let description = requests[0].tools()[0].description();
