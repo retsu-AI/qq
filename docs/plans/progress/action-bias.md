@@ -574,3 +574,9 @@ newest last.
 - Independent parent review caught the separate mcp__ external prefix; include
   it alongside ext__ in unproven mutation evidence. A completed MCP-only
   mutation fixture now leaves the cohort unqualified too.
+
+- AB1 final review wave immutable source 087b705d7e0847f06e6c4c8f4f28031264258955: fresh
+  workspace package-clean qualification 2290 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab1-2026-10-14/fresh-final-review-wave-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
