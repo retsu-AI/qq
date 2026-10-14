@@ -166,3 +166,37 @@ newest last.
   pressure (some avg10 24.95%, full 23.91%) prevent quiet-host acceptance.
   No runtime regression test or performance gate is waived. AB1 is local;
   no implementation PR or hosted Codex approval claimed yet.
+
+
+### 2026-10-14 — second hosted plan review corrections
+
+- Fresh #295 findings: retained Git output writers, absent ask_user prompt
+  text, multiple ignored instruction roots, rendered-line continuation,
+  completion censoring, progressive selection eligibility and dry-run cohorts.
+  Verified against code; each receives concrete acceptance rather than a waiver.
+- Instruction discovery uses the highest ignored ancestor, not only its
+  worktree child; host loading supplies only workspace-root instructions.
+  One search per distinct discovery root covers multi-root edits without
+  a per-directory walk. Preserve raw per-run counts and audit scope coverage.
+- Completion now fixes observation at end + 24 h; later finishes never
+  become completed-by-cutoff. Activity metrics use terminal-by-cutoff runs.
+  Exclude dry-run previews from mutation and instruction cohorts.
+
+- Independent review added the nonignored-parent case: every below-root
+  edit uses workspace-root discovery, plus each applicable highest ignored
+  subtree. The AB2 fixture covers `src/AGENTS.md` above ignored `src/vendor`.
+- Added a corrected first-actual-edit qualification query excluding dry-run
+  previews. The original historical query remains documented as a preview-
+  inclusive proxy; its 9/57 result must be reconciled before qualification.
+- Executed the corrected query on schema 45: 109 editing roots, median 9,
+  p90 57; original thresholds remain valid. Exact-query SQLite fixture
+  measures 42 reads across a preview and excludes preview-only runs.
+  Evidence: `target/qq-perf/ab-plan-2026-10-14/first-actual-edit.json`.
+- Second independent review approved these corrections. `cargo test -p qq
+  docs_truth -- --nocapture`: 23 passed; `git diff --check` passed. Production
+  source is unchanged from the integrated head with all four workspace
+  gates green; these corrections change plan/research/ledger only.
+
+- AB1 exact `git show --output=written.txt HEAD` verdict regression passes
+  with all five focused AB1 tests. Merged the reviewed parent corrections;
+  production source unchanged from the locally qualified classifier.
