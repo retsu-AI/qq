@@ -817,19 +817,8 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
                     .iter()
                     .any(|prefix| arg.starts_with(prefix))
         }),
-        "sort" => {
-            !cfg!(windows)
-                && !args.iter().any(|arg| {
-                    let option = arg.split('=').next().unwrap_or(arg);
-                    (arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && (arg.contains('o') || arg.contains('T')))
-                        || (option.len() > 2
-                            && ["--output", "--compress-program", "--temporary-directory"]
-                                .iter()
-                                .any(|name| name.starts_with(option)))
-                })
-        }
+        // Spills can write inside the workspace through inherited TMPDIR.
+        "sort" => false,
         "uniq" => {
             let mut operands = 0;
             let mut stdout = false;
@@ -891,9 +880,8 @@ fn read_only_argv(program: &str, args: &[&str]) -> bool {
         }
         // Repository loading may reconcile and persist divergent operation heads.
         "jj" => false,
-        // Locked metadata/tree still invoke configured compiler wrappers.
-        "cargo" => args == ["--version"],
-        "rustc" => args.first() == Some(&"--version"),
+        // Compiler queries invoke wrappers; rustup proxies can install toolchains.
+        "cargo" | "rustc" => false,
         "tree" => !args.iter().any(|arg| {
             (arg.starts_with('-')
                 && !arg.starts_with("--")
@@ -1126,7 +1114,7 @@ mod tests {
                 "git --no-lazy-fetch -c core.fsmonitor=false worktree list",
                 true,
             ),
-            ("cut -f 1 f.rs | sort | uniq", !cfg!(windows)),
+            ("cut -f 1 f.rs | sort | uniq", false),
             ("grep 'a;b' f | wc -l", !cfg!(windows)),
             ("sed -n '/write/p' f", !cfg!(windows)),
             (
@@ -1396,6 +1384,18 @@ mod tests {
             assert!(super::read_only_shell_command(command), "{command}");
         }
         for command in ["uniq input out", "uniq input - extra"] {
+            assert!(!super::read_only_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn ab1_inherited_sort_spills_and_rustup_installation_are_work() {
+        for command in [
+            "sort -S1K huge-input",
+            "sort input",
+            "cargo --version",
+            "rustc --version",
+        ] {
             assert!(!super::read_only_shell_command(command), "{command}");
         }
     }

@@ -551,3 +551,9 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace build
   exit 0. Receipts fresh-regex-tree-integrated-{0..4}.log and receipt.json.
   Performance qualification remains open; shared-host pressure is not waived.
+
+- AB1 inherited-effect regression: exact sort -S1K huge-input reproduced Read
+  before the fix. All sort and Cargo/rustc forms now count as Work because
+  inherited temporary storage and rustup installation cannot be neutralized
+  by this lexical predicate. Focused run: 18 pass, 0 fail. Retain PATH identity
+  as an explicit lexical limitation; no approval authority is expanded.
