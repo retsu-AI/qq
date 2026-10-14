@@ -1987,6 +1987,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
     append_run_turns(
         vec![StoredTurn {
             strict_projection: true,
+            checkpoint_projection_required: false,
             projection_json: None,
             run_id: "fixture".to_owned(),
             legacy_projection: false,
@@ -3160,6 +3161,7 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         append_run_turns(
             vec![StoredTurn {
                 strict_projection: true,
+                checkpoint_projection_required: false,
                 projection_json: None,
                 run_id: "fixture".to_owned(),
                 legacy_projection: false,

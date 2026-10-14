@@ -5000,6 +5000,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_final_candidate_correction_feedback_is_bounded() {
+        struct FinalRed;
+        impl CheckpointReviewer for FinalRed {
+            fn reviews_tools(&self) -> bool {
+                false
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: CheckpointOutcome::Contradicted,
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: Vec::new(),
+                requests: Arc::clone(&requests),
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(FinalRed));
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("finish")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            let notice = request
+                .messages()
+                .iter()
+                .flat_map(Message::content)
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text),
+                    _ => None,
+                })
+                .last()
+                .unwrap();
+            assert!(notice.len() <= 32 * 1024);
+            assert!(notice.ends_with("…[truncated]"));
+        }
+    }
+
+    #[tokio::test]
     async fn a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record() {
         // Regression (RR3): 9 real runs on 2026-09-19/20 ended as `Failed`
         // with "Jev exhausted its two correction attempts" after the model

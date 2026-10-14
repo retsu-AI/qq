@@ -651,3 +651,7 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - AB2 additionally owns `sessions/{claim,compaction,settlement}.rs` constructor
   integration to isolate unresolved replay to its reservation, rather than failing
   the shared scheduler. Existing fatal persistence/codec handling stays intact.
+
+- AB2 owns `runtime/checkpoint.rs` for shared feedback/correction-notice bounds.
+  Checkpoint-enabled tool history without the exact barrier fails only its
+  reservation; recorded descriptor identity avoids per-turn archive scans.

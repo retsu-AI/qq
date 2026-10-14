@@ -1066,3 +1066,17 @@ newest last.
 - All dependent publication waits on the repaired parent. Existing event journal
   lacks a run checkpoint index, so detection must preserve retained-context scaling
   rather than scanning the entire workspace archive for every replayed turn.
+
+- Checkpoint repair focused checks:42AB2passed,0failed. Bounded Unicode feedback
+  covers single/aggregate tool corrections, final candidates and actual session
+  corrective request persistence/exact reopen. Missing checkpoint-enabled barrier
+  refuses reconstruction from descriptor presence; no workspace journal scan.
+- Independent source review approves checkpoint presence for all supported compiled
+  runtime paths, including empty/malformed identities and final-only reviewers.
+  Public zero-provider continuation coverage is extended before full gates.
+
+- The public checkpoint-session extension passes: actual oversize RED feedback
+  produces a corrective provider request and exact notice after reopen. Removing
+  its following barrier then settles continuation with zero new provider requests
+  and a healthy runtime. Current source freezes for fresh workspace gates.
+  Raw red/green logs are under`target/qq-perf/ab2-2026-10-14/`.

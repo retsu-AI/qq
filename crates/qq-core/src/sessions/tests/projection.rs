@@ -229,6 +229,11 @@ async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
     let (session, claimed, _) = projection_fixture(&store, directory.path()).await;
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
+        Ok(())
+    }).await.unwrap();
     let projected = Arc::new(crate::runtime::ProjectedToolTurn {
         message: Message::tool_results(vec![
             ContentBlock::ToolResult {
@@ -682,4 +687,132 @@ async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict(
         "durable checkpoint consequences must not disappear: {result:?}"
     );
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ab2_oversized_checkpoint_feedback_persists_the_corrective_request() {
+    struct RedTools;
+    impl CheckpointReviewer for RedTools {
+        fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+            Box::pin(std::future::ready(CheckpointVerdict {
+                spend: qq_protocol::CheckpointSpend::default(),
+                confidence: Some(1.0),
+                outcome: if request.phase == crate::runtime::CheckpointPhase::ToolResult {
+                    CheckpointOutcome::Contradicted
+                } else {
+                    CheckpointOutcome::Supported
+                },
+                feedback: "界".repeat(12 * 1024),
+            }))
+        }
+    }
+    struct Loader(Arc<StdMutex<Vec<ModelRequest>>>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let provider = ScriptedRunProvider {
+                requests: Arc::clone(&self.0),
+                script: vec![("read_file", r#"{"path":"note.txt"}"#.to_owned())],
+                turn: StdMutex::new(0),
+            };
+            Box::pin(async move {
+                let runtime = Runtime::new(provider, "test-model", 256)
+                    .unwrap()
+                    .with_checkpoint_reviewer(Arc::new(RedTools));
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(Loader(Arc::clone(&requests))),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created =
+        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    queue_prompt(&runtime, session_id, "inspect".to_owned()).await;
+    let observed = collect_through_finished(&mut events).await;
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )),
+        "{observed:?}"
+    );
+    let notice = {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        requests[1]
+            .messages()
+            .iter()
+            .flat_map(Message::content)
+            .find_map(|block| match block {
+                ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(notice.len() <= 32 * 1024);
+    assert!(notice.contains("…[truncated]"));
+    runtime.close().await.unwrap();
+    let reopened = Store::open(path.clone()).await.unwrap();
+    let context = reopened
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    assert!(context.contains(&Message::user(notice)));
+    assert!(context.iter().flat_map(Message::content).any(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[JEV RED"))));
+    // Reproduce the crash gap after the actual checkpoint event, retaining
+    // its per-call row but removing the projection that would follow it.
+    reopened
+        .call(Priority::Control, |connection| {
+            connection.execute(
+                "UPDATE model_turns SET tool_results_projection_json=NULL WHERE turn_ordinal=1",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    reopened.close().await.unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path),
+        Arc::new(Loader(Arc::clone(&requests))),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, after) = resolve_workspace(&runtime, directory.path()).await;
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    queue_prompt(&runtime, session_id, "continue".to_owned()).await;
+    let observed = collect_through_finished(&mut events).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
+        if failure.message.contains("exact tool-result projection"))));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(!*runtime.inner.failed.borrow());
+    runtime.close().await.unwrap();
 }
