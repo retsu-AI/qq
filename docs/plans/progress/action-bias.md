@@ -1558,3 +1558,11 @@ newest last.
 - Prompt history explicitly records21→22; the architecture restriction now omits
   all external tools in read-only runs. This commit adds only the receipt.
   Fresh hosted/Codex, dependent propagation and named performance gates remain open.
+
+### 2026-10-14 — AB4 host grant provenance regression
+
+- Fresh Codex review identifies a later duplicate host grant authorizing the
+  surviving first host. Independent investigation confirms both unattended
+  exposure and the effective descriptor must retain declaring-host provenance.
+  Add a regression covering all owner/later grant combinations and host dispatch
+  counters before changing admission. The original grant union predates AB4.
