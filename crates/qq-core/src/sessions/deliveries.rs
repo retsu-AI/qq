@@ -255,7 +255,8 @@ pub(super) fn run_latest_report_text(
 }
 
 /// The settled run's own spend plus its exact owned descendants'. Later user
-/// prompts in a child session are separate runs and do not enter it. Missing
+/// prompts in a child session are separate runs and do not enter it. Internal
+/// compactions are charged to their exact owner, without counting as children. Missing
 /// usage or cost stays unknown; an unsettled descendant is an error.
 pub(super) fn owned_run_spend(
     connection: &Connection,
@@ -295,6 +296,14 @@ pub(super) fn owned_run_spend(
                      AND initial.user_message_id = first.id
                  WHERE owned.depth < ?3
                  LIMIT ?4
+             ), billable(run_id, depth, internal) AS (
+                 SELECT run_id, depth, 0 FROM owned
+                 UNION ALL
+                 SELECT step.id, owned.depth, 1
+                 FROM owned JOIN runs step
+                   ON step.auto_compaction_for_run_id = owned.run_id
+                 WHERE step.kind = 'compaction'
+                   AND step.auto_compaction_for_run_id IS NOT NULL
              )
              SELECT r.id,
                     r.outcome_json IS NOT NULL AND r.status IN
@@ -302,11 +311,11 @@ pub(super) fn owned_run_spend(
                     r.usage_json, r.estimated_cost_usd_nanos,
                     r.status = 'cancelled' AND r.started_at_ms IS NULL AND r.routing_json IS NULL
                         AND NOT EXISTS(SELECT 1 FROM model_turns t WHERE t.run_id = r.id),
-                    owned.depth = ?3 AND EXISTS(
+                    NOT billable.internal AND billable.depth = ?3 AND EXISTS(
                         SELECT 1 FROM candidates child
-                        WHERE child.owner_run_id = owned.run_id
-                    )
-             FROM owned LEFT JOIN runs r ON r.id = owned.run_id",
+                        WHERE child.owner_run_id = billable.run_id
+                    ), billable.internal
+             FROM billable LEFT JOIN runs r ON r.id = billable.run_id",
         )
         ?;
     let rows = statement.query_map(
@@ -324,13 +333,22 @@ pub(super) fn owned_run_spend(
                 row.get::<_, Option<u64>>(3)?,
                 row.get::<_, Option<bool>>(4)?.unwrap_or(false),
                 row.get::<_, bool>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         },
     )?;
     let mut spend = SpawnAgentSpend::NONE;
-    for (index, row) in rows.enumerate() {
-        let (id, settled, encoded_usage, cost, never_started, too_deep) = row?;
-        if id.is_none() || !settled || too_deep || index > usize::from(MAX_DESCENDANTS_PER_ROOT) {
+    let mut owned_count = 0_usize;
+    for row in rows {
+        let (id, settled, encoded_usage, cost, never_started, too_deep, internal) = row?;
+        if !internal {
+            owned_count += 1;
+        }
+        if id.is_none()
+            || !settled
+            || too_deep
+            || owned_count > usize::from(MAX_DESCENDANTS_PER_ROOT) + 1
+        {
             return Err(SessionRuntimeError::AccountingUnavailable);
         }
         let usage = match encoded_usage {

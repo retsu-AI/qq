@@ -1543,7 +1543,18 @@ pub(super) fn append_run_turns(
         // instead of poisoning the session.
         let result_message_index = context.len() + 1;
         let mut result_index = 0;
-        let mut turn_output = crate::tools::TurnOutputBudget::new();
+        let mut turn_output =
+            crate::tools::TurnOutputBudget::for_results(content.iter().filter_map(|block| {
+                match block {
+                    ContentBlock::ToolCall { id, name, .. } => Some((
+                        name.as_str(),
+                        recorded_turn
+                            .get(id)
+                            .map_or(INTERRUPTED_TOOL_RESULT, |result| result.content.as_str()),
+                    )),
+                    _ => None,
+                }
+            }));
         let results = content
             .iter()
             .filter_map(|block| match block {
@@ -1655,6 +1666,102 @@ mod action_bias_tests {
             format!("{path}\0{}", 0).as_bytes()
         );
         assert!(prunable_stub(&calls, Some(EffectClass::ReadOnly), "search-call", &stub).is_none());
+    }
+
+    #[test]
+    fn ab2_replay_matches_live_projection_for_sixty_four_mixed_replies() {
+        let long_name = "x".repeat(128);
+        let page = format!(
+            "search . mode=names next=YWJjADA\n{}",
+            "match\n".repeat(2_030)
+        );
+        let mut blocks = Vec::new();
+        let mut recorded = HashMap::new();
+        let mut rows = Vec::new();
+        for index in 0..64_u8 {
+            let name = if [1, 12, 23, 34, 63].contains(&index) {
+                "search"
+            } else {
+                long_name.as_str()
+            };
+            let text = if name == "search" {
+                page.clone()
+            } else {
+                "ordinary\n".repeat(4_000)
+            };
+            let id = format!("call-{index}");
+            let call = ToolCallId::from_bytes([index + 1; 16]);
+            blocks.push(super::super::codec::PersistedContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.to_owned(),
+                arguments: serde_json::json!({}),
+            });
+            recorded.insert(
+                id.clone(),
+                RecordedResult {
+                    content: text.clone(),
+                    is_error: false,
+                    effect: None,
+                    id: call,
+                    spill_digest: None,
+                },
+            );
+            rows.push((id, name.to_owned(), text, call));
+        }
+        let mut budget = crate::tools::TurnOutputBudget::for_results(
+            rows.iter()
+                .map(|(_, name, text, _)| (name.as_str(), text.as_str())),
+        );
+        let expected = rows
+            .iter()
+            .map(|(id, name, text, call)| {
+                let mut content = text.clone();
+                budget.admit(
+                    name,
+                    &mut content,
+                    crate::tools::ResultRecall::StoredResult {
+                        tool: name,
+                        call: *call,
+                    },
+                );
+                ContentBlock::ToolResult {
+                    call_id: id.clone(),
+                    content,
+                    is_error: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut context = Vec::new();
+        append_run_turns(
+            vec![StoredTurn {
+                ordinal: 1,
+                content_json: serde_json::to_string(&blocks).unwrap(),
+                truncated: false,
+                notice: None,
+            }],
+            HashMap::from([(1, recorded)]),
+            Default::default(),
+            Default::default(),
+            None,
+            &mut context,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(context[1].content(), expected);
+        let total = expected
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => content.len(),
+                _ => unreachable!(),
+            })
+            .sum::<usize>();
+        assert!(total <= crate::tools::output::MAX_TURN_TOOL_OUTPUT_BYTES);
+        for index in [1, 12, 23, 34, 63] {
+            let ContentBlock::ToolResult { content, .. } = &expected[index] else {
+                unreachable!()
+            };
+            assert_eq!(content, &page);
+        }
     }
 
     #[test]

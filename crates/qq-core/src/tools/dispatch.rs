@@ -103,6 +103,7 @@ impl Drop for ToolTaskLease {
 /// future was dropped (the caller gave up on it). Both halves wake waiters;
 /// blocking tools check [`Self::is_cancelled`] between steps and the shell
 /// awaits [`Self::cancelled`] alongside its child process.
+#[derive(Clone)]
 pub(super) struct ToolCancellation {
     run: RunCancellation,
     call: Arc<CallCancellation>,
@@ -155,10 +156,8 @@ impl Drop for CancelCallOnDrop {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
-)]
+#[cfg(test)]
+#[expect(clippy::too_many_arguments, reason = "default-policy test entry point")]
 pub(crate) async fn execute(
     workspace: Workspace,
     file_state: Arc<FileState>,
@@ -169,6 +168,37 @@ pub(crate) async fn execute(
     tasks: ToolTasks,
     shell_policy: Arc<crate::runtime::ShellPolicy>,
     network_policy: Arc<super::network::NetworkPolicy>,
+) -> ToolOutput {
+    execute_with_images(
+        workspace,
+        file_state,
+        name,
+        arguments,
+        cancelled,
+        output,
+        tasks,
+        shell_policy,
+        network_policy,
+        Arc::default(),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
+)]
+pub(crate) async fn execute_with_images(
+    workspace: Workspace,
+    file_state: Arc<FileState>,
+    name: String,
+    arguments: String,
+    cancelled: RunCancellation,
+    output: Option<mpsc::Sender<String>>,
+    tasks: ToolTasks,
+    shell_policy: Arc<crate::runtime::ShellPolicy>,
+    network_policy: Arc<super::network::NetworkPolicy>,
+    approved_read_images: Arc<crate::runtime::ApprovedReadImages>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::error("tool arguments exceed the 64 KiB limit");
@@ -228,6 +258,7 @@ pub(crate) async fn execute(
             run_shell(
                 &workspace,
                 &shell_policy,
+                approved_read_images,
                 launch,
                 &cancelled,
                 output.as_ref(),
@@ -285,6 +316,7 @@ pub(crate) struct ToolOutput {
     /// store to keep under a handle the marker names. `None` when the model
     /// text is complete or the text exceeds what the store keeps.
     pub(crate) spill: Option<SpillRecord>,
+    pub(crate) execution_context: Option<Box<super::process_context::ExecutionContextReceipt>>,
 }
 
 /// Complete read-side domain output. Dispatch adds any argument-repair
@@ -374,6 +406,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill,
+            execution_context: None,
         }
     }
 
@@ -387,6 +420,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill: None,
+            execution_context: None,
         }
     }
 
@@ -399,6 +433,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill: None,
+            execution_context: None,
         }
     }
 }

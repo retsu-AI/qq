@@ -362,9 +362,9 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
     );
 }
 
-/// A read-only shell command is a read: it never resets the count.
+/// Lexical read shape alone cannot qualify an executed program.
 #[tokio::test]
-async fn a_read_only_command_is_not_progress() {
+async fn an_unverified_read_shape_counts_as_work() {
     let mut script = reads(64);
     script[59] = (
         "shell",
@@ -373,7 +373,7 @@ async fn a_read_only_command_is_not_progress() {
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(
         calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).len(),
-        1
+        0
     );
 }
 
@@ -1012,7 +1012,7 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
 }
 
 #[tokio::test]
-async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
+async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
     let mut provider = Scripted::new(vec![
         ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
         64
@@ -1020,15 +1020,8 @@ async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
     provider.calls_per_turn = 1;
     let (events, requests) = run(provider, RunCapabilities::user(None)).await;
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert_eq!(last_notice(&requests[64]), Some(ROOT_STALL_REPORT_NOTICE));
-    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
-    assert_eq!(
-        notices(&events),
-        [
-            runtime::TurnNotice::RootStallReport,
-            runtime::TurnNotice::Continuation
-        ]
-    );
+    assert!(calls_before_reports(&requests, ROOT_STALL_REPORT_NOTICE).is_empty());
+    assert!(notices(&events).is_empty());
 }
 
 #[tokio::test]
@@ -1047,42 +1040,86 @@ async fn ab1_cd_prefixed_failing_cargo_test_restarts_the_stall_count() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn ab5_root_notice_mapping_is_new_and_legacy_wording_is_stable() {
-    assert_eq!(
-        runtime::TurnNotice::from_stored("root_stall_report").map(|notice| notice.as_str()),
-        Some("root_stall_report")
-    );
-    assert_eq!(
-        runtime::TurnNotice::from_stored("stall_report")
-            .unwrap()
-            .text(),
-        "[QQ runtime notice; not a user instruction]\nThe last 64 tool calls changed nothing and produced no answer. Do not call tools in this reply. Write a short report: what is established (with path:line evidence), what is still unknown, and the one next action. QQ keeps this report and continues the same run with tools available again."
-    );
-}
-
-#[tokio::test]
-async fn ab5_live_roots_receive_action_notice_and_continue_after_call_sixty_four() {
-    for capabilities in [
-        RunCapabilities::user(None),
-        RunCapabilities::user(None).read_only(),
-    ] {
-        let mut provider = Scripted::new(reads(64));
-        provider.calls_per_turn = 1;
-        let (events, requests) = run(provider, capabilities).await;
-        assert_eq!(completed_text(&events).as_deref(), Some("done"));
-        assert!(
-            last_notice(&requests[64])
-                .unwrap()
-                .contains("next action permitted by this task and run")
-        );
-        assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
-        assert_eq!(
-            notices(&events)
-                .iter()
-                .map(|notice| notice.as_str())
-                .collect::<Vec<_>>(),
-            ["root_stall_report", "continuation"]
-        );
+fn ab1_verified_exec_reads_report_on_request_sixty_five() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    if std::env::var_os("QQ_CONTEXT_STALL_WORKER").is_none() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let image = crate::tools::process_context::test_read_image(0);
+        std::fs::write(root.join("grep"), image).unwrap();
+        std::fs::set_permissions(root.join("grep"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::progress::ab1_verified_exec_reads_report_on_request_sixty_five",
+                "--nocapture",
+            ])
+            .env("QQ_CONTEXT_STALL_WORKER", "1")
+            .env("QQ_CONTEXT_STALL_ROOT", &root)
+            .env("PATH", &root)
+            .env("LANG", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
     }
+    let root = PathBuf::from(std::env::var_os("QQ_CONTEXT_STALL_ROOT").unwrap());
+    let hash = qq_protocol::ContentHash::from_bytes(
+        sha2::Sha256::digest(crate::tools::process_context::test_read_image(0)).into(),
+    );
+    let images = crate::ApprovedReadImages::new(vec![crate::ApprovedReadImage {
+        family: crate::ReadImageFamily::Grep,
+        sha256: hash,
+        contract: crate::ReadImageContract::SelfContainedReadV1,
+    }])
+    .unwrap();
+    let mut provider = Scripted::new(vec![("exec", r#"{"program":"grep","args":["x","f"]}"#); 64]);
+    provider.calls_per_turn = 1;
+    let requests = provider.requests.clone();
+    let runtime = Runtime::new(provider, "gpt-test", 256)
+        .unwrap()
+        .with_approved_read_images(images);
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = tokio.block_on(async {
+        runtime
+            .run_loop_with_spawner(
+                vec![Message::user("work")],
+                root,
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::default(),
+                RunCapabilities::user(None),
+            )
+            .collect::<Vec<_>>()
+            .await
+    });
+    let requests = requests.lock().unwrap();
+    assert_eq!(last_notice(&requests[64]), Some(ROOT_STALL_REPORT_NOTICE));
+    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
+    let receipts = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolCallFinished {
+                execution_context, ..
+            } => execution_context.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 64);
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.valid() && !receipt.is_work())
+    );
 }

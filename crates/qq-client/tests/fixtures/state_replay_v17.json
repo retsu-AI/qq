@@ -27,6 +27,7 @@
     {
       "effects": [
         "Attention(RunFinished { session_title: \"Fix the login redirect\" })",
+        "RequestSnapshot(SnapshotRequest { workspace_id: WorkspaceId(\"02020202020202020202020202020202\"), focused_session_id: None, include_sessions: [SessionId(\"03030303030303030303030303030303\")], session_limit: 512, message_limit: 256 })",
         "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Error, text: \"workspace file \\\"src/auth.rs\\\" changed: expected content hash 11…, found 22…\" }"
       ],
       "sequence": 19
@@ -40,6 +41,7 @@
     {
       "effects": [
         "Attention(RunFinished { session_title: \"Fix the login redirect\" })",
+        "RequestSnapshot(SnapshotRequest { workspace_id: WorkspaceId(\"02020202020202020202020202020202\"), focused_session_id: None, include_sessions: [SessionId(\"03030303030303030303030303030303\")], session_limit: 512, message_limit: 256 })",
         "Notice { session: Some(SessionId(\"03030303030303030303030303030303\")), level: Error, text: \"the provider stopped at its output token limit (16384 tokens) on 4 consecutive turns; the partial answer is in the transcript\" }"
       ],
       "sequence": 21
@@ -102,7 +104,7 @@
       "reasoning": [],
       "runs": [
         {
-          "cost_usd_nanos": 42,
+          "cost_usd_nanos": null,
           "finished_at_ms": 1700000000000,
           "first_token_at_ms": null,
           "id": "04040404040404040404040404040404",

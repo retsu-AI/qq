@@ -98,6 +98,52 @@ qualification and H0 metric registration remain AC0.2. Store raw logs beneath
 
 ## Same-binary control
 
+### Isolated turn diagnostic recording
+
+The CI workflow accepts an optional `perf_baseline_sha` on manual dispatch.
+Both the baseline and candidate must be immutable forty-hex commits. An optional
+`perf_fixture_sha` pins the common benchmark sources independently; its default
+is the immutable dispatch commit. Dispatch
+the candidate branch with a reviewed baseline:
+
+```sh
+gh workflow run ci.yml --ref ci/eng-1044-turn-overhead-recording \
+  -f perf_baseline_sha=<full-baseline-commit>
+gh run list --workflow ci.yml --branch ci/eng-1044-turn-overhead-recording
+gh run download <run-id> --name turn-overhead-<run-id>-<attempt> \
+  --dir target/qq-perf/<slice>-<date>/isolated-run
+```
+
+The manual turn job uses a separate hosted runner, identical pinned compiler,
+separate build targets and optimized profiles. Both arms overlay only
+`crates/qq-core/benches/turn_overhead.rs` and its included
+`crates/qq-core/tests/support/soak.rs` from the same immutable fixture checkout.
+Receipts preserve original and effective source manifests, production/fixture
+commit identities, and binary hashes. Compiler dep-info must contain exactly
+those direct sources; undeclared includes and production edits refuse. Every
+sample reports the embedded effective source digest, which must match both
+build receipts. Recorder admission requires those verified receipts and checks
+the production commit, complete source manifest and actual binary hash before
+launch. Bare digest arguments alone cannot qualify a recording. Fixture commits without this embedded digest refuse recording.
+Builds finish before recording.
+It saves 30 alternating baseline/candidate pairs, then 30 same-binary
+baseline/baseline pairs, using one benchmark iteration per invocation. Artifacts
+include build logs, compiler/profile identity, executable SHA-256 hashes,
+pressure readings, every sample log, raw receipts and milestone median/p95
+summaries. Interpret p95 as the distribution of diagnostic invocation samples,
+not individual turn latency. Retention is 30 days; download qualifying evidence.
+
+Launch, nonzero-exit, malformed-output, timeout and output-limit failures retain
+partial evidence and fail the job. An incomplete recording has no qualifying
+summary. This job neither registers an H0 budget nor qualifies concurrent
+streams, fsync, real provider outages or the integrated autonomy soak. Inspect
+A/A variation and host pressure before claiming a performance result.
+
+Recordings made before common-fixture verification compared materially different
+included soak sources. Preserve them as whole-build diagnostics; their A/B
+changes cannot be attributed to runtime changes. Do not retrospectively qualify
+them using matching boundary labels, profiles or compiler versions.
+
 Tail gates (p95, p99) on a shared host are frequently not repeatable. For any
 tail gate the slice reports, also run a **same-binary A/A pair**: baseline
 against itself with the same procedure. If the A/A pair fails the same gate as
