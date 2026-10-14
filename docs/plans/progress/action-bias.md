@@ -1364,3 +1364,7 @@ newest last.
   schema-48 missing-receipt-column rejection. Updated the plan's shared-file
   schema boundary to 47→48, matching its acceptance row. These fixtures still
   await execution after parent qualification.
+
+- Corrected the inherited receipt-reopen fixture's current-schema assertion
+  from 47 to 48; its historical NULL and malformed claimed-47 rejection
+  fixtures remain unchanged. AB5 qualification still awaits the parent.
