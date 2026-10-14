@@ -1159,3 +1159,12 @@ newest last.
 - Native Windows proof for the final AB3 repair: run38576567373 at fbbb9985
   passes both zero-row and separate repair-note exact tests and completes
   the entire Windows teardown job successfully; wasm also passes.
+
+
+- Fresh immutable AB5 source a21602ad passes 2,337 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after clearing every workspace package debug artifact. Root authority-
+  neutral notices, legacy/child wording, schema46 version-only migration and
+  future-schema guards remain qualified. Logs: fresh-search-read-authority-
+  integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
+  Native Windows upstream gates pass. No user store migrated; performance open.
