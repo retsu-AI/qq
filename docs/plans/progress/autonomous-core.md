@@ -1496,3 +1496,5 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 
 - Merge published AC3e8c52db1, preserving schema45 delegated holds and46 owner index. Both append-only ledger histories retained; no recorder/runtime source conflict. AC3 serial workspace2309 passes with formatting, Clippy and build; fresh opening review is pending on this new parent.
 - Recorder full qualification and focused16 recorder/4 fixture tests follow before push. Earlier ENOSPC/collector failures and immutable fixture recording remain preserved; no final-head performance or H0 qualification claim.
+
+- Recorder16 and fixture4 tests pass. Unfiltered actionlint reports only existingSC2129 repeated-redirection style inCI/release; the previously documented focusedCI check with that exclusion passes (`ci-main46-qualified-parent-actionlint-focused.log`). Full workspace remains running; no timeout/performance exemption or push. AC3e8 parent fresh Codex review reports no major issues, opening+1 reaction566977703 at2026-10-14T07:51:14Z, all13 threads resolved.
