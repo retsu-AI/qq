@@ -420,8 +420,12 @@ fn lines(
         .field("note", "offset_ignored")
         .into_line();
     // Keep ordinary-path windows stable; long headers reserve their full weight.
-    let header_bytes = (masked_escaped_len(&header_bound) + notes.argument_note_bytes).max(256);
-    let header_lines = header_bound.lines().count();
+    // Dispatch chooses note placement before masking, so a large raw header
+    // can require an extra row even when its masked rendering is short.
+    let note_row = usize::from(notes.argument_note_bytes > 0);
+    let header_bytes =
+        (masked_escaped_len(&header_bound) + notes.argument_note_bytes + note_row).max(256);
+    let header_lines = header_bound.lines().count() + note_row;
     if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
         || header_lines + 1 >= READ_BOUNDS.max_lines
     {

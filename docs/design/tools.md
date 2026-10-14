@@ -732,7 +732,10 @@ file, bounded by 32 KiB and 4,000 rendered lines. Prefer one larger read
 over repeated small slices. The renderer reserves room for its header
 and continuation marker and never cuts a row in half. Row and header admission
 measure the masked escaped output, including argument-repair notes, so secret
-masking expansion cannot invalidate the contiguous window. The 2,000-byte
+masking expansion cannot invalidate the contiguous window.
+Repairs reserve a possible separate note row and its escaped newline, because
+placement uses the raw header before masking. This also covers native Unicode
+paths whose UTF-8 text exceeds the rendered line cap. The 2,000-byte
 content ceiling applies before the gutter; dispatch retains complete rendered
 rows. A byte or rendered-
 line stop carries `truncated=bytes` or `truncated=lines`, with a contiguous

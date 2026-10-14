@@ -863,3 +863,11 @@ newest last.
   Windows public-dispatch regression checks all 5,000 blank rows exactly once.
   Linux native paths reject this shape; native Windows execution remains a
   separate hosted verification requirement.
+
+
+- Renderer plus actual dispatch reproduces the missing note-row spill before
+  correction: native-note-row-final-red.log. Reserving a possible note row and
+  its additional escaped byte fixes it; eleven focused Linux tests pass in
+  native-note-row-green.log. Independent final source/CI review approves.
+- The native Windows test is selected by CI's exact-test wrapper. Its hosted
+  execution is required separately; local Linux success is not native proof.
