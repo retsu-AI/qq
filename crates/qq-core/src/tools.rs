@@ -845,6 +845,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn ab3_native_zero_row_window_returns_a_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for _ in 0..110 {
+            let name = "界".repeat(95);
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", format!("{}\n", "x".repeat(2_000)))
+            .unwrap();
+        drop(dir);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let args = serde_json::json!({"path":format!("{}/f.txt",components.join("/"))}).to_string();
+        let result = run_tool(&workspace, &state, "read_file", &args);
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("output_limit:"));
+        assert!(!result.model_text.contains("offset=0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn ab3_native_unicode_header_preserves_repaired_read_windows() {
         let directory = tempfile::tempdir().unwrap();
         let mut dir =
