@@ -871,3 +871,10 @@ newest last.
   native-note-row-green.log. Independent final source/CI review approves.
 - The native Windows test is selected by CI's exact-test wrapper. Its hosted
   execution is required separately; local Linux success is not native proof.
+
+
+- Immutable source 467a39db passes 2,315 workspace tests, zero failures,
+  14 ignored; fmt, Clippy, build and the exact-test wrapper guard exit 0.
+  Logs: target/qq-perf/ab3-2026-10-14/native-note-gate-{0,1,2,3,4}.log.
+  Actionlint passes excluding the pre-existing SC2129 release-size style
+  diagnostic. Native Windows execution and matched performance remain open.
