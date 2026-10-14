@@ -990,3 +990,11 @@ newest last.
   #305 review requires the runbook/schema truth check to follow the rebased
   notice boundary. These corrections join the next qualified propagation.
 - No new source pushed, and no fresh review thread resolved prematurely.
+
+### 2026-10-14 — AB2 exact projected-row replay regression
+
+- Added stored-row close/reopen fixture requiring exact projected replies,
+  post-checkpoint error flag and correction notice, independently of original
+  per-call text. The missing column/replay seam must fail before implementation.
+- Implements ADR-0061's accepted scope; root owns the new store barrier and
+  decoder. No source publication or review resolution precedes qualification.

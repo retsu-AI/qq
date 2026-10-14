@@ -141,3 +141,133 @@ async fn ab2_known_historical_projection_preserves_the_eighth_search_page() {
         }
     }
 }
+
+async fn projection_fixture(
+    store: &Store,
+    workspace: &Path,
+) -> (SessionId, ClaimedRun, Vec<ToolCallId>) {
+    let (_, session, claimed) = create_claimed_parent(store, workspace).await;
+    let calls = (0..2_u8)
+        .map(|index| RuntimeToolCall {
+            id: ToolCallId::from_bytes([index + 1; 16]),
+            turn_ordinal: 1,
+            call_ordinal: u16::from(index) + 1,
+            provider_call_id: format!("call-{index}"),
+            name: "read_file".to_owned(),
+            arguments: r#"{"path":"f"}"#.to_owned(),
+            effect: crate::catalog::EffectClass::ReadOnly,
+            rejection: None,
+        })
+        .collect::<Vec<_>>();
+    let ids = calls.iter().map(|call| call.id).collect::<Vec<_>>();
+    let blocks = calls
+        .iter()
+        .map(|call| {
+            ContentBlock::tool_call(
+                call.provider_call_id.as_str(),
+                "read_file",
+                &serde_json::json!({"path":"f"}),
+            )
+        })
+        .collect();
+    store
+        .persist_model_turn(
+            &claimed,
+            ModelTurnCommit {
+                turn_ordinal: 1,
+                message: Message::new(Role::Assistant, blocks),
+                calls,
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: None,
+                truncated: false,
+                notice: None,
+            },
+        )
+        .await
+        .unwrap();
+    for id in &ids {
+        store.start_tool_call(&claimed, *id).await.unwrap();
+        store
+            .finish_tool_call(
+                &claimed,
+                *id,
+                "original per-call text".to_owned(),
+                false,
+                Vec::new(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    (session, claimed, ids)
+}
+
+#[tokio::test]
+async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (session, claimed, _) = projection_fixture(&store, directory.path()).await;
+    let exact = serde_json::json!({"version":1,"results":[
+        {"call_id":"call-0","content":"bounded first reply","is_error":false},
+        {"call_id":"call-1","content":"second reply\n[JEV RED checkpoint: change required]","is_error":true}
+    ],"correction_notice":"Correct the next action using the checkpoint feedback."}).to_string();
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE model_turns SET tool_results_projection_json=?1 WHERE run_id=?2 AND turn_ordinal=1", params![exact, run])?;
+        Ok(())
+    }).await.unwrap();
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(path).await.unwrap();
+    let context = reopened
+        .call(Priority::Control, move |connection| {
+            load_model_context(connection, session, u64::MAX)
+        })
+        .await
+        .unwrap();
+    let replies = context
+        .iter()
+        .flat_map(Message::content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => Some((call_id.as_str(), content.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replies,
+        [
+            ("call-0", "bounded first reply", false),
+            (
+                "call-1",
+                "second reply\n[JEV RED checkpoint: change required]",
+                true
+            )
+        ]
+    );
+    assert_eq!(
+        context.last(),
+        Some(&Message::user(
+            "Correct the next action using the checkpoint feedback."
+        ))
+    );
+    reopened.close().await.unwrap();
+}
