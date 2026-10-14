@@ -41,7 +41,18 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let cli = cli::Cli::parse();
     validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
+    if !cli.approved_read_images.is_empty()
+        && !matches!(
+            cli.command,
+            None | Some(
+                cli::Command::Ask { .. } | cli::Command::Run(_) | cli::Command::Serve { .. }
+            )
+        )
+    {
+        return Err(io::Error::other("read image approvals are only valid when starting ask, run, serve or interactive execution").into());
+    }
     let overrides = CliOverrides {
+        approved_read_images: qq_core::ApprovedReadImages::new(cli.approved_read_images)?,
         model: cli.model,
         max_output_tokens: cli.max_output_tokens,
         organization: cli.organization,
@@ -53,7 +64,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Serve {
             bind,
             allow_origins,
-        }) => serve(bind, &allow_origins).await?,
+        }) => serve(bind, &allow_origins, &overrides).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -117,6 +128,7 @@ struct CliOverrides {
     model: Option<String>,
     max_output_tokens: Option<u32>,
     organization: Option<String>,
+    approved_read_images: qq_core::ApprovedReadImages,
 }
 
 impl CliOverrides {
@@ -149,7 +161,8 @@ impl CliOverrides {
 }
 
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
-    let factory = runtime::RuntimeFactory::system()?;
+    let factory =
+        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())?;
     let load = overrides.load_request()?;
     let compiler = factory.clone();
     let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
@@ -321,7 +334,9 @@ async fn prepare_headless(
         }
     };
 
-    let factory = runtime::RuntimeFactory::system().map_err(|error| invalid(error.to_string()))?;
+    let factory =
+        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())
+            .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
@@ -434,17 +449,36 @@ async fn prepare_headless(
     Ok((handler.sessions().clone(), options))
 }
 
-async fn serve(bind: std::net::SocketAddr, allow_origins: &[String]) -> Result<(), Box<dyn Error>> {
+fn reject_read_approvals_for_existing_server(
+    images: &qq_core::ApprovedReadImages,
+) -> Result<(), io::Error> {
+    if images.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "read image approvals cannot change an existing server; stop it and start a new server with the approval flags",
+        ))
+    }
+}
+
+async fn serve(
+    bind: std::net::SocketAddr,
+    allow_origins: &[String],
+    overrides: &CliOverrides,
+) -> Result<(), Box<dyn Error>> {
     let options = server::ServerOptions::for_user()?
         .with_bind_address(bind)
         .with_version(cli::BUILD_VERSION)
         .with_allowed_origins(server::AllowedOrigins::new(allow_origins)?);
     match server::reserve(options).await? {
         server::ReserveOutcome::Existing(connection) => {
+            reject_read_approvals_for_existing_server(&overrides.approved_read_images)?;
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
-            let factory = runtime::RuntimeFactory::system()?;
+            let factory = runtime::RuntimeFactory::system_with_read_images(
+                overrides.approved_read_images.clone(),
+            )?;
             // The server's own configuration decides the approval wait for
             // every session it serves: a server-side control like the Jev
             // settings, not one a client forwards. Absent is no deadline. A
@@ -551,6 +585,7 @@ async fn interactive(
         .into());
     }
     let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
+    let approved_read_images = overrides.approved_read_images.clone();
     let factory = environment.factory;
     let request = environment.request;
     let environment_request = request.clone();
@@ -647,7 +682,11 @@ async fn interactive(
                 .await
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
             {
-                server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
+                server::ReserveOutcome::Existing(connection) => {
+                    reject_read_approvals_for_existing_server(&approved_read_images)
+                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+                    (connection, initial(false))
+                }
                 server::ReserveOutcome::Reserved(reservation) => {
                     owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
@@ -809,8 +848,11 @@ impl InteractiveEnvironment {
     ) -> Result<Self, Box<dyn Error>> {
         let Some(root) = tui_qa_root else {
             let config = config::ConfigLoader::system()?;
-            let factory =
-                runtime::RuntimeFactory::new(config.clone(), auth::CredentialStore::system()?)?;
+            let factory = runtime::RuntimeFactory::new_with_read_images(
+                config.clone(),
+                auth::CredentialStore::system()?,
+                overrides.approved_read_images.clone(),
+            )?;
             return Ok(Self {
                 factory,
                 config,
@@ -820,6 +862,12 @@ impl InteractiveEnvironment {
             });
         };
 
+        if !overrides.approved_read_images.is_empty() {
+            return Err(io::Error::other(
+                "read image approvals are not supported in the isolated TUI QA fixture",
+            )
+            .into());
+        }
         let root = prepare_tui_qa_root(&root)?;
         let config = config::ConfigLoader::new(config::ConfigPaths::new(
             root.join("config"),
@@ -1924,6 +1972,30 @@ mod tests {
         fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
             panic!("isolated TUI QA attempted to remove Keychain entry {name:?}")
         }
+    }
+
+    #[test]
+    fn ab1_existing_server_cannot_silently_ignore_read_approvals() {
+        assert!(
+            reject_read_approvals_for_existing_server(&qq_core::ApprovedReadImages::default())
+                .is_ok()
+        );
+        let images = qq_core::ApprovedReadImages::new(vec![
+            format!("grep:{}", "01".repeat(32)).parse().unwrap(),
+        ])
+        .unwrap();
+        assert!(
+            reject_read_approvals_for_existing_server(&images)
+                .unwrap_err()
+                .to_string()
+                .contains("existing server")
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let overrides = CliOverrides {
+            approved_read_images: images,
+            ..CliOverrides::default()
+        };
+        assert!(InteractiveEnvironment::open(&overrides, Some(fixture.path().to_owned())).is_err());
     }
 
     #[test]

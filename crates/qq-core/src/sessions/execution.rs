@@ -2889,6 +2889,7 @@ async fn execute_started_run(
                 file_states,
                 display,
                 spill,
+                execution_context,
             })) => {
                 if internal {
                     continue;
@@ -2924,7 +2925,16 @@ async fn execute_started_run(
                 }
                 match inner
                     .store
-                    .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
+                    .finish_tool_call(
+                        &claimed,
+                        id,
+                        result,
+                        is_error,
+                        file_states,
+                        display,
+                        spill,
+                        execution_context,
+                    )
                     .await
                 {
                     Ok(_) => {}

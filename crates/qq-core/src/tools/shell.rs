@@ -46,37 +46,37 @@ pub(crate) fn observe_shell_spawn(
     receiver
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ShellArgs {
     pub(super) command: String,
     #[serde(default)]
-    cwd: Option<String>,
+    pub(super) cwd: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     /// Environment variable names to pass through from the server's
     /// environment. The child otherwise starts from [`BASE_ENV`] only.
     #[serde(default)]
-    env: Vec<String>,
+    pub(super) env: Vec<String>,
 }
 
 /// `exec`: one program with an argument list and no shell between the model
 /// and the process — no quoting, globbing, `$`, or pipes, so the classifier
 /// sees exact argv. Same bounds, capture, spill, and approval path as `shell`.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecArgs {
     pub(super) program: String,
     #[serde(default)]
     pub(super) args: Vec<String>,
     #[serde(default)]
-    cwd: Option<String>,
+    pub(super) cwd: Option<String>,
     #[serde(default)]
     stdin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
-    env: Vec<String>,
+    pub(super) env: Vec<String>,
 }
 
 pub(super) const MAX_EXEC_ARGS: usize = 64;
@@ -92,11 +92,59 @@ pub(super) enum Launch<'a> {
 }
 
 impl Launch<'_> {
-    fn cwd(&self) -> Option<&str> {
+    pub(super) fn validate(&self) -> Result<(), InvalidLaunch> {
         match self {
+            Self::Shell(args) => {
+                if args.command.trim().is_empty() || args.command.contains('\0') {
+                    return Err(InvalidLaunch::Command);
+                }
+            }
+            Self::Exec(args) => {
+                if args.program.trim().is_empty()
+                    || args.program.len() > MAX_EXEC_PROGRAM_BYTES
+                    || args.program.contains('\0')
+                {
+                    return Err(InvalidLaunch::Program);
+                }
+                if args.args.len() > MAX_EXEC_ARGS
+                    || args
+                        .args
+                        .iter()
+                        .any(|arg| arg.len() > MAX_EXEC_ARG_BYTES || arg.contains('\0'))
+                {
+                    return Err(InvalidLaunch::Args);
+                }
+                if args
+                    .stdin
+                    .as_ref()
+                    .is_some_and(|text| text.len() > MAX_EXEC_STDIN_BYTES)
+                {
+                    return Err(InvalidLaunch::Stdin);
+                }
+            }
+        }
+        let timeout = self.timeout_seconds().unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
+        if timeout == 0 || timeout > MAX_SHELL_TIMEOUT_SECS {
+            return Err(InvalidLaunch::Timeout);
+        }
+        if self.env().len() > MAX_SHELL_ENV_NAMES
+            || self
+                .env()
+                .iter()
+                .any(|name| !crate::runtime::valid_env_name(name))
+        {
+            return Err(InvalidLaunch::Env);
+        }
+        let cwd = match self {
             Self::Shell(args) => args.cwd.as_deref(),
             Self::Exec(args) => args.cwd.as_deref(),
+        };
+        if cwd.is_some_and(|cwd| {
+            cwd.is_empty() || cwd.contains('\0') || std::path::Path::new(cwd).is_absolute()
+        }) {
+            return Err(InvalidLaunch::Cwd);
         }
+        Ok(())
     }
 
     fn timeout_seconds(&self) -> Option<u64> {
@@ -137,6 +185,24 @@ impl Launch<'_> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum InvalidLaunch {
+    #[error("command must not be empty or contain NUL")]
+    Command,
+    #[error("invalid_program: program must be 1 to 256 bytes without NUL")]
+    Program,
+    #[error("invalid_args: at most 64 arguments of 4096 bytes without NUL")]
+    Args,
+    #[error("invalid_stdin: stdin exceeds 65536 bytes")]
+    Stdin,
+    #[error("timeout_seconds must be between 1 and 600")]
+    Timeout,
+    #[error("invalid_env: at most 16 valid environment names per call")]
+    Env,
+    #[error("cwd must be a nonempty relative workspace path without NUL")]
+    Cwd,
+}
+
 /// The fate of one supervised shell command.
 enum ShellOutcome {
     Exited(std::io::Result<std::process::ExitStatus>),
@@ -153,6 +219,7 @@ enum ShellOutcome {
 pub(super) async fn run_shell(
     workspace: &Workspace,
     policy: &ShellPolicy,
+    approved_read_images: std::sync::Arc<crate::runtime::ApprovedReadImages>,
     launch: Launch<'_>,
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
@@ -161,52 +228,11 @@ pub(super) async fn run_shell(
     if cancelled.is_cancelled() {
         return ToolOutput::error("tool execution was cancelled");
     }
-    match &launch {
-        Launch::Shell(arguments) => {
-            if arguments.command.trim().is_empty() {
-                return ToolOutput::error("command must not be empty");
-            }
-        }
-        Launch::Exec(arguments) => {
-            if arguments.program.trim().is_empty()
-                || arguments.program.len() > MAX_EXEC_PROGRAM_BYTES
-            {
-                return ToolOutput::error(format!(
-                    "invalid_program: program must be 1 to {MAX_EXEC_PROGRAM_BYTES} bytes"
-                ));
-            }
-            if arguments.args.len() > MAX_EXEC_ARGS {
-                return ToolOutput::error(format!(
-                    "invalid_args: at most {MAX_EXEC_ARGS} arguments"
-                ));
-            }
-            if let Some(long) = arguments.args.iter().find(|a| a.len() > MAX_EXEC_ARG_BYTES) {
-                return ToolOutput::error(format!(
-                    "invalid_args: an argument is {} bytes; the limit is {MAX_EXEC_ARG_BYTES}",
-                    long.len()
-                ));
-            }
-            if arguments
-                .stdin
-                .as_ref()
-                .is_some_and(|s| s.len() > MAX_EXEC_STDIN_BYTES)
-            {
-                return ToolOutput::error(format!(
-                    "invalid_stdin: stdin exceeds {MAX_EXEC_STDIN_BYTES} bytes"
-                ));
-            }
-        }
+    if let Err(error) = launch.validate() {
+        return ToolOutput::error(error.to_string());
     }
     let env_names = launch.env();
-    if env_names.len() > MAX_SHELL_ENV_NAMES {
-        return ToolOutput::error(format!(
-            "invalid_env: at most {MAX_SHELL_ENV_NAMES} environment names per call"
-        ));
-    }
     for name in env_names {
-        if !crate::runtime::valid_env_name(name) {
-            return ToolOutput::error(format!("invalid_env: {name:?} is not a variable name"));
-        }
         if !policy.permits_env(name) {
             return ToolOutput::error(format!(
                 "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
@@ -229,67 +255,49 @@ pub(super) async fn run_shell(
     let timeout_seconds = launch
         .timeout_seconds()
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-    if timeout_seconds == 0 || timeout_seconds > MAX_SHELL_TIMEOUT_SECS {
-        return ToolOutput::error(format!(
-            "timeout_seconds must be between 1 and {MAX_SHELL_TIMEOUT_SECS}"
-        ));
+    let preparation_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+    let permit = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return ToolOutput::error("tool execution was cancelled"),
+        result = crate::workspace::blocking_permits().acquire_owned() => match result {
+            Ok(permit) => permit,
+            Err(_) => return ToolOutput::error("tool executor is unavailable"),
+        },
+        () = tokio::time::sleep(std::time::Duration::from_secs(timeout_seconds)) => return ToolOutput::error("process preparation timed out"),
+    };
+    let owned = match &launch {
+        Launch::Shell(args) => super::process_context::OwnedLaunch::Shell((*args).clone()),
+        Launch::Exec(args) => super::process_context::OwnedLaunch::Exec((*args).clone()),
+    };
+    let preparation_cancelled = cancelled.clone();
+    let preparation_workspace = workspace.clone();
+    let mut prepared = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        super::process_context::prepare(
+            preparation_workspace,
+            owned,
+            approved_read_images,
+            &preparation_cancelled,
+            preparation_deadline,
+        )
+    })
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => return ToolOutput::error(error.to_string()),
+        Err(_) => return ToolOutput::error("process preparation stopped unexpectedly"),
+    };
+    if cancelled.is_cancelled() || std::time::Instant::now() >= preparation_deadline {
+        return ToolOutput::error("tool execution was cancelled or timed out before spawn");
     }
-    let cwd = match launch.cwd() {
-        None => workspace.path().to_owned(),
-        Some(requested) => {
-            let relative = match workspace.contained_path(requested) {
-                Ok(relative) => relative,
-                Err(error) => return ToolOutput::error(error.to_string()),
-            };
-            if !workspace.root().is_dir(&relative) {
-                return ToolOutput::error("cwd is not a directory");
-            }
-            workspace.path().join(relative)
-        }
-    };
-
-    let mut command = match &launch {
-        Launch::Shell(arguments) => shell_command(&arguments.command),
-        Launch::Exec(arguments) => {
-            let mut command = tokio::process::Command::new(&arguments.program);
-            command.args(&arguments.args);
-            command
-        }
-    };
     let stdin_text = match &launch {
         Launch::Exec(arguments) => arguments.stdin.clone(),
         Launch::Shell(_) => None,
     };
-    // A cleared environment: the base names, then what the call asked for
-    // and policy allows. Secrets the server holds never reach a child by
-    // accident.
-    command.env_clear();
-    for name in BASE_ENV
-        .iter()
-        .copied()
-        .chain(env_names.iter().map(String::as_str))
-    {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
-        .current_dir(cwd)
-        .stdin(if stdin_text.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            return ToolOutput::error(format!("could not start the command: {error}"));
-        }
+    let (mut child, receipt) = match prepared.spawn(stdin_text.is_some()) {
+        Ok(started) => started,
+        Err(error) => return ToolOutput::error(format!("could not start the command: {error}")),
     };
     *process_pending = true;
     // The child leads its own process group (pgid == pid); the guard kills the
@@ -322,7 +330,7 @@ pub(super) async fn run_shell(
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let started = tokio::time::Instant::now();
-    let deadline = started + std::time::Duration::from_secs(timeout_seconds);
+    let deadline = tokio::time::Instant::from_std(preparation_deadline);
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut streamed = 0_usize;
     let mut stdout_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
@@ -374,42 +382,48 @@ pub(super) async fn run_shell(
     };
 
     let elapsed = started.elapsed();
-    match outcome {
-        ShellOutcome::Exited(Ok(status)) => shell_result(
-            launch.header_tool(),
-            capture,
-            status,
-            elapsed,
-            hint.as_deref(),
-        ),
-        ShellOutcome::Exited(Err(error)) => {
-            ToolOutput::error(format!("could not observe the command exit: {error}"))
-        }
-        ShellOutcome::TimedOut => {
-            if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
-                return ToolOutput::error(message);
+    let mut result = async {
+        match outcome {
+            ShellOutcome::Exited(Ok(status)) => shell_result(
+                launch.header_tool(),
+                capture,
+                status,
+                elapsed,
+                hint.as_deref(),
+            ),
+            ShellOutcome::Exited(Err(error)) => {
+                ToolOutput::error(format!("could not observe the command exit: {error}"))
             }
-            let mut content = Header::new(launch.header_tool(), None)
-                .field("exit", "timeout")
-                .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
-                .field("bytes", capture.total())
-                .into_line();
-            content.push_str(&capture.into_output());
-            if !content.ends_with('\n') {
-                content.push('\n');
+            ShellOutcome::TimedOut => {
+                if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
+                    return ToolOutput::error(message);
+                }
+                let mut content = Header::new(launch.header_tool(), None)
+                    .field("exit", "timeout")
+                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+                    .field("bytes", capture.total())
+                    .into_line();
+                content.push_str(&capture.into_output());
+                if !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str(&format!(
+                    "command timed out after {timeout_seconds} s; its process group was killed"
+                ));
+                ToolOutput::bounded(content, &SHELL_BOUNDS, true)
             }
-            content.push_str(&format!(
-                "command timed out after {timeout_seconds} s; its process group was killed"
-            ));
-            ToolOutput::bounded(content, &SHELL_BOUNDS, true)
-        }
-        ShellOutcome::Cancelled => {
-            if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
-                return ToolOutput::error(message);
+            ShellOutcome::Cancelled => {
+                if let Err(message) = stop_shell(&mut child, &mut guard, process_pending).await {
+                    return ToolOutput::error(message);
+                }
+                ToolOutput::error("tool execution was cancelled")
             }
-            ToolOutput::error("tool execution was cancelled")
         }
     }
+    .await;
+    result.execution_context = receipt;
+    drop(prepared);
+    result
 }
 
 async fn stop_shell(
@@ -436,14 +450,14 @@ async fn stop_shell(
 }
 
 #[cfg(unix)]
-fn shell_command(command: &str) -> tokio::process::Command {
+pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("/bin/sh");
     shell.arg("-c").arg(command);
     shell
 }
 
 #[cfg(not(unix))]
-fn shell_command(command: &str) -> tokio::process::Command {
+pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
     shell.arg("/C").arg(command);
     shell
