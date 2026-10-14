@@ -509,7 +509,7 @@ prerequisite slice adds an explicit AB2-treatment mode. Build both arms
 from the same accepted AB1–AB5 runtime source; a reviewed counterfactual
 patch changes only AB2's prompt treatment and four descriptions, retaining
 identical AB3 schemas/behavior and AB4/AB5 authority/notice behavior, including
-base prompt version 21. Label
+base prompt version 22. Label
 this prompt-19-versus-20 treatment on a fixed runtime, not a comparison to
 the historical released prompt-19 runtime. Record the exact expected pairs
 for source revision, binary hash, prompt/system hashes, tool-schema hash and
