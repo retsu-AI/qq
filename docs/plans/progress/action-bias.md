@@ -232,3 +232,22 @@ newest last.
 - Independent eighth plan review approves; docs truth 23 passed. Source
   qualification remains attached to the respective slice receipts; no
   performance or deployed observation gate is waived.
+
+
+### 2026-10-14 — ninth hosted plan review reconciliation
+
+- Instruction-scope qualification now requires the exact anchored basename
+  regex and JSON boolean regex=true. The fixed-window recount is 108 roots,
+  one scope/start, zero repeats; the 25-start substring proxy remains context.
+  The deterministic query fixture rejects NOTAGENTS, mistyped regex flags,
+  literal searches and continuation pages; anchored-scope-query.json.
+- AB1 acceptance requires --no-lazy-fetch, closed Git inspection forms,
+  JJ classified as work and file preserve-date excluded. AB4 records version
+  21; historical 19/20 are AB2 treatment labels on the same accepted runtime.
+- Coverage, matched performance, final classifier recount and deployed
+  candidate observation remain open; no deployment or paid calls performed.
+
+- Docs truth passes 23 tests; formatting and diff checks pass. Independent
+  review caught and corrected the branch-list acceptance example's missing
+  no-lazy-fetch switch. Source is unchanged; slice-specific source gates
+  remain tracked independently.
