@@ -17,6 +17,7 @@ use ignore::{
     overrides::{Override, OverrideBuilder},
 };
 
+use super::dispatch::ToolCancellation;
 use crate::workspace::Workspace;
 
 /// Directories qq never lists or searches by default, regardless of ignore
@@ -90,6 +91,13 @@ pub(crate) enum ListError {
         #[source]
         source: std::io::Error,
     },
+}
+
+pub(super) struct ListingLimits<'a> {
+    pub(super) max_entries: usize,
+    pub(super) max_bytes: usize,
+    pub(super) deadline: Instant,
+    pub(super) cancelled: &'a ToolCancellation,
 }
 
 /// Why a scan stopped before the subtree was exhausted.
@@ -245,11 +253,12 @@ fn add_ignore_file(workspace: &Workspace, builder: &mut GitignoreBuilder, path: 
 /// Symlinks are reported and never followed. Names that are not UTF-8 are
 /// counted in `unreadable` and dropped: no cursor or later call could
 /// address them.
-pub(crate) fn list_children(
+pub(super) fn list_children(
     workspace: &Workspace,
     dir: &str,
     stack: &mut IgnoreStack,
     unreadable: &mut usize,
+    _limits: Option<ListingLimits<'_>>,
 ) -> Result<Vec<Child>, ListError> {
     let entries = workspace
         .root()
@@ -398,7 +407,7 @@ pub(crate) struct ScanBudget {
     max_entries: usize,
     pub(crate) bytes: u64,
     max_bytes: u64,
-    deadline: Instant,
+    pub(super) deadline: Instant,
     pub(super) skipped_large: usize,
     pub(super) skipped_binary: usize,
     pub(crate) unreadable: usize,
@@ -445,6 +454,48 @@ impl ScanBudget {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ab2_directory_listing_is_bounded_before_ordered_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["c", "a", "b"] {
+            std::fs::write(directory.path().join(name), "").unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let run = crate::RunCancellation::new();
+        let cancelled = ToolCancellation::new(run.clone());
+        for (max_entries, max_bytes, expired, cancel) in [
+            (2, usize::MAX, false, false),
+            (10, 2, false, false),
+            (10, usize::MAX, true, false),
+            (10, usize::MAX, false, true),
+        ] {
+            if cancel {
+                run.cancel();
+            }
+            let mut stack = IgnoreStack::open(&workspace, ".", true);
+            let deadline = if expired {
+                Instant::now()
+            } else {
+                Instant::now() + std::time::Duration::from_secs(10)
+            };
+            assert!(
+                list_children(
+                    &workspace,
+                    ".",
+                    &mut stack,
+                    &mut 0,
+                    Some(ListingLimits {
+                        max_entries,
+                        max_bytes,
+                        deadline,
+                        cancelled: &cancelled
+                    })
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn an_ignore_file_swapped_for_a_fifo_or_link_after_listing_is_not_read() {

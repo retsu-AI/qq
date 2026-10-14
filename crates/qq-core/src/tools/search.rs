@@ -22,8 +22,8 @@ use super::{
     lang::{Language, REGEX_SIZE_LIMIT, SymbolError, SymbolMatchers},
     output::{Bounds, Header, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len},
     walk::{
-        Child, EntryKind, IgnoreStack, ListError, MAX_FILE_SCAN_BYTES, PathFilter, ScanBudget,
-        StopReason, list_children, looks_binary, relative_string,
+        Child, EntryKind, IgnoreStack, ListError, ListingLimits, MAX_FILE_SCAN_BYTES, PathFilter,
+        ScanBudget, StopReason, list_children, looks_binary, relative_string,
     },
 };
 
@@ -313,6 +313,12 @@ impl Walker<'_> {
             dir,
             &mut self.stack,
             &mut self.budget.unreadable,
+            Some(ListingLimits {
+                max_entries: 100_000,
+                max_bytes: 16 * 1024 * 1024,
+                deadline: self.budget.deadline,
+                cancelled: self.cancelled,
+            }),
         )?;
         for child in &children {
             if self.stop.is_some() {

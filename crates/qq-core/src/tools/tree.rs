@@ -148,18 +148,19 @@ pub(super) fn tree(
         // Ignore matching needs each directory's ancestor chain, so the BFS
         // opens a stack per directory rather than sharing one.
         let mut stack = IgnoreStack::open(workspace, &dir, arguments.include_ignored);
-        let children = match list_children(workspace, &dir, &mut stack, &mut budget.unreadable) {
-            Ok(children) => children,
-            // An unreadable subdirectory shows unexpanded; the root itself
-            // failing is the call's error.
-            Err(error) => match parent {
-                Some(parent) => {
-                    nodes[parent].expanded = false;
-                    continue;
-                }
-                None => return ReadSideOutput::error(error.to_string()),
-            },
-        };
+        let children =
+            match list_children(workspace, &dir, &mut stack, &mut budget.unreadable, None) {
+                Ok(children) => children,
+                // An unreadable subdirectory shows unexpanded; the root itself
+                // failing is the call's error.
+                Err(error) => match parent {
+                    Some(parent) => {
+                        nodes[parent].expanded = false;
+                        continue;
+                    }
+                    None => return ReadSideOutput::error(error.to_string()),
+                },
+            };
         let mut unlisted = 0_usize;
         for child in children {
             if let Some(reason) = budget.charge_entry() {
@@ -253,7 +254,8 @@ fn count_dir(
     let mut unreadable = 0_usize;
     while let Some(path) = pending.pop() {
         let mut stack = IgnoreStack::open(workspace, &path, include_ignored);
-        let Ok(children) = list_children(workspace, &path, &mut stack, &mut unreadable) else {
+        let Ok(children) = list_children(workspace, &path, &mut stack, &mut unreadable, None)
+        else {
             continue;
         };
         for child in children {
