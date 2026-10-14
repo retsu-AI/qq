@@ -592,3 +592,9 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   and tools/dispatch.rs actual repaired-argument note byte reservation. Read
   construction uses post-mask costs and retains unmasked spill semantics.
   Returned line bounds preserve manually clipped complete rows and gutters.
+
+
+- 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
+  for the native Unicode-path contiguous-window regression. The existing job
+  selected teardown tests only. A test-only read/output hook exercises the
+  actual dispatch mask/bound pipeline using valid Windows metadata on Linux.

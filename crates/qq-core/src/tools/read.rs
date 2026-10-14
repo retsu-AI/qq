@@ -726,7 +726,7 @@ mod tests {
             hash: Some(hash.clone()),
             perms: "rw".to_owned(),
         };
-        let mut output = lines(
+        let output = lines(
             &loaded,
             &hash[..SHORT_HASH_LEN],
             5_000,
@@ -741,7 +741,8 @@ mod tests {
             },
             &ToolCancellation::new(crate::RunCancellation::new()),
         );
-        let end = output.text.find('\n').unwrap();
+        assert!(loaded.path.len() > READ_BOUNDS.max_bytes);
+        let bounded = output.with_test_notes(&["cwd_ignored"]);
         assert!(end > READ_BOUNDS.max_bytes);
         // This raw header requires the dispatch convention's separate note row.
         output.text.insert_str(end, "\nnote=cwd_ignored");
