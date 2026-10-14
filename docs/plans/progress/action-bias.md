@@ -1506,3 +1506,8 @@ newest last.
 - V1/NULL history remains unavailable without independent immutable mapping;
   Work is not mutation proof. Format 3 generation and coverage counters
   still need implementation and qualification. PR remains nondraft.
+
+- Test-first expansion for the open semantic-envelope finding adds zero/
+  oversized timeout, whitespace/NUL command, empty/absolute cwd, and invalid
+  environment-name envelopes. Execution of the red fixture waits for the
+  active parent gate run; production validation is not yet changed.
