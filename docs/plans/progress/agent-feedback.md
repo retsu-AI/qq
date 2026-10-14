@@ -11,8 +11,7 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 | AF4 | `cargo xtask smoke` | In review | same | |
 | AF5 | `QQ_LOG` tracing | Planned | | ADR needed |
 | AF6 | Test audit | Planned (remaining modules) | | one module per PR |
-| AF6.1 | Cancellation module audit | In progress | `test/eng-1028-af6-cancellation-audit` (stacked on #282) | deterministic wakeups, stress, mutation coverage |
-
+| AF6.1 | Cancellation module audit | In review | `test/eng-1028-af6-cancellation-audit` (stacked on #282) | deterministic wakeups, stress, mutation coverage |
 | AF7 | CI affected/full split | In review | same | merge queue setting is the operator's |
 | AF8 | AGENTS.md and skills | In review | same | |
 | AF9 | `cargo xtask lint` | In review (first rules) | same | mistake mining next |
@@ -87,3 +86,19 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
   progress and final discovery over three pages with a deterministic 70-entry
   budget and a tiny tree. No production bounds or assertions were relaxed.
   Added parsing of nextest's actual FLKY-FL status observed in CI.
+
+
+#### 2026-10-14 AF6.1 cancellation audit
+
+- Owned paths: cancellation.rs tests, lint sleep ratchet, plan and this ledger.
+  Stacked on #282 by explicit user request; parent must merge first.
+- Replaced sleep and wall-clock assertions with explicit Future polling and
+  observed wakeups. Covers 16 live waiters, future waits, repeated cancellation,
+  dropping a registered waiter, and accurate cancellation diagnostics.
+- Stress: 100 runs / 300 tests passed. cargo-mutants 27.1.0 generated six
+  mutants: first pass 5 caught / 1 missed (Debug); diagnostic assertions added;
+  final pass 6/6 caught, 0 missed, 0 timeouts. Evidence stays under
+  target/qq-perf/af6-cancellation/mutants.out/; production code unchanged.
+- Sleep ceiling 78 → 77. Full CI-profile gate passed; smoke 6/6.
+  Remaining modules (especially shell-heavy compaction/delegation), AF5 tracing
+  ADR, AF9 lesson mining and AF10 blinded eval remain open.
