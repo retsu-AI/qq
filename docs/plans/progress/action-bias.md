@@ -1348,3 +1348,12 @@ newest last.
 - Integrated qualified parent3b73f315, retaining read windows/masking/repair bounds.
   Parent checkpoint feedback and missing-barrier protection are inherited.
   Fresh workspace gates precede the next publication; named performance remains open.
+
+### 2026-10-14 — AB3 checkpoint repair integration qualification
+
+- Immutable81aa8947f693581f29d916711837b17d0edbd107 integrates parent3b73f315.
+  Fresh workspace2,398passed,0failed,14ignored (38blocks); fmt/Clippy/build exit0.
+  Logs: `target/qq-perf/ab3-2026-10-14/checkpoint-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Independent integration review approves unchanged read/mask/repair/row bounds
+  and inherited checkpoint protection. This commit adds only the receipt.
+  Fresh hosted/Codex and named performance gates remain open.
