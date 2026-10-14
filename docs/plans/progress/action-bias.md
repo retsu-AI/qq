@@ -1043,3 +1043,15 @@ newest last.
   {0,1,2,3}.log. Prompt provenance is version 21; the deterministic child
   fixture retains separate gates. Independent integration review approves.
   Native Windows execution, matched performance and hosted review remain open.
+
+
+- Immutable integrated AB5 source e10b69b8 passes 2,330 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab5-2026-10-14/native-note-authority-
+  integrated-gate-{0,1,2,3}.log. Independent notice/schema integration
+  review approves. Schema 46 remains version-only and historical notices
+  remain byte-identical. No user store was migrated.
+- Native Windows upstream proof: CI run 38570370961 at eb28791c, job
+  115873674638, executes ab3_native_unicode_header_preserves_repaired_read_windows:
+  one passed, zero failed, then completes the entire teardown job successfully.
+  Matched performance and final hosted review remain open.
