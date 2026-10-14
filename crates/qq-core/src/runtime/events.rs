@@ -181,7 +181,7 @@ pub(crate) enum RuntimeEvent {
         /// The complete output when `result` was cut and a session store
         /// will keep it under the handle the marker already names.
         spill: Option<crate::tools::SpillRecord>,
-        execution_context: Option<crate::tools::process_context::ExecutionContextReceipt>,
+        execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     },
     CheckpointStarted {
         correlation: String,

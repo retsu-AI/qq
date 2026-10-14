@@ -76,7 +76,7 @@ pub(super) fn finish_tool_call(
     file_states: Vec<FileStateUpdate>,
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
-    execution_context: Option<crate::tools::process_context::ExecutionContextReceipt>,
+    execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn) = transaction

@@ -316,7 +316,7 @@ pub(crate) struct ToolOutput {
     /// store to keep under a handle the marker names. `None` when the model
     /// text is complete or the text exceeds what the store keeps.
     pub(crate) spill: Option<SpillRecord>,
-    pub(crate) execution_context: Option<super::process_context::ExecutionContextReceipt>,
+    pub(crate) execution_context: Option<Box<super::process_context::ExecutionContextReceipt>>,
 }
 
 /// Complete read-side domain output. Dispatch adds any argument-repair

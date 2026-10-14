@@ -129,7 +129,6 @@ pub(super) enum OwnedLaunch {
 pub(super) struct PreparedLaunch {
     command: tokio::process::Command,
     receipt: ExecutionContextReceipt,
-    #[cfg(target_os = "linux")]
     _cwd: cap_std::fs::Dir,
     #[cfg(target_os = "linux")]
     _image: Option<std::fs::File>,
@@ -140,7 +139,7 @@ impl PreparedLaunch {
     pub(super) fn spawn(
         &mut self,
         piped_stdin: bool,
-    ) -> std::io::Result<(tokio::process::Child, Option<ExecutionContextReceipt>)> {
+    ) -> std::io::Result<(tokio::process::Child, Option<Box<ExecutionContextReceipt>>)> {
         self.command
             .stdin(if piped_stdin {
                 std::process::Stdio::piped()
@@ -156,7 +155,7 @@ impl PreparedLaunch {
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.pid = pid;
-            receipt
+            Box::new(receipt)
         });
         Ok((child, receipt))
     }
@@ -328,7 +327,6 @@ pub(super) fn prepare(
             verdict,
             pid: 0,
         },
-        #[cfg(target_os = "linux")]
         _cwd: directory,
         #[cfg(target_os = "linux")]
         _image: image,
@@ -780,7 +778,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<ExecutionContextReceipt>(&json).unwrap(),
-            receipt
+            *receipt
         );
         let mut dynamic = image;
         dynamic[64..68].copy_from_slice(&3_u32.to_le_bytes());

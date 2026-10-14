@@ -1627,7 +1627,7 @@ impl Store {
         file_states: Vec<FileStateUpdate>,
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
-        execution_context: Option<crate::tools::process_context::ExecutionContextReceipt>,
+        execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;

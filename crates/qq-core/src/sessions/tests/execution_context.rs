@@ -102,7 +102,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 Vec::new(),
                 None,
                 None,
-                Some(invalid)
+                Some(Box::new(invalid))
             )
             .await
             .is_err()
@@ -119,7 +119,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 Vec::new(),
                 None,
                 None,
-                Some(mismatch)
+                Some(Box::new(mismatch))
             )
             .await
             .is_err()
@@ -147,7 +147,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                     digest: crate::workspace::content_hash(text.as_bytes()),
                     omitted_from_line: 2
                 }),
-                Some(receipt.clone())
+                Some(Box::new(receipt.clone()))
             )
             .await
             .is_err()
@@ -192,7 +192,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
             Vec::new(),
             None,
             None,
-            Some(receipt.clone()),
+            Some(Box::new(receipt.clone())),
         )
         .await
         .unwrap();
