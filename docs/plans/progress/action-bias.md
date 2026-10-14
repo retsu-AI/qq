@@ -1263,3 +1263,9 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
   build exit 0. Receipts target/qq-perf/ab4-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
   Named performance and whole-cohort observation gates remain open.
+
+- AB5 final review wave immutable source 72b0601786a7aff304a87d3b95ca4cef8a645358: fresh
+  workspace package-clean qualification 2343 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab5-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
