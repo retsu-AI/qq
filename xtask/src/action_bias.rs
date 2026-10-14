@@ -705,6 +705,55 @@ mod tests {
     }
 
     #[test]
+    fn ab6_export_header_binds_the_transforming_build() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        call(&connection, 1, 1, "completed", r#"{"command":"pwd"}"#);
+        let path = directory.path().join("cohort.jsonl");
+        export(&store, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, &path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(header["format"], 2);
+        for field in [
+            "source_commit",
+            "classifier_source_sha256",
+            "executable_sha256",
+            "classifier_platform",
+            "classifier_arch",
+        ] {
+            assert!(
+                header["exporter"][field].is_string(),
+                "missing exporter {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn ab6_public_export_requires_immutable_build_identity() {
+        if option_env!("QQ_ACTION_BIAS_SOURCE_SHA").is_some() {
+            return; // The missing-build case is exercised only in an unpinned build.
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (store, connection) = fixture(directory.path());
+        call(&connection, 1, 1, "completed", r#"{"command":"pwd"}"#);
+        let output = directory.path().join("cohort.jsonl");
+        let result = run(ActionBiasArgs {
+            command: ActionBiasCommand::Export {
+                store,
+                start: "1970-01-02".to_owned(),
+                end: "1970-01-03".to_owned(),
+                cutoff: "1970-01-04".to_owned(),
+                output: output.clone(),
+            },
+        });
+        assert!(matches!(
+            result,
+            Err(ActionBiasError::Unqualified(Validation::BuildIdentity))
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
     fn ab6_envelope_overflow_is_unqualified_and_exact_command_bound_is_retained() {
         let directory = tempfile::tempdir().unwrap();
         let (store, connection) = fixture(directory.path());
