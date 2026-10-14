@@ -132,3 +132,22 @@ newest last.
   docs_truth -- --nocapture`: 23 passed; `git diff --check` passed. Production
   source is unchanged from the integrated head with all four workspace
   gates green; these corrections change plan/research/ledger only.
+
+### 2026-10-14 — AB4 execution eligibility investigation
+
+- Independent source investigation confirms external read-only hints grant
+  nothing. Strict ReadOnly denies all External calls, including granted ones;
+  unattended Ask allows only configuration-granted externals. Clarified the
+  plan to preserve that gate behavior, avoid request-time grant resolution,
+  and filter progressive index/selection with the declaration predicate.
+
+### 2026-10-14 — third hosted plan review corrections
+
+- Five fresh concrete findings: goal still capped all scopes at one search,
+  sed file-supplied programs, direct-run guide omitted granted externals,
+  suffix regex matched NOTAGENTS.md, and scan-cap remainder counts unknown.
+  Aligned goals/contracts and added exact regression acceptance; no waiver.
+- Independent review approved all five corrections and the external-hints
+  eligibility clarification. Docs truth 23 passed; fmt/diff checks passed.
+  AB1 exact file-supplied sed regressions pass (existing classifier rejects
+  them); AB2 exact-basename fixture passes; AB3 unknown-count fixture passes.

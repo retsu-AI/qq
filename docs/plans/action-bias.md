@@ -23,8 +23,11 @@ reports, without reading the same material repeatedly first. Specifically:
 - **Reads go through the built-ins.** Root shell calls whose program (after
   an optional leading `cd DIR`) is a read fall from 38 % of root `shell`
   calls (725 of 1,886) to ≤ 15 %.
-- **No per-directory instruction walk.** Instruction-file probes fall from
-  271 in 30 days to at most one `search` per run that edits below the root.
+- **No per-directory instruction walk.** Each run that actually edits below root starts at most one instruction
+  names search per permitted discovery root (workspace root plus applicable
+  highest ignored subtrees); cursor pages continue that search. The historical
+  271 physical probes remain context; the scope baseline records 40 starts,
+  10 repeated roots across seven runs, before path normalization and coverage audit.
 - **The safety net fires.** A root run whose last 64 calls changed nothing
   receives a stall report. Today `cd … && grep` and `sed -n` count as work,
   so this never happened in the window: 0 root stall reports in 30 days
@@ -73,9 +76,9 @@ described in AB6.
 | ID | Goal | Finding | Size | Inputs | Owned paths | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | AB1 | A shell call counts as a read when, after a leading `cd DIR` (`&&` or `;`), every segment is a read; `sed -n` (no in-place, no `w`/`e`), `nl`, `cut`, `sort`/`uniq` (no output operand) and `git -C DIR <read>` join the read set; known write shapes that pass today stop passing | AB-F1 | S | — | `crates/qq-core/src/approval.rs` (`read_only_shell_command` only), `runtime/progress.rs` tests, `lib.rs` and `runtime/audit.rs` audit-trigger tests | The § AB1 table as a test, every row; scripted root fixture: 64 × `cd sub && grep -n x f.rs` → a stall report on request 65; `cd sub && cargo test` still resets the count; a short run whose only change is `sed -ni s/a/b/ f.rs` still triggers the heuristic audit; `turn_overhead` within noise |
-| AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
+| AB2 | Prompt v20: an action-biased root contract, an exploration budget, shell-to-built-in mapping including ignored worktrees, instruction files found once per distinct search root instead of a per-directory walk, a header naming only present tools | AB-F2, AB-F3, AB-F5 | S | — | `crates/qq-core/src/runtime/prompt.rs`, `AGENT_PROMPT_VERSION` 19 → 20, `tools/specs.rs` descriptions for `read_file`/`search`/`tree`/`shell`, the prompt assertions in `lib.rs` (e.g. `observable completion criteria`, `lib.rs:2669`), `docs/design/tools.md` § Tool loop conventions paragraph (`tools.md:55-61`) | Golden tests: root prompt contains the § AB2 bullets verbatim; an analysis-only root task retains an explicit findings-without-edits instruction; a read child keeps its sub-agent section and lacks the "Do the work" bullet; the header omits `search_history`/`read_tool_result` when absent; `plan_compile` within noise; prefix bytes recorded; `search mode=names` and content search with `path` into an ignored directory each have a regression test; exact basename matching excludes NOTAGENTS.md; two distinct ignored roots, ignored-ancestor instructions, and nonignored parent instructions above an ignored subtree are covered without per-directory probes |
 | AB3 | `read_file` default window fills the byte budget instead of 200 lines; a read stopped by the line limit always carries `…[qq: N more lines; continue from offset=K]…`; the description says one larger read beats many slices | AB-F3, AB-F7 | S | AB2 (description text) | `crates/qq-core/src/tools/read.rs`, `tools/specs.rs`, `docs/design/tools.md` § read_file | A 3,000-line file with no `limit` returns lines up to the 32 KiB budget with the offset marker; a 300-line file returns whole with no marker; an explicit `limit` stopping early gets the marker; explicit `ranges` are unchanged; a 3,000-line short-line file fitting the byte and rendered-line bounds returns whole; a 4,000-empty-line file gets contiguous offset continuation before generic bounding; a batched fixture (6 parallel default reads of 1,000-line files) records turn-budget cuts before and after, and the slice does not ship if cuts rise without fewer calls; the schema's `"default": 200` (`specs.rs:126`) change is recorded with the tool-schema hash; `tool_dispatch` and `tool_output` within noise |
-| AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` gains one `granted_externals: bool`; `specs_with_pins` honours the filter), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
+| AB4 | Direct runs (`qq ask`, `CompiledAgentPlan::run`) and read-only roots declare only tools that can execute, and a read-only root's prompt says it cannot act; ADR-0059 | AB-F6 | M | AB2 | `crates/qq-core/src/lib.rs` (`CompiledAgentPlan::run`, `run_messages`), `catalog.rs` (`StaticFilter` distinguishes strict read-only and unattended direct runs; eligibility honours configuration grants and filters pins/index/selection), `plan.rs` (prefix-cache bound comment), `runtime/prompt.rs` (authority line), `docs/design/{architecture,protocol}.md`, `docs/guide/{headless,cli}.md` (`qq ask` "no tools" is wrong today), ADR-0059 | `qq ask` request declares no `edit_file`/`write_file`/`shell`/`exec`/`ask_user`; a config-granted mutating MCP tool still declares and runs on a direct run; an ungranted hinted-read-only External tool is omitted on direct runs; strict read-only sessions omit all External tools, including hinted/granted tools; a pinned mutating MCP tool is not declared in a read-only run; progressive index/selection does not offer or report an ineligible mutating tool as callable; the read-only root prompt has the authority line and no implement line; a `qq run --approval auto` prompt is byte-identical to AB2's; the `plan.run` callers in `src/main.rs`, `src/runtime.rs` and `qq-core` tests pass |
 | AB5 | A root's stall report asks for the next action, not a status summary: a new `TurnNotice::RootStallReport` with its own wording; children keep `StallReport` | AB-F1 | S | AB1 | `crates/qq-core/src/lib.rs` (notice constant), `runtime/events.rs` (`TurnNotice`, `from_stored`), `runtime/run_loop.rs` (choose by `StallPolicy`), `sessions/store/schema` (`STORE_SCHEMA_VERSION` 45 → 46, version-only migration; root request), `docs/design/protocol.md` store schema history, guide `troubleshooting.md` and `providers.md` schema mentions (checked by `docs_truth`) | A root fixture gets `root_stall_report` on request 65 and its continuation; a replayed pre-AB5 root run still renders `stall_report` byte-identically; live/replayed read-only roots receive the same authority-neutral notice; a child fixture is unchanged; a schema-45 binary refuses a schema-46 store at open instead of failing per session with `CODEC` |
 | AB6 | Qualification: re-run the research queries after seven days of AB1–AB4 on `main`; if ENG-809 authorizes paid runs, one paired A/B on the T13 fixtures (prompt 19 vs 20) | all | S | AB1–AB4 shipped | `docs/plans/progress/action-bias.md`, a `progress/g-action-bias.md` gate file | Every § Goal number recorded before and after with the window and schema; any miss becomes a slice or a recorded decision; no claim beyond what the counts show |
 
@@ -115,7 +118,8 @@ The rule:
      accepted long-option abbreviations).
 5. Additions:
    - `sed` when `-n` is present, no flag contains `i` or is
-     `--in-place`, and the script has no `w`, `W` or `e` command;
+     `--in-place`, no file-supplied program (`-f`/`--file`, joined or
+     abbreviated forms), and every literal script has no `w`, `W` or `e` command;
    - `nl`, `cut`;
    - `sort` without `-o` (including attached `-oFILE`), `--output` or
      `--output=FILE`, and `uniq` with at most one operand;
@@ -132,6 +136,7 @@ The rule:
 | `sed -i s/a/b/ f.rs` | no |
 | `cd x && grep foo f > out` | no |
 | `cd 'a b' && grep x f` | no (not stripped; unchanged from today) |
+| `sed -n -f write.sed input.txt`, `sed -n --file=write.sed input.txt` | no |
 | `sed -ni s/a/b/ f.rs`, `sed -n --in-place …`, `sed -n '1,5w out' f` | no |
 | `sort -o f.rs f.rs`, `sort -oout f.rs`, `sort --output=out f.rs`, `sort --output out f.rs`, `uniq in out` | no |
 | `git branch --delete topic`, `git branch --move old new`, `git branch --copy old new`, `git branch --force topic` | no |
@@ -184,7 +189,7 @@ is reviewed in the PR; these bullets are the contract.
 - **Replace** the AGENTS.md walk with: "Instructions from nested AGENTS.md
   files (CLAUDE.md where there is none) apply below their directory, more
   specific first. Before editing below the root, find them once per distinct search root
-  with search mode=names regex=true query="(AGENTS|CLAUDE)\.md$", and
+  with search mode=names regex=true query="(^|/)(AGENTS|CLAUDE)\.md$", and
   read only those on the path to your target. Always search the workspace
   root to cover nonignored ancestors. For a target inside an ignored
   directory, also search its highest ignored ancestor below the workspace
@@ -222,7 +227,10 @@ an open-ended range (`end: usize::MAX`), and `READ_BOUNDS`
 (32 KiB, 4,000 rendered lines) stops it, with the existing
 `continue from offset=` marker. A read that stops on its line limit
 before the end of the file now gets the same marker, with the remaining
-line count. Explicit `ranges` are unchanged. The read loop reserves rendered lines
+line count when the entire file was scanned. Beyond the 4 MiB scan cap,
+remaining count is unknown: use an unknown-count marker naming the cap and
+next offset rather than an exact prefix remainder. Test both bounded-default
+and explicit-limit reads of a file beyond the scan cap. Explicit `ranges` are unchanged. The read loop reserves rendered lines
 for its header and continuation marker before admitting body rows; generic
 head/tail truncation must never replace a contiguous offset continuation.
 A 4,000-empty-line no-limit fixture stops contiguously with the offset
@@ -253,12 +261,16 @@ projection is deterministic (F23).
   - Direct-run grants are host grants only (`lib.rs:1407-1412`,
     `shell_prefixes` empty), so built-in edit and shell tools are never
     declared there.
-  - Today `StaticFilter.read_only` drops every External tool not hinted
-    read-only (`catalog.rs:585-589`), which would also drop a granted MCP
-    tool.
-  - The filter gains one `granted_externals: bool`, and `base_specs`
-    looks up the plan's configuration grants itself. Those grants are
-    constant for a plan (`Runtime::config_grants`, `lib.rs:1407`).
+  - Today `StaticFilter.read_only` retains External tools hinted read-only,
+    but hints are not approval grants. Strict ReadOnly denies all External
+    calls, even hinted or configuration-granted ones; omit them there.
+    Unattended Ask retains only configuration-granted External tools,
+    regardless of hints. Neither rule changes the gate.
+  - The filter distinguishes strict read-only sessions from unattended
+    direct runs. Snapshot configuration-granted tool names at plan compile
+    time, so eligibility lookup performs no configuration work on requests.
+    Use that same eligibility for declarations, pins, index and selection.
+    Grants are constant for a plan (`Runtime::config_grants`, `lib.rs:1407`).
   - `StaticFilter` and `PromptPrefixKey` stay `Copy` and the prefix
     cache stays bounded. Its bound comment (`plan.rs:516-519`: "2⁵ … (198)")
     is updated to the new count.
@@ -294,7 +306,8 @@ projection is deterministic (F23).
     and is unaffected.
   - The user guide says `qq ask` has "no tools"
     (`docs/guide/headless.md:13`, `docs/guide/cli.md:28`). That is wrong
-    today and is corrected to "read-only tools" in this PR.
+    today and is corrected to "read-only built-ins plus explicitly
+    configuration-granted external tools" in this PR.
 
 ### AB5 — the root's stall report asks for action
 
