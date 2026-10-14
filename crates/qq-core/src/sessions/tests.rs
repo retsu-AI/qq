@@ -6499,6 +6499,98 @@ fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
 }
 
 #[tokio::test]
+async fn recovered_internal_summary_settles_durable_session_cost_once() {
+    for state in 0..4 {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("recovered-summary.sqlite");
+        let store = Store::open(path.clone()).await.unwrap();
+        let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
+        let model = Arc::new(test_resolved_model(
+            "test/model",
+            "test-model",
+            256,
+            Some(budget_pricing()),
+        ));
+        let (summary, _) = store
+            .start_in_run_compaction(&parent, &model, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        if state == 1 || state == 2 {
+            store.start_in_run_summary_request(&summary).await.unwrap();
+            let mut accounting = RunAccountingAccumulator::new(
+                Some(budget_pricing()),
+                context_occupancy_basis(
+                    qq_protocol::ContentHash::from_bytes([0; 32]),
+                    crate::runtime::PreparedStaticPrefix::new(
+                        qq_protocol::ContentHash::from_bytes([0; 32]),
+                        None,
+                    ),
+                    0,
+                ),
+            );
+            accounting.record_turn(Some(usage(7, 3)));
+            store
+                .persist_in_run_summary_turn(
+                    &summary,
+                    ModelTurnCommit {
+                        turn_ordinal: 1,
+                        message: Message::new(
+                            Role::Assistant,
+                            vec![ContentBlock::Text {
+                                text: "measured prefix".to_owned(),
+                            }],
+                        ),
+                        calls: Vec::new(),
+                        turn_message: None,
+                        context_tokens: None,
+                        occupancy_basis: None,
+                        usage: Some(usage(7, 3)),
+                        estimated_cost_usd_nanos: Some(13_000),
+                        accounting: Some(accounting.snapshot()),
+                        truncated: false,
+                        notice: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        if state == 2 || state == 3 {
+            store.start_in_run_summary_request(&summary).await.unwrap();
+        }
+        store.close().await.unwrap();
+        drop(store);
+        let (mut connection, store_id) = open_database(&path).unwrap();
+        let recovered =
+            crate::sessions::settlement::recover_interrupted_runs(&mut connection, store_id)
+                .unwrap();
+        assert_eq!(recovered.len(), 2);
+        let expected = if state == 1 {
+            (13_000, true)
+        } else {
+            (0, state == 0)
+        };
+        for reopen in 0..2 {
+            let actual: (u64, bool) = connection
+                .query_row(
+                    "SELECT estimated_cost_usd_nanos, cost_known FROM sessions WHERE id = ?1",
+                    [session_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "durable state {state}, reopen {reopen}");
+            assert!(
+                crate::sessions::settlement::recover_interrupted_runs(&mut connection, store_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(connection);
+            (connection, _) = open_database(&path).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("queued-summary.sqlite");

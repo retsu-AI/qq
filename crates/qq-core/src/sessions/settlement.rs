@@ -243,8 +243,25 @@ pub(super) fn settle_run(
         [claimed.identity.session_id.to_string()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
     )?;
-    let (next_cost, next_cost_known) = if saw_turn {
-        match cost.and_then(|cost| current_cost.checked_add(cost)) {
+    // Recovery has no executor accumulator. Owned summaries durably record
+    // their aggregate before settlement, including unknown pending requests.
+    let (session_cost, session_saw_turn) = if cause == SettlementCause::Recovery {
+        transaction
+            .query_row(
+                "SELECT estimated_cost_usd_nanos,
+                    usage_json IS NULL OR EXISTS(SELECT 1 FROM model_turns WHERE run_id = runs.id)
+                 FROM runs WHERE id = ?1 AND kind = 'compaction'
+                    AND auto_compaction_for_run_id IS NOT NULL",
+                [claimed.identity.run_id.to_string()],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?
+            .unwrap_or((cost, saw_turn))
+    } else {
+        (cost, saw_turn)
+    };
+    let (next_cost, next_cost_known) = if session_saw_turn {
+        match session_cost.and_then(|cost| current_cost.checked_add(cost)) {
             Some(cost) if current_cost_known => (cost, true),
             _ => (current_cost, false),
         }

@@ -985,6 +985,13 @@ fn process_kill_preserves_pending_summary_prefix_without_resending() {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
             .map(Result::unwrap).collect();
         assert_eq!(rows, vec![("interrupted".to_owned(), None, None)]);
+        let cost_known: bool = connection
+            .query_row("SELECT cost_known FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            !cost_known,
+            "a recovered pending summary must not advertise a known session cost"
+        );
         let prefix: (u64, String, u64) = connection.query_row(
             "SELECT COUNT(*), t.usage_json, t.estimated_cost_usd_nanos FROM model_turns t JOIN runs r ON r.id = t.run_id WHERE r.kind = 'compaction'",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
