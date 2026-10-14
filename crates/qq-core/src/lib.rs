@@ -10731,6 +10731,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_run_messages_uses_grants_at_first_poll_for_gate_and_declarations() {
+        for granted in [false, true] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            let live_granted = Arc::new(std::sync::atomic::AtomicBool::new(granted));
+            host.live_granted = Some(Arc::clone(&live_granted));
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let events =
+                runtime.run_messages(vec![Message::user("perform the requested operation")]);
+            live_granted.store(!granted, std::sync::atomic::Ordering::SeqCst);
+            let events = events.collect::<Vec<_>>().await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(!granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), !granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));

@@ -650,3 +650,10 @@ newest last.
   Hosted review requested. Parent source0dc6f436 receipt integrated; no
   production change after full2305-test qualification. Matched performance
   remains open; no merge or readiness claim.
+
+- Fresh parent review alleged stale grants in uncompiled Runtime::run_messages.
+  Current AB4 already replaces its empty placeholder gate after compilation
+  using the compiled descriptor snapshot. Public first-poll regression now
+  tests grant addition/removal between stream construction and polling; both
+  declarations and execution follow the newly compiled grants. Focused pass
+  requires no production change. Rerun workspace before publishing the test.
