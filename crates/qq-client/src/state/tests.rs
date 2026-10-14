@@ -627,7 +627,7 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
 
 #[test]
 fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
-    for snapshot in [false, true] {
+    for snapshot in 0..4 {
         for internal_first in [false, true] {
             let session_id = SessionId::from_bytes([3; 16]);
             let prompt = RunId::from_bytes([4; 16]);
@@ -636,7 +636,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
             running.status = SessionStatus::Running;
             running.active_run_id = Some(prompt);
             let mut store = SessionStore::default();
-            if snapshot {
+            if snapshot == 1 {
                 let runs = [prompt, compaction]
                     .into_iter()
                     .map(|id| {
@@ -660,27 +660,31 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                 );
             } else {
                 store.upsert_summary(running.clone(), &[], 0);
-                store.warm_empty(session_id);
-                store
-                    .get_mut(&session_id)
-                    .unwrap()
-                    .messages
-                    .as_mut()
-                    .unwrap()
-                    .push(message(8, session_id, prompt, "work"));
-                for (index, run_id) in [prompt, compaction].into_iter().enumerate() {
-                    store.reduce_event(
-                        &envelope(
-                            index as u64 + 1,
-                            session_id,
-                            SessionEvent::RunStarted {
-                                session: Box::new(running.clone()),
-                                run_id,
-                                plan: None,
-                            },
-                        ),
-                        context(&[]),
-                    );
+                if snapshot == 0 || snapshot == 3 {
+                    store.warm_empty(session_id);
+                }
+                if snapshot == 0 {
+                    store
+                        .get_mut(&session_id)
+                        .unwrap()
+                        .messages
+                        .as_mut()
+                        .unwrap()
+                        .push(message(8, session_id, prompt, "work"));
+                    for (index, run_id) in [prompt, compaction].into_iter().enumerate() {
+                        store.reduce_event(
+                            &envelope(
+                                index as u64 + 1,
+                                session_id,
+                                SessionEvent::RunStarted {
+                                    session: Box::new(running.clone()),
+                                    run_id,
+                                    plan: None,
+                                },
+                            ),
+                            context(&[]),
+                        );
+                    }
                 }
             }
             let mut idle = running.clone();
@@ -729,6 +733,151 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                 1
             );
         }
+    }
+}
+
+#[test]
+fn an_owned_summary_finish_does_not_submit_the_second_draft() {
+    for internal_first in [false, true] {
+        let session_id = SessionId::from_bytes([3; 16]);
+        let prompt = RunId::from_bytes([4; 16]);
+        let compaction = RunId::from_bytes([5; 16]);
+        let mut running = summary(session_id);
+        running.status = SessionStatus::Running;
+        running.active_run_id = Some(prompt);
+        let mut store = SessionStore::default();
+        store.upsert_summary(running.clone(), &[], 0);
+        for (index, run_id) in [prompt, compaction].into_iter().enumerate() {
+            store.reduce_event(
+                &envelope(
+                    index as u64 + 1,
+                    session_id,
+                    SessionEvent::RunStarted {
+                        session: Box::new(running.clone()),
+                        run_id,
+                        plan: None,
+                    },
+                ),
+                context(&[]),
+            );
+        }
+        store
+            .get_mut(&session_id)
+            .unwrap()
+            .drafts
+            .extend(["first".to_owned(), "second".to_owned()]);
+        let mut idle = running.clone();
+        idle.active_run_id = None;
+        idle.status = SessionStatus::Idle;
+        let order = if internal_first {
+            [compaction, prompt]
+        } else {
+            [prompt, compaction]
+        };
+        let mut effects = Vec::new();
+        for (index, run_id) in order.into_iter().enumerate() {
+            effects.extend(store.reduce_event(
+                &envelope(
+                    index as u64 + 3,
+                    session_id,
+                    SessionEvent::RunFinished {
+                        session: Box::new(if internal_first && index == 0 {
+                            running.clone()
+                        } else {
+                            idle.clone()
+                        }),
+                        run_id,
+                        outcome: RunOutcome::Interrupted,
+                        usage: None,
+                        context_tokens: None,
+                        final_output: None,
+                    },
+                ),
+                context(&[]),
+            ));
+        }
+        let submitted: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                StateEffect::SubmitDraft { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(submitted, ["first"], "internal_first={internal_first}");
+        assert_eq!(store[&session_id].drafts, ["second"]);
+    }
+}
+
+#[test]
+fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
+    for session_cost in [Some(14_150), None] {
+        let session_id = SessionId::from_bytes([3; 16]);
+        let prompt = RunId::from_bytes([4; 16]);
+        let mut running = summary(session_id);
+        running.status = SessionStatus::Running;
+        running.active_run_id = Some(prompt);
+        running.estimated_cost_usd_nanos = Some(1_000);
+        let mut store = SessionStore::default();
+        store.upsert_summary(running.clone(), &[], 0);
+        store.warm_empty(session_id);
+        store
+            .get_mut(&session_id)
+            .unwrap()
+            .messages
+            .as_mut()
+            .unwrap()
+            .push(message(8, session_id, prompt, "answer"));
+        store.reduce_event(
+            &envelope(
+                1,
+                session_id,
+                SessionEvent::RunStarted {
+                    session: Box::new(running.clone()),
+                    run_id: prompt,
+                    plan: None,
+                },
+            ),
+            context(&[]),
+        );
+        let mut idle = running;
+        idle.active_run_id = None;
+        idle.status = SessionStatus::Idle;
+        idle.estimated_cost_usd_nanos = session_cost;
+        let mut focused = context(&[]);
+        focused.focused = Some(session_id);
+        focused.workspace_id = Some(WorkspaceId::from_bytes([2; 16]));
+        let effects = store.reduce_event(
+            &envelope(
+                2,
+                session_id,
+                SessionEvent::RunFinished {
+                    session: Box::new(idle.clone()),
+                    run_id: prompt,
+                    outcome: RunOutcome::Completed,
+                    usage: None,
+                    context_tokens: None,
+                    final_output: None,
+                },
+            ),
+            focused,
+        );
+        assert_eq!(store[&session_id].runs[&prompt].cost_usd_nanos, None);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, StateEffect::RequestSnapshot(_)))
+                .count(),
+            1
+        );
+        let snapshot = qq_protocol::SessionSnapshot {
+            side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
+            runs: vec![serde_json::from_value(serde_json::json!({
+                "id":prompt,"session_id":session_id,"status":"completed","outcome":{"type":"completed"},
+                "estimated_cost_usd_nanos":150,"correlation":{}
+            })).unwrap()], tool_calls: Vec::new(), has_older_messages: false, has_older_tool_calls: false,
+        };
+        store.install_session_snapshot(snapshot, &[], 2);
+        assert_eq!(store[&session_id].runs[&prompt].cost_usd_nanos, Some(150));
     }
 }
 
