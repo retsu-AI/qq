@@ -801,9 +801,18 @@ mod tests {
         let content = "x".repeat(output::MAX_LINE_BYTES);
         fs::write(directory.path().join("row.txt"), &content).unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_tool(&workspace, &FileState::default(), "read_file", r#"{"path":"row.txt"}"#);
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"row.txt"}"#,
+        );
         assert!(!result.is_error);
-        let row = result.model_text.lines().find_map(|line| line.split_once('\t')).unwrap();
+        let row = result
+            .model_text
+            .lines()
+            .find_map(|line| line.split_once('\t'))
+            .unwrap();
         assert_eq!(row.1, content);
     }
 

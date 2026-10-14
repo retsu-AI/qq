@@ -709,7 +709,11 @@ When both are given, `ranges` wins and the header carries
 nothing (tool-layer D9). With no `limit`, the window runs to the end of
 file, bounded by 32 KiB and 4,000 rendered lines. Prefer one larger read
 over repeated small slices. The renderer reserves room for its header
-and continuation marker and never cuts a row in half. A byte or rendered-
+and continuation marker and never cuts a row in half. Row and header admission
+measure the masked escaped output, including argument-repair notes, so secret
+masking expansion cannot invalidate the contiguous window. The 2,000-byte
+content ceiling applies before the gutter; dispatch retains complete rendered
+rows. A byte or rendered-
 line stop carries `truncated=bytes` or `truncated=lines`, with a contiguous
 `continue from offset=<next>` marker. An explicit `limit` ending before
 EOF names the remaining lines and next offset. For a file beyond the

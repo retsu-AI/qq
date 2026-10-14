@@ -688,3 +688,10 @@ newest last.
 - Full 2,000-byte rows also lose content when dispatch clips the added gutter.
   Test-first failure captured; shared masked measure and actual note budget
   preserve complete rows while retaining the existing content clip ceiling.
+
+
+- Masked escaped row/header admission includes actual repair-note bytes,
+  preserves unmasked spill contents and prevents a second gutter-based clip.
+  Ten focused regressions pass; independent source review approves. Existing
+  range-separator accounting now charges its four escaped bytes.
+  Full integrated gates and dispatch measurements remain pending.
