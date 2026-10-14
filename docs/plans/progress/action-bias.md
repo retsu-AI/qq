@@ -633,3 +633,11 @@ newest last.
   target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
   Ten focused classifier fixtures pass; independent source review approves.
   Matched performance and final hosted review remain open.
+
+
+- Integrated gate caught the cursor schema's generated maxLength change and
+  an old fixture requiring a clipped-header spill. The bound is intentionally
+  widened to 5,476; canonical tool identity is now af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d.
+  The repair-note fixture now requires a complete decodable header and no
+  spill while preserving baseline content/cursor. Prior green receipts remain
+  historical; fresh integrated gates follow this correction.

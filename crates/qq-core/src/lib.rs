@@ -9662,13 +9662,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // AB2 changes four built-in descriptions; their schemas are unchanged.
+        // AB2 changes four descriptions and widens the cursor length bound.
         // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed"
+            "af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d"
         );
         let spawn = specs.last().unwrap();
         assert!(

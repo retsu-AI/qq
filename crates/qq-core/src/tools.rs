@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn readonly_argument_repairs_preserve_spilled_search_text_and_original_cursor() {
+    fn readonly_argument_repairs_preserve_complete_search_text_and_original_cursor() {
         let directory = tempfile::tempdir().unwrap();
         let query = "needle";
         let nested = directory.path().join(vec!["a".repeat(120); 15].join("/"));
@@ -421,52 +421,24 @@ mod tests {
             "{}",
             result.model_text
         );
-        let spill = result
-            .spill
-            .as_ref()
-            .expect("long search header exceeds the reserved header budget");
-        let complete_header = spill.text.lines().next().unwrap();
-        assert!(
-            spill
-                .text
-                .lines()
-                .any(|line| line == "note=include_array_coerced,cwd_ignored,offset_ignored")
-        );
-        let encoded = complete_header
+        assert!(result.spill.is_none(), "complete cursor header must fit");
+        assert!(baseline.spill.is_none());
+        let encoded = header
             .split_once(" next=")
             .unwrap()
             .1
             .split_whitespace()
             .next()
             .unwrap();
-        let original = baseline.spill.as_ref().expect("baseline also spills");
+        assert!(search::Cursor::decode(encoded).is_some());
         assert_eq!(
-            spill.text.replace(
+            result.model_text.replace(
                 "note=include_array_coerced,cwd_ignored,offset_ignored\n",
                 ""
             ),
-            original.text,
-            "repair must preserve complete spilled content"
+            baseline.model_text,
+            "repair must preserve complete bounded content and its cursor"
         );
-        let original_cursor = original
-            .text
-            .lines()
-            .next()
-            .unwrap()
-            .split_once(" next=")
-            .unwrap()
-            .1
-            .split_whitespace()
-            .next()
-            .unwrap();
-        assert_eq!(
-            encoded, original_cursor,
-            "repair must preserve the original cursor"
-        );
-        assert_eq!(spill.digest, content_hash(spill.text.as_bytes()));
-        assert!(spill.text.len() > result.model_text.len());
-        assert!(spill.omitted_from_line > 1);
-        assert!(spill.omitted_from_line <= spill.text.lines().count());
     }
 
     #[test]
@@ -2487,7 +2459,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed"
+            "af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d"
         );
     }
 

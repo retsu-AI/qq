@@ -651,7 +651,8 @@ The byte budget (12 KiB) is respected by the walk itself: rather than
 letting dispatch cut the middle out of a result, `search` stops emitting
 and hands back a cursor, so no match is lost between pages.
 Cursor paths are capped at 4,096 UTF-8 bytes, including a completed-directory
-slash; their base64url tokens are capped at 5,476 bytes. The walk reserves the
+slash; their base64url tokens and the cursor schema maxLength are capped at 5,476
+bytes. This widens the former 512-byte schema ceiling. The walk reserves the
 current frontier's full cursor before admitting body text, and dispatch keeps
 the complete header. A longer path produces `search_path_budget`; a first
 match that cannot fit with its cursor produces `search_output_budget`.
