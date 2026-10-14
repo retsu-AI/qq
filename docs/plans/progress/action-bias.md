@@ -219,3 +219,16 @@ newest last.
   eligibility clarification. Docs truth 23 passed; fmt/diff checks passed.
   AB1 exact file-supplied sed regressions pass (existing classifier rejects
   them); AB2 exact-basename fixture passes; AB3 unknown-count fixture passes.
+
+### 2026-10-14 — AB1 draft publication qualification
+
+- Integrated reviewed parent `188b69ff`; exact git-output and sed-file
+  regressions pass without changing the classifier. Final workspace gates
+  pass: 2,277 tests, 0 failures, 14 ignored; fmt, Clippy and build exit 0.
+  `cargo test --workspace -- --test-threads=1` serializes fixtures while their
+  internal async concurrency tests still execute. Color enabled, tmpfs stores.
+- Parallel publication attempt hit unchanged MCP cancellation timing
+  (45.83 ms against 45 ms); full serial rerun passes without threshold edits.
+  Logs `target/qq-perf/ab1-2026-10-14/publish-serial-gate-{0,1,2,3}.log`.
+- Publish as draft for hosted source review; matched performance qualification
+  remains open. No readiness or merge claim is made by draft publication.
