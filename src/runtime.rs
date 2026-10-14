@@ -173,6 +173,7 @@ struct RuntimeFactoryInner {
     config: ConfigLoader,
     credentials: CredentialStore,
     mode: RuntimeMode,
+    approved_read_images: qq_core::ApprovedReadImages,
     providers: ProviderCompiler,
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
@@ -235,10 +236,21 @@ fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
 }
 
 impl RuntimeFactory {
-    pub fn system() -> Result<Self, RuntimeBuildError> {
-        Self::new(ConfigLoader::system()?, CredentialStore::system()?)
+    pub fn system_with_read_images(
+        images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
+        Self::new_with_read_images(ConfigLoader::system()?, CredentialStore::system()?, images)
     }
 
+    pub fn new_with_read_images(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
+        Self::with_mode_and_images(config, credentials, RuntimeMode::Standard, images)
+    }
+
+    #[cfg(test)]
     pub fn new(
         config: ConfigLoader,
         credentials: CredentialStore,
@@ -283,11 +295,26 @@ impl RuntimeFactory {
         credentials: CredentialStore,
         mode: RuntimeMode,
     ) -> Result<Self, RuntimeBuildError> {
+        Self::with_mode_and_images(
+            config,
+            credentials,
+            mode,
+            qq_core::ApprovedReadImages::default(),
+        )
+    }
+
+    fn with_mode_and_images(
+        config: ConfigLoader,
+        credentials: CredentialStore,
+        mode: RuntimeMode,
+        approved_read_images: qq_core::ApprovedReadImages,
+    ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
                 config,
                 credentials,
                 mode,
+                approved_read_images,
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
@@ -1741,6 +1768,7 @@ impl RuntimeFactory {
                 .with_delegation(delegation)
                 .with_audit(audit)
                 .with_shell_policy(shell)
+                .with_approved_read_images(self.inner.approved_read_images.clone())
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
                 .with_approval_delegate_identity(

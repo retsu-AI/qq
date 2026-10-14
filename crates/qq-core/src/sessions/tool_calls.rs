@@ -76,6 +76,7 @@ pub(super) fn finish_tool_call(
     file_states: Vec<FileStateUpdate>,
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
+    execution_context: Option<crate::tools::process_context::ExecutionContextReceipt>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn) = transaction
@@ -113,9 +114,32 @@ pub(super) fn finish_tool_call(
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
+    let execution_context_json = match execution_context {
+        Some(receipt) => {
+            if !receipt.valid() {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            let arguments: String = transaction.query_row(
+                "SELECT arguments_json FROM tool_calls WHERE id = ?1",
+                [tool_call_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if crate::tools::process_context::arguments_digest(&tool_name, &arguments)
+                != Some(receipt.arguments_sha256)
+            {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            let json = serde_json::to_string(&receipt)?;
+            if json.len() > crate::tools::process_context::MAX_EXECUTION_CONTEXT_BYTES {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            Some(json)
+        }
+        None => None,
+    };
     let updated = transaction.execute(
         "UPDATE tool_calls
-             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7
+             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = ?8
              WHERE id = ?1 AND run_id = ?6 AND state = 'running'",
         params![
             tool_call_id.to_string(),
@@ -125,6 +149,7 @@ pub(super) fn finish_tool_call(
             now,
             identity.run_id.to_string(),
             display_json,
+            execution_context_json,
         ],
     )?;
     if updated != 1 {

@@ -35,6 +35,15 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub tui_qa_root: Option<PathBuf>,
 
+    /// Attest that this exact native image performs only self-contained reads
+    /// for admitted arguments/stdin in a C locale; repeat for up to ten families.
+    #[arg(
+        long = "approve-self-contained-read-image",
+        global = true,
+        value_name = "FAMILY:SHA256"
+    )]
+    pub approved_read_images: Vec<qq_core::ApprovedReadImage>,
+
     /// Override the configured provider/model route.
     #[arg(long, global = true, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,

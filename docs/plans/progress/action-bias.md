@@ -586,3 +586,8 @@ newest last.
   Existing literal exec classification calls it Read, so progress and audit
   assertions fail. The real helper execution and side effect are checked before
   the verdict. context-shadow-red.log retains the failing worker/parent result.
+
+### 2026-10-14 — expanded context implementation in progress
+
+- Inherited-PATH executable spoof reproduced red and now passes with execution-derived Work accounting. Prepared launch captures environment once, holds cwd, binds explicitly approved self-contained static Linux exec images with sealed bytes, and produces typed atomic store receipts. CLI approvals propagate through immutable factories; existing-server attachment rejects nonempty flags.
+- Local source remains unqualified: focused tests identified a store-fixture table typo (fixed), broader tests exposed old heuristic assumptions and partial-migration fixtures (fixed); descriptor golden awaits refresh. No new source pushed. Integrating newly merged main #295/#296/#297 and preserving its schema46 before the next qualification.

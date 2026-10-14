@@ -81,7 +81,9 @@ without producing anything.
 
    Shell read classification treats one leading unquoted `cd DIR &&` or
    `cd DIR;` as transparent. Recognized print-only `sed -n`, `nl`, `cut`,
-   stream-only `sort`/`uniq` and `git -C DIR` reads remain reads. Known
+   `uniq` stdout and `git -C DIR` reads remain lexical reads. All `sort`
+   calls count as Work because inherited `TMPDIR` can place spill files in the
+   workspace. Known
    write/execute options, substitutions, redirections and unknown shell
    syntax count as work. Classification is bounded to 16 KiB and 128 words
    per segment. It is used only by progress and audit, never as an approval

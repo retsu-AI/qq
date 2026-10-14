@@ -7,6 +7,7 @@ mod lang;
 mod matching;
 pub(crate) mod network;
 pub mod output;
+pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
@@ -16,7 +17,7 @@ pub(crate) mod walk;
 mod write;
 
 #[cfg(test)]
-pub(crate) use dispatch::test_executions_started;
+pub(crate) use dispatch::{execute, test_executions_started};
 
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
 /// public API.
@@ -71,7 +72,7 @@ pub mod bench_support {
     }
 }
 pub(crate) use dispatch::{
-    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute,
+    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute_with_images,
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;

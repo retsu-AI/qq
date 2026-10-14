@@ -359,9 +359,9 @@ async fn a_failing_command_before_the_threshold_means_no_report() {
     );
 }
 
-/// A read-only shell command is a read: it never resets the count.
+/// Lexical read shape alone cannot qualify an executed program.
 #[tokio::test]
-async fn a_read_only_command_is_not_progress() {
+async fn an_unverified_read_shape_counts_as_work() {
     let mut script = reads(64);
     script[59] = (
         "shell",
@@ -370,7 +370,7 @@ async fn a_read_only_command_is_not_progress() {
     let (_events, requests) = run(Scripted::new(script), RunCapabilities::user(None)).await;
     assert_eq!(
         calls_before_reports(&requests, STALL_REPORT_NOTICE).len(),
-        1
+        0
     );
 }
 
@@ -1008,7 +1008,7 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
 }
 
 #[tokio::test]
-async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
+async fn ab1_cd_prefixed_reads_without_context_verification_count_as_work() {
     let mut provider = Scripted::new(vec![
         ("shell", r#"{"command":"cd sub && grep -n x f.rs"}"#);
         64
@@ -1016,15 +1016,8 @@ async fn ab1_cd_prefixed_reads_report_on_request_sixty_five() {
     provider.calls_per_turn = 1;
     let (events, requests) = run(provider, RunCapabilities::user(None)).await;
     assert_eq!(completed_text(&events).as_deref(), Some("done"));
-    assert_eq!(last_notice(&requests[64]), Some(STALL_REPORT_NOTICE));
-    assert_eq!(last_notice(&requests[65]), Some(SLICE_CONTINUATION_NOTICE));
-    assert_eq!(
-        notices(&events),
-        [
-            runtime::TurnNotice::StallReport,
-            runtime::TurnNotice::Continuation
-        ]
-    );
+    assert!(calls_before_reports(&requests, STALL_REPORT_NOTICE).is_empty());
+    assert!(notices(&events).is_empty());
 }
 
 #[tokio::test]

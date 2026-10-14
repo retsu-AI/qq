@@ -15,6 +15,7 @@ mod context_capacity;
 mod contract;
 mod deadlines;
 mod delegation;
+mod execution_context;
 mod feeds;
 mod migrations;
 mod nonblocking;
@@ -1828,6 +1829,7 @@ async fn spill_one_call(
                 digest: digest.clone(),
                 omitted_from_line: 2,
             }),
+            None,
         )
         .await
         .unwrap();
@@ -4180,6 +4182,7 @@ async fn project_terminal_run_with_tool_boundaries(
             "persisted result".to_owned(),
             false,
             Vec::new(),
+            None,
             None,
             None,
         )

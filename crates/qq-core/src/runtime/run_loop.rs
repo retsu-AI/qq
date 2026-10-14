@@ -2631,6 +2631,7 @@ impl RunState {
                     let hosts = &plan.hosts;
                     let delegation = &plan.runtime.delegation;
                     let shell_policy = &plan.runtime.shell;
+                    let approved_read_images = &plan.runtime.approved_read_images;
                     let network_policy = &plan.runtime.network;
                     let reasoning_effort = plan.runtime.reasoning_effort;
 
@@ -2743,6 +2744,7 @@ impl RunState {
                                 file_states: Vec::new(),
                                 display: result.ui_payload,
                                 spill: None,
+                                    execution_context: None,
                             });
                         }
                         if tool_scope.pins_changed {
@@ -2780,6 +2782,7 @@ impl RunState {
                             let spills = spills.clone();
                             let delegation = Arc::clone(delegation);
                             let shell_policy = Arc::clone(shell_policy);
+                            let approved_read_images = Arc::clone(approved_read_images);
                             let network_policy = Arc::clone(network_policy);
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
@@ -3072,7 +3075,7 @@ impl RunState {
                                         }
                                     }
                                     None => {
-                                        tools::execute(
+                                        tools::execute_with_images(
                                             workspace,
                                             file_state,
                                             call.name.clone(),
@@ -3082,6 +3085,7 @@ impl RunState {
                                             tool_tasks,
                                             shell_policy,
                                             network_policy,
+                                            approved_read_images,
                                         )
                                         .await
                                     }
@@ -3175,6 +3179,7 @@ impl RunState {
                                     file_states: result.file_states,
                                     display: result.ui_payload,
                                     spill: result.spill,
+                                    execution_context: result.execution_context,
                                 });
                             }
                         }
@@ -3264,6 +3269,7 @@ impl RunState {
                                     file_states: result.file_states,
                                     display: result.ui_payload,
                                     spill: result.spill,
+                                    execution_context: result.execution_context,
                                 });
                                 if interrupted_here {
                                     tool_scope.interrupted = true;
@@ -3300,6 +3306,7 @@ impl RunState {
                                         file_states: Vec::new(),
                                         display: None,
                                         spill: None,
+                                    execution_context: None,
                                     });
                                 }
                             }

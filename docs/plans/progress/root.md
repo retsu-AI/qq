@@ -536,3 +536,8 @@ User authorizes completing the entire autonomous-core plan as stacked PRs, inclu
   classification field in its existing shell preview pattern. Approval
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
+
+### 2026-10-14 — AB1 execution-context shared-path request
+
+- User authorized host execution-context capture/verification and required every PR to stay out of draft. AB1 owns the concrete process preparation/receipt seam, startup approval flags in `src/{cli,main,runtime}.rs`, descriptor v14, and nullable store receipt migration; AB5 must follow the current main schema with its notice-only migration. ADR-0060 is reserved in the parent follow-up.
+- Newly merged main includes #295/#296/#297. Integrating it before publishing AB1; migration numbering must preserve AC3's schema46 rather than reuse it. Historical process qualification stays unavailable.
