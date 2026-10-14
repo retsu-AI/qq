@@ -427,3 +427,10 @@ newest last.
   review caught and corrected the branch-list acceptance example's missing
   no-lazy-fetch switch. Source is unchanged; slice-specific source gates
   remain tracked independently.
+
+
+- Immutable integrated source 007d6728 passes 2,282 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
+  Ten focused classifier fixtures pass; independent source review approves.
+  Matched performance and final hosted review remain open.
