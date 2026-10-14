@@ -35,6 +35,15 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub tui_qa_root: Option<PathBuf>,
 
+    /// Attest that this exact native image performs only self-contained reads
+    /// for admitted arguments/stdin in a C locale; repeat for up to ten families.
+    #[arg(
+        long = "approve-self-contained-read-image",
+        global = true,
+        value_name = "FAMILY:SHA256"
+    )]
+    pub approved_read_images: Vec<qq_core::ApprovedReadImage>,
+
     /// Override the configured provider/model route.
     #[arg(long, global = true, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,
@@ -512,6 +521,45 @@ mod tests {
         let mut out = Vec::new();
         walk(&Cli::command(), "", &mut out);
         out
+    }
+
+    #[test]
+    fn ab1_read_approval_flag_parses_for_every_execution_surface() {
+        let value = format!("grep:{}", "01".repeat(32));
+        for command in [
+            Vec::new(),
+            vec!["ask", "task"],
+            vec!["run", "task"],
+            vec!["serve"],
+        ] {
+            let args = [
+                vec!["qq", "--approve-self-contained-read-image", value.as_str()],
+                command,
+            ]
+            .concat();
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert_eq!(parsed.approved_read_images.len(), 1);
+            assert_eq!(
+                parsed.approved_read_images[0].family,
+                qq_core::ReadImageFamily::Grep
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "qq",
+                "--approve-self-contained-read-image",
+                "grep:bad",
+                "ask",
+                "task"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["qq", "ask", "task"])
+                .unwrap()
+                .approved_read_images
+                .is_empty()
+        );
     }
 
     #[test]

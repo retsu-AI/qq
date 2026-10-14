@@ -28,6 +28,16 @@ use serde::Serialize;
 
 const TOOL: &str = "ext__soak__step";
 
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "integration-only fault modes share this fixture with the fault-free benchmark"
+)]
+pub enum SummaryPrefix {
+    Calls,
+    Truncated,
+}
+
 #[derive(Clone)]
 pub struct Script {
     pub turns: usize,
@@ -37,7 +47,16 @@ pub struct Script {
     pub truncate_at: Vec<usize>,
     pub fault_at: Option<usize>,
     pub fault_attempts: usize,
-    pub summary_fails: bool,
+    /// Summarizer requests answered with a 529 before one succeeds.
+    pub summary_faults: usize,
+    /// HTTP status of each scripted summarizer fault.
+    pub summary_fault_status: u16,
+    /// One measured call-bearing summarizer turn before a later fault.
+    pub summary_prefix: Option<SummaryPrefix>,
+    pub summary_hang_after_prefix: bool,
+    pub pricing: Option<qq_protocol::ModelPricing>,
+    /// Backoff between turn and summarizer retries.
+    pub retry_delay: Duration,
     pub empty_checkpoint: bool,
     pub repeat_arguments: bool,
     pub stall_after: Option<usize>,
@@ -45,6 +64,10 @@ pub struct Script {
     pub hold_result: bool,
     /// Visible text streamed with each work turn's calls, in bytes.
     pub text_bytes: usize,
+    pub work_usage: Option<qq_provider::ProviderUsage>,
+    /// Deterministic request-sized usage so measured context still grows.
+    pub measure_work_usage: bool,
+    pub summary_usage: Option<qq_provider::ProviderUsage>,
 }
 
 impl Script {
@@ -62,13 +85,21 @@ impl Script {
             truncate_at: Vec::new(),
             fault_at: None,
             fault_attempts: 0,
-            summary_fails: false,
+            summary_faults: 0,
+            summary_fault_status: 529,
+            summary_prefix: None,
+            summary_hang_after_prefix: false,
+            pricing: None,
+            retry_delay: Duration::from_millis(1),
             empty_checkpoint: false,
             repeat_arguments: false,
             stall_after: None,
             journal: None,
             hold_result: false,
             text_bytes: 0,
+            work_usage: None,
+            measure_work_usage: false,
+            summary_usage: None,
         }
     }
 }
@@ -79,6 +110,10 @@ pub struct Observations {
     pub provider_requests: usize,
     pub truncations: HashSet<usize>,
     pub faults: usize,
+    pub summary_faults: usize,
+    pub summary_prefix_served: bool,
+    pub summary_requests: usize,
+    pub summary_inputs: Vec<String>,
     pub calls: Vec<u64>,
     pub turn_gaps_ns: Vec<u64>,
     last_work_entry: Option<Instant>,
@@ -93,9 +128,9 @@ impl Provider for ScriptedProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let mut observed = self.observed.lock().expect("fixture observations");
         observed.provider_requests += 1;
-        // Summarizers are recognized by their instruction, the last message:
-        // they declare the session's tools to share its cache (ADR-0056 § 5).
-        let summarizing = request.messages().last().is_some_and(|message| {
+        // The instruction remains in summarizer continuations and rejected
+        // call replies. Ordinary prompt history never includes it.
+        let summarizing = request.messages().iter().any(|message| {
             message.content().iter().any(|block| {
                 matches!(block, qq_provider::ContentBlock::Text { text }
                     if text.starts_with("Summarize this conversation")
@@ -103,15 +138,58 @@ impl Provider for ScriptedProvider {
             })
         });
         if summarizing {
-            drop(observed);
-            if self.script.summary_fails {
+            observed.summary_requests += 1;
+            if self.script.summary_faults > 0
+                && observed.summary_inputs.len() <= usize::from(qq_protocol::MAX_TURN_RETRIES)
+            {
+                observed.summary_inputs.push(format!("{request:?}"));
+            }
+            if let Some(prefix) = self.script.summary_prefix
+                && !observed.summary_prefix_served
+            {
+                observed.summary_prefix_served = true;
+                return match prefix {
+                    SummaryPrefix::Calls => Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "summary-read".to_owned(),
+                            name: TOOL.to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "summary-read".to_owned(),
+                            json: "{\"sequence\":0}".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "summary-read".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed {
+                            usage: self.script.summary_usage,
+                        }),
+                    ])),
+                    SummaryPrefix::Truncated => Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "1. Intent: keep the task".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Incomplete {
+                            usage: self.script.summary_usage,
+                            reason: IncompleteReason::OutputTokens,
+                        }),
+                    ])),
+                };
+            }
+            if self.script.summary_hang_after_prefix && observed.summary_prefix_served {
+                return Box::pin(stream::pending());
+            }
+            if observed.summary_faults < self.script.summary_faults {
+                observed.summary_faults += 1;
                 return Box::pin(stream::iter([Err(ProviderError::Api {
-                    status: 529,
+                    status: self.script.summary_fault_status,
                     message: "scripted summarizer outage".to_owned(),
                 })]));
             }
-            return text(
+            drop(observed);
+            return text_with_usage(
                 "1. Intent: finish the scripted task\n2. Decisions and constraints: local fixture only\n3. Work state: earlier steps are durable\n4. Open problems: none\n5. Next step: finish the scripted task",
+                self.script.summary_usage,
             );
         }
         // The checkpoint's report notice is the request's last message
@@ -137,6 +215,17 @@ impl Provider for ScriptedProvider {
             }
             return text("Checkpoint: continue with the next uniquely numbered step.");
         }
+        let work_usage = if self.script.measure_work_usage {
+            Some(qq_provider::ProviderUsage {
+                input_tokens: u64::try_from(format!("{request:?}").len().div_ceil(4)).unwrap(),
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: None,
+            })
+        } else {
+            self.script.work_usage
+        };
         let turn = observed.work_turns;
         if self.script.stall_after.is_some_and(|after| turn >= after) {
             return Box::pin(stream::pending());
@@ -156,7 +245,7 @@ impl Provider for ScriptedProvider {
         }
         if turn == self.script.turns {
             drop(observed);
-            return text("Scripted task complete.");
+            return text_with_usage("Scripted task complete.", work_usage);
         }
         let now = Instant::now();
         if let Some(previous) = observed.last_work_entry.replace(now) {
@@ -191,17 +280,21 @@ impl Provider for ScriptedProvider {
             }));
             events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
         }
-        events.push(Ok(ProviderEvent::Completed { usage: None }));
+        events.push(Ok(ProviderEvent::Completed { usage: work_usage }));
         Box::pin(stream::iter(events))
     }
 }
 
 fn text(value: &str) -> ProviderStream {
+    text_with_usage(value, None)
+}
+
+fn text_with_usage(value: &str, usage: Option<qq_provider::ProviderUsage>) -> ProviderStream {
     Box::pin(stream::iter([
         Ok(ProviderEvent::OutputTextDelta {
             text: value.to_owned(),
         }),
-        Ok(ProviderEvent::Completed { usage: None }),
+        Ok(ProviderEvent::Completed { usage }),
     ]))
 }
 
@@ -317,8 +410,8 @@ impl RuntimeLoader for Loader {
                     policy_bound: false,
                 }))
                 .with_turn_recovery(TurnRecoveryPolicy::new(
-                    Duration::from_millis(1),
-                    Duration::from_millis(1),
+                    script.retry_delay,
+                    script.retry_delay,
                 ))
                 .with_tool_host(host);
                 LoadedRuntime::compile_blocking(
@@ -332,7 +425,7 @@ impl RuntimeLoader for Loader {
                         credential_profile: None,
                         max_output_tokens: 1_024,
                         context_window: script.context_window,
-                        pricing: None,
+                        pricing: script.pricing.clone(),
                         output_token_control: CapabilitySupport::Native,
                         generation: GenerationCapabilities {
                             reasoning_effort: CapabilitySupport::Unsupported,
@@ -443,6 +536,14 @@ impl Fixture {
     }
 
     pub async fn submit(&self) -> RunId {
+        self.submit_with_limits(RunLimits {
+            max_duration_ms: Some(300_000),
+            ..RunLimits::default()
+        })
+        .await
+    }
+
+    pub async fn submit_with_limits(&self, limits: RunLimits) -> RunId {
         let receipt = self
             .runtime
             .command(
@@ -450,10 +551,7 @@ impl Fixture {
                 SessionCommand::SubmitPrompt {
                     session_id: self.session_id,
                     input: vec![InputPart::text("finish the scripted task".to_owned())],
-                    limits: RunLimits {
-                        max_duration_ms: Some(300_000),
-                        ..RunLimits::default()
-                    },
+                    limits,
                     correlation: Correlation::default(),
                     output: None,
                 },
@@ -468,6 +566,9 @@ impl Fixture {
 
     pub async fn finish(&mut self, run_id: RunId) -> Report {
         let mut compactions = 0;
+        let mut turn_retries = 0;
+        let mut step_runs_started = 0;
+        let mut step_runs_finished = 0;
         let mut durable_calls = 0;
         let mut persisted_bytes = 0;
         let baseline_rss = self.initial_resources.rss_bytes;
@@ -485,6 +586,15 @@ impl Fixture {
                     serde_json::to_vec(&envelope).expect("event encoding").len() as u64;
                 match envelope.event {
                     SessionEvent::SessionCompacted { .. } => compactions += 1,
+                    SessionEvent::RunTurnRetrying { .. } if envelope.run_id == Some(run_id) => {
+                        turn_retries += 1
+                    }
+                    SessionEvent::RunStarted { run_id: step, .. } if step != run_id => {
+                        step_runs_started += 1
+                    }
+                    SessionEvent::RunFinished { run_id: step, .. } if step != run_id => {
+                        step_runs_finished += 1
+                    }
                     SessionEvent::ToolCallFinished { .. } if envelope.run_id == Some(run_id) => {
                         durable_calls += 1
                     }
@@ -529,6 +639,10 @@ impl Fixture {
             duplicate_sequences: observed.calls.len() - unique,
             durable_calls,
             compactions,
+            turn_retries,
+            step_runs_started,
+            step_runs_finished,
+            summarizer_faults: observed.summary_faults,
             persisted_event_bytes: persisted_bytes,
             baseline_rss_bytes: baseline_rss,
             peak,
@@ -598,6 +712,13 @@ pub struct Report {
     pub duplicate_sequences: usize,
     pub durable_calls: usize,
     pub compactions: usize,
+    /// `run_turn_retrying` events for the prompt run.
+    pub turn_retries: usize,
+    /// Internal (compaction) runs started and finished in the session.
+    pub step_runs_started: usize,
+    pub step_runs_finished: usize,
+    /// Scripted summarizer faults the provider actually served.
+    pub summarizer_faults: usize,
     pub persisted_event_bytes: u64,
     pub baseline_rss_bytes: Option<u64>,
     pub peak: Resources,

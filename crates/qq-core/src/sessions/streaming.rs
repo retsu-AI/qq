@@ -129,6 +129,7 @@ pub(super) fn persist_model_turn(
     store_id: StoreId,
     claimed: &ClaimedRun,
     turn: &ModelTurnCommit,
+    reserve_context: bool,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let ModelTurnCommit {
         turn_ordinal,
@@ -190,7 +191,9 @@ pub(super) fn persist_model_turn(
     let non_text_bytes =
         usize::try_from(full_message_bytes.saturating_sub(already_reserved_text_bytes))
             .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
-    reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
+    if reserve_context {
+        reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
+    }
     // Completing the turn's message in the same transaction as the turn row
     // keeps message state and turn persistence atomic: after a crash, a
     // streaming message always identifies exactly the turn that never
