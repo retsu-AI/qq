@@ -1,5 +1,6 @@
 """Public CLI behavior of the isolated turn-overhead recorder; no Rust build."""
 import json
+import hashlib
 import os
 import signal
 from pathlib import Path
@@ -31,16 +32,38 @@ class RecorderTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_recorder(self, *extra, baseline=None, candidate=None, fixture_identity=True):
+    def run_recorder(self, *extra, baseline=None, candidate=None, fixture_identity=True, fixture_receipts=True, receipt_changes=None):
+        for arm, binary, sha in (("baseline", baseline or self.baseline, "a" * 40),
+                                 ("candidate", candidate or self.candidate, "b" * 40)):
+            receipt = {"format_version": 1, "compiled_fixture_verified": True,
+                       "production_sha": sha, "fixture_sha": "e" * 40,
+                       "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                       "effective_fixture": {"sha256": FIXTURE_DIGEST}}
+            if arm == "candidate" and receipt_changes:
+                receipt.update(receipt_changes)
+            (self.root / f"{arm}-fixture.json").write_text(json.dumps(receipt))
         return subprocess.run([sys.executable, str(RECORDER),
             "--baseline", str(baseline or self.baseline),
             "--candidate", str(candidate or self.candidate),
             "--baseline-sha", "a" * 40, "--candidate-sha", "b" * 40,
             "--output", str(self.root / "result"),
             *(["--baseline-fixture-sha256", FIXTURE_DIGEST,
-               "--candidate-fixture-sha256", FIXTURE_DIGEST] if fixture_identity else []), *extra],
+               "--candidate-fixture-sha256", FIXTURE_DIGEST] if fixture_identity else []),
+            *(["--baseline-fixture-receipt", str(self.root / "baseline-fixture.json"),
+               "--candidate-fixture-receipt", str(self.root / "candidate-fixture.json")] if fixture_receipts else []), *extra],
             env=dict(os.environ, ORDER_LOG=str(self.root / "order")),
             text=True, capture_output=True, timeout=30)
+
+    def test_verified_build_receipts_are_required_before_execution(self):
+        for changes in (None, {"compiled_fixture_verified": False},
+                        {"production_sha": "f" * 40}, {"binary_sha256": "0" * 64},
+                        {"effective_fixture": {"sha256": "d" * 64}}):
+            with self.subTest(changes=changes):
+                result = self.run_recorder(fixture_receipts=changes is not None, receipt_changes=changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("receipt", result.stderr)
+                self.assertFalse((self.root / "order").exists())
+                self.assertFalse((self.root / "result").exists())
 
     def test_fixture_identity_is_required_before_execution(self):
         result = self.run_recorder(fixture_identity=False)
