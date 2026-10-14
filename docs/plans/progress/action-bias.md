@@ -782,3 +782,10 @@ newest last.
   correction (notice-docs-red.log); shared paths reserved in root ledger.
 - Correct the report vocabulary and all-report predicate, preserving Goal 6's
   slice-only selection explicitly. Exact SQL fixture and full gates next.
+
+- Architecture now names root_stall_report and child/legacy stall_report.
+  Runbook defaults to all three report kinds on schema 40+, with schema 46
+  semantics explicit; Goal 6 uses its narrower slice-only predicate.
+- Docs truth 24 passed. Exact SQL fixture: all reports 3/missed 1; Goal 6
+  slice reports 1/missed 0. Evidence notice-query-fixture.json in AB5 receipts.
+  Independent documentation/integration review approves; full gates next.

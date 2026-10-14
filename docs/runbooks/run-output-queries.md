@@ -140,8 +140,11 @@ text only or with nothing.
 From store schema 40 (AP3a), each slice report is marked by
 `model_turns.notice = 'report'` on the first turn whose request carried it.
 From AP3b, a stall report is marked `stall_report` and a sub-agent's last
-turn `final_answer`; replace `notice = 'report'` with
-`notice IN ('report', 'stall_report')` below to count both report kinds.
+turn `final_answer`. Store schema 46 adds `root_stall_report` for new root
+stalls; children and historical root stalls retain `stall_report`. The query
+below counts slice, child/legacy stall and new root-stall reports with
+`notice IN ('report', 'stall_report', 'root_stall_report')`. The same predicate
+also works on schema 40–45, where the new value is absent.
 A report retried after a fault or an output-limit cut continues on later
 turn rows without the mark. Its final attempt is the last row before the row
 marked `continuation`. This query counts reports in the window, and how many
@@ -157,7 +160,7 @@ q "WITH m AS (SELECT t.run_id, t.turn_ordinal, t.notice, t.assistant_content_jso
 reports AS (SELECT run_id, turn_ordinal start,
      coalesce((SELECT min(n.turn_ordinal) FROM m n WHERE n.run_id = m.run_id
                AND n.turn_ordinal > m.turn_ordinal AND n.notice = 'continuation'), 1 << 31) stop
-   FROM m WHERE notice = 'report'),
+   FROM m WHERE notice IN ('report', 'stall_report', 'root_stall_report')),
 last AS (SELECT r.run_id, (SELECT max(t.turn_ordinal) FROM m t WHERE t.run_id = r.run_id
             AND t.turn_ordinal >= r.start AND t.turn_ordinal < r.stop) ordinal FROM reports r)
 SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t,
@@ -167,8 +170,10 @@ SELECT count(*), sum(NOT EXISTS (SELECT 1 FROM m t,
             AND trim(json_extract(b.value, '$.text')) <> '')) FROM last;"
 ```
 
-Goal 6's checkpoint target uses this query once the window starts after
-AP3a merged.
+Goal 6's slice-checkpoint target uses this query with the narrower
+`notice = 'report'` predicate once the window starts after AP3a merged.
+Record the selected report kinds with the receipt; all-report counts cannot
+substitute for that slice-only target.
 
 ## 4. Time parents spend blocked on children
 
