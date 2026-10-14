@@ -310,3 +310,6 @@ newest last.
   14 ignored; fmt, all-target/all-feature Clippy and build exit 0. Logs:
   `target/qq-perf/ab2-2026-10-14/candidate-basename-final-gate-{0,1,2,3}.log`.
   Integrated latest AB1 and reviewed parent docs; final publication gates next.
+- Integrated AB3 workspace tests and fmt passed. Clippy caught one nested
+  `if let` in the test provider; collapsed it without changing coverage logic.
+  Focused rerun and remaining lint/build gates follow.

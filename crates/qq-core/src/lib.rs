@@ -4051,11 +4051,11 @@ mod tests {
                             .unwrap();
                         let index: usize = file.strip_prefix("batch-").unwrap().parse().unwrap();
                         for row in content.lines().skip(1) {
-                            if let Some((number, _)) = row.split_once('\t') {
-                                if let Ok(number) = number.trim().parse::<usize>() {
-                                    assert!((1..=1_000).contains(&number));
-                                    state.seen[index][number - 1] = true;
-                                }
+                            if let Some((number, _)) = row.split_once('\t')
+                                && let Ok(number) = number.trim().parse::<usize>()
+                            {
+                                assert!((1..=1_000).contains(&number));
+                                state.seen[index][number - 1] = true;
                             }
                         }
                     }
