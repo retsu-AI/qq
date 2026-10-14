@@ -103,6 +103,7 @@ impl Drop for ToolTaskLease {
 /// future was dropped (the caller gave up on it). Both halves wake waiters;
 /// blocking tools check [`Self::is_cancelled`] between steps and the shell
 /// awaits [`Self::cancelled`] alongside its child process.
+#[derive(Clone)]
 pub(super) struct ToolCancellation {
     run: RunCancellation,
     call: Arc<CallCancellation>,
@@ -155,10 +156,8 @@ impl Drop for CancelCallOnDrop {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
-)]
+#[cfg(test)]
+#[expect(clippy::too_many_arguments, reason = "default-policy test entry point")]
 pub(crate) async fn execute(
     workspace: Workspace,
     file_state: Arc<FileState>,
@@ -169,6 +168,41 @@ pub(crate) async fn execute(
     tasks: ToolTasks,
     shell_policy: Arc<crate::runtime::ShellPolicy>,
     network_policy: Arc<super::network::NetworkPolicy>,
+) -> ToolOutput {
+    execute_with_images(
+        workspace,
+        file_state,
+        name,
+        arguments,
+        cancelled,
+        output,
+        tasks,
+        shell_policy,
+        network_policy,
+        Arc::default(),
+        Arc::default(),
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dispatch per call; every argument is a distinct capability the tool receives"
+)]
+pub(crate) async fn execute_with_images(
+    workspace: Workspace,
+    file_state: Arc<FileState>,
+    name: String,
+    arguments: String,
+    cancelled: RunCancellation,
+    output: Option<mpsc::Sender<String>>,
+    tasks: ToolTasks,
+    shell_policy: Arc<crate::runtime::ShellPolicy>,
+    network_policy: Arc<super::network::NetworkPolicy>,
+    approved_read_images: Arc<crate::runtime::ApprovedReadImages>,
+    process_producer: Arc<crate::ProcessProducer>,
+    call_id: Option<qq_protocol::ToolCallId>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::error("tool arguments exceed the 64 KiB limit");
@@ -228,6 +262,9 @@ pub(crate) async fn execute(
             run_shell(
                 &workspace,
                 &shell_policy,
+                approved_read_images,
+                process_producer,
+                call_id,
                 launch,
                 &cancelled,
                 output.as_ref(),
@@ -285,6 +322,43 @@ pub(crate) struct ToolOutput {
     /// store to keep under a handle the marker names. `None` when the model
     /// text is complete or the text exceeds what the store keeps.
     pub(crate) spill: Option<SpillRecord>,
+    pub(crate) execution_context: Option<Box<super::process_context::ExecutionContextReceipt>>,
+}
+
+/// Complete read-side domain output. Dispatch adds any argument-repair
+/// note before masking and bounding once; a clipped preview is never treated
+/// as complete input for another bound.
+pub(super) struct ReadSideOutput {
+    text: String,
+    bounds: Bounds,
+    pub(super) is_error: bool,
+    pub(super) ui_payload: Option<ToolCallDisplay>,
+    pub(super) file_states: Vec<FileStateUpdate>,
+}
+
+impl ReadSideOutput {
+    #[cfg(test)]
+    pub(super) fn with_test_notes(self, notes: &[&str]) -> ToolOutput {
+        with_argument_notes(self, notes)
+    }
+
+    pub(super) fn success(text: String) -> Self {
+        Self::with_bounds(text, &Bounds::DEFAULT, false)
+    }
+
+    pub(super) fn error(message: impl Into<String>) -> Self {
+        Self::with_bounds(message.into(), &Bounds::DEFAULT, true)
+    }
+
+    pub(super) fn with_bounds(text: String, bounds: &Bounds, is_error: bool) -> Self {
+        Self {
+            text,
+            bounds: *bounds,
+            is_error,
+            ui_payload: None,
+            file_states: Vec::new(),
+        }
+    }
 }
 
 /// A complete tool output awaiting storage: the text, its SHA-256 (the
@@ -338,6 +412,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill,
+            execution_context: None,
         }
     }
 
@@ -351,6 +426,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill: None,
+            execution_context: None,
         }
     }
 
@@ -363,6 +439,7 @@ impl ToolOutput {
             ui_payload: None,
             file_states: Vec::new(),
             spill: None,
+            execution_context: None,
         }
     }
 }
@@ -402,14 +479,28 @@ pub(super) fn execute_blocking(
         return ToolOutput::error("tool execution was cancelled");
     }
     match BuiltInTool::from_name(name) {
-        Some(BuiltInTool::ReadFile) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| {
-                read_file(workspace, file_state, args, cancelled)
+        Some(BuiltInTool::ReadFile) => deserialize_read_only(name, arguments).map_or_else(
+            ToolOutput::error,
+            |(args, notes)| {
+                let note_bytes = if notes.is_empty() {
+                    0
+                } else {
+                    6 + notes.iter().map(|note| note.len()).sum::<usize>() + notes.len() - 1
+                };
+                with_argument_notes(
+                    read_file(workspace, file_state, args, cancelled, note_bytes),
+                    &notes,
+                )
+            },
+        ),
+        Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments)
+            .map_or_else(ToolOutput::error, |(args, notes)| {
+                with_argument_notes(tree(workspace, args, cancelled), &notes)
             }),
-        Some(BuiltInTool::Tree) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| tree(workspace, args, cancelled)),
-        Some(BuiltInTool::Search) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| search(workspace, args, cancelled)),
+        Some(BuiltInTool::Search) => deserialize_read_only(name, arguments)
+            .map_or_else(ToolOutput::error, |(args, notes)| {
+                with_argument_notes(search(workspace, args, cancelled), &notes)
+            }),
         // The applied change travels as a UI payload (the unified diff of what
         // actually changed on disk); the model gets the header summary.
         Some(BuiltInTool::EditFile) => deserialize(arguments)
@@ -475,4 +566,142 @@ pub(super) fn execute_blocking(
 
 fn deserialize<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, String> {
     serde_json::from_str(arguments).map_err(|error| format!("invalid arguments: {error}"))
+}
+
+// Value's default object decoder overwrites duplicate keys. A failed strict
+// decode must never turn an ambiguous path or query into an accepted call.
+struct ReadOnlyObject(serde_json::Map<String, serde_json::Value>);
+
+impl<'de> serde::Deserialize<'de> for ReadOnlyObject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+            type Value = ReadOnlyObject;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object with unique argument fields")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut access: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut object = serde_json::Map::new();
+                while let Some(key) = access.next_key::<String>()? {
+                    if object.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate argument field {key:?}"
+                        )));
+                    }
+                    object.insert(key, access.next_value()?);
+                }
+                Ok(ReadOnlyObject(object))
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+fn deserialize_read_only<T: serde::de::DeserializeOwned>(
+    name: &str,
+    arguments: &str,
+) -> Result<(T, Vec<&'static str>), String> {
+    let original_error = match serde_json::from_str(arguments) {
+        Ok(args) => return Ok((args, Vec::new())),
+        Err(error) => {
+            if !error.is_data() {
+                return Err(format!("invalid arguments: {error}"));
+            }
+            format!("invalid arguments: {error}")
+        }
+    };
+    let ReadOnlyObject(mut object) = match serde_json::from_str(arguments) {
+        Ok(object) => object,
+        Err(error) => return Err(format!("invalid arguments: {error}")),
+    };
+    let mut notes = Vec::new();
+    let arrays: &[(&str, &str)] = match name {
+        "search" => &[
+            ("include", "include_array_coerced"),
+            ("exclude", "exclude_array_coerced"),
+        ],
+        "read_file" => &[("ranges", "ranges_array_coerced")],
+        "tree" => &[],
+        _ => return Err(original_error),
+    };
+    for &(field, note) in arrays {
+        if let Some(serde_json::Value::String(encoded)) = object.get(field) {
+            let values: Vec<String> = match serde_json::from_str(encoded) {
+                Ok(values) => values,
+                Err(_) => return Err(original_error),
+            };
+            object.insert(field.to_owned(), serde_json::Value::from(values));
+            notes.push(note);
+        }
+    }
+    // These unknown values explicitly select the existing workspace root or
+    // first search page. Any non-neutral value still fails strict decoding.
+    if object
+        .get("cwd")
+        .is_some_and(|value| value.as_str() == Some("."))
+    {
+        object.remove("cwd");
+        notes.push("cwd_ignored");
+    }
+    if name == "search"
+        && object
+            .get("offset")
+            .is_some_and(|value| value.as_u64() == Some(0))
+    {
+        object.remove("offset");
+        notes.push("offset_ignored");
+    }
+    // An ignore-walk flag has no effect on reading a named file. The
+    // observed boolean shape is redundant; other types remain invalid.
+    if name == "read_file"
+        && object
+            .get("include_ignored")
+            .is_some_and(serde_json::Value::is_boolean)
+    {
+        object.remove("include_ignored");
+        notes.push("include_ignored_ignored");
+    }
+    if notes.is_empty() {
+        return Err(original_error);
+    }
+    match serde_json::from_value(serde_json::Value::Object(object)) {
+        Ok(args) => Ok((args, notes)),
+        Err(error) => Err(format!("invalid arguments: {error}")),
+    }
+}
+
+fn with_argument_notes(mut output: ReadSideOutput, notes: &[&str]) -> ToolOutput {
+    if !notes.is_empty() {
+        let end = output.text.find('\n').unwrap_or(output.text.len());
+        let search = output.text.starts_with("search ");
+        let position = if search {
+            output.text[..end].rfind(" mode=").unwrap_or(end)
+        } else {
+            end
+        };
+        let note = format!(" note={}", notes.join(","));
+        let header_cap = if search {
+            super::output::MAX_STUB_HEADER_BYTES.min(output.bounds.max_line_bytes)
+        } else {
+            output.bounds.max_line_bytes
+        };
+        if end + note.len() > header_cap {
+            output
+                .text
+                .insert_str(end, &format!("\nnote={}", notes.join(",")));
+        } else {
+            output.text.insert_str(position, &note);
+        }
+    }
+    let mut result = ToolOutput::bounded(output.text, &output.bounds, output.is_error);
+    result.ui_payload = output.ui_payload;
+    result.file_states = output.file_states;
+    result
 }

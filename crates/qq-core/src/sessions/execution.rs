@@ -88,6 +88,7 @@ fn session_prompt_prefix_key(
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
+            unattended: false,
         }),
         guidance: user,
         subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
@@ -829,6 +830,23 @@ pub(super) async fn execute_run(
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if *cancellation.borrow() {
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
+        return;
+    }
+    if let Some(run) = claimed.unresolved_tool_projection {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: SessionRuntimeError::ToolProjectionUnavailable {
+                        run: run.to_string(),
+                    }
+                    .to_string(),
+                },
+            },
+        )
+        .await;
         return;
     }
     let load_progress = RuntimeLoadProgress::default();
@@ -2882,6 +2900,32 @@ async fn execute_started_run(
                     flush_at = None;
                 }
             }
+            RunInput::Event(Some(RuntimeEvent::ToolResultsProjected {
+                turn_ordinal,
+                projection,
+            })) => {
+                if internal {
+                    continue;
+                }
+                if let Err(error) = inner
+                    .store
+                    .persist_tool_projection(&claimed, turn_ordinal, projection)
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist projected tool results", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {
                 id,
                 result,
@@ -2889,6 +2933,7 @@ async fn execute_started_run(
                 file_states,
                 display,
                 spill,
+                execution_context,
             })) => {
                 if internal {
                     continue;
@@ -2924,7 +2969,16 @@ async fn execute_started_run(
                 }
                 match inner
                     .store
-                    .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
+                    .finish_tool_call(
+                        &claimed,
+                        id,
+                        result,
+                        is_error,
+                        file_states,
+                        display,
+                        spill,
+                        execution_context,
+                    )
                     .await
                 {
                     Ok(_) => {}

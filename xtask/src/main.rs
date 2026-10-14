@@ -2,6 +2,7 @@
 
 use std::process::ExitCode;
 
+mod action_bias;
 mod check;
 mod eval;
 mod homebrew;

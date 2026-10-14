@@ -188,7 +188,25 @@ xtask/
   attention, refocus, snapshot request, draft submission, session removed)
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
-  the network, the clock, or rendering state. Surfaces supply a
+  the network, the clock, or rendering state.
+  Views retain the observed foreground run identity across idle summaries,
+  keeping late identified internal completions out of attention and draft
+  handoff. Body snapshots preserve observed timing and priced-turn ordinals;
+  replay charges each ordinal once. Cancelling the last queued prompt releases
+  an idle draft even when that prompt never started. Terminal run cost comes
+  from the run snapshot, not the session total that also includes compaction
+  spend. Snapshot admission reserves metadata for the active run and every
+  displayed message's run, charging each new receipt with its first message.
+  Bounded newer internal rows fill remaining slots; an empty body may load the
+  last visible terminal receipt. Row or byte pressure drops older messages with
+  their unadmitted receipts rather than displaying an answer without its cost. Focused completion requests a body refresh; warm background completion
+  requests an included body without changing focus. Included-body refreshes
+  replay newer retained events just as focused refreshes do, preserving unread
+  badges and drafts without repeating notices, attention or draft submission.
+  Replayed deletions apply removal cleanup, refocus and any needed replacement body fetch. If replay warms a previously
+  cold body, it requests one fresh terminal receipt for missing run pricing. Late responses do not
+  replace a body or its summary already loaded through a newer cursor. Terminal cost
+  remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
   pins the projection of every `event_*` wire fixture, natively and on
@@ -437,12 +455,23 @@ The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
 index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
-may load guidance, and whether it is a model-spawned child with read or write
-authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
+may load guidance, strict read-only or unattended authority, and whether it is
+a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
+built at compile; other sets on first use, bounded by the 390 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+
+Tool visibility follows immutable run authority. Strict read-only runs omit
+mutating, shell, network and all external schemas; external read-only hints
+never grant permission. Unattended direct runs omit questions and retain
+read-only builtins plus configuration-granted external tools. The compiler
+captures grants once; direct gates use that same snapshot. The declaration
+predicate also filters recovered pins, progressive indexes and selector
+reports. Read-only roots receive exact caller-applied changes instead of an
+implementation obligation; unattended roots use declared tools and return
+caller-applied changes when those tools cannot act. Mutable approval modes
+are absent from cached prompt wording (ADR-0059).
 
 Per-request work is likewise kept off the transcript. The run holds its
 messages as `Arc<Vec<Message>>`, hands the same allocation to each turn's
@@ -877,12 +906,31 @@ One durable run follows a guarded loop:
    cannot shift replay off the live splice (ENG-991). In-run steps do not
    draw on `MAX_COMPACTION_STEPS`, which bounds one between-run fold; each
    must still shrink the context and is charged to the caller's token and
-   cost limits like any turn. Empty-output cap raises
+   cost limits like any turn. Each summarizer subrequest checks the current
+   caller remainder and original deadline before sending. Completed and
+   usage-bearing truncated subturns persist their actual assistant/replay
+   data and individual usage/cost before another request. Summarizer tool
+   calls remain evidence and never execute. An admitted request marks the
+   internal run's aggregate spend unknown until its receipt commits; a
+   later fault, cancellation or restart retains the measured prefix rows
+   without claiming that prefix is the whole attempt. Internal settlement
+   charges session cost once without releasing the prompt's active slot;
+   child-spend receipts include compactions belonging to the exact owned
+   runs without counting them as children. Terminal internal runs refuse
+   later request-start and model-turn writes. Empty-output cap raises
    (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
-   completed turn restores the allowance. A rejected or stalled
-   summarizer settles its run failed/cancelled, writes no marker, and the
-   prompt run fails closed with the reason — the overflowing request is
-   never sent. Cancelling the prompt run cascades to its in-run compaction.
+   completed turn restores the allowance. The summarizer is under the same
+   turn recovery as a model turn (ADR-0048 § 2): a transient provider fault
+   settles that compaction run failed and the loop re-issues the step after
+   the `TurnRecoveryPolicy` backoff (`run_turn_retrying`); once
+   `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
+   earlier turn durable. Token or cost caps stop with `budget_exhausted`
+   when a failed attempt's spend is unknown; retry does not renew the
+   allowance or deadline. A rejected summary settles its internal run failed,
+   writes no marker, and fails the prompt with the reason; the overflowing
+   work request is never sent. A pending summary stops with the caller's
+   cancellation or original deadline, yielding Cancelled or BudgetExhausted
+   respectively. Cancelling the prompt cascades to its in-run compaction.
    Direct `qq ask` runs have no compactor and fail as before. The prompt
    run reports `RunActivity::Compacting` before it asks and
    `WaitingForProvider` at its next turn; every compaction run, between-run
@@ -1036,9 +1084,18 @@ sessions. Unknown usage or cost stays unknown and refuses a new child when the
 corresponding bound is imposed. Descendant history cannot be deleted until every
 owning ancestor run settles. Auditors store their direct spend on their own run;
 the parent meter and inclusive accounting each include that spend once.
-A read-only session is not offered the mutating, shell, or non-read external
-schemas its policy would deny, and a spawned child's approval mode can be
-lowered but never raised by a client command.
+A read-only session exposes built-in inspection and permitted read-child
+delegation. It omits mutation, shell, and all external tool schemas; external
+effect labels do not grant read-only authority. A spawned child's approval mode
+can be lowered but never raised by a client command.
+
+Base prompt identity 22 includes the authority wording for read-only,
+unattended and inspection-only tool sets. Ordinary actionable interactive
+wording is unchanged from version 20, but the version distinguishes the
+changed restricted prompts in otherwise identical plan descriptors. A read-only
+root retains read-only delegation, with a cached restricted spawn schema that
+omits write authority even when the configured roster permits write children.
+Injected write requests remain denied by policy.
 
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
@@ -1050,8 +1107,9 @@ conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
 cached prefix survives the seam. Each notice is stored on the first turn
 row whose request carried it, as `model_turns.notice` (`report`,
-`stall_report`, `continuation`, or `final_answer`), and replayed before that
-turn, so a later run assembles
+`stall_report`, `root_stall_report`, `continuation`, or `final_answer`), and replayed before that
+turn. New root stalls use `root_stall_report`; children retain `stall_report`,
+and historical root `stall_report` notices replay unchanged. A later run assembles
 exactly the messages the live run sent (ADR-0054 § 2). The column records
 where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and
@@ -1338,6 +1396,14 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
 
+After cancellation, deadline teardown or panic, a started prompt's terminal
+transaction settles its abandoned in-run summary first. This preserves the
+summary's durable measured prefix and unknown pending-send aggregate, and
+makes the owned child receipt readable when the prompt's terminal event arrives.
+Delayed drop cleanup observes the terminal row and adds no event or charge. The
+visible session last outcome excludes owned compaction steps, so their newer
+row or equal timestamp cannot hide the owning prompt's terminal reason.
+
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
 summarization run (a bounded step carries its own cutoff, the unit boundary it
@@ -1463,6 +1529,46 @@ approval policy; the exact policy is defined in `tools.md`.
 A remote server operates only on workspaces available on that server. A hosted
 coordinator with outbound-connected desktop workers is outside QQ (see
 "Hosting Boundary").
+
+Process progress accounting uses executor-produced context receipts (ADR-0060).
+A prepared launch captures the cleared child environment once, holds the cwd,
+and keeps any verified image alive through reap. Environment values stay
+private; receipts carry opaque identities and limited facts. Executed processes
+count as Work unless a trusted host explicitly approves their read behavior and
+binding is verified. Failures and timeouts of Work still trigger heuristic
+process audits; rejected and never-started calls have no receipt.
+
+Hosts may repeat `--approve-self-contained-read-image FAMILY:SHA256` when
+starting ask, run, serve or interactive execution. Approvals remain immutable
+in the runtime factory and core plan, outside workspace/configuration/session
+inputs; existing-server attachment rejects nonempty approvals. Descriptor 14
+records their public digest. Initial verification supports literal Linux exec
+calls to a bounded set of read families, a C/POSIX/unset locale, no requested
+environment names, a held contained cwd and at most 16 MiB of approved static
+native ELF bytes. A sealed memfd binds hashing and execution; scripts, dynamic
+images, shell compounds and unsupported platforms count as Work under ordinary
+approval. Image approval is a behavioral trust decision, not inferred from a
+hash, pathname ownership or ELF format.
+
+Store schema 47 saves bounded nullable process receipts atomically with their
+results, file state, spills and finished events. Historical rows remain NULL;
+saved command shape alone cannot qualify execution effects. These internal
+receipts do not change protocol envelopes or model-facing tool output.
+
+Session tool-turn replay persists the exact model-facing projection (ADR-0061).
+The core emits an internal barrier after budgeting and checkpoint annotations;
+session execution awaits its durable store acknowledgement before polling the
+runtime for another provider request. A failed projection write stops/drains the
+run and settles a persistence failure. Direct execution retains its live
+projection. Per-call rows remain authoritative for actual outcomes and effects;
+the projection preserves the ordered text, flags and correction notice seen by
+the next request. Descriptor15 identifies the strict policy for partial turns,
+and schema49 stores the bounded projection independently of those per-call rows.
+An unresolved historical projection settles only its queued reservation before
+runtime loading or provider polling. Missing projections in checkpoint-enabled
+tool turns also refuse reconstruction, including final-only reviewers, to preserve
+potentially durable verdict consequences without archive scans. It preserves that history, releases the
+preparation slot, and leaves fresh sessions usable; other store faults remain fatal.
 
 ## Concurrency And Multiple Agents
 

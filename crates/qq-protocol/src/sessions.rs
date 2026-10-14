@@ -1329,6 +1329,32 @@ pub struct SessionSummary {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<RunOutcome>,
+    /// Held calls of the active run still waiting for a decision (protocol
+    /// 32), calls a human is asked first, at most [`MAX_PENDING_HOLDS`].
+    /// Exact at the summary's cursor, so a client that never loaded the
+    /// session's body still knows it is waiting; later `tool_approval_*` and
+    /// `tool_call_*` events move it on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_holds: Vec<PendingHold>,
+    /// The side question running for this session, if any (protocol 32).
+    /// Later `side_question_updated` events move it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_side_question: Option<RunId>,
+}
+
+/// Bound on [`SessionSummary::pending_holds`]: one model turn's tool calls,
+/// the most a run can hold at once.
+pub const MAX_PENDING_HOLDS: usize = 16;
+
+/// One held call in [`SessionSummary::pending_holds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingHold {
+    pub tool_call_id: ToolCallId,
+    /// An approval delegate is still deciding; a human is asked only after
+    /// `tool_approval_escalated`. Absent means a human is being asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delegated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1767,6 +1793,7 @@ impl ToolErrorKind {
             "bad_glob",
             "cursor_invalid",
             "handle_invalid",
+            "handle_placeholder:",
             "not executed:",
             "not_read:",
             "tool arguments exceed",
@@ -2072,6 +2099,9 @@ pub enum SessionEvent {
     /// turn; the run sleeps `delay_ms` and re-issues the turn as
     /// `turn_ordinal + 1`. `attempt` is 1-based within this turn's recovery;
     /// a turn that completes resets it. Exhaustion settles the run `paused`.
+    /// The in-run compaction step before turn `turn_ordinal` is retried the
+    /// same way with its own count: then nothing is committed, the same
+    /// summarizer request is re-sent, and `message` names the summarizer.
     RunTurnRetrying {
         run_id: RunId,
         turn_ordinal: u32,
@@ -2155,6 +2185,11 @@ pub enum SessionEvent {
         /// Present when the held call is `fetch` (protocol 22).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fetch: Option<Box<FetchPreview>>,
+        /// The hold goes to an approval delegate first (protocol 32): a
+        /// human is asked only after `tool_approval_escalated`. Absent means
+        /// the human is asked now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        delegated: bool,
     },
     ToolApprovalResolved {
         tool_call: ToolCallSnapshot,
@@ -2608,6 +2643,24 @@ mod tests {
     /// itself, outcomes are well-formed "no" answers, and anything else
     /// (including an unlisted code) stays a failure.
     #[test]
+    fn placeholder_spill_handles_are_argument_corrections() {
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "handle_placeholder: copy the handle from the result marker"
+            ),
+            ToolErrorKind::Correction,
+        );
+        assert_eq!(
+            ToolErrorKind::of(
+                "read_tool_result",
+                "spill_missing: no stored output for t:shell:12345678:abcdef12"
+            ),
+            ToolErrorKind::Outcome,
+        );
+    }
+
+    #[test]
     fn tool_error_kinds_follow_the_leading_error_code() {
         for result in [
             "invalid_ranges: \"a\" is not <start>[-<end>]",
@@ -3022,6 +3075,7 @@ mod tests {
             edit: None,
             question: None,
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&requested).unwrap();
         assert_eq!(encoded["type"], "tool_approval_requested");
@@ -3043,6 +3097,7 @@ mod tests {
             }),
             question: None,
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&edit_requested).unwrap();
         assert_eq!(encoded["edit"]["path"], "src/lib.rs");
@@ -3067,6 +3122,7 @@ mod tests {
                 }],
             })),
             fetch: None,
+            delegated: false,
         };
         let encoded = serde_json::to_value(&question_requested).unwrap();
         assert_eq!(
@@ -3522,6 +3578,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             summary: Some("intent: ship compaction".to_owned()),
             before_bytes: 3_200_000,
@@ -3583,6 +3641,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: None,
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
         };
         let encoded = serde_json::to_value(&updated).unwrap();
@@ -3643,6 +3703,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
@@ -3877,6 +3939,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 11,
                 last_outcome: Some(RunOutcome::Completed),
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }),
             run_id: id(4),
             outcome: RunOutcome::Completed,
@@ -4337,6 +4401,8 @@ mod tests {
                 estimated_cost_usd_nanos: None,
                 updated_at_ms: 1,
                 last_outcome: None,
+                pending_holds: Vec::new(),
+                running_side_question: None,
             }).unwrap(),
             "run_id": id::<RunId>(4),
         });

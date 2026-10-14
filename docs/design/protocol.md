@@ -50,7 +50,8 @@ adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 `approval_delegate`, the identity of the first delegate for held calls (Jev
 approval) when enabled (ADR-0052); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
-catalog (ADR-0054 § 4). None alters the wire envelope version or
+catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
+approved self-contained read images (ADR-0060). None alters the wire envelope version or
 requires a database migration; historical descriptor JSON remains historical
 evidence.
 
@@ -65,7 +66,15 @@ separate durable side-question snapshots, and replayable side projection updates
 Cancelling a question that already settled returns
 `side_question_already_finished` with its effective state and changes
 nothing; an unknown side-question id is a client error. These do not alter
-the main session transcript or accounting.
+the main session transcript or accounting. Version 32 also adds
+`delegated: true` to `tool_approval_requested` when an approval delegate
+decides the hold before any human; it is omitted (false) otherwise, so
+every earlier hold encodes unchanged. Session summaries gain
+`pending_holds` (the active run's held calls, each with `delegated` when a
+delegate decides first) and `running_side_question`, both exact at the
+summary's cursor and omitted when empty, so a client knows a session is
+waiting or answering without loading its body or having seen the request
+event.
 
 Golden fixtures for the current version live under
 `crates/qq-protocol/tests/fixtures/v32/`; the `v17`–`v31` directories are
@@ -250,6 +259,44 @@ answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
 `prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
 `side_questions`, the isolated side-question rows behind protocol 32.
+Schema 45 adds `tool_calls.approval_delegated`, behind
+`SessionSummary.pending_holds`; holds written before it read as waiting for
+a human.
+Schema 46 adds the non-unique partial `runs_owned_compaction` index for
+exact owner-run accounting of internal compaction attempts. Completed, failed
+and cancelled attempts enter their owner's child-spend receipt; manual and
+unrelated compactions do not. Unknown usage or cost remains unknown. Internal
+attempts do not consume the child-count or depth allowance. No wire shape changes.
+
+Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
+The process executor's receipt commits with its result and finished event;
+historical rows remain NULL and cannot qualify execution context. No wire
+shape changes. Older binaries refuse the upgraded store at open. Receipt V2
+uses the existing16KiB column: it binds the actual call ID and canonical
+arguments, retains the bounded approved-image manifest and policy digest, and
+records shared producer instance/source/running executable identity. V1 remains
+decodable for recorded accounting; qualification requires V2 and independent
+clean source/binary pins. Readers replaying tools ignore receipt JSON, so V2
+requires no new store schema or descriptor encoding. Work does not attest
+mutation, and absent evidence does not establish that execution never began.
+
+Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
+2 MiB. It commits the exact ordered model-facing tool replies and optional
+correction notice before the next provider request. The internal barrier adds
+no wire event. Descriptor 15 records the strict projector policy; historical
+13/14 encodings remain unchanged. Known pre-AB2 histories use their original
+projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
+without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
+experimental schema-48 AB5 build because it lacks that build's root-notice
+codec. The schema50 reader migrates both experimental48 and projection49,
+adding projection storage and publishing version50 atomically for48 while
+retaining the root-notice codec. A failed48 upgrade leaves its original version
+and structure intact.
+
+Schema 50 adds the replay value `root_stall_report` through a version-only
+migration. Roots receive an action-oriented, authority-neutral notice;
+historical `stall_report` wording remains byte-identical and children retain
+it. Older readers refuse the new store at open before session assembly.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
@@ -983,7 +1030,9 @@ omits it for every other resolution. A reviewer `escalate` leaves the hold
 open for a client, whose wait starts at the escalation. The hold
 (`tool_approval_requested`) is always published before the reviewer is
 consulted, so a client may still answer first; the first durable resolution
-wins. Reviewer spend is charged to the reviewed run.
+wins. It carries `delegated: true` when the reviewer is consulted (protocol
+32): a client then knows the human is asked only after
+`tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
 
 Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
 `full`. `supervised` is never advertised for root sessions and cannot be set by
@@ -1472,14 +1521,14 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `steering_superseded` | `run_id`, `message_id` | Run finished before the steering applied |
 | `run_interrupted` | `run_id`, `turn_ordinal` | An interrupting steer aborted the turn in flight |
 | `run_output_truncated` | `run_id`, `turn_ordinal`, `continuation` | The provider cut the turn at its output token limit; the partial turn is committed and the run resumes on the next turn |
-| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes |
+| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes. The in-run compaction step before a turn is retried the same way with its own count: nothing is committed, the same summarizer request is re-sent, and `message` names the summarizer |
 | `run_audit_started` | `run_id`, `audit_session_id` | A read-only audit child is checking the run's candidate final answer |
 | `run_audit_completed` | `run_id`, `audit` | The audit settled (`pass`, `revised`, or `unavailable`); on `revised` the run continues once with the findings |
 | `assistant_message_started` | `message` | A model turn's message begins streaming |
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch` | Policy needs a human decision, or (`question`) the model asked one |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch`, optional `delegated` | Policy needs a decision, or (`question`) the model asked one; `delegated` means an approval delegate decides first |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
 | `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
@@ -1550,6 +1599,15 @@ activity.
 session. It is absent when unknown. A successful compaction or a model change
 clears it until another prompt turn reports usage; clients must not reconstruct
 it from cumulative run billing.
+
+`pending_holds` lists the active run's calls still awaiting a decision, at
+most 16, calls a human is asked ordered first: `{ "tool_call_id": "...",
+"delegated": true }`, where `delegated` (omitted when false) means an
+approval delegate decides before any human. `running_side_question` is the
+id of the session's running side question. Both are exact at the summary's
+cursor; `tool_approval_*`, `tool_call_*`, `run_finished`, and
+`side_question_updated` events move them on. A client that never loaded the
+session's body uses them to tell idle, working, and waiting apart.
 
 **`RunSnapshot`**
 
@@ -1977,6 +2035,12 @@ path (`qq ask` and internal runtime tests):
 - `RunCommand { prompt }`
 - `RunEvent` — `started`, `output_text_delta`, `refusal_delta`, `usage`,
   `completed`, `failed`
+
+Direct requests declare workspace read tools and configuration-granted external
+tools; denied builtin mutation/command/question/network schemas are omitted.
+The gate uses the plan's immutable grant snapshot. Strict read-only session
+requests omit every External schema, regardless of hints or grants. This is
+request visibility behavior; protocol and descriptor encodings are unchanged.
 
 These types are not persisted session state. `qq ask` consumes them entirely
 in-process; use the workspace/session routes or `qq run` for work that must be

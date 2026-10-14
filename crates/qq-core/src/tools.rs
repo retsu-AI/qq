@@ -7,6 +7,7 @@ mod lang;
 mod matching;
 pub(crate) mod network;
 pub mod output;
+pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
@@ -15,8 +16,17 @@ mod tree;
 pub(crate) mod walk;
 mod write;
 
+/// Parse qualification envelopes with the same type used by shell dispatch.
+pub(crate) fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+    process_context::arguments_digest("shell", arguments)?;
+    match serde_json::from_str::<shell::ShellArgs>(arguments) {
+        Ok(arguments) => Some((arguments.command, !arguments.env.is_empty())),
+        Err(_) => None, // Malformed envelopes remain non-read without exposing their text.
+    }
+}
+
 #[cfg(test)]
-pub(crate) use dispatch::test_executions_started;
+pub(crate) use dispatch::{execute, test_executions_started};
 
 /// Entry points for the `search_walk` and `edit_batch` benches. Not a
 /// public API.
@@ -71,7 +81,7 @@ pub mod bench_support {
     }
 }
 pub(crate) use dispatch::{
-    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute,
+    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute_with_images,
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
@@ -193,6 +203,440 @@ mod tests {
     }
 
     #[test]
+    fn readonly_argument_repairs_are_noted_without_changing_the_read() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\nsecond\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, valid, malformed, note) in [
+            (
+                "search",
+                r#"{"query":"needle","include":["*.txt"]}"#,
+                r#"{"query":"needle","include":"[\"*.txt\"]"}"#,
+                "include_array_coerced",
+            ),
+            (
+                "search",
+                r#"{"query":"needle","exclude":["*.rs"]}"#,
+                r#"{"query":"needle","exclude":"[\"*.rs\"]"}"#,
+                "exclude_array_coerced",
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt","ranges":["1-2"]}"#,
+                r#"{"path":"input.txt","ranges":"[\"1-2\"]"}"#,
+                "ranges_array_coerced",
+            ),
+            (
+                "search",
+                r#"{"query":"needle"}"#,
+                r#"{"query":"needle","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "search",
+                r#"{"query":"needle"}"#,
+                r#"{"query":"needle","offset":0}"#,
+                "offset_ignored",
+            ),
+            (
+                "tree",
+                r#"{"path":"."}"#,
+                r#"{"path":".","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt"}"#,
+                r#"{"path":"input.txt","cwd":"."}"#,
+                "cwd_ignored",
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":["*.txt"],"context":10}"#,
+                r#"{"query":"needle","include":"[\"*.txt\"]","context":10}"#,
+                "include_array_coerced",
+            ),
+        ] {
+            let expected = run_tool(&workspace, &state, name, valid);
+            let repaired = run_tool(&workspace, &state, name, malformed);
+            assert!(!expected.is_error, "{}", expected.model_text);
+            assert!(!repaired.is_error, "{name}: {}", repaired.model_text);
+            assert_eq!(
+                repaired.model_text.replace(&format!(" note={note}"), ""),
+                expected.model_text,
+                "{name}: repair changed the result"
+            );
+            assert_eq!(repaired.file_states, expected.file_states);
+        }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_authority_duplicates_and_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments) in [
+            ("search", r#"{"query":"needle","cwd":".."}"#),
+            ("search", r#"{"query":"needle","cwd":"sub"}"#),
+            ("search", r#"{"query":"needle","offset":1}"#),
+            ("search", r#"{"query":"needle","include":"[1]"}"#),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","query":"other"}"#,
+            ),
+            (
+                "search",
+                r#"{"include":"[\"*.txt\"]","path":".","path":"..","query":"needle"}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","max_per_file":51}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","include_ignored":"true"}"#,
+            ),
+            (
+                "search",
+                r#"{"query":"needle","include":"[\"*.txt\"]","approval":"allow"}"#,
+            ),
+            (
+                "read_file",
+                r#"{"path":"input.txt","ranges":"[\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\",\"1\"]"}"#,
+            ),
+            ("read_file", r#"{"path":"../input.txt","ranges":"[\"1\"]"}"#),
+            (
+                "read_file",
+                r#"{"path":"input.txt","include_ignored":"yes"}"#,
+            ),
+            (
+                "exec",
+                r#"{"program":"printf","args":"[\"bad\"]","command":"echo bad"}"#,
+            ),
+            (
+                "write_file",
+                r#"{"path":"new.txt","content":"bad","cwd":"."}"#,
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(
+                result.is_error,
+                "accepted {arguments}: {}",
+                result.model_text
+            );
+        }
+        assert!(!directory.path().join("new.txt").exists());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("input.txt")).unwrap(),
+            "needle\n"
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_keep_continuation_and_hashes_when_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let contents = ("a".repeat(100) + "\n").repeat(1_000);
+        fs::write(directory.path().join("input.txt"), &contents).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let expected = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":["1-1000"]}"#,
+        );
+        let result = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":"[\"1-1000\"]"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.len() <= read::READ_BOUNDS.max_bytes);
+        assert!(
+            result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .contains("note=ranges_array_coerced")
+        );
+        assert!(result.model_text.contains("continue from offset="));
+        assert_eq!(
+            result.model_text.replace(" note=ranges_array_coerced", ""),
+            expected.model_text
+        );
+        if let Some(spill) = &result.spill {
+            assert!(
+                spill
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains("note=ranges_array_coerced")
+            );
+            assert_eq!(spill.digest, content_hash(spill.text.as_bytes()));
+        }
+        assert_eq!(result.file_states.len(), 1);
+        assert_eq!(
+            result.file_states[0].hash,
+            content_hash(contents.as_bytes())
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_complete_search_text_and_original_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let query = "needle";
+        let nested = directory.path().join(vec!["a".repeat(120); 15].join("/"));
+        fs::create_dir_all(&nested).unwrap();
+        for index in 0..20 {
+            fs::write(
+                nested.join(format!("input{index:02}.txt")),
+                "needle abcdefgh\n".repeat(50),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let baseline = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            &json!({
+                "query": query, "limit": 500, "include": ["**/*.txt"], "max_per_file": 50
+            })
+            .to_string(),
+        );
+        let arguments = json!({
+            "query": query,
+            "limit": 500,
+            "include": "[\"**/*.txt\"]",
+            "max_per_file": 50,
+            "cwd": ".",
+            "offset": 0,
+        })
+        .to_string();
+        let result = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.len() <= search::SEARCH_BOUNDS.max_bytes);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.contains("next="), "{header}");
+        assert!(
+            result
+                .model_text
+                .lines()
+                .any(|line| line == "note=include_array_coerced,cwd_ignored,offset_ignored"),
+            "{}",
+            result.model_text
+        );
+        assert!(result.spill.is_none(), "complete cursor header must fit");
+        assert!(baseline.spill.is_none());
+        let encoded = header
+            .split_once(" next=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        assert!(search::Cursor::decode(encoded).is_some());
+        assert_eq!(
+            result.model_text.replace(
+                "note=include_array_coerced,cwd_ignored,offset_ignored\n",
+                ""
+            ),
+            baseline.model_text,
+            "repair must preserve complete bounded content and its cursor"
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_keep_search_pagination_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n".repeat(50)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let first = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({
+                "query": "needle", "include": "[\"*.txt\"]", "max_per_file": 50, "limit": 25
+            })
+            .to_string(),
+        );
+        assert!(!first.is_error, "{}", first.model_text);
+        let encoded = first
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_once(" next=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let cursor = search::Cursor::decode(encoded).expect("first page cursor is usable");
+        assert_eq!(cursor.path, "input.txt");
+        assert_eq!(cursor.line, 25);
+        let second = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({
+                "query": "needle", "include": "[\"*.txt\"]", "max_per_file": 50,
+                "limit": 25, "cursor": encoded
+            })
+            .to_string(),
+        );
+        assert!(!second.is_error, "{}", second.model_text);
+        assert!(
+            second.model_text.contains("matches=25/25"),
+            "{}",
+            second.model_text
+        );
+        assert!(!second.model_text.lines().next().unwrap().contains("next="));
+        assert!(second.model_text.contains("note=include_array_coerced"));
+    }
+
+    #[test]
+    fn readonly_argument_repairs_remain_visible_for_long_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let relative = vec!["a".repeat(120); 18].join("/");
+        let nested = directory.path().join(&relative);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for (name, path) in [
+            ("tree", relative.clone()),
+            ("read_file", format!("{relative}/input.txt")),
+        ] {
+            let arguments = json!({"path": path, "cwd": "."}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), name, &arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result
+                    .model_text
+                    .split_whitespace()
+                    .any(|field| field == "note=cwd_ignored"),
+                "{}",
+                result.model_text
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_drop_observed_irrelevant_read_ignore_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "needle\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let expected = run_tool(&workspace, &state, "read_file", r#"{"path":"input.txt"}"#);
+        for value in [true, false] {
+            let result = run_tool(
+                &workspace,
+                &state,
+                "read_file",
+                &json!({"path":"input.txt", "include_ignored": value}).to_string(),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(
+                result
+                    .model_text
+                    .replace(" note=include_ignored_ignored", ""),
+                expected.model_text
+            );
+            assert_eq!(result.file_states, expected.file_states);
+        }
+    }
+
+    #[test]
+    fn readonly_argument_repairs_note_execution_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"missing.txt","ranges":"[\"1\"]"}"#,
+        );
+        assert!(result.is_error);
+        assert!(result.model_text.contains("path_not_found"));
+        assert!(
+            result.model_text.contains("note=ranges_array_coerced"),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_line_clipping_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "a".repeat(3_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let typed = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":["1"]}"#,
+        );
+        let repaired = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt","ranges":"[\"1\"]"}"#,
+        );
+        assert!(typed.spill.is_none());
+        assert!(typed.model_text.contains("…+"));
+        assert_eq!(
+            repaired
+                .model_text
+                .replace(" note=ranges_array_coerced", ""),
+            typed.model_text
+        );
+    }
+
+    #[test]
+    fn readonly_argument_repairs_preserve_the_prunable_search_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join(vec!["a".repeat(102); 3].join("/"));
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("input.txt"), "needle\n".repeat(50)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let typed = run_tool(
+            &workspace,
+            &state,
+            "search",
+            &json!({"query":"needle","limit":25,"max_per_file":50,"include":["**/*.txt"]})
+                .to_string(),
+        );
+        let header = typed.model_text.lines().next().unwrap();
+        assert!(
+            header.len() <= output::MAX_STUB_HEADER_BYTES,
+            "{}",
+            header.len()
+        );
+        assert!(
+            header.len() + " note=include_array_coerced,cwd_ignored".len()
+                > output::MAX_STUB_HEADER_BYTES,
+            "{}",
+            header.len()
+        );
+        let repaired = run_tool(&workspace, &state, "search", &json!({"query":"needle","limit":25,"max_per_file":50,"include":"[\"**/*.txt\"]","cwd":"."}).to_string());
+        assert_eq!(repaired.model_text.lines().next().unwrap(), header);
+        assert!(
+            repaired
+                .model_text
+                .lines()
+                .any(|line| line == "note=include_array_coerced,cwd_ignored")
+        );
+    }
+
+    #[test]
     fn read_and_list_are_bounded_and_deterministic() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("b.txt"), "one\ntwo\nthree\n").unwrap();
@@ -223,12 +667,432 @@ mod tests {
         let hash = content_hash(b"one\ntwo\nthree\n");
         assert_eq!(
             read.model_text,
-            format!("read b.txt L2/3 h:{}\n2\ttwo\n", &hash[..12])
+            format!(
+                "read b.txt L2/3 h:{}\n2\ttwo\n…[qq: 1 more lines; continue from offset=3]…\n",
+                &hash[..12]
+            )
         );
         let update = read.file_states.into_iter().next().unwrap();
         assert_eq!(update.path, "b.txt");
         assert_eq!(update.hash, hash);
         assert_eq!(state.recorded("b.txt"), Some(update.hash));
+    }
+
+    #[test]
+    fn ab3_default_reads_fill_the_budget_and_explicit_limits_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, lines, content) in [
+            ("small", 300, "x\n"),
+            ("short", 3_000, "x\n"),
+            ("large", 3_000, "012345678901234567890123456789\n"),
+        ] {
+            fs::write(directory.path().join(path), content.repeat(lines)).unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for (path, expected) in [("small", 300), ("short", 3_000)] {
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"{path}"}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert_eq!(result.model_text.lines().skip(1).count(), expected);
+            assert!(!result.model_text.contains(MARKER_PREFIX));
+        }
+        let large = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"large"}"#,
+        );
+        let rows = large
+            .model_text
+            .lines()
+            .skip(1)
+            .filter(|row| !row.starts_with(MARKER_PREFIX))
+            .count();
+        assert!(rows > 200 && rows < 3_000, "{rows}");
+        assert!(
+            large
+                .model_text
+                .contains(&format!("continue from offset={}", rows + 1))
+        );
+        let limited = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","limit":20}"#,
+        );
+        assert!(
+            limited
+                .model_text
+                .ends_with("…[qq: 280 more lines; continue from offset=21]…\n"),
+            "{}",
+            limited.model_text
+        );
+        let ranged = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"small","ranges":["1-20"]}"#,
+        );
+        assert!(!ranged.model_text.contains(MARKER_PREFIX));
+    }
+
+    #[test]
+    fn ab3_long_path_headers_preserve_contiguous_model_visible_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let path = format!("{prefix}/notes.txt");
+        std::fs::write(
+            directory.path().join(&path),
+            ("x".repeat(80) + "\n").repeat(2_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            &serde_json::json!({"path":path}).to_string(),
+        );
+        assert!(!output.is_error, "{}", output.model_text);
+        let rows: Vec<usize> = output
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(number, _)| number.trim().parse().ok())
+            })
+            .collect();
+        assert!(rows.len() > 200);
+        assert!(
+            rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "visible rows have a gap"
+        );
+        assert!(!output.model_text.contains("not stored"));
+    }
+
+    #[test]
+    fn ab3_full_row_is_not_clipped_again_after_adding_the_gutter() {
+        let directory = tempfile::tempdir().unwrap();
+        let content = "x".repeat(output::MAX_LINE_BYTES);
+        fs::write(directory.path().join("row.txt"), &content).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"row.txt"}"#,
+        );
+        assert!(!result.is_error);
+        let row = result
+            .model_text
+            .lines()
+            .find_map(|line| line.split_once('\t'))
+            .unwrap();
+        assert_eq!(row.1, content);
+    }
+
+    #[test]
+    fn ab3_secret_masking_preserves_contiguous_default_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = std::iter::repeat_n("a".repeat(100), 6)
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&prefix)).unwrap();
+        let long_path = format!("{prefix}/{}notes.txt", "SECRET=abcdefgh ".repeat(8));
+        for path in ["notes.txt", long_path.as_str()] {
+            fs::write(
+                directory.path().join(path),
+                "SECRET=abcdefgh\n".repeat(2_500),
+            )
+            .unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            let mut offset = 1;
+            while offset <= 2_500 {
+                let arguments = serde_json::json!({"path":path,"offset":offset,
+                    "ranges":"[]","cwd":".","include_ignored":true})
+                .to_string();
+                let result = run_tool(&workspace, &state, "read_file", &arguments);
+                assert!(!result.is_error, "{}", result.model_text);
+                assert!(result.spill.is_none(), "read window must survive masking");
+                assert!(!result.model_text.contains("SECRET=abcdefgh"));
+                let rows = result
+                    .model_text
+                    .lines()
+                    .filter_map(|line| {
+                        line.split_once('\t')
+                            .and_then(|(number, _)| number.trim().parse::<usize>().ok())
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!rows.is_empty());
+                assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+                let last = *rows.last().unwrap();
+                if last == 2_500 {
+                    break;
+                }
+                let next = result
+                    .model_text
+                    .split("offset=")
+                    .nth(1)
+                    .unwrap()
+                    .split(|ch: char| !ch.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(next, last + 1);
+                offset = next;
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab3_native_zero_row_window_returns_a_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for _ in 0..110 {
+            let name = "界".repeat(95);
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", format!("{}\n", "x".repeat(2_000)))
+            .unwrap();
+        drop(dir);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let args = serde_json::json!({"path":format!("{}/f.txt",components.join("/"))}).to_string();
+        let result = run_tool(&workspace, &state, "read_file", &args);
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("output_limit:"));
+        assert!(!result.model_text.contains("offset=0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ab3_native_unicode_header_preserves_repaired_read_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dir =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+        let mut components = Vec::new();
+        for index in 0..110 {
+            let name = if index == 0 {
+                format!("SECRET={}", "界".repeat(100))
+            } else {
+                "界".repeat(100)
+            };
+            dir.create_dir(&name).unwrap();
+            dir = dir.open_dir(&name).unwrap();
+            components.push(name);
+        }
+        dir.write("f.txt", "\n".repeat(5_000)).unwrap();
+        drop(dir);
+        let path = format!("{}/f.txt", components.join("/"));
+        assert!(path.len() > read::READ_BOUNDS.max_bytes);
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let mut offset = 1;
+        while offset <= 5_000 {
+            let args = serde_json::json!({"path":path,"offset":offset,"cwd":"."}).to_string();
+            let result = run_tool(&workspace, &state, "read_file", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(
+                result.spill.is_none(),
+                "native read must preserve its contiguous window"
+            );
+            let rows = result
+                .model_text
+                .lines()
+                .filter_map(|line| {
+                    line.split_once('\t')
+                        .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+                })
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty());
+            assert_eq!(rows, (offset..offset + rows.len()).collect::<Vec<_>>());
+            offset += rows.len();
+            if offset <= 5_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+            }
+        }
+        assert_eq!(offset, 5_001);
+    }
+
+    #[test]
+    fn ab3_continuation_beyond_start_offset_bound_is_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("many.txt"), "\n".repeat(105_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let output = run_tool(
+            &workspace,
+            &FileState::default(),
+            "read_file",
+            r#"{"path":"many.txt","offset":99999}"#,
+        );
+        assert!(!output.is_error, "{}", output.model_text);
+        assert!(
+            output.model_text.contains("start-offset limit 100000"),
+            "{:?}",
+            output.model_text.lines().last()
+        );
+        assert!(!output.model_text.contains("continue from offset="));
+    }
+
+    #[test]
+    fn ab3_rendered_line_bound_continues_contiguously_without_spill() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("empty"), "\n".repeat(4_000)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut calls = 0;
+        while offset <= 4_000 {
+            calls += 1;
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                &format!(r#"{{"path":"empty","offset":{offset}}}"#),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(result.model_text.lines().count() <= 4_000);
+            assert!(!result.model_text.contains("not stored"));
+            let rows: Vec<_> = result
+                .model_text
+                .lines()
+                .skip(1)
+                .filter(|row| !row.starts_with(MARKER_PREFIX))
+                .collect();
+            assert!(!rows.is_empty());
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.trim().parse::<usize>().unwrap(), offset + index);
+            }
+            offset += rows.len();
+            if offset <= 4_000 {
+                assert!(
+                    result
+                        .model_text
+                        .contains(&format!("continue from offset={offset}"))
+                );
+                assert!(rows.len() > 200);
+            } else {
+                assert!(!result.model_text.contains(MARKER_PREFIX));
+            }
+        }
+        assert_eq!(offset, 4_001);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn ab3_scan_cap_continuation_does_not_claim_an_exact_remainder() {
+        let directory = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "x".repeat(1_023));
+        fs::write(directory.path().join("capped"), line.repeat(4_097)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for arguments in [r#"{"path":"capped"}"#, r#"{"path":"capped","limit":2}"#] {
+            let result = run_tool(&workspace, &FileState::default(), "read_file", arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            let marker = result.model_text.lines().last().unwrap();
+            assert!(marker.contains("count unknown"), "{marker}");
+            assert!(marker.contains("4 MiB scan cap"), "{marker}");
+            assert!(marker.contains("continue from offset="), "{marker}");
+            assert!(!marker.contains("4094 more lines"));
+        }
+    }
+
+    #[test]
+    fn ab3_scan_cap_offsets_remain_readable_until_a_terminal_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("capped"),
+            format!("{}\n", "x".repeat(99)).repeat(52_429),
+        )
+        .unwrap();
+        fs::write(directory.path().join("single"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for path in ["capped", "single"] {
+            let mut offset = 1;
+            for call in 0..256 {
+                let arguments = format!(r#"{{"path":"{path}","offset":{offset}}}"#);
+                let result = run_tool(&workspace, &FileState::default(), "read_file", &arguments);
+                assert!(!result.is_error, "offset={offset}: {}", result.model_text);
+                let marker = result.model_text.lines().last().unwrap();
+                if let Some((_, next)) = marker.split_once("continue from offset=") {
+                    let next = next.split(']').next().unwrap().parse::<usize>().unwrap();
+                    assert!(next > offset);
+                    offset = next;
+                } else {
+                    assert!(
+                        marker.contains("file continues past the 4 MiB scan cap"),
+                        "{marker}"
+                    );
+                    break;
+                }
+                assert!(call < 255, "scan prefix did not terminate");
+            }
+        }
+    }
+
+    #[test]
+    fn ab3_six_default_read_results_characterize_turn_budget_pressure() {
+        use super::output::{ResultRecall, TurnOutputBudget};
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("batch"),
+            "012345678901234567890123456789\n".repeat(1_000),
+        )
+        .unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut offset = 1;
+        let mut reads = 0;
+        let mut cuts = 0;
+        let mut bytes = 0;
+        while offset <= 1_000 {
+            let mut budget = TurnOutputBudget::new();
+            let mut shown = 0;
+            for _ in 0..6 {
+                let result = run_tool(
+                    &workspace,
+                    &FileState::default(),
+                    "read_file",
+                    &format!(r#"{{"path":"batch","offset":{offset}}}"#),
+                );
+                assert!(!result.is_error);
+                shown = result
+                    .model_text
+                    .lines()
+                    .skip(1)
+                    .filter(|row| !row.starts_with(MARKER_PREFIX))
+                    .count();
+                bytes += result.model_text.len();
+                let mut projected = result.model_text;
+                cuts += usize::from(budget.admit("read_file", &mut projected, ResultRecall::None));
+                reads += 1;
+            }
+            assert!(shown > 0);
+            offset += shown;
+        }
+        eprintln!(
+            "AB3 six-result batches: reads={reads} turn_budget_cuts={cuts} mean_read_bytes={}",
+            bytes / reads
+        );
+        assert!(reads <= 30);
+        assert!(cuts == 0 || reads < 30, "cuts must buy fewer read calls");
     }
 
     #[test]
@@ -273,6 +1137,34 @@ mod tests {
         );
         // The whole file still hashes: the read is complete for the guard.
         assert!(!result.file_states.is_empty());
+    }
+
+    #[test]
+    fn t20_oversized_search_and_ranges_keep_lossless_corrections() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), "x\n".repeat(100)).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments, code) in [
+            (
+                "search",
+                r#"{"query":"x","max_per_file":80}"#,
+                "invalid_max_per_file:",
+            ),
+            (
+                "read_file",
+                r#"{"path":"a","ranges":["1","2","3","4","5","6","7","8","9"]}"#,
+                "invalid_ranges:",
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(result.is_error, "{}", result.model_text);
+            assert!(result.model_text.starts_with(code), "{}", result.model_text);
+            assert_eq!(
+                qq_protocol::ToolErrorKind::of(name, &result.model_text),
+                qq_protocol::ToolErrorKind::Correction
+            );
+        }
     }
 
     #[test]
@@ -792,6 +1684,549 @@ mod tests {
             result.model_text
         );
         assert!(!result.model_text.contains("blob.bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_names_discovery_reports_safe_instruction_links_and_blocks_bad_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::create_dir(directory.path().join("shared")).unwrap();
+        fs::write(directory.path().join("shared/rules"), "instructions\n").unwrap();
+        symlink("../shared/rules", directory.path().join("src/AGENTS.md")).unwrap();
+        fs::write(directory.path().join(".gitignore"), "AGENTS.md\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let arguments = r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true}"#;
+        let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("src/AGENTS.md"),
+            "{}",
+            result.model_text
+        );
+        let content = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"instructions"}"#,
+        );
+        assert!(!content.model_text.contains("src/AGENTS.md"));
+        for target in ["../../outside", "../missing", "../shared"] {
+            fs::remove_file(directory.path().join("src/AGENTS.md")).unwrap();
+            symlink(target, directory.path().join("src/AGENTS.md")).unwrap();
+            let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+            assert!(result.is_error, "target={target}: {}", result.model_text);
+            assert!(
+                result.model_text.contains("src/AGENTS.md"),
+                "{}",
+                result.model_text
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_instruction_link_pages_resume_without_following_directory_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("rules"), "instructions\n").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::create_dir(directory.path().join(name)).unwrap();
+            symlink("../rules", directory.path().join(name).join("AGENTS.md")).unwrap();
+        }
+        symlink("a", directory.path().join("directory-link")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cursor = None;
+        for (page, path) in ["a/AGENTS.md", "b/AGENTS.md", "c/AGENTS.md"]
+            .iter()
+            .enumerate()
+        {
+            let mut arguments = serde_json::json!({"query":"AGENTS.md","mode":"names","limit":1});
+            if let Some(cursor) = cursor.take() {
+                arguments["cursor"] = serde_json::Value::String(cursor);
+            }
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                &arguments.to_string(),
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            let shown = result
+                .model_text
+                .lines()
+                .filter(|line| line.ends_with("/AGENTS.md"))
+                .collect::<Vec<_>>();
+            assert_eq!(shown, [*path]);
+            assert!(!result.model_text.contains("directory-link/"));
+            cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next=").map(str::to_owned));
+            assert_eq!(cursor.is_some(), page < 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_names_scan_budget_advances_past_nonmatching_links() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            symlink("missing", directory.path().join(format!("s{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let header = result.model_text.lines().next().unwrap();
+        assert!(header.contains("partial=scan"), "{header}");
+        let cursor = header
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("scan prefix must produce a resumable cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial=scan"));
+    }
+
+    #[test]
+    fn ab2_names_scan_budget_advances_past_empty_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_cursor_path_boundary_round_trips_without_header_clipping() {
+        for path in ["a".repeat(4_096), "界".repeat(1_365) + "/"] {
+            let cursor = search::Cursor {
+                path,
+                line: u32::MAX,
+            };
+            assert_eq!(search::Cursor::decode(&cursor.encode()), Some(cursor));
+        }
+        let cursor = search::Cursor {
+            path: "a".repeat(4_097),
+            line: 0,
+        };
+        assert!(search::Cursor::decode(&cursor.encode()).is_none());
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..8)
+            .map(|_| "a".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut cursor = None::<String>;
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let args =
+                serde_json::json!({"query":"x", "mode":"names", "cursor":cursor}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), "search", &args);
+            assert!(!result.is_error, "{}", result.model_text);
+            assert!(!result.model_text.contains("…+"), "{}", result.model_text);
+            assert!(output::escaped_len(&result.model_text) <= 12 * 1024);
+            for recall in [
+                ResultRecall::None,
+                ResultRecall::StoredResult {
+                    tool: "search",
+                    call: qq_protocol::ToolCallId::from_bytes([0x31; 16]),
+                },
+            ] {
+                let mut prior = "x".repeat(93 * 1024);
+                let mut budget = TurnOutputBudget::for_results(
+                    [
+                        ("other", prior.as_str()),
+                        ("search", result.model_text.as_str()),
+                    ]
+                    .into_iter(),
+                );
+                budget.admit("other", &mut prior, ResultRecall::None);
+                let mut projected = result.model_text.clone();
+                assert!(!budget.admit("search", &mut projected, recall));
+                assert_eq!(
+                    projected, result.model_text,
+                    "search pages cannot lose rows before their continuation"
+                );
+            }
+            for path in result.model_text.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate path");
+            }
+            cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .map(str::to_owned);
+            if let Some(encoded) = &cursor {
+                assert!(search::Cursor::decode(encoded).is_some());
+            } else {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 10);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn ab2_long_nonmatching_prefix_releases_its_cursor_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = (0..14)
+            .map(|_| "a".repeat(235))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(prefix)).unwrap();
+        let text = format!(
+            "{}needle{}\n",
+            format!("{}\n", "x".repeat(1_900)).repeat(4),
+            "x".repeat(1_890)
+        );
+        fs::write(directory.path().join("z.txt"), text).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"needle","context":4}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("L5: needle"),
+            "{}",
+            result.model_text
+        );
+        assert!(
+            !result.model_text.contains("truncated="),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab2_unrepresentable_match_returns_an_explicit_budget_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = (0..16)
+            .map(|_| "\"".repeat(240))
+            .collect::<Vec<_>>()
+            .join("/");
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        fs::write(directory.path().join(&root).join("AGENTS.md"), "rules").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("search_output_budget"),
+            "{}",
+            result.model_text
+        );
+    }
+
+    #[test]
+    fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
+        fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(&root).join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_depth_skip_does_not_block_later_directory_watermarks() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut deep = directory.path().join("a");
+        for _ in 0..66 {
+            fs::create_dir(&deep).unwrap();
+            deep.push("d");
+        }
+        for index in 0..search::MAX_SCAN_ENTRIES {
+            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+        }
+        fs::create_dir(directory.path().join("z")).unwrap();
+        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"AGENTS.md","mode":"names"}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        let cursor = result
+            .model_text
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("next="))
+            .expect("completed directories must provide a cursor");
+        let arguments =
+            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+        assert!(!next.is_error, "{}", next.model_text);
+        assert!(
+            next.model_text.contains("z/AGENTS.md"),
+            "{}",
+            next.model_text
+        );
+        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+    }
+
+    #[test]
+    fn ab2_names_discover_file_ignored_instructions_in_visible_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::create_dir(directory.path().join("hidden")).unwrap();
+        fs::write(
+            directory.path().join(".gitignore"),
+            "AGENTS.md\nCLAUDE.md\nhidden/\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("src/AGENTS.md"), "rules\n").unwrap();
+        fs::write(directory.path().join("src/CLAUDE.md"), "fallback\n").unwrap();
+        fs::write(directory.path().join("hidden/AGENTS.md"), "hidden\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true}"#,
+        );
+        assert!(!result.is_error, "{}", result.model_text);
+        for path in ["src/AGENTS.md", "src/CLAUDE.md"] {
+            assert!(result.model_text.contains(path), "{}", result.model_text);
+        }
+        assert!(!result.model_text.contains("hidden/AGENTS.md"));
+    }
+
+    #[test]
+    fn ab2_instruction_discovery_depth_windows_cover_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut path = String::new();
+        let mut roots = vec![".".to_owned()];
+        let mut expected = Vec::new();
+        for depth in 1..=130 {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(&format!("d{depth:03}"));
+            fs::create_dir(directory.path().join(&path)).unwrap();
+            if matches!(depth, 64 | 65 | 128 | 130) {
+                let instruction = format!("{path}/AGENTS.md");
+                fs::write(directory.path().join(&instruction), "rules\n").unwrap();
+                expected.push(instruction);
+            }
+            if depth % 64 == 0 {
+                roots.push(path.clone());
+            }
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let mut discovered = String::new();
+        for (index, root) in roots.iter().enumerate() {
+            let arguments = serde_json::json!({"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":root,"include_ignored":true}).to_string();
+            let result = run_tool(&workspace, &FileState::default(), "search", &arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            if index < 2 {
+                assert!(
+                    result.model_text.contains("partial=depth"),
+                    "{}",
+                    result.model_text
+                );
+            } else {
+                assert!(!result.model_text.contains("partial=depth"));
+            }
+            discovered.push_str(&result.model_text);
+        }
+        for instruction in expected {
+            assert!(discovered.contains(&instruction), "missing {instruction}");
+        }
+        let hint = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"RULES","case":"sensitive"}"#,
+        );
+        assert!(
+            hint.model_text.contains("case_insensitive_matches=1+"),
+            "{}",
+            hint.model_text
+        );
+    }
+
+    #[test]
+    fn ab2_names_and_content_search_reach_an_explicit_ignored_worktree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join(".gitignore"), "/.worktrees/\n/src/vendor/\n").unwrap();
+        fs::create_dir_all(root.join("src/vendor")).unwrap();
+        fs::write(root.join("src/AGENTS.md"), "source ancestor policy\n").unwrap();
+        fs::write(root.join("src/NOTAGENTS.md"), "not instructions\n").unwrap();
+        fs::write(root.join("src/vendor/AGENTS.md"), "vendor policy\n").unwrap();
+        fs::write(root.join("src/vendor/x.rs"), "// target\n").unwrap();
+        fs::create_dir_all(root.join(".worktrees/x/nested")).unwrap();
+        fs::write(root.join(".worktrees/AGENTS.md"), "ancestor policy\n").unwrap();
+        fs::write(root.join(".worktrees/x/AGENTS.md"), "worktree policy\n").unwrap();
+        fs::create_dir_all(root.join("target/stk")).unwrap();
+        fs::write(root.join("target/CLAUDE.md"), "target ancestor policy\n").unwrap();
+        fs::write(
+            root.join("target/stk/AGENTS.md"),
+            "second worktree policy\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".worktrees/x/nested/CLAUDE.md"),
+            "nested policy\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(root).unwrap();
+        for (arguments, expected) in [
+            (
+                r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":".worktrees","include_ignored":true}"#,
+                ".worktrees/x/nested/CLAUDE.md",
+            ),
+            (
+                r#"{"query":"worktree policy","path":".worktrees","include_ignored":true}"#,
+                "L1: worktree policy",
+            ),
+        ] {
+            let result = run_tool(&workspace, &FileState::default(), "search", arguments);
+            assert!(!result.is_error, "{}", result.model_text);
+            if arguments.contains("names") {
+                assert!(
+                    result.model_text.contains(".worktrees/AGENTS.md"),
+                    "{}",
+                    result.model_text
+                );
+            }
+            assert!(
+                result.model_text.contains(expected),
+                "{}",
+                result.model_text
+            );
+        }
+
+        let second = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"target","include_ignored":true}"#,
+        );
+        assert!(!second.is_error, "{}", second.model_text);
+        assert!(second.model_text.contains("target/CLAUDE.md"));
+        assert!(second.model_text.contains("target/stk/AGENTS.md"));
+
+        let ancestors = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"."}"#,
+        );
+        assert!(!ancestors.is_error, "{}", ancestors.model_text);
+        assert!(ancestors.model_text.contains("src/AGENTS.md"));
+        assert!(!ancestors.model_text.contains("NOTAGENTS.md"));
+        assert!(!ancestors.model_text.contains("src/vendor/AGENTS.md"));
+        let ignored = run_tool(
+            &workspace,
+            &FileState::default(),
+            "search",
+            r#"{"query":"(^|/)(AGENTS|CLAUDE)\\.md$","mode":"names","regex":true,"path":"src/vendor","include_ignored":true}"#,
+        );
+        assert!(!ignored.is_error, "{}", ignored.model_text);
+        assert!(ignored.model_text.contains("src/vendor/AGENTS.md"));
     }
 
     #[test]
@@ -1477,7 +2912,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
     }
 
@@ -1659,11 +3094,12 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let state = FileState::default();
 
+        // ADR-0058: a unique exact `old` is proof enough; an anchor is not.
         let edit = run_tool(
             &workspace,
             &state,
             "edit_file",
-            r#"{"edits":[{"path":"note.txt","old":"content","new":"changed"}]}"#,
+            r#"{"edits":[{"path":"note.txt","insert_after":"content","new":"changed"}]}"#,
         );
         assert!(edit.is_error);
         assert!(edit.model_text.contains("read_file"), "{}", edit.model_text);

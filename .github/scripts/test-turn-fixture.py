@@ -1,0 +1,103 @@
+"""Verify the pinned benchmark source and compiled dependency closure."""
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class FixtureTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "fixture", Path(__file__).with_name("turn-fixture.py"))
+        self.fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.fixture)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for name in self.fixture.SOURCES:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(name.encode())
+
+    def test_each_included_source_changes_identity(self):
+        original = self.fixture.manifest(self.root)
+        for name in self.fixture.SOURCES:
+            path = self.root / name
+            previous = path.read_bytes()
+            path.write_bytes(previous + b"changed")
+            self.assertNotEqual(original, self.fixture.manifest(self.root))
+            path.write_bytes(previous)
+
+    def test_dependency_closure_accepts_only_the_declared_sources(self):
+        dep = self.root / "turn.d"
+        inputs = " ".join(str(self.root / name) for name in self.fixture.SOURCES)
+        dep.write_text(f"turn: {inputs}\n")
+        self.fixture.verify_dependencies(self.root, dep)
+        dep.write_text(f"turn: {inputs} {self.root / 'extra.rs'}\n")
+        with self.assertRaisesRegex(ValueError, "dependency closure"):
+            self.fixture.verify_dependencies(self.root, dep)
+        dep.write_text(f"turn: {self.root / self.fixture.SOURCES[0]}\n")
+        with self.assertRaisesRegex(ValueError, "dependency closure"):
+            self.fixture.verify_dependencies(self.root, dep)
+
+    def test_dependency_closure_supports_continuation_and_escaped_spaces(self):
+        spaced = self.root / "source root"
+        for name in self.fixture.SOURCES:
+            path = spaced / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"source")
+        dep = self.root / "turn.d"
+        inputs = " \\\n ".join(str(spaced / name).replace(" ", "\\ ") for name in self.fixture.SOURCES)
+        dep.write_text(f"turn: {inputs}\n")
+        self.fixture.verify_dependencies(spaced, dep)
+
+    def test_prepare_and_verify_preserve_production_identity_and_refuse_other_changes(self):
+        production, fixture = self.root / "production", self.root / "fixture"
+        for checkout, content in ((production, b"old"), (fixture, b"common")):
+            for name in self.fixture.SOURCES:
+                path = checkout / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            (checkout / "production.rs").write_bytes(content)
+            subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+            subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(checkout), "-c", "user.name=fixture",
+                            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+        receipt = self.root / "receipt.json"
+        head = self.fixture.git(production, "rev-parse", "HEAD")
+        command = [sys.executable, str(Path(__file__).with_name("turn-fixture.py"))]
+        prepare = command + ["prepare", "--production-root", str(production),
+                             "--fixture-root", str(fixture), "--production-sha", head,
+                             "--fixture-sha", self.fixture.git(fixture, "rev-parse", "HEAD"),
+                             "--receipt", str(receipt)]
+        subprocess.run(prepare, check=True, capture_output=True)
+        saved = json.loads(receipt.read_text())
+        self.assertEqual(saved["production_sha"], head)
+        self.assertNotEqual(saved["original_fixture"], saved["effective_fixture"])
+        self.assertEqual(saved["effective_fixture"], self.fixture.manifest(production))
+        self.assertFalse(saved["compiled_fixture_verified"])
+        self.assertNotEqual(subprocess.run(prepare, capture_output=True).returncode, 0)
+        binary = self.root / "binary"
+        binary.write_bytes(b"compiled binary")
+        dep = self.root / "compiled.d"
+        dep.write_text("turn: " + " ".join(str(production / name) for name in self.fixture.SOURCES) + "\n")
+        verify = command + ["verify", "--production-root", str(production), "--receipt", str(receipt),
+                            "--dep-info", str(dep), "--binary", str(binary)]
+        subprocess.run(verify, check=True, capture_output=True)
+        self.assertTrue(json.loads(receipt.read_text())["compiled_fixture_verified"])
+        (production / "production.rs").write_bytes(b"unexpected production change")
+        failed = subprocess.run(verify, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("outside the pinned fixture", failed.stderr)
+        (production / "production.rs").write_bytes(b"old")
+        (production / self.fixture.SOURCES[1]).write_bytes(b"late fixture change")
+        failed = subprocess.run(verify, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("changed after preparation", failed.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -139,6 +139,7 @@ source control.
 | Restart reconstruction | open-to-snapshot, replay, temporary RSS | Byte-identical one MiB snapshot and exact event-envelope digest after final close and reopen |
 | Load | ack, completion, batch, spread, throughput, active runs, RSS for 1/10/100 sessions | Concurrent admitted sessions with the default eight-run cap |
 | Autonomous-core diagnostic (AC0.1) | requested/reached turns, executed/settled calls, committed compactions, RSS and DB/WAL samples, work-turn gaps at 10/100/1,000 | Standalone `cargo test -p qq-core --test soak` / `cargo bench -p qq-core --bench turn_overhead`; immediate local provider, public durable runtime, no H0 report or budget entry yet |
+| Controlled turn recording (AC0.2.1) | 30 alternating A/B and 30 same-binary A/A invocation samples at 10/100/1,000, median/p95, pressure and artifact identity | Manually dispatched CI `perf_baseline_sha`; separate build targets and hosted runner; see [perf recording](../../docs/runbooks/perf-recording.md#isolated-turn-diagnostic-recording). Diagnostic only, no H0 registration or automatic budget waiver |
 
 AC0.1 is a characterization baseline, not autonomous-run qualification.
 Known failures are asserted by the default fixtures; explicit completion

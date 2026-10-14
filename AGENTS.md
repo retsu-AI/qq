@@ -70,7 +70,8 @@ ledger every session, and reserve ADR numbers in
 - `website/`: docs site generated from `docs/guide/`; edit the guide, not the
   site (`docs/runbooks/website.md`).
 - `.qq/skills/`: agent skills (`qq-mode`, `principles`, `verify-qq`,
-  `design-skill-or-pack`), also reachable as `.agents/skills/`. Packs with
+  `design-skill-or-pack`), with checked-in compatibility copies under
+  `.agents/skills/` (keep them identical to `.qq/skills/`). Packs with
   their own skills live in `.qq/packs/` (for example
   `.qq/packs/protocol/skills/protocol-bump/` for wire, descriptor, and
   schema changes).
@@ -194,6 +195,15 @@ current, and query rather than guess issue or PR details.
 - Keep changes narrow: no drive-by refactors or formatting churn outside the
   issue's scope.
 - Never commit secrets, credentials, `target/`, or generated output.
+
+## Code Review Rules
+
+- Review plans for unsafe, contradictory, or untestable designs; process
+  bookkeeping alone is not a finding unless it would let unsafe code merge.
+- Settled threads need new evidence before reopening.
+- Shell-classification findings must name a command and its incorrect verdict.
+  `Prompt` where `Allow` is safe is a usability issue, not a safety issue.
+- Report each finding once, against the earliest PR introducing it.
 
 ## Definition of done
 

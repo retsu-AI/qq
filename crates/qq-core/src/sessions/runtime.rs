@@ -116,6 +116,7 @@ impl LoadedRuntime {
         .with_delegation(runtime.delegation.as_ref().clone())
         .with_audit(runtime.audit)
         .with_shell_policy(runtime.shell.as_ref().clone())
+        .with_process_producer(Arc::clone(&runtime.process_producer))
         .with_network_policy(runtime.network.as_ref().clone())
         .with_profile_id(profile_id);
         for host in runtime.hosts.iter() {
@@ -1418,6 +1419,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error(
+        "tool projection for run {run} is unresolved: it lacks the exact tool-result projection needed to preserve its history; start a new session to continue without changing this history"
+    )]
+    ToolProjectionUnavailable { run: String },
     #[error("maximum active runs must be greater than zero")]
     InvalidRunLimit,
     #[error("a side question is already active for this session")]

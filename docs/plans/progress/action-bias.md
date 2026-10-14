@@ -1,0 +1,2073 @@
+# Ledger — Action bias
+
+Plan: [`../action-bias.md`](../action-bias.md). Only the agent working this
+plan edits this file. Current state on top; dated entries appended below,
+newest last.
+
+| Slice | Goal | Status | Linear | Branch / PR | Notes |
+| --- | --- | --- | --- | --- | --- |
+| AB1 | Verified process context determines progress and audit | Shipped (`007adcda`) | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301) | Merged; local/hosted gates and fresh Codex pass, named performance open |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | Merged (`62c65930`) | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB3 | `read_file` window fills the byte budget; line-limit marker | Merged (`62c65930`) | [ENG-1040](https://linear.app/retsu-ai/issue/ENG-1040) | [#303](https://github.com/retsu-AI/qq/pull/303) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB4 | Declared tools and prompt match the run's authority; ADR-0059 | Merged (`62c65930`) | [ENG-1041](https://linear.app/retsu-ai/issue/ENG-1041) | [#304](https://github.com/retsu-AI/qq/pull/304) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB5 | Root stall report asks for the next change | Merged (`62c65930`) | [ENG-1042](https://linear.app/retsu-ai/issue/ENG-1042) | [#305](https://github.com/retsu-AI/qq/pull/305) | Merged by user; final published Codex review cleared; named performance carried to AB6 |
+| AB6.1 | Bounded snapshot export and pinned-classifier recount | In review | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | [#306](https://github.com/retsu-AI/qq/pull/306) | Nondraft; V2 context evidence/format3 implemented; hosted review and performance gates pending |
+| AB6 | Seven-day re-measure; paired run if ENG-809 authorizes | Planned | [ENG-1043](https://linear.app/retsu-ai/issue/ENG-1043) | | After AB6.1 acceptance and AB1–AB5 + 7 days |
+
+## Entries
+
+### 2026-10-13 — plan opened
+
+- Research snapshot `../../research/action-bias.md` from a read-only store
+  open: schema 44, 412 prompt runs and 29,956 calls in the 30 days before
+  2026-10-13; counts only. The reference trees were read at the revisions
+  named in the research.
+- Baselines (root unless stated):
+  - reads before first edit: median 9, p90 57;
+  - same-path re-reads: 1,631 of 3,669;
+  - shell reads after an optional `cd`: 725 of 1,886;
+  - instruction-file probes: 271;
+  - root stall reports: 0 (2 slice checkpoints);
+  - wall time: 23.7 min without spawning, 145.4 min with;
+  - children account for 73 % of built-in reads.
+- No code changed. ADR-0059 reserved in `root.md`. Linear program issue
+  ENG-1037 is under milestone `Action Bias`. Plan PR: [#295](https://github.com/retsu-AI/qq/pull/295).
+- Two independent read-only reviews of the plan against `ce768bb`. The
+  first returned Request changes, with one blocking item: AB5's unknown
+  notice fails assembly with `CODEC`, so it needs store schema 45. The
+  second returned Approve once that item and S1–S7 were folded in:
+  - AB1 closes write shapes misclassified as reads today;
+  - AB2 respects pruned-read stubs;
+  - AB3 measures the turn budget;
+  - AB4 filters with a bool and declares no per-mode clause;
+  - research totals reconciled to the prompt-run window.
+
+
+### 2026-10-14 — #295 Codex review corrections
+
+- Verified all eight unresolved findings against current implementation:
+  unattended questions are denied; names search needs explicit ignored
+  roots; default reads have a 4,000-line output bound distinct from the
+  explicit 2,000-line limit; eval compare rejects prompt-version changes.
+- Plan preserves analysis-only scope, rejects long branch mutation aliases,
+  specifies open-ended default reads and one authority-neutral root notice.
+  Direct runs omit `ask_user`. Paired paid evaluation now explicitly needs
+  an accepted comparator slice and ENG-809 authorization before dispatch.
+- Added and executed three missing historical-window qualification queries
+  read-only (schema 44): root edits 211/1,230 failed; roots 190/254 completed;
+  108 below-root editing runs, 44 instruction searches, 9 runs over one.
+  Defined denominators, zero regression tolerance, window boundaries and
+  unqualified cases. AB6 remains pending seven days after AB1–AB4 merge.
+- Independent read-only review confirmed the eight corrections and caught
+  one further write alias: `sort --output=out f` must count as work. Added
+  separate and attached short/long output flag verdict cases to AB1.
+- Documentation truth tests: 23 passed. Supplemental SQL also executed
+  through the documented Bash/sqlite3 commands; outputs match the counts
+  above. Relative links and `git diff --check` pass. Workspace gates running
+  before push; no runtime code changed in this correction.
+
+
+### 2026-10-14 — AB1 baseline started; schema dependency refreshed
+
+- Previous continuation made progress: committed #295 corrections and
+  independently reviewed their final state. Workspace gate process remains
+  live; inspected its ongoing test output rather than restarting it.
+- Isolated AB1 branch `fix/eng-1038-ab1-shell-reads` now inherits `147e4eca`.
+  Baseline `cargo bench -p qq-core --bench turn_overhead` built successfully
+  and is running; raw output is under that worktree's
+  `target/qq-perf/ab1-2026-10-14/baseline.log`. Concurrent host work means
+  this diagnostic cannot qualify performance acceptance.
+- Fetched `origin/main`: `7de994b1` includes #289's schema 45 and #294's
+  tolerant arguments. AB5 now specifies schema 45→46; historical schema-44
+  research stays unchanged. Stack must integrate current main before its
+  final qualification; no runtime code changed yet.
+
+
+### 2026-10-14 — baseline test diagnosis and main integration
+
+- Old-base workspace test gate failed: qq-core 933 passed, 5 failed,
+  3 ignored; all five failures were 30-second fixture waits. Other gates
+  after the test command were not run. Same compiled failing checkpoint
+  test passed alone on disk in 14.13 s. All five unchanged binaries passed
+  serially with test stores on task-owned tmpfs (under one second combined).
+  Evidence: `target/qq-perf/ab1-2026-10-14/old-failures-tmpfs.log` in the
+  plan worktree. I/O pressure was 43.63% some / 42.22% full avg10.
+- Integrated `origin/main` (`7de994b1`) as merge `2ffb0a1a`, retaining both
+  the updated autonomous-core index and action-bias priority row. No
+  runtime fix was needed for this timing reproduction. Requalifying the
+  integrated source with task-owned tmpfs test stores; disk latency remains
+  unqualified by that correctness run.
+
+- Integrated source workspace gates passed with isolated tmpfs test stores:
+  2,272 passed, 0 failed, 14 ignored (35 test-report blocks); formatting,
+  all-target/all-feature Clippy with `-D warnings`, and workspace build all
+  exit 0. Logs: `target/qq-perf/ab1-2026-10-14/integrated-gate-{0,1,2,3}.log`.
+  This qualifies correctness on tmpfs, not persistence latency on disk.
+
+
+### 2026-10-14 — AB1 regression start
+
+- Branch `fix/eng-1038-ab1-shell-reads` inherits integrated plan `a9dc6e80`.
+  Pre-change tmpfs diagnostic on unchanged classifier: 212,429 / 163,549 /
+  176,586 ns per turn at 10/100/1,000 (one iteration, unqualified).
+  Original disk baseline recording remains live; do not confuse its handle
+  with this separate storage diagnostic. Final matched performance gate is
+  still open, including a baseline on the integrated immutable source.
+- Added command-table and short-run sed audit regressions before the fix.
+  No approval permission changes are intended; reads affect only progress
+  reports and heuristic audit selection. Linear ENG-1038 is In Progress.
+
+- Test-first result on integrated source: `cargo test -p qq-core ab1_
+  --no-default-features` (tmpfs stores) gives 1 passed / 2 failed: command
+  table and `ab1_cd_prefixed_reads_report_on_request_sixty_five` reproduce
+  the intended failures. Log: `target/qq-perf/ab1-2026-10-14/ab1-red.log`.
+  Short-run in-place sed audit preservation already passes.
+- Original disk baseline completed, exit 0, three iterations: medians
+  82,124,330 / 81,953,505 / 101,346,859 ns per turn at 10/100/1,000.
+  Heavy storage contention and the pre-integration build make this
+  characterization only; matched integrated-source qualification stays open.
+
+
+### 2026-10-14 — AB1 classifier implementation
+
+- Implemented a bounded, allocation-free lexical read classifier: one
+  leading literal cd, quote-aware segments, read argv checks, shared exact
+  Git branch listing predicate. Rejects dynamic/uncertain syntax and known
+  write/execute flags; approval decisions are unchanged.
+- Five focused tests pass, including request 65 after 64 shell reads,
+  a failing cd-prefixed cargo test restarting the count, short sed write
+  audit preservation, command aliases and lexical/resource limits.
+- Independent first review found quoted-option concatenation, retained
+  programs' output/execute flags and slash-addressed sed prints. Added
+  reproductions and fixed these; final independent re-review requested.
+  Workspace gates and matched performance qualification remain pending.
+
+- Final alias follow-up: test-first `file --comp -m magic` and unquoted
+  `find . -de*` reproduced wrong read verdicts. Guard abbreviated compile
+  flags and all unquoted glob expansions while keeping quoted find patterns.
+  Five AB1 tests pass again (`ab1-green.log`). Input/argv-bound tests include
+  exactly 128 words, overflow, malformed quotes and concatenated options.
+- First candidate workspace pipeline exited 0 for test/fmt/Clippy/build,
+  but review changed the source during it; it is superseded evidence, not
+  final qualification. Re-run gates on the committed final candidate before
+  push. Matched benchmark baseline is the integrated plan head `f7b0457e`.
+
+
+
+### 2026-10-14 — AB1 final local correctness qualification
+
+- Code/spec independent re-review: Approve on immutable `f9fb94d6`, after
+  concrete alias and glob-expansion findings were reproduced and fixed.
+- Final-source workspace gates: 2,277 passed, 0 failed, 14 ignored (35
+  report blocks); fmt, all-target/all-feature Clippy `-D warnings`, build
+  all exit 0. Test stores used task-owned tmpfs. Raw logs under AB1 worktree
+  `target/qq-perf/ab1-2026-10-14/final-candidate-gate-{0,1,2,3}.log`.
+- Matched integrated baseline build from detached `f7b0457e` is live.
+  Performance gate remains open: concurrent cargo/nextest work and I/O
+  pressure (some avg10 24.95%, full 23.91%) prevent quiet-host acceptance.
+  No runtime regression test or performance gate is waived. AB1 is local;
+  no implementation PR or hosted Codex approval claimed yet.
+
+
+### 2026-10-14 — AB2 baseline and regression start
+
+- Branch `feat/eng-1039-ab2-action-prompt` stacks on AB1 `2d0bfa4f`.
+  Pre-change `cargo bench -p qq-core --bench plan_compile`: 29,242 ns per
+  compile (2,000 iterations), descriptor digest 2,562 ns (20,000), estimated
+  plan bytes 34,963, canonical descriptor bytes 1,408. Fixture stores on
+  tmpfs, shared host; final paired/noise qualification remains open. Raw
+  baseline: AB1 worktree `target/qq-perf/ab2-2026-10-14/baseline.log`.
+- Added root contract, read-child and absent-tool header regressions before
+  production changes, plus explicit ignored-worktree names/content searches.
+  Fixed-path fixture prints prefix bytes and schema hash for before/after.
+
+- Test-first baseline: four focused AB2 tests, 2 passed / 2 failed. Root
+  action contract and absent-tool header reproduce the intended defects;
+  read-child section and explicit ignored-worktree names/content searches
+  already pass. Fixed prompt fixture: 4,214 bytes; built-in schema hash
+  `9ecb4e7efbcc1de6556cc22803ea7579df287b71f70bf4aaf79ec4a81d69a4cb`.
+  Raw test evidence: `target/qq-perf/ab2-2026-10-14/red-compiled.log`.
+
+### 2026-10-14 — AB2 implementation review
+
+- Implemented prompt v20 and built-in mappings on AB1 `2d0bfa4f`; independent
+  review approved after adding both ignored and nonignored ancestor scopes.
+- `cargo test -p qq-core ab2_ -- --nocapture`: 5 passed; `cargo test -p
+  qq-core prompt -- --nocapture`: 58 passed. First fixture attempt failed
+  because its TMPDIR parent was missing; created the task-owned directory
+  and reran successfully. Prefix fixture: 5,516 bytes; descriptor schema
+  hash `f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85`.
+- Baseline plan compilation: 29,242 ns/iteration (2,000 iterations), digest
+  2,562 ns/iteration (20,000); candidate and noise qualification remain open.
+  Workspace gates are next; nothing in this slice has been pushed.
+- First workspace gate found one stale headless JSONL prompt-version
+  assertion (expected 19, observed 20); reserved its test-only path in the
+  root ledger and updated the expected identity. Gate rerun remains pending.
+- Corrected headless regression passes (1 test). Thirty alternating A/B
+  and same-binary A/A pairs recorded in `paired-plan-compile.json`: paired
+  compile median +2.16%, A/A +0.82% (pair range -4.54% to +7.64%). Concurrent
+  builds invalidate quiet-host qualification; these are diagnostic samples,
+  not a waived performance gate. Initial candidate 30,239 ns/iteration.
+- Second full test run exposed four more stale contract assertions: plan
+  digest, tool-schema digest and two delegation prompts. Updated their
+  expected v20 identities/text, including the negative read-child assertion;
+  no production behavior was changed to satisfy them. Requalification next.
+
+### 2026-10-14 — AB3 test-first start
+
+- Isolated `perf/eng-1040-ab3-read-window` stacks on AB2 `ad32760e`.
+  Pre-change benchmarks recorded in AB2 worktree `ab3-2026-10-14`: dispatch
+  94,369 ns/iteration, output fits 2,153 ns/iteration, shell bound 24,414.
+  Shared-host diagnostic; final matched qualification remains required.
+- Added public read-window, 4,000-line contiguous continuation and six-result
+  turn-budget fixtures before production changes. Red run pending.
+- Pre-change focused tests: 1 passed, 2 failed (default stops at 200 and
+  line-stop has no offset marker). Six-result fixture baseline: 30 reads,
+  0 turn-budget cuts, mean 7,079 bytes per read. This is deterministic output
+  projection characterization, not timing or live parallel execution.
+- Scan-cap exact/unknown-count regression fails before its marker fix.
+  Added an actual six-parallel-read runtime fixture that tracks only visible
+  rows and recovers missing offsets; baseline runtime execution is next.
+
+### 2026-10-14 — AB3 implementation review
+
+- Five focused regressions pass. Actual parallel runtime recovers all 6,000
+  lines: baseline 30 calls / 0 cuts → candidate 15 calls / 4 cuts; cuts buy
+  fewer total calls, including recovery. Projection diagnostic 30/0 → 12/3.
+- No-limit reads use EOF windows bounded by bytes and rendered lines, reserve
+  header/marker rows, and emit explicit-limit continuation. Scan-capped reads
+  report an unknown count without reading beyond 4 MiB. Ranges retain intervals.
+- Independent code/spec review approved. Schema hash changes to
+  `d0a311aab69d74e7cf7684ebefc25a1fa366a81217c529947d3b17b357e7fa0f`.
+  Workspace and final benchmark gates remain open; no implementation pushed.
+
+
+- Third workspace attempt passed core behavior but failed five TUI ANSI
+  assertions under inherited `NO_COLOR=1`. The same compiled binary passes
+  all render tests (6) and highlighted-frame test (1) with NO_COLOR removed.
+  Re-run full gates with that test environment; no TUI code change needed.
+- Final v20 source before basename follow-up: 2,282 passed, 0 failed,
+  14 ignored; fmt/Clippy/build exit 0. Independent review approved identities
+  and child contracts. Third hosted plan review requires exact-basename
+  instruction search; added NOTAGENTS.md rejection, requalification next.
+- Basename full gate hit unchanged MCP cancellation timing: 49.56 ms
+  against 45 ms fixture bound during concurrent builds. Same compiled test
+  passes alone in 20 ms; no MCP code or threshold changed. Full rerun next.
+
+
+### 2026-10-14 — second hosted plan review corrections
+
+- Fresh #295 findings: retained Git output writers, absent ask_user prompt
+  text, multiple ignored instruction roots, rendered-line continuation,
+  completion censoring, progressive selection eligibility and dry-run cohorts.
+  Verified against code; each receives concrete acceptance rather than a waiver.
+- Instruction discovery uses the highest ignored ancestor, not only its
+  worktree child; host loading supplies only workspace-root instructions.
+  One search per distinct discovery root covers multi-root edits without
+  a per-directory walk. Preserve raw per-run counts and audit scope coverage.
+- Completion now fixes observation at end + 24 h; later finishes never
+  become completed-by-cutoff. Activity metrics use terminal-by-cutoff runs.
+  Exclude dry-run previews from mutation and instruction cohorts.
+
+- Independent review added the nonignored-parent case: every below-root
+  edit uses workspace-root discovery, plus each applicable highest ignored
+  subtree. The AB2 fixture covers `src/AGENTS.md` above ignored `src/vendor`.
+- Added a corrected first-actual-edit qualification query excluding dry-run
+  previews. The original historical query remains documented as a preview-
+  inclusive proxy; its 9/57 result must be reconciled before qualification.
+- Executed the corrected query on schema 45: 109 editing roots, median 9,
+  p90 57; original thresholds remain valid. Exact-query SQLite fixture
+  measures 42 reads across a preview and excludes preview-only runs.
+  Evidence: `target/qq-perf/ab-plan-2026-10-14/first-actual-edit.json`.
+- Second independent review approved these corrections. `cargo test -p qq
+  docs_truth -- --nocapture`: 23 passed; `git diff --check` passed. Production
+  source is unchanged from the integrated head with all four workspace
+  gates green; these corrections change plan/research/ledger only.
+
+- AB1 exact `git show --output=written.txt HEAD` verdict regression passes
+  with all five focused AB1 tests. Merged the reviewed parent corrections;
+  production source unchanged from the locally qualified classifier.
+
+### 2026-10-14 — AB4 execution eligibility investigation
+
+- Independent source investigation confirms external read-only hints grant
+  nothing. Strict ReadOnly denies all External calls, including granted ones;
+  unattended Ask allows only configuration-granted externals. Clarified the
+  plan to preserve that gate behavior, avoid request-time grant resolution,
+  and filter progressive index/selection with the declaration predicate.
+
+### 2026-10-14 — third hosted plan review corrections
+
+- Five fresh concrete findings: goal still capped all scopes at one search,
+  sed file-supplied programs, direct-run guide omitted granted externals,
+  suffix regex matched NOTAGENTS.md, and scan-cap remainder counts unknown.
+  Aligned goals/contracts and added exact regression acceptance; no waiver.
+- Independent review approved all five corrections and the external-hints
+  eligibility clarification. Docs truth 23 passed; fmt/diff checks passed.
+  AB1 exact file-supplied sed regressions pass (existing classifier rejects
+  them); AB2 exact-basename fixture passes; AB3 unknown-count fixture passes.
+
+- Exact-basename AB2 source workspace gates passed: 2,282 tests, 0 failed,
+  14 ignored; fmt, all-target/all-feature Clippy and build exit 0. Logs:
+  `target/qq-perf/ab2-2026-10-14/candidate-basename-final-gate-{0,1,2,3}.log`.
+  Integrated latest AB1 and reviewed parent docs; final publication gates next.
+- Integrated AB3 workspace tests and fmt passed. Clippy caught one nested
+  `if let` in the test provider; collapsed it without changing coverage logic.
+  Focused rerun and remaining lint/build gates follow.
+
+
+### 2026-10-14 — AB1 draft publication qualification
+
+- Integrated reviewed parent `188b69ff`; exact git-output and sed-file
+  regressions pass without changing the classifier. Final workspace gates
+  pass: 2,277 tests, 0 failures, 14 ignored; fmt, Clippy and build exit 0.
+  `cargo test --workspace -- --test-threads=1` serializes fixtures while their
+  internal async concurrency tests still execute. Color enabled, tmpfs stores.
+- Parallel publication attempt hit unchanged MCP cancellation timing
+  (45.83 ms against 45 ms); full serial rerun passes without threshold edits.
+  Logs `target/qq-perf/ab1-2026-10-14/publish-serial-gate-{0,1,2,3}.log`.
+- Publish as draft for hosted source review; matched performance qualification
+  remains open. No readiness or merge claim is made by draft publication.
+- Draft implementation PR [#301](https://github.com/retsu-AI/qq/pull/301)
+  opened on `83f9621e`, base #295; requested hosted Codex review. Linear
+  remains In Progress because matched performance qualification is open.
+
+### 2026-10-14 — AB2 draft publication qualification
+
+- Integrated AB1 and reviewed parent corrections. Workspace gates on the
+  exact production source pass: 2,282 tests, 0 failed, 14 ignored; fmt,
+  all-target/all-feature Clippy and build exit 0. Logs under
+  `target/qq-perf/ab2-2026-10-14/publish-gate-{0,1,2,3}.log`.
+- Final fixed-prefix fixture: 5,521 bytes (baseline 4,214), builtin schema
+  `f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85`.
+  Independent review approved. Draft publication awaits hosted source review;
+  plan_compile quiet-host/noise qualification remains open.
+
+- Draft [#302](https://github.com/retsu-AI/qq/pull/302) opened on `90c6b88d`,
+  stacked on #301. Fourth plan review identified fixed body conventions for
+  omitted tools. Captured read_file-only/no-tools regression fails before
+  correction (no-tools prompt still names read_file); test-first followup.
+- Custom-subset fix now renders builtin/file/command/instruction/recall
+  conventions from declared tools. Captured no-tools and read_file-only
+  requests pass; prompt tests 59 passed. Historical v14 prompt digest remains
+  unchanged after reversing only the reviewed v20 changes. Prefix fixture
+  5,299 bytes; schema unchanged. Single-tool matrix and final gates next.
+
+### 2026-10-14 — AB1 hosted source review regressions
+
+- #301 raised ripgrep hostname helpers, Git external diff/textconv helpers,
+  and Cargo lockfile-generating queries. Added exact verdict regressions
+  before changing the recognizer; independent investigation requested.
+- Independent review caught Git disabling flags used as path/value operands
+  and default blame textconv. Require canonical leading disable switches,
+  suppress signature helpers for log/show, and test separators/overrides.
+  Cargo's lock guard is a leading switch, with config overrides rejected.
+  All five focused regressions pass; final independent re-review requested.
+### 2026-10-14 — fourth hosted plan review corrections
+
+- Six concrete contract gaps: sed substitution flags, sort abbreviations,
+  classifier-mismatched shell metric, unattended prompt authority, mixed AB5
+  measurement window and custom-subset tool conventions. Plan corrections
+  require shared-classifier recount, fixed AB1–AB5 candidate window, direct
+  authority wording and captured arbitrary-subset prompts. Source followups
+  are test-first; no findings or performance gates are waived.
+- AB6.1 is a concrete prerequisite: consistent read-only cohort export and
+  bounded streamed recount with the actual AB1 classifier. Both windows use
+  one pinned binary; old shell-program SQL figures stay historical proxies.
+  Baseline recount and candidate qualification remain open.
+- Independent final review approved the corrections and fixed-runtime paid
+  comparator contract. Docs truth: 23 passed; fmt/diff checks passed.
+  Production source unchanged from the previously qualified parent.
+
+### 2026-10-14 — AB1 helper fix qualification
+
+- Independent final source review approved. Workspace tests: 2,277 passed,
+  0 failed, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0.
+  Logs: `target/qq-perf/ab1-2026-10-14/helper-final-gate-{0,1,2,3}.log`.
+  Integrated parent docs only; production source remains qualified.
+- Matched performance qualification remains open; prior candidate binary
+  predates the helper fix and cannot qualify this head.
+
+### 2026-10-14 — AB4 baseline and test-first start
+
+- Isolated branch `fix/eng-1041-ab4-run-authority`, AB3 parent `93cef811`.
+  Loaded-host baseline catalog compile 664,763 ns/500 iterations, selection
+  18,393 ns/10,000, host plan compile 58,587 ns/500; not qualification.
+  Raw baseline lives in AB3 `target/qq-perf/ab4-2026-10-14/baseline-catalog.log`.
+- Both new regressions fail: direct request declares denied edit_file;
+  strict ReadOnly retains a hinted external tool. Test-first log under
+  this worktree `target/qq-perf/ab4-2026-10-14/test-first.log`.
+- Snapshot eligibility/gates and prefix authority implementation next.
+
+### 2026-10-14 — AB4 implementation review
+
+- Shared immutable grant eligibility now filters declarations, recovered
+  pins, progressive indexes and selector reports. Direct gates use the
+  compiler snapshot; strict ReadOnly omits all externals. Root authority
+  follows read-only/unattended flags and derived callable mutation capability.
+- Eight focused AB4 tests pass; independent source review approved after
+  fixing an inherited recall fast-path omission (test-first reproduced).
+  Core library: 975 passed, 0 failed, 3 ignored. An earlier run stalled in
+  overflow recovery; that exact fixture passes alone and the full immutable
+  rerun passes. Logs `target/qq-perf/ab4-2026-10-14/core-immutable-retry.log`.
+- ADR-0059 proposed, design/guide corrected. Integrate newest parent fixes
+  before workspace/performance qualification and draft publication.
+### 2026-10-14 — AB2 subset correction qualification
+
+- Independent source review approved conditional conventions and captured
+  subsets; seven focused AB2 tests and 59 prompt tests pass. Workspace gates
+  pass: 2,284 tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0.
+  Logs: `target/qq-perf/ab2-2026-10-14/subset-final-gate-{0,1,2,3}.log`.
+- Fixed prefix 5,299 bytes; builtin schema unchanged. Matched plan compilation
+  performance remains unqualified; draft source review continues.
+
+### 2026-10-14 — AB3 integrated publication qualification
+
+- Independent final source review approved. Integrated workspace: 2,289
+  passed, 0 failed, 14 ignored; fmt, Clippy and build exit 0. First attempt
+  stopped when the filesystem filled; removed only task-owned obsolete
+  incremental caches, then reran all gates. Logs under this worktree
+  `target/qq-perf/ab3-2026-10-14/integrated-space-retry-{0,1,2,3}.log`.
+- Actual parallel coverage recovers all 6,000 rows: baseline 30 calls/0 cuts,
+  candidate 15 calls/4 cuts. Explicit windows, ranges and scan-cap fixtures pass.
+- Loaded-host diagnostics: dispatch 94,369 → 64,433 ns/iteration (1,000);
+  default output bounding 132,475 → 128,788 ns. Matched/noise performance
+  qualification remains open; these samples do not establish a speedup.
+- Draft source publication next, stacked on AB2; no readiness claim.
+
+### 2026-10-14 — AB3 continuation start-offset boundary
+
+- Hosted plan review supplied a 100,000-line start-offset boundary. A
+  105,000-short-line fixture starting at 99,999 reproduces an unusable
+  next offset 103,227. Test-first fails before the correction. Preserve
+  the existing bound and emit a terminal marker naming it instead.
+### 2026-10-14 — AB2 shell-only and range guidance regressions
+
+- Hosted review found absent companion tools in shell-only descriptions and
+  read_file-specific ranges in no-tools prompts. Extend captured subsets
+  with shell-only interactive requests and description/ranges assertions.
+  Test-first fails on no-tools range guidance before production correction.
+- Independent final review approved conditional ranges and compiled
+  descriptions. Seven focused tests pass, including shell-only/edit-only
+  captured profiles after the common-path allocation adjustment. Full
+  builtin schema remains unchanged; workspace requalification follows.
+### 2026-10-14 — fresh AB1 helper regressions
+
+- Latest hosted source review supplied signature-format verification,
+  compressed ripgrep helpers, configured Cargo compilers, repeated sed
+  expressions and JJ external formatters. Exact test-first table fails
+  before fixes; independent investigation confirms configuration defaults
+  can execute helpers, and bare JJ commands snapshot the working copy.
+- Narrowing canonical safe Git/JJ forms and treating Cargo queries as work
+  is required; no read verdict or approval authority is inferred from hints.
+- Independent final review approved helper narrowing; all five focused
+  regressions pass. Workspace requalification and fresh candidate build next.
+
+### 2026-10-14 — fifth hosted plan review corrections
+
+- Added explicit find file-list output and sort compressor exclusions,
+  inspection-only interactive authority, and terminal read offset bounds.
+  AB1/AB3/AB4 source regressions reproduce the corresponding cases.
+- Preview exclusion now tests JSON boolean true only and handles malformed
+  JSON explicitly. Exact-query fixture retains four failures/five calls
+  while excluding the actual preview; corrected fixed-window baseline remains
+  205/1,222. Evidence `target/qq-perf/ab-plan-2026-10-14/malformed-preview.json`.
+- Updated concrete helper rules from fresh AB1 review; independent final
+  review and documentation checks pending. No gates waived.
+- Independent review approved all five plan corrections. Docs truth 23
+  passed; exact malformed-preview fixture and baseline recount passed.
+  Production parent remains unchanged from its qualified source.
+
+
+- Latest helper source workspace gates pass: 2,277 tests, 0 failed,
+  14 ignored; fmt, Clippy and build exit 0. Integrated parent docs only;
+  logs `target/qq-perf/ab1-2026-10-14/configured-helper-gate-{0,1,2,3}.log`.
+
+### 2026-10-14 — AB5 replay-stable root notice start
+
+- Isolated branch `feat/eng-1042-ab5-root-stall-action`, AB4 parent604dc6a6.
+  User-authorized stack; parent final qualification remains open. Test-first
+  root notice mapping/live roots and schema46 migration/reopen next.
+- Independent read-only investigation mapped root/child/retry fixtures and
+  historical migration skips. Pin a schema45 test binary before the bump
+  and verify actual file opening refuses46, without per-session decoding.
+
+### 2026-10-14 — AB5 root notice and compatibility evidence
+
+- Test-first mapping, live-root and migration assertions reproduced the
+  missing behavior. Root policy now emits RootStallReport; child and legacy
+  notices retain their original text. Pinned retries and delivery decoding
+  recognize both report variants; unknown persisted values remain errors.
+- Schema46 adds a version-only migration. The pinned schema45 probe binary
+  (SHA256 7723fe8faa0b05ad9ee421e705f37cb283fc26cd0bb59133de965a7bd4be732e)
+  refuses an actual schema46 store at open with CONSTRAINT, leaving46 intact.
+- Five focused AB5 tests pass, including live read-only root, persisted
+  follow-up, independent reference assembly and byte-identical legacy replay.
+  Historical migration and child progress tests pass in the focused run.
+  Logs: target/qq-perf/ab5-2026-10-14/{focused-final,replay-focused,progress-complete-decode}.log.
+- Independent production-source review approves. Parent integration, full
+  immutable workspace gates, final measurements and draft publication remain
+  open; no readiness or rollout acceptance is claimed.
+
+- Initial immutable workspace gate found one stale schema45 constant assertion
+  in the side-question migration fixture (980 core tests passed, one failed).
+  Verify actual reopened metadata equals the current schema instead; rerun
+  workspace gates on the corrected commit.
+
+- Corrected immutable source05044927 passes full workspace gates: 2,301 tests,
+  zero failed,14 ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/root-notice-final-gate-{0,1,2,3}.log.
+  This qualifies the local slice against its current parent only; newer
+  parent integration, measurement and publication remain open.
+### 2026-10-14 — AB3 long-header regression
+
+- Hosted source review supplied a valid 615-byte path. Fixed 256-byte
+  header reservation allows generic bounding to drop middle rows while
+  reporting contiguous offsets. The model-visible row-contiguity fixture
+  fails before correction; budget the rendered header before the body.
+- Rendered header upper bound now reserves actual escaped path and metadata
+  bytes plus header rows. All seven focused AB3 tests pass; independent
+  final review approved. Workspace requalification follows.
+
+- Retained the historical 256-byte minimum reservation while reserving the
+  full rendered header for longer paths. This preserves ordinary read-window
+  sizes and the existing replay-budget fixture without weakening bounds.
+  Seven focused AB3 regressions and the exact replay fixture pass; independent
+  final review approves this compatibility adjustment. Full workspace rerun
+  remains open, along with fresh scan-cap review and matched performance.
+
+- Fresh hosted scan-cap claim checked against current source: the exhaustive
+  5 MiB fixture follows every advertised offset successfully until the
+  existing terminal scan-cap marker. A single over-cap line is also terminal.
+  Regression passes without a production change; the older draft contract
+  needs to state this existing terminal behavior explicitly.
+
+- Immutable source0eaf8dd2 workspace gates pass: 2,292 tests, zero failed,
+  14 ignored; fmt, Clippy and build all exit0. Logs
+  target/qq-perf/ab3-2026-10-14/header-final-gate-{0,1,2,3}.log.
+  Matched performance and newer upstream integration remain open.
+
+- Integrated qualified AB3 read-window source837786c9 (merge b1a61680).
+  Added captured direct requests where an external host changes its grants
+  after compilation, testing both grant-removal and grant-addition directions.
+  Execution and declaration remain tied to the compiled snapshot; focused
+  regression passes without a production change. Final parent integration
+  and immutable workspace gates remain open.
+- Integrated description/range correction workspace gates pass: 2,284
+  tests, 0 failed, 14 ignored; fmt, Clippy and build exit 0. Logs
+  `target/qq-perf/ab2-2026-10-14/description-final-gate-{0,1,2,3}.log`.
+  Source and full builtin schema are independently reviewed; performance open.
+
+### 2026-10-14 — AB2 child, ignored-walk and exec-only guidance
+
+- Three test-first assertions reproduced read-child edit demand, incomplete
+  ignored-path guidance and exec-only absent-shell references. Read children
+  now return findings; ignored search/tree calls require path plus
+  include_ignored=true in prompts and declarations; exec-only descriptions
+  preserve literal arguments and cleared-environment semantics.
+- Eight focused AB2 tests and61 prompt-filtered tests pass. Independent
+  final review approves the prompt/compiler correction; declaration wording
+  is covered by captured search/tree requests. Full input schemas are unchanged;
+  corrected descriptions change canonical full tool identity to
+  f34eb03af41070290dc4ee6ea49d4c12b011cc409b823e795beaa92cc9c453ed.
+  Full fixture prefix5342bytes. Historical prompt14 golden remains unchanged.
+- New symlink/depth discovery findings and upstream integration remain open;
+  workspace qualification and matched performance follow immutable final source.
+
+- Correction to the prior prompt-filter receipt:61 passed before updating
+  the two ignored-walk declarations. The next run was60 passed,one failed:
+  its canonical tool-identity assertion retained the old description hash.
+  Update that assertion to the measured f34eb03a… identity; historical
+  prompt14 digest itself still passed unchanged. Final rerun follows.
+
+### 2026-10-14 — AB2 bounded instruction discovery completion
+
+- Test-first safe-link and depth fixtures reproduced omission; names searches
+  now report regular-file symlinks resolved inside the workspace. Content
+  searches and directory traversal retain link exclusion. Matching broken,
+  escaping or nonfile instruction links return a blocker.
+- Depth omissions are explicit (partial=depth, or depth_limited=64 alongside
+  another stop); targeted ancestor roots at each64-component boundary cover
+  deep edits. No unusable depth cursor is emitted.
+- Independent review caught a charged nonmatching-link cursor gap. The public
+  50,000-link fixture reproduced it; every considered link now advances the
+  scan watermark. Paginated matching links, cancellation and incomplete hint
+  counts retain their contracts.
+- Twelve focused AB2 tests pass; independent final review approves. Fixture
+  prefix5728bytes; canonical full schema identity remains f34eb03a… after
+  the earlier declaration corrections. Historical prompt14 remains pinned.
+  Logs instruction-discovery-{red,final}.log, symlink-budget-red.log and
+  depth-hint-red.log under target/qq-perf/ab2-2026-10-14.
+- Full workspace gates, upstream integration and fresh matched performance
+  remain open. Parent plan qualification corrections are being reconciled.
+
+### 2026-10-14 — AB1 configured environment and native shell corrections
+
+- Test-first fixture reproduced the configured-Git false read. Git reads now
+  require canonical -c core.fsmonitor=false after optional-C; ripgrep reads
+  require --no-config. fd detailed listings and file decompression count work.
+- Unix quoted regex metacharacters are literal; unquoted metacharacters and
+  expansion inside double quotes remain work. Windows single quotes, expansion
+  and escape characters and native sort are conservative work. Windows-only
+  fixtures are present but have not been executed on this Linux host.
+- Six Linux focused regressions pass; independent final source review approves.
+  Full workspace rerun and fresh matched performance remain open.
+  Evidence target/qq-perf/ab1-2026-10-14/environment-helpers-{red,focused-final}.log.
+
+- Initial full rerun found one existing live progress fixture using plain
+  git status, now intentionally work because of configured fsmonitor. Update
+  its read case to canonical git -c core.fsmonitor=false status; keep its
+  report assertion. Core957 passed,one failed,three ignored before correction.
+
+- Corrected immutable sourcebb106e3f passes workspace gates: 2,278 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-helpers-final-gate-{0,1,2,3}.log.
+  Windows-only execution and final matched performance remain open.
+
+- Initial immutable integrated workspace run:969 core tests passed,one failed,
+  three ignored. The remaining failure was the second builtin declaration
+  golden retaining the old description identity. Update it to measured
+  f34eb03a…; schemas remain unchanged. Full immutable gates rerun next.
+
+- Integrated current AB2 bounded instruction discovery and helper-qualified
+  AB1 source. Declaration identity now combines AB2 corrected descriptions
+  with AB3's removed default200: a8f52f3e1dc6398001a13aea54ccfeb8624c167a3c20378adcb9b9f50de42323.
+  Keep both corresponding golden assertions in sync with the measured full
+  catalog. Parent source integration requires fresh immutable workspace gates.
+- Immutable integrated sourcec7c0bc41 passes workspace gates:2,290 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab2-2026-10-14/discovery-qualified-gate-{0,1,2,3}.log.
+  Newer parent documentation integration and matched performance remain open.
+### 2026-10-14 — sixth hosted plan review corrections
+
+- Explicit existing classifier exclusions now cover find okdir, fd exec/
+  exec-batch, tree output and file compile modes. No runtime verdicts
+  changed for these cases. Preview exclusion applies only to edit_file;
+  write_file dry_run is a schema failure. Corrected205/1,222 baseline is
+  published beside the obsolete211/1,230 proxy.
+- Successful discovery starts must precede actual edits in a model-visible
+  earlier turn. Same-turn/failed/later starts cannot prove coverage; later
+  new targets require separate ordered coverage evidence. Exact-query
+  fixtures pass: five failures/six nonpreview calls; one eligible discovery
+  of four starts. Fixed historical early scope:108roots,18distinct roots,
+  25starts,7repeated roots,5affected runs,max5. Coverage remains unqualified.
+- Independent final review approved; docs truth/fmt/diff checks next.
+  Evidence `target/qq-perf/ab-plan-2026-10-14/typed-preview-preedit.json`.
+- Docs truth23passed; fmt/diff checks pass. Production parent unchanged
+  from qualified source; sixth-review corrections ready for hosted review.
+
+### 2026-10-14 — seventh hosted plan review reconciliation
+
+- Clarified canonical Git/ripgrep configuration disables, native Windows
+  uncertainty, read-child findings, ignored-walk overrides, safe instruction
+  links/depth windows, terminal scan-cap markers and compiled grant lifetime.
+  Source regressions and independent reviews cover the corresponding slices.
+- Export overflow makes qualification unqualified unless the pinned classifier
+  itself rejects the command. Canonical persisted read identity replaces
+  argument spelling for re-read qualification; unresolved aliases remain open.
+- Exact SQL fixture retains a failed boolean-true preview (one failure/two
+  attempts) and accepts discovery between root-level and below-root edits.
+  Corrected fixed-window baseline:211 failures/1,228 attempts,17.1824%;
+  below-root early scopes108/18/25/7/5/5,still unqualified for path/page/read
+  coverage. Evidence completed-preview-below-root.json under the plan receipts.
+- Independent final plan review approves. Docs truth23 passed; fmt and diff
+  checks passed. Parent production source is unchanged from its qualified
+  source; no acceptance or performance gate is waived.
+
+- Integrated immutable AB4 workspace gates pass:2,305 tests,zero failed,
+  14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab4-2026-10-14/authority-qualified-gate-{0,1,2,3}.log.
+- Integrated immutable AB3 workspace gates pass:2,298 tests,zero failed,
+  14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab3-2026-10-14/discovery-qualified-gate-{0,1,2,3}.log.
+  Independent source/integration review approves. Matched performance and
+  hosted review remain open; publish as draft without a readiness claim.
+
+- AB4 published as draft PR304, stacked on303; LinearENG-1041 In Review.
+  Hosted review requested. Parent source0dc6f436 receipt integrated; no
+  production change after full2305-test qualification. Matched performance
+  remains open; no merge or readiness claim.
+
+- Immutable integrated source185f983e passes full workspace gates:2,310 tests,
+  zero failed,14ignored; fmt, Clippy and build exit0. Logs
+  target/qq-perf/ab5-2026-10-14/integrated-root-notice-gate-{0,1,2,3}.log.
+  NO_COLOR removed, task-owned tmpfs temporaries, incremental off; dev/test
+  debug symbols disabled to bound task-owned build storage (debug assertions
+  retained). These are correctness gates, not performance measurements.
+- Integrated AB4 draft304 parent receipt with no production change. Matched
+  performance and hosted review remain open; publish AB5 as draft.
+
+### 2026-10-14 — AB6.1 reproducible recount start
+
+- Isolated feat/eng-1043-ab6-qualification starts at AB5 a06fb868. ENG-1043
+  In Progress covers tooling now and seven-day qualification later. No named
+  runtime performance gate changes: hidden predicate wrapper plus explicit
+  xtask-only export/recount; provider/runtime paths remain inactive.
+- CLI test-first fixture precedes implementation. Ownership reserved in root
+  ledger, including the actual existing CLI router and manifest/lockfile.
+  Implementation, deterministic fixtures, independent review and all final
+  workspace gates remain open.
+
+- AB6.1 CLI red fixture reproduced absent command; explicit export/recount now
+  implements readonly snapshots, typed bounded JSONL and footer integrity,
+  all-state denominator preservation and pinned classifier-source/executable
+  identities. Six initial fixtures passed. Independent review caught arbitrary
+  cutoffs; a new fixture reproduced that gap, and export/recount now enforce
+  exact end+24hours and UTC-day alignment. Seven focused fixtures pass.
+- Independent final source review approves. New runbook documents local-only
+  exports, immutable build labels/hashes and treatment-cohort limitations.
+  Full immutable workspace gates and actual pinned baseline recount remain
+  open; post-deployment observation and paid evaluation are not performed.
+
+- AB6.1 immutable source 96afed7e passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Receipts:
+  target/qq-perf/ab6-2026-10-14/tooling-gate-{0,1,2,3}.log.
+- Export/recount source review approves; seven focused fixtures cover snapshot
+  cohorts, all shell states, bounds, tamper/truncation and exact UTC cutoff.
+  Final classifier recount and deployed seven-day candidate cohort remain open.
+
+- Fresh parent review alleged stale grants in uncompiled Runtime::run_messages.
+  Current AB4 already replaces its empty placeholder gate after compilation
+  using the compiled descriptor snapshot. Public first-poll regression now
+  tests grant addition/removal between stream construction and polling; both
+  declarations and execution follow the newly compiled grants. Focused pass
+  requires no production change. Rerun workspace before publishing the test.
+
+- Immutable first-poll regression source 5759c682 passes all workspace gates:
+  2,306 tests, zero failed, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab4-2026-10-14/uncompiled-grants-gate-{0,1,2,3}.log.
+  Declarations and execution use grants compiled at first poll; no production
+  change was needed. Hosted review and matched performance remain open.
+
+### 2026-10-14 — AB2 file ignores, empty directories and write-only contract
+
+- Test-first public discovery fixtures reproduce hidden instruction basenames
+  in visible directories and no resumable cursor after 50,000 empty dirs:
+  12 focused tests pass, two fail. Captured write-only request separately
+  reproduces unavailable prior-read guidance. Red receipts under AB2 target.
+- Repair preserves directory ignores and names-only safe-link handling; only
+  fully visited directories may advance a scan watermark. Work in progress.
+
+- Initial repairs pass 14 focused fixtures. Independent review found a depth
+  skip could suppress later empty-directory watermarks; new public fixture
+  reproduces it (one failed). A per-subtree depth-skip counter now permits
+  only completed subtrees to advance. Ignored instruction links are covered
+  alongside regular files; write-only captured declarations name creation
+  and an independently known current hash, without unavailable prior reads.
+
+### 2026-10-14 — configured Git helpers and literal exec regressions
+
+- New hosted findings reproduced test-first: working-tree filters, signature
+  branch formatting/default sort and remerge helpers must count as work.
+- Exact exec argv containing spaces, quotes and shell metacharacters is a
+  literal read, independent of native shell quoting. Focused red run: six
+  pass, two fail; configured-git-exact-exec-red.log in AB1 receipts.
+- Repair and independent read-only review in progress; performance remains open.
+
+- Repair caches one progress/audit verdict from exact exec argv or checked shell
+  syntax. Working-tree Git forms count as work; branch reads force refname
+  sorting, and history reads force no patch/merge-diff generation. Approval
+  previews, grants and decisions are unchanged. Initial focused green: eight
+  tests passed; independent final review and immutable workspace gates next.
+
+- Immutable source 4bd16392 passes workspace checks: 2,280 tests, zero failed,
+  14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/configured-git-exact-exec-gate-{0,1,2,3}.log.
+  Independent final read-only review approves; eight focused regressions pass.
+  Matched performance remains open; no readiness claim.
+
+### 2026-10-14 — eighth hosted plan review reconciliation
+
+- Corrected Goal scope baseline to 25 starts, seven repeated roots, five runs;
+  raw argument counts remain separate and coverage remains unqualified.
+- Candidate begins after pinned AB1–AB5 main deployment and prior-writer
+  retirement, with runtime source/binary and continuity proof. Merge dates
+  and prompt version alone cannot qualify treatment. No deployment performed.
+- Public uncompiled first-poll grant regression is qualified in AB4; AB1
+  helper/exec and AB2 ignored-file/empty-directory repairs are in progress.
+
+- Independent eighth plan review approves; docs truth 23 passed. Source
+  qualification remains attached to the respective slice receipts; no
+  performance or deployed observation gate is waived.
+
+- Integrated immutable source e1e56e7a passes all workspace checks: 2,295
+  tests, zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/ignored-files-empty-dirs-gate-{0,1,2,3}.log.
+  Fifteen focused AB2 fixtures pass; independent final review approves the
+  depth/empty-directory continuation fix, instruction file-ignore handling
+  and write-only contract. Matched performance and hosted review remain open.
+
+- Integrated accepted AB1 helper/exec fixes and AB2 discovery fixes with their
+  qualified receipts. AB3 production read-window behavior is unchanged; rerun
+  immutable workspace gates on the combined source before updating draft #303.
+
+- Integrated accepted AB1 exact-argv/Git-helper and AB2 instruction discovery
+  repairs through the AB3 parent. AB4 authority implementation is unchanged.
+  Rerun immutable combined workspace gates; hosted review and performance open.
+
+### 2026-10-14 — AB5 notice documentation regression
+
+- Hosted review found architecture's stored-notice list and report-query
+  runbook omit root_stall_report. New docs-truth regression fails before
+  correction (notice-docs-red.log); shared paths reserved in root ledger.
+- Correct the report vocabulary and all-report predicate, preserving Goal 6's
+  slice-only selection explicitly. Exact SQL fixture and full gates next.
+
+- Architecture now names root_stall_report and child/legacy stall_report.
+  Runbook defaults to all three report kinds on schema 40+, with schema 46
+  semantics explicit; Goal 6 uses its narrower slice-only predicate.
+- Docs truth 24 passed. Exact SQL fixture: all reports 3/missed 1; Goal 6
+  slice reports 1/missed 0. Evidence notice-query-fixture.json in AB5 receipts.
+  Independent documentation/integration review approves; full gates next.
+
+- Combined immutable source 0d82d86f passes all workspace gates: 2,303 tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
+  Independent integration review approves; read-window behavior unchanged.
+  Matched performance and final hosted review remain open.
+
+- Combined immutable source 265a4e21 passes workspace checks: 2,311 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab4-2026-10-14/helper-discovery-gate-{0,1,2,3}.log.
+  Independent integration review approves; AB3's completed receipt integrated
+  without production changes. Hosted review and matched performance remain open.
+
+- Integrated accepted AB1–AB5 source and notice documentation into AB6.1.
+  Indexed the qualification runbook. Freeze combined source for full checks;
+  final classifier export/recount and hosted review follow. No candidate
+  observation window or deployment is claimed.
+
+- Combined source 8cda0e3a passes workspace checks (2,324 tests, zero failures,
+  14 ignored; fmt/Clippy/build exit 0), but independent review found SQLite
+  command extraction accepts duplicate fields and wrongly typed cwd rejected
+  by the runtime parser. Qualification remains open; reproduce test-first and
+  validate bounded argument envelopes through the shared typed parsing seam.
+
+- Typed-envelope regression reproduces three false reads: duplicate command,
+  numeric cwd and duplicate cwd each become Read in SQLite extraction but
+  are rejected by the runtime parser. Red result: expected 3 malformed/0
+  reads, got 0 malformed/3 reads. Receipt typed-envelope-red.log.
+
+- Bounded export now validates the runtime's exact ShellArguments type before
+  emitting a command. Duplicate recognized fields and invalid cwd become
+  Malformed; accepted commands over the classifier ceiling retain their
+  proven bound-rejection status. No over-bound envelope enters Rust.
+- Eight focused AB6 fixtures pass, including all three typed-envelope
+  regressions. Independent final review and immutable full gates next.
+
+- Combined immutable source 38b3a374 passes workspace checks: 2,317 tests,
+  zero failures, 14 ignored; formatting, Clippy and build exit 0. Logs
+  target/qq-perf/ab5-2026-10-14/helper-discovery-notice-gate-{0,1,2,3}.log.
+  Independent notice-documentation/integration review approves; exact SQL
+  fixture and 24 docs-truth tests pass. Hosted review and matched performance
+  remain open; no deployment or completed observation window is claimed.
+
+- Immutable typed-envelope source 08458f17 passes all workspace checks:
+  2,325 tests, zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab6-2026-10-14/typed-envelope-gate-{0,1,2,3}.log.
+  Eight focused fixtures and independent final typed-envelope review pass.
+  Publish tooling as draft; upstream review repairs, final classifier recount,
+  matched performance and deployed observation cohort remain open.
+
+- AB6.1 published as draft #306 on #305, source 08458f17/receipt 37012bd1.
+  Eight focused fixtures and all 2,325 workspace tests pass. ENG-1043 remains
+  In Progress for upstream integration, final recount and the deployed cohort.
+
+
+### 2026-10-14 — AB6 exact envelope, root role and exporter identity
+
+- Hosted review found that the approval envelope ignores execution-only
+  fields, parent deletion clears links without changing historical depth,
+  and an old exporter can transform evidence before a pinned recount.
+- Regression cases cover typed timeout/env, unknown and duplicate fields,
+  missing command and orphaned depth-one children. Export/recount must share
+  the execution parser and immutable identity; format-one evidence is retired.
+- Final source integration, qualification and observation remain in progress.
+
+
+- Exact execution parser, persisted depth-zero cohort and format-2 exporter
+  identity are implemented. Twelve focused AB6 tests pass; two independent
+  source reviews approve. Red receipts: execution-root-red.log and
+  export-identity-red.log; green: export-identity-green.log.
+- Read-only schema-45 fixed-window check finds zero orphaned child runs;
+  the historical counts are not changed by this specific cohort correction.
+  Full integrated gates, final pinned export/recount and observation remain open.
+
+
+- AB6 retains the exact parser's requested-env flag as a required field;
+  omitted/empty lists remain reads and nonempty lists count as nonreads.
+  Environment values/names are not exported. A missing-flag record is rejected
+  even with a recomputed valid footer. Thirteen focused fixtures pass;
+  independent source review approves. environment-red.log/green.log.
+- Final upstream integration and workspace/release qualification remain open.
+### 2026-10-14 — AB4 prompt behavioral identity
+
+- Independent review confirms an unchanged read_file-only profile keeps the
+  same descriptor/catalog fields while AB4 changes its authority text. Public
+  compiled-plan regression reproduces the same digest as its prompt-20
+  predecessor. Receipt prompt21-descriptor-red.log.
+- Bump AB4's base prompt identity to 21, preserving ordinary actionable auto
+  prompt bytes. Retain historical version-20 digest coverage; AB6 must pin
+  the deployed version-21 runtime, not infer treatment from prompt 20.
+
+
+- Authority-sensitive prompt behavior now carries base version 21. The
+  read-only descriptor regression distinguishes the old prompt-20 identity;
+  canonical prompt-20 bytes remain a historical golden. Sixty-two prompt
+  focused tests pass; independent source review approves. Full integrated
+  qualification follows upstream repair integration.
+### 2026-10-14 — masked read window regressions
+
+- Public default reads of 2,500 short credential-shaped rows spill after
+  masking expansion, invalidating the advertised contiguous window. Regression
+  fails before correction; includes repaired arguments and a long filename.
+- Full 2,000-byte rows also lose content when dispatch clips the added gutter.
+  Test-first failure captured; shared masked measure and actual note budget
+  preserve complete rows while retaining the existing content clip ceiling.
+
+
+- Masked escaped row/header admission includes actual repair-note bytes,
+  preserves unmasked spill contents and prevents a second gutter-based clip.
+  Ten focused regressions pass; independent source review approves. Existing
+  range-separator accounting now charges its four escaped bytes.
+  Full integrated gates and dispatch measurements remain pending.
+### 2026-10-14 — long cursors and read/write-only prompt contract
+
+- Two public regressions fail before correction: a completed subtree with
+  two 250-byte components emits an undecodable cursor, and read_file plus
+  write_file describes absent anchor-edit semantics. Fourteen focused pass,
+  two fail; long-cursor-readwrite-contract-red.log.
+- Cursor repair must budget its full header and preserve native line bounds.
+  Unsupported paths must be explicit blockers, never skipped or unusable next.
+
+
+- The cursor repair supports 4,096-byte paths with complete dynamically
+  reserved headers, explicit path/first-record budget errors and releasable
+  reservation as the frontier shortens. Nineteen focused AB2 tests pass,
+  including long-directory continuation, Unicode boundaries and exact-once
+  long-header pagination. long-cursor-final.log; independent review approves.
+- Read/write-only prompt guidance excludes absent anchor-edit semantics.
+  Full integrated gates and matched performance remain pending.
+### 2026-10-14 — lazy fetch, operation merge and timestamp regressions
+
+- Test-first hosted regressions reproduce Git history lazy fetching, JJ
+  operation reconciliation and file's explicit timestamp restoration as false
+  reads. The same fixture requires Unix sed's literal last-line address.
+- Git 2.54 locally supports --no-lazy-fetch. Official Git/JJ/file documentation
+  confirms the side effects. Constrain canonical Git reads, classify JJ as
+  work, and exclude timestamp-restoring file modes; approval unchanged.
+
+- Nine focused fixtures pass after lazy-fetch/operation/timestamp repairs.
+  Additional test-first Git --help case reproduces a false read: repository
+  help settings may launch a browser/helper. rev-parse and worktree listing
+  now use closed suffixes. Receipt git-help-red.log; final focused run next.
+
+### 2026-10-14 — ninth hosted plan review reconciliation
+
+- Instruction-scope qualification now requires the exact anchored basename
+  regex and JSON boolean regex=true. The fixed-window recount is 108 roots,
+  one scope/start, zero repeats; the 25-start substring proxy remains context.
+  The deterministic query fixture rejects NOTAGENTS, mistyped regex flags,
+  literal searches and continuation pages; anchored-scope-query.json.
+- AB1 acceptance requires --no-lazy-fetch, closed Git inspection forms,
+  JJ classified as work and file preserve-date excluded. AB4 records version
+  21; historical 19/20 are AB2 treatment labels on the same accepted runtime.
+- Coverage, matched performance, final classifier recount and deployed
+  candidate observation remain open; no deployment or paid calls performed.
+
+- Docs truth passes 23 tests; formatting and diff checks pass. Independent
+  review caught and corrected the branch-list acceptance example's missing
+  no-lazy-fetch switch. Source is unchanged; slice-specific source gates
+  remain tracked independently.
+
+
+- Immutable integrated source 007d6728 passes 2,282 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/lazy-operation-gate-{0,1,2,3}.log.
+  Ten focused classifier fixtures pass; independent source review approves.
+  Matched performance and final hosted review remain open.
+
+
+- Integrated gate caught the cursor schema's generated maxLength change and
+  an old fixture requiring a clipped-header spill. The bound is intentionally
+  widened to 5,476; canonical tool identity is now af3ea1523e2813221cf7e0642eb0ff7e3c4dec60b721bc519c2411ffc795a44d.
+  The repair-note fixture now requires a complete decodable header and no
+  spill while preserving baseline content/cursor. Prior green receipts remain
+  historical; fresh integrated gates follow this correction.
+
+
+- Immutable integrated source d0274113 passes 2,301 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/long-cursor-final-gate-{0,1,2,3}.log.
+  Nineteen focused AB2 fixtures pass; independent source and schema review
+  approves. Matched performance and final hosted review remain open.
+
+
+- Integrated the qualified complete-cursor schema and classifier repairs.
+  Combined AB3 tool identity is 2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27;
+  both canonical goldens reflect the observed declaration identity. No
+  production description or schema change beyond the upstream cursor bound.
+
+
+- Integrated workspace test found a legacy repair-note fixture requiring a
+  separate row even when the complete read header now fits. It now checks
+  visibility as a complete token for both inline and separate-line rendering.
+  The note text and public visibility contract remain asserted. Fresh gates
+  follow this fixture correction; no failed check is waived.
+
+
+- Immutable integrated source 5581e55c passes 2,311 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/masked-cursor-final-gate-{0,1,2,3}.log.
+  Ten focused masked-read regressions pass; independent repair and integration
+  reviews approve. Matched dispatch/output performance remains open.
+
+
+- Full integrated gate caught the JSONL headless provenance fixture's old
+  prompt-20 expectation. Updated that public output assertion to 21; the
+  canonical descriptor and historical prompt-20 goldens remain distinct.
+  Fresh integrated gates follow; no failed check is waived.
+
+
+- Full AB4 gate reproduced an inherited shared-semaphore fixture race: B
+  settled when the test assumed A would be released. Independent diagnosis
+  traces unchanged fixture code to #257. Separate explicit model gates now
+  release A and B deterministically and select B by model, preserving the
+  answer-before-interim-report and replay assertions. No production change.
+### 2026-10-14 — trailing reads, substitutions and explicit environments
+
+- Hosted review identifies trailing-semicolon and print-substitution reads
+  wrongly treated as work, and explicit passthrough environments that can
+  mutate via process initialization. Test-first cases cover both shell/exec
+  environments, safe substitutions and incomplete/mutating script exclusions.
+- Nonempty requested environments must count as work without changing
+  execution authority; AB6 must retain that fact through export/recount.
+
+
+- Safe sed fields/flags and trailing separators are implemented without
+  accepting incomplete pipelines/conjunctions or write/execute flags. Ten
+  prior plus two new focused regressions pass; an additional duplicate/escaped
+  environment fixture preserves the original command preview. Both independent
+  source reviews approve; full integration gates follow.
+- Environment inspection runs only for read candidates and does not alter
+  approval input. The zero-sized ignored-element vector does not allocate
+  element storage. Parsing overhead still needs matched measurement.
+### 2026-10-14 — failed discovery starts and environment-aware reads
+
+- The repeated-root gate counts every matching start, including failed
+  attempts, while completed pre-edit coverage stays independent. A two-root
+  failed/retried fixture corrects 2 starts/0 repeats to 3 starts/1 repeat;
+  fixed-window baseline remains 108 roots, one scope/start, zero repeats.
+- Qualification derives historical root role from persisted depth; a
+  read-only check finds zero orphaned child runs in the fixed baseline.
+- AB1's narrow sed substitutions/trailing semicolons are reads; explicit
+  requested process environments disqualify reads without changing authority.
+  AB6 must preserve that status. Performance and deployed observation remain open.
+
+
+- Tenth docs truth passes 23 tests; formatting/diff checks pass. Independent
+  review approves. failed-discovery-starts.json records the executable SQL
+  fixture and live fixed-window recount; all acceptance gates remain explicit.
+
+
+- Immutable integrated source 8f9c4253 passes 2,285 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab1-2026-10-14/environment-substitution-gate-{0,1,2,3}.log.
+  Thirteen focused classifier fixtures pass in the workspace run; independent
+  source reviews approve. Matched hot-path performance remains open.
+- Proactive scope review found first-page cursor placeholders were omitted
+  from start counts. The query now matches typed omitted/null values and all
+  runtime placeholders with Unicode whitespace trim and ASCII case folding.
+  A padded-placeholder fixture counts 14 starts across two roots with one
+  repeated root; baseline remains one start. Other cursor values require
+  exact prior-next provenance or leave qualification open.
+  Evidence: placeholder-discovery-starts.json; independent design review.
+
+
+- Placeholder docs truth passes 23 tests; formatting and diff checks pass.
+  Independent final review approves typed/trimmed cursor-start semantics and
+  the explicit provenance requirement for all other cursor records.
+
+
+- Immutable integrated source b937a2b7 passes 2,304 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab2-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  AB2 production behavior is unchanged by the qualified AB1/environment and
+  scope-query integration. Matched prompt/catalog/search performance stays open.
+
+
+- Immutable integrated source ba137d16 passes 2,314 workspace tests,
+  zero failures, 14 ignored; fmt, Clippy and build exit 0. Logs
+  target/qq-perf/ab3-2026-10-14/environment-integrated-gate-{0,1,2,3}.log.
+  Masked-read behavior is unchanged by the qualified environment-aware upstream
+  integration. Matched dispatch/output performance and hosted review stay open.
+
+
+### 2026-10-14 — native long-header repair-note rows
+
+- Source-supported Windows input can have >32KiB UTF-8 path bytes while
+  fitting its UTF-16/component limits. Credential masking shortens the header,
+  but dispatch may still add a separate repair-note row based on raw length.
+- Renderer/output-bound regression uses that valid metadata shape; a native
+  Windows public-dispatch regression checks all 5,000 blank rows exactly once.
+  Linux native paths reject this shape; native Windows execution remains a
+  separate hosted verification requirement.
+
+
+- Renderer plus actual dispatch reproduces the missing note-row spill before
+  correction: native-note-row-final-red.log. Reserving a possible note row and
+  its additional escaped byte fixes it; eleven focused Linux tests pass in
+  native-note-row-green.log. Independent final source/CI review approves.
+- The native Windows test is selected by CI's exact-test wrapper. Its hosted
+  execution is required separately; local Linux success is not native proof.
+
+
+- Immutable source 467a39db passes 2,315 workspace tests, zero failures,
+  14 ignored; fmt, Clippy, build and the exact-test wrapper guard exit 0.
+  Logs: target/qq-perf/ab3-2026-10-14/native-note-gate-{0,1,2,3,4}.log.
+  Actionlint passes excluding the pre-existing SC2129 release-size style
+  diagnostic. Native Windows execution and matched performance remain open.
+
+
+- Immutable integrated AB4 source bca83a30 passes 2,324 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab4-2026-10-14/native-note-integrated-gate-
+  {0,1,2,3}.log. Prompt provenance is version 21; the deterministic child
+  fixture retains separate gates. Independent integration review approves.
+  Native Windows execution, matched performance and hosted review remain open.
+
+
+- Immutable integrated AB5 source e10b69b8 passes 2,330 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab5-2026-10-14/native-note-authority-
+  integrated-gate-{0,1,2,3}.log. Independent notice/schema integration
+  review approves. Schema 46 remains version-only and historical notices
+  remain byte-identical. No user store was migrated.
+- Native Windows upstream proof: CI run 38570370961 at eb28791c, job
+  115873674638, executes ab3_native_unicode_header_preserves_repaired_read_windows:
+  one passed, zero failed, then completes the entire teardown job successfully.
+  Matched performance and final hosted review remain open.
+
+
+- Immutable integrated AB6.1 source 196cd9fe passes 2,343 workspace tests,
+  zero failures, 14 ignored; fmt, all-target/all-feature Clippy and build
+  exit 0. Logs: target/qq-perf/ab6-2026-10-14/final-envelope-integrated-
+  gate-{0,1,2,3}.log. Thirteen qualification fixtures cover exact execution
+  envelopes, immutable exporter identity, orphaned-child exclusion and
+  required environment disqualification metadata. Independent review approves.
+  New upstream review findings, final pinned baseline recount, matched
+  performance and the deployed seven-day candidate cohort remain open.
+### 2026-10-14 — zero-row read windows
+
+- Valid long Windows paths can leave a positive body budget smaller than the
+  first row. Actual renderer/dispatch fixture reproduces unusable offset=0:
+  zero-row-real-red.log. Reject zero-row stopped windows with an explicit
+  output_limit error and nearer-root advice. Native Windows public fixture
+  is selected in CI; hosted execution and full qualification remain pending.
+- Shared-target reuse selected zero tests in the initial zero-row command.
+  Invalidate workspace-package debug artifacts on worktree switches; zero-
+  test selections never count as verification. Fresh final receipts supersede
+  source-reuse uncertainty in earlier local receipts.
+### 2026-10-14 — complete pages and bounded directory enumeration
+
+- Long cursor-page regression fails under the generic per-turn projection:
+  turn-page-red.log. Live and replay now pass actual tool identity; search's
+  complete 12KiB pages survive the per-result floor and are fully charged.
+- Search listing checks cancellation/deadline during enumeration and after
+  sorting, with 100,000 entries and 32MiB retained name/path bytes. Incomplete
+  listing returns an explicit search_listing_limit error without a cursor.
+  Existing caller API remains shared; no unsorted-prefix pagination is used.
+  Focused listing regression fails before enforcement:
+  directory-listing-final-red.log. Final checks and integration remain open.
+### 2026-10-14 — output-only shell reads and workspace temporaries
+
+- Focused regressions reproduce Work for sed line-number printing/uniq
+  stdout and Read for workspace sort temporary-directory options. Receipts
+  extra-output-red.log and sort-temporary-red.log. Accept output-only `=`
+  sed scripts and uniq's second-operand stdout sentinel; reject sort's
+  temporary-directory options, including clusters and long abbreviations.
+  Approval authority remains unchanged. Full integration/performance open.
+
+
+- Immutable source 218cb185 passes 2,287 workspace tests, zero failures,
+  14 ignored; fmt, Clippy and build exit 0. Fifteen focused classifiers pass.
+  Logs: target/qq-perf/ab1-2026-10-14/output-temporary-gate-{0,1,2,3}.log.
+  Latest shell-read repairs retain authority and preview behavior. Matched
+  performance remains open; downstream integration is pending.
+### 2026-10-14 — whole-run discovery repetition and export inputs
+
+- Repetition counts now include starts after the first below-root edit;
+  coverage retains separate successful pre-edit/per-target requirements.
+  Executable fixture adds successful and failed placeholder starts after
+  edits: [1,2,16,1,1,2]. Fixed baseline remains [108,1,1,0,0,1].
+  Receipt: post-edit-discovery-starts.json. Independent query review agrees.
+- AB6 contract requires exact runtime-envelope parsing, typed requested-env
+  status and pinned exporter/recount identity. AB4 explicitly tests feature-
+  enabled fetch exclusion; current unattended Network filtering already
+  excludes it, so the hosted exposure claim is stale. AB2 acceptance bounds
+  pre-budget directory enumeration and rejects incomplete sorted-page proof.
+
+- Fresh parent docs-truth verification passes 23 tests after invalidating
+  qq/qq-core debug artifacts; fmt/diff checks pass. No production sources
+  change. Logs: whole-run-discovery-docs-truth.log. Exact SQL fixture and
+  current fixed-window recount retain the baseline above.
+
+
+- Fresh immutable source 2a59cfeb passes 2,287 workspace tests (0 failures,
+  14 ignored), fmt, all-target/all-feature Clippy and build after explicitly
+  cleaning every workspace package's debug artifacts. The source remained
+  clean/unchanged throughout. Receipt: fresh-whole-run-integrated-receipt.json;
+  logs fresh-whole-run-integrated-{0,1,2,3,4}.log. This source-specific receipt
+  supersedes earlier shared-cache qualification uncertainty. Performance open.
+
+- Live wiring regression fails with the original generic name and passes
+  with actual search identity (live-wiring-red.log/green.log). All 2,310
+  fresh workspace tests pass, including mid-enumeration cancellation and
+  stored replay. Clippy flags the new fixture's explicit drop before await;
+  a lexical scope now ends the capture lock. Full checks are rerun before push.
+
+
+- Fresh immutable AB2 source 03686601 passes 2,310 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after explicitly cleaning every workspace package's debug artifacts.
+  Twenty-three AB2 fixtures cover live direct complete-page continuation,
+  stored replay and cancellation after entry two. Independent final source
+  review approves. Logs: fresh-complete-page-final-{0,1,2,3,4}.log; receipt
+  fresh-complete-page-final-receipt.json under AB2 target/qq-perf. This fresh
+  source-specific receipt supersedes earlier cache uncertainty. Performance open.
+
+- AB3 integration updates its existing read-window budget fixture to supply
+  actual read_file identity to AB2's shared projection signature. Initial
+  fresh integration compile failure is retained in fresh-zero-row-integrated-
+  1.log; the corrected combined source is qualified before publishing.
+
+
+- Fresh immutable AB3 source 55da9c1c passes 2,322 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Twelve Linux AB3
+  regressions pass, including zero admitted rows through actual dispatch.
+  Independent source review approves; exact-test guard and actionlint pass
+  (excluding the pre-existing SC2129 release-size style diagnostic). Logs:
+  fresh-zero-row-final-{0,1,2,3,4}.log; source receipt alongside these logs.
+  Native Windows zero-row execution and matched performance remain open.
+
+
+- Fresh immutable AB4 source dac23ede passes 2,331 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after cleaning every workspace package debug artifact. Source remains
+  clean/unchanged; prompt21, captured grant snapshots and deterministic child
+  gates retain their behavior. Logs: fresh-search-read-integrated-{0..4}.log
+  and source receipt under AB4 target/qq-perf. Matched performance open.
+- Native Windows proof for the final AB3 repair: run38576567373 at fbbb9985
+  passes both zero-row and separate repair-note exact tests and completes
+  the entire Windows teardown job successfully; wasm also passes.
+
+
+- Fresh immutable AB5 source a21602ad passes 2,337 workspace tests, zero
+  failures, 14 ignored; fmt, all-target/all-feature Clippy and build exit 0
+  after clearing every workspace package debug artifact. Root authority-
+  neutral notices, legacy/child wording, schema46 version-only migration and
+  future-schema guards remain qualified. Logs: fresh-search-read-authority-
+  integrated-{0,1,2,3,4}.log and source receipt under AB5 target/qq-perf.
+  Native Windows upstream gates pass. No user store migrated; performance open.
+
+
+- Fresh immutable complete-stack source 10d52022 passes 2,350 workspace
+  tests, zero failures, 14 ignored; fmt, all-target/all-feature Clippy and
+  build exit 0 after clearing every workspace package debug artifact.
+  Source remains clean/unchanged. Thirteen AB6.1 fixtures retain exact
+  execution parser/environment status, exporter identity and depth-zero role.
+  Logs: fresh-final-stack-integrated-{0,1,2,3,4}.log and source receipt.
+  This fresh receipt supersedes earlier cache uncertainty. Final pinned
+  baseline export/recount, matched performance, final hosted review and the
+  deployed seven-day candidate cohort remain open. No paid calls or deployment.
+
+- 2026-10-14 AB6 receipt semantics follow-up: rename read_share to
+  lexical_read_share and emit execution_effects_qualified=false. Historical
+  inherited PATH/TMPDIR and executable identity are unavailable, so command
+  shape counts cannot prove nonmutation. Fixture assertions pin the JSON field
+  names and the unavailable actual-effect qualification; runbook is explicit.
+  Existing provisional pinned baseline must be regenerated after this wave.
+- 2026-10-14 AB4 write-child follow-up: a public read-only root fixture with
+  write_children configured reproduces the exposed write enum, while injected
+  writes remain policy-denied. Cache a restricted spawn declaration at plan
+  compilation and select it for read-only exposure; keep read delegation and
+  ordinary actionable declarations. Public green fixture passes. Advance prompt
+  identity 21 to 22, retaining golden historical 20/21 descriptors. Current
+  version-22 golden is c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92.
+  Full integrated qualification follows before publication.
+- 2026-10-14 AB2 pruning/checkpoint follow-up: focused red run reproduced lost
+  long next cursors and cut annotated search bodies (23 pass, 2 fail). Search
+  pruning now retains a bounded 12KiB header, with exact cursor decoding and
+  repeated-pruning idempotency coverage. Turn projection reserves 12KiB page
+  plus bounded 24KiB checkpoint feedback and 512 bytes framing; other tools
+  retain their existing floor. Focused green: 25 pass, 0 fail. This preserves
+  identical supplied page text; it does not change the preexisting timing of
+  persisted tool results versus later checkpoint annotation.
+- 2026-10-14 AB1 extended-regex/tree follow-up: reproduced both verdict bugs
+  (15 pass, 2 fail), then admitted sed -E/-r/--regexp-extended and closed n/E/r
+  short clusters while preserving write/execute rejection. tree -R is Work;
+  restored ordinary -T title handling. Final focused AB1 run: 17 pass, 0 fail.
+  Inherited PATH/TMPDIR effects remain outside lexical progress classification
+  and do not grant approval authority. Full immutable qualification follows.
+- 2026-10-14 review follow-up: corrected nearest-rank offsets for both first-edit
+  queries. Deterministic empty/singleton/even/odd/duplicate fixtures pass;
+  the actual-edit baseline remains 109 roots, median 9, p90 57. Alias grouping
+  now requires immutable call-time evidence; current filesystem resolution
+  cannot qualify historical discovery identity. Shell qualification is explicitly
+  lexical_read_share; inherited executable/environment effects remain unqualified.
+  Updated the sort temporary-directory and uniq stdout contracts to match AB1.
+
+- AB1 immutable follow-up source 5f989e64dc5d12850599d00b19dd2d5753e8c18b:
+  fresh workspace package-clean qualification passed 2,289 tests, 0 failures,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace build
+  exit 0. Receipts fresh-regex-tree-integrated-{0..4}.log and receipt.json.
+  Performance qualification remains open; shared-host pressure is not waived.
+
+- AB1 inherited-effect regression: exact sort -S1K huge-input reproduced Read
+  before the fix. All sort and Cargo/rustc forms now count as Work because
+  inherited temporary storage and rustup installation cannot be neutralized
+  by this lexical predicate. Focused run: 18 pass, 0 fail. Retain PATH identity
+  as an explicit lexical limitation; no approval authority is expanded.
+- 2026-10-14 qualification follow-up: typed discovery paths cannot become
+  scopes through SQLite coercion. The diagnostic now exposes invalid scopes
+  and executed shell/exec/external runs with unproven mutation paths. Fixtures
+  cover numeric/array/object roots and a shell-only sed edit. Historical scope
+  diagnostic is 108/1/1/0/0/1, invalid scopes 0, unproven mutation runs 208;
+  the whole editing cohort remains unqualified. First-edit ordering has the
+  same immutable mutation-evidence requirement.
+
+- AB1 scope correction: sort remains Work because ordinary spills can write
+  through inherited TMPDIR; explicit -T rejection alone is insufficient.
+  Cargo/rustc version queries are Work because rustup proxies can install
+  missing workspace-selected toolchains. These are known program semantics,
+  distinct from unqualified arbitrary executable identity.
+
+- Independent parent review caught the separate mcp__ external prefix; include
+  it alongside ext__ in unproven mutation evidence. A completed MCP-only
+  mutation fixture now leaves the cohort unqualified too.
+
+- AB1 final review wave immutable source 087b705d7e0847f06e6c4c8f4f28031264258955: fresh
+  workspace package-clean qualification 2290 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab1-2026-10-14/fresh-final-review-wave-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+
+- Fresh AB2 integration caught a non-test build error: checkpoint text limit
+  was previously re-exported only under cfg(test). Split the export so the
+  production turn floor uses the same constant; reviewer-count test export
+  remains test-only. Prior focused tests were green; the failed full run is
+  retained and nothing from this AB2 wave has been pushed. Rerun all gates.
+
+- The next fresh AB2 run caught an existing pruning fixture whose 4KiB
+  "overlong" search header now fits the intentional 12KiB bound. Preserve
+  the non-header/lookalike invariant with a line beyond the global output
+  ceiling; the new real long-cursor idempotency regression covers headers
+  inside the accepted search bound. All other 994 core tests passed; rerun
+  the corrected fixture and full workspace gates before any push.
+
+- AB2 final review wave immutable source b7399a86426ea596b66aa34ac0ff94f385b5fccc: fresh
+  workspace package-clean qualification 2315 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab2-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+
+- AB3 final review wave immutable source 842263c840b23e132d8ecafd8f971f8e8c6de11b: fresh
+  workspace package-clean qualification 2327 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab3-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+
+- AB4 final review wave immutable source ac54c1df1e7de9512653fb60837661cdf804eede: fresh
+  workspace package-clean qualification 2337 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab4-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+
+- AB5 final review wave immutable source 72b0601786a7aff304a87d3b95ca4cef8a645358: fresh
+  workspace package-clean qualification 2343 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab5-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+
+- AB6 final review wave immutable source 094e9ae23972df82d6027b8c543e2c3a9c18d6e5: fresh
+  workspace package-clean qualification 2356 pass, 0 fail,
+  14 ignored; fmt, all-target/all-feature Clippy -D warnings, workspace
+  build exit 0. Receipts target/qq-perf/ab6-2026-10-14/fresh-final-review-wave-final-{0..4}.log and receipt.json.
+  Named performance and whole-cohort observation gates remain open.
+- AB1 execution-context test-first: a child test process captures PATH with a
+  workspace-local executable named grep that actually writes written.txt.
+  Existing literal exec classification calls it Read, so progress and audit
+  assertions fail. The real helper execution and side effect are checked before
+  the verdict. context-shadow-red.log retains the failing worker/parent result.
+
+### 2026-10-14 — expanded context implementation in progress
+
+- Inherited-PATH executable spoof reproduced red and now passes with execution-derived Work accounting. Prepared launch captures environment once, holds cwd, binds explicitly approved self-contained static Linux exec images with sealed bytes, and produces typed atomic store receipts. CLI approvals propagate through immutable factories; existing-server attachment rejects nonempty flags.
+- Local source remains unqualified: focused tests identified a store-fixture table typo (fixed), broader tests exposed old heuristic assumptions and partial-migration fixtures (fixed); descriptor golden awaits refresh. No new source pushed. Integrating newly merged main #295/#296/#297 and preserving its schema46 before the next qualification.
+
+### 2026-10-14 — current-main integration and focused context evidence
+
+- Local merge `24653324` includes main `f87d5d9d` (#295/#296/#297). Resolved schema conflict by preserving AC3's46 and appending receipt47; AB5 must move its notice to48. GitHub still has the older head until qualified source is pushed.
+- Focused AB1 run:25 tests pass,0 fail; CLI/factory run:3 pass,0 fail. Real static-image worker proves64 verified exec calls reach the stall report, replacement image/cwd paths cannot replace held inputs, and failed writes trigger audits. Receipt rollback/bounds/reopen and historical NULL fixtures pass.
+- Independent read-only reviews approved host flag propagation and receipt transaction/migration wiring; executable review found and fixed unreadable-PATH skipping and unbounded sealed readback. Full workspace checks and matched performance remain open. Logs `/tmp/qq-context-{focused,root-tests}.log` (will copy into task-owned evidence before qualification).
+
+- First fresh expanded-source workspace attempt on `1f48e28d` stopped in root tests:268 passed,2 failed,2 ignored; new CLI flag lacked its guide entry and the current descriptor assertion still expected13. Both corrected; no later gates ran. Failed logs retained under `target/qq-perf/ab1-2026-10-14/expanded-context-first-gates-*`. Independent final read-only reviews approved executable binding and receipt/ADR wiring on1f48.
+
+- Fresh source `ea6482b7`: workspace tests2341 passed,0 failed,14 ignored; fmt passed. Clippy failed2 large-enum checks because inline process receipts enlarged `TurnStep`/`RunInput`; build not run. Receipts now allocate one boxed payload only for started processes, preserving ordinary/default event size. Cwd capability stays owned on unsupported platforms too. Failed logs retained as `expanded-context-final-gates-*`; fresh requalification follows.
+
+### 2026-10-14 — expanded AB1 qualification and conflict repair published
+
+- Qualified immutable source `9cbbaa7d7dcb989756ddaff970974601b24d3cab` includes main `f87d5d9d`:2341 passed,0 failed,14 ignored (38 report blocks); fmt, all-target/all-feature Clippy `-D warnings` and workspace build exit0. Logs/receipt `target/qq-perf/ab1-2026-10-14/expanded-context-final2-gates-*`.
+- Three independent read-only reviews approved launch binding, startup manifest propagation and atomic receipts/docs. Clippy-driven boxing changes only optional process payload ownership; ordinary events stay small. Unsupported/historical contexts remain unqualified.
+- All PRs stay out of draft. Publishing this source removes the old main conflict on301; fresh Codex review and current-head hosted CI follow. Matched default/process/turn/persistence measurements remain open, so merge acceptance is not yet claimed.
+
+### 2026-10-14 — AB2 strict batched-search admission
+
+- Integrated published AB1 execution-context verification and current main,
+  including AC3 schema 46 followed by receipt schema 47. PR remains nondraft.
+- Reproduced the sixteen-page overflow before the repair; admission now
+  reserves full search pages and short replies before execution. Live and
+  replay projection share the strict 96 KiB calculation.
+- Focused AB2 tests passed before adding sixteen/sixty-four-call runtime
+  retry coverage. Independent review and fresh workspace gates remain open;
+  no unqualified changes have been pushed.
+
+- Final core qualification: 1,019 passed, zero failed, three ignored; logs
+  `/tmp/qq-ab2-cap-core-final.log`. Actual sixteen/sixty-four-call deferrals,
+  exact retry, mixed maximum-length recall names, complete pages, stored
+  replay parity, and historical descriptor 13/prompt 20 digest pass.
+- Independent cursor/admission and output/replay reviews approve production
+  behavior. The child-compaction fixture now grants two million tokens so
+  both scripted 48-turn children finish under the longer prompt; exact
+  inherited spend assertions remain intact. Full workspace gates follow.
+
+### 2026-10-14 — AB2 strict-cap workspace qualification
+
+- Immutable source `91c05c81d1b2d5e4c78eddc36203fea937ec69cf`: fresh
+  workspace qualification passes 2,371 tests, zero failures, 14 ignored
+  across 38 report blocks; formatting, Clippy/all targets/all features with
+  warnings denied, and workspace build all exit zero.
+- Evidence: `target/qq-perf/ab2-2026-10-14/strict-cap-workspace-{0..4}.log`
+  and `strict-cap-workspace-receipt.json`; source stayed clean and unchanged
+  throughout qualification. Independent admission and projection reviews
+  approve. Current descriptor 14/prompt 20 golden is `fde8f5629db25add...`;
+  historical descriptor 13/prompt 20 remains `61a6c7e80a481d54...`.
+- This publication resolves the actual batched-search output overflow and
+  integrates current main/AB1. Hosted checks, fresh Codex review, and named
+  performance gates remain open; this receipt does not waive them.
+
+### 2026-10-14 — AB3 verified-context and strict-cap integration
+
+- Integrated qualified AB2 `e4342a5c` and current main, retaining both the
+  parallel read-window runtime regression and batched-search retry coverage.
+- Receipt schema 47 follows AC3 schema 46; descriptor 14/prompt 20 and
+  historical descriptor 13 identity are inherited unchanged.
+- PR remains nondraft. Fresh source qualification and independent integration
+  review follow; hosted and named performance gates remain open.
+
+### 2026-10-14 — AB4 verified-context and bounded-output integration
+
+- Integrated AB3 source `b2a727bc` with actual main AC3/schema 46, receipt
+  schema 47, and strict search admission. Parent qualification is running;
+  this child will not be pushed until parent and child gates pass.
+- Preserved frozen read-only child authority and historical descriptor 13
+  prompt 20–22 identities; current descriptor 14/prompt 22 golden refresh
+  follows a focused encoding check. PR remains nondraft.
+
+### 2026-10-14 — AB5 schema sequencing and verified-read integration
+
+- Integrated AB4/current-main sources: AC3 owns schema 46; AB1 receipts own
+  schema 47; the root-stall replay-value migration now follows as schema 48.
+  All prior migration guards skip 48 and retain their structural validators.
+- Reconciled progress tests with executor receipts: unverified shell calls
+  count as Work; genuinely verified exec reads retain the root stall boundary
+  and now receive RootStallReport. Legacy child wording remains unchanged.
+- PR remains nondraft. Parent/child gates, old-reader refusal proof and fresh
+  hosted/Codex review follow; no unqualified source is being pushed.
+
+- Added schema-47→48 structure/store-identity idempotency regression and
+  schema-48 missing-receipt-column rejection. Updated the plan's shared-file
+  schema boundary to 47→48, matching its acceptance row. These fixtures still
+  await execution after parent qualification.
+
+- Corrected the inherited receipt-reopen fixture's current-schema assertion
+  from 47 to 48; its historical NULL and malformed claimed-47 rejection
+  fixtures remain unchanged. AB5 qualification still awaits the parent.
+
+### 2026-10-14 — AB6 verified-context implementation preparation
+
+- Integrated AB5 source `3ce24f3d` and actual main schema sequencing through
+  schema 48. Parent qualification and descriptor golden propagation remain
+  in flight; this unqualified child is not being pushed.
+- User-approved scope expands this slice to retained process context,
+  semantic argument validation, accepted policy identity, manifest binding
+  and producer provenance with bounded shell/exec export/recount.
+- V1/NULL history remains unavailable without independent immutable mapping;
+  Work is not mutation proof. Format 3 generation and coverage counters
+  still need implementation and qualification. PR remains nondraft.
+
+- Test-first expansion for the open semantic-envelope finding adds zero/
+  oversized timeout, whitespace/NUL command, empty/absolute cwd, and invalid
+  environment-name envelopes. Execution of the red fixture waits for the
+  active parent gate run; production validation is not yet changed.
+### 2026-10-14 — AB3 current-main/context integration qualification
+
+- Immutable source `b2a727bc8ddd93c1d364a6db8640695d1484eb32` passes
+  2,383 workspace tests, zero failures, 14 ignored across 38 report blocks;
+  formatting, Clippy/all targets/all features with warnings denied, and
+  workspace build all exit zero. Source remained clean and unchanged.
+- Receipts: `target/qq-perf/ab3-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Independent integration review approves
+  retained byte-window/masking/repair reservations and live/replay bounds.
+- PR remains nondraft. Fresh hosted/Codex review and performance gates
+  remain open; this local receipt does not qualify those gates.
+
+- Focused canonical-encoding check identified the descriptor 14/prompt 22
+  digest `a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d`;
+  the inherited prompt-20 golden was replaced. Descriptor 13 prompt 20–22
+  historical fixtures stay unchanged. Independent integration review approves
+  immutable image-manifest propagation and frozen child authority; full gates
+  now run against the corrected immutable source.
+
+### 2026-10-14 — AB4 immutable verified-context qualification
+
+- Immutable `2f061eccc285687365faf8eb054ded9a1cbca62d`: fresh workspace
+  passes 2,393 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source remained clean and unchanged throughout the run.
+- Receipts: `target/qq-perf/ab4-2026-10-14/verified-context-strict-cap-{0..4}.log`
+  and matching receipt JSON. Current 14/prompt 22 and historical 13/prompt
+  20–22 digests pass. Independent integration review approves immutable
+  manifest propagation and frozen read-only child declarations.
+- Nondraft publication follows; fresh hosted/Codex and named performance
+  gates remain open and are not waived by local qualification.
+
+- Qualified parent AB4 `364eb74c` is now integrated, including the corrected
+  descriptor 14/prompt 22 golden and parent receipt. Independent schema and
+  notice integration review approves. Full child gates start against this
+  immutable merge; schema-47 old-reader refusal probe follows its build.
+
+### 2026-10-14 — AB5 early-guard reopen correction
+
+- First immutable `4d66221a` workspace run failed root unclean-exit resume
+  at store reopen (`Persistence(Constraint)`); no push occurred. Focused
+  schema-47→48 structure/store-identity regression also reproduced rejection
+  on its second open. Red evidence: `schema48-reopen-red.log`.
+- Corrected the initial supported-version match and all earlier multiline
+  migration guards to include 48. Late receipt/accounting validators remain
+  intact. Focused migration/notice fixtures and full fresh gates rerun next.
+
+### 2026-10-14 — AB5 schema-48 local qualification and older-reader proof
+
+- Immutable `9971c44c802e88a1bbadb7d4888045746e71d35e`: fresh workspace
+  passes 2,399 tests, zero failures, 14 ignored across 38 report blocks;
+  fmt, all-target/all-feature Clippy with warnings denied, and build exit
+  zero. Source stayed clean and unchanged. Five focused AB5 fixtures pass.
+- Evidence: `target/qq-perf/ab5-2026-10-14/verified-context-schema48-fixed-{0..4}.log`
+  and receipt JSON. First failing workspace/red reopen evidence is retained.
+- Real isolated schema-48 store was created and cleanly shut down by this
+  build; retained schema-47 binary `9cbbaa7d` exits 1 at store open, leaving
+  metadata, structure and empty session count unchanged. Receipt/log/script:
+  `schema47-refusal*` under the same evidence directory; no model calls.
+- Independent post-repair review checks all 37 historical migration guards,
+  structural validators and notice compatibility. Nondraft publication and
+  fresh hosted/Codex review follow; performance gates remain open.
+
+- Inherited qualified AB5 `6aefbfc7`, including all early schema-48 guards,
+  current descriptor 14/prompt 22 golden, successful 2,399-test workspace
+  receipt and real schema-47 refusal proof. AB6 format/provenance work and
+  fresh parent AB2 review repairs remain incomplete; no child push yet.
+### 2026-10-14 — AB4 fresh review documentation repairs
+
+- Addressed prompt22 history and the architecture paragraph that still described
+  the earlier non-read-only external filter. Read-only declarations omit all external
+  tools. These source edits await the AB2 projection integration and fresh gates;
+  neither fresh review thread is resolved before publication.
+
+### 2026-10-14 — AB2 fresh review admission/replay/frontier findings
+
+- Fresh Codex review of published `e4342a5c` identified real gaps: deferred
+  searches were still counted against slices; historical turn projection
+  lacked policy evidence; depth-limited siblings could exhaust scanning
+  without advancing a cursor. Independent investigations confirm all three.
+- Added twenty sixteen-search-batch regression: 140 admitted executions must
+  not trigger a 256-execution slice checkpoint. Test-first reproduction
+  follows before correcting the final-admission counter.
+- Replay repair will retain explicit persisted projection identity or exact
+  bounded model-facing bytes; ambiguous old identities cannot be backfilled
+  from present code. Frontier repair must watermark only policy-skipped
+  child subtrees, preserving eligible depth-64 files. Nothing is waived.
+
+### 2026-10-14 — AB1 merged and AB2 current-main reconciliation
+
+- User merged #301 as `007adcda75454958ed48ccc81d4cc66d663c80e9`; GitHub
+  retargeted #302 to main. Integrated this actual main head locally, keeping
+  AB2's prompt-20 identity and owned discovery/output/replay repairs.
+- #302 has real fresh Codex findings in progress. #303–#305 currently report
+  mergeable against their parents and CI passes at #302–#304 published heads;
+  #306 still needs parent/context implementation integration. No draft PRs.
+
+- Slice regression now reproduces the premature checkpoint at immutable
+  `2dc01dff`; evidence `deferred-slice-red.log`. Final OutputBudget rejection
+  now removes only that previously counted request from slice accounting;
+  existing rejected/denied-call semantics remain unchanged. Focused check
+  follows; replay/frontier fixes and full qualification remain open.
+
+### 2026-10-14 — AB2 depth-exclusion continuation regression
+
+- Added deterministic actual-walker fixture: 64 ancestors, twelve policy-
+  excluded subtrees, later `z/AGENTS.md`, and a 70-entry scan limit. It
+  requires advancing encoded cursors, at most four pages and one match.
+- Uses the same bounded walker without injecting production configuration;
+  test-first reproduction precedes terminal-subtree cursor correction.
+
+- The depth-limit fixture reproduces `last_scanned=None` at immutable
+  `0b50ed0d`; red evidence `depth-frontier-red.log`. The walker now reserves
+  each excluded subtree's complete terminal cursor before charging/advancing
+  it. Eligible files at depth 64 are still inspected; ancestors are not
+  prematurely marked complete. Focused continuation check follows.
+
+- Admission/frontier source `30eb4e93` passes all 31 focused AB2 fixtures.
+  Added stored historical descriptor-14/prompt-19 regression with sixteen
+  near-12KiB pages; the original main projector retains its eighth page
+  and later generic-floor recall markers, including after reopen. This
+  test establishes the replay regression before persistence repair.
+
+- Historical descriptor-14/prompt-19 regression reproduces eighth-page
+  truncation at `97512db2`. Context assembly now selects the preserved
+  original-main generic-floor projector for recorded descriptor 13/14
+  prompt versions through 19. Newer ambiguous identities still require the
+  explicit projection-evidence repair before this wave can be published.
+
+- The first restoration run retained the eighth page but exposed a fixture
+  assumption: one 12KiB row takes the legacy long-line truncation path,
+  rather than the expected recall-marker path. The fixture now uses complete
+  <=200-byte rows at the same exact 12,000-byte page size. Production legacy
+  behavior remains the preserved original-main implementation.
+
+### 2026-10-14 — AB2 projection repair evidence and reserved boundary
+
+- Current `c9c0ba11` passes 32 focused AB2 fixtures, including known historical
+  descriptor-14/prompt-19 replay after close/reopen; logs
+  `historical-projection-focused-final.log`. Independent frontier review
+  approves exclusion watermarks and explicit trailing-slash path bounds.
+- Reserved ADR-0061 and shared ownership for exact projected reply/notice
+  persistence before the next request, descriptor 15 policy identity and
+  schema 48; the AB5 notice step must follow at 49. This is a proposed
+  boundary, not a claim that the barrier is implemented or qualified.
+- Fresh #304 review requires prompt-history/external-tool wording corrections;
+  #305 review requires the runbook/schema truth check to follow the rebased
+  notice boundary. These corrections join the next qualified propagation.
+- No new source pushed, and no fresh review thread resolved prematurely.
+
+### 2026-10-14 — AB2 exact projected-row replay regression
+
+- Added stored-row close/reopen fixture requiring exact projected replies,
+  post-checkpoint error flag and correction notice, independently of original
+  per-call text. The missing column/replay seam must fail before implementation.
+- Implements ADR-0061's accepted scope; root owns the new store barrier and
+  decoder. No source publication or review resolution precedes qualification.
+
+### 2026-10-14 — #301 merge and exact projection repair in progress
+
+- Actual main007adcda is integrated locally into AB2; no repair wave pushed yet.
+- Deferred slice accounting, depth-frontier continuation and known legacy replay
+  pass focused checks. Durable projection writer uses existing group-commit savepoints;
+  35 focused AB2 tests pass, including exact reopen and injected write failure before
+  a second provider request. Migration/ambiguity fixtures and full gates remain open.
+- Projection schema49/final notice50 avoid reusing published experimental48.
+
+- Full core repair check: 1,028passed,0failed,3ignored in
+  `/tmp/qq-ab2-projection-core-third.log`. Independent writer/barrier review approves;
+  independent replay review required descriptors10–12 and rejects prompt-only inference.
+  Final ownership/unfinished-result and47→49 historical-row checks are being qualified.
+
+- Final narrow repair checks:37AB2passed,0failed (`/tmp/qq-ab2-projection-final-focused.log`).
+  Historical10–14 rows survive47→49 migration; writer rejects wrong session/turn,
+  unfinished/mismatched calls and limits, preserving first commit. Stored retry JSON
+  is also bounded in SQL before copying. Source is being frozen for fresh workspace gates.
+
+- First frozen workspace run atc457630a failed root compilation on the new
+  `SessionRuntimeError::ToolProjectionUnavailable` exhaustive match; no tests ran.
+  Root maps it to an actionable request error with a regression fixture. All gates
+  will rerun at the repaired immutable head; the failed receipt is retained.
+
+- Repaired workspace runb9d38c60 reached root tests:270passed,1failed,2ignored.
+  The failure pins the former v14 canonical-domain prefix; update it to v15 while
+  retaining secret-exclusion checks and both historical core digest fixtures.
+  Fresh workspace gates rerun after this test identity update.
+
+- All four workspace gates pass at1963a389. This is intermediate qualification:
+  a new public continuation fixture covers unresolved history escaping reservation
+  and poisoning the shared scheduler. That failure must settle only the affected run
+  before publication; fresh sessions must remain usable without provider polling
+  on the ambiguous history. Test-first repair follows, then all gates rerun.
+
+- Intermediate source1963a389: 2,381 passed, zero failed, 14 ignored (38 blocks);
+  fmt/Clippy/build passed. The scheduler-isolation regression then failed with
+  runtimeUnavailable and passed after per-reservation handling. Independent review
+  approves cancellation precedence, settlement before loading, history preservation
+  and fresh-session usability. Evidence is under `target/qq-perf/ab2-2026-10-14/`.
+  This intermediate receipt is superseded by the final qualification below.
+
+### 2026-10-14 — AB2 durable projection final qualification
+
+- Immutable source `fb2296aa21c5f8163f3eb8e2869391e52f4e1da9` integrates merged
+  main `007adcda`. Fresh workspace: 2,382 passed, zero failed, 14 ignored (38 blocks);
+  formatting, all-target/all-feature Clippy with `-D warnings`, and build exit0.
+- Logs: `target/qq-perf/ab2-2026-10-14/durable-projection-final-gate-{0,1,2,3,4}.log`.
+  Independent writer/barrier, replay and reservation-failure reviews approve.
+- Descriptor15/schema49 commit exact projected replies and correction notice before
+  another provider request. Known descriptor10–14/pre20 histories retain the legacy
+  projector; ambiguous history fails only its reservation with a recovery message.
+- Real isolated schema49 store is refused by retained schema47 and experimental48
+  binaries, exit1, metadata/structure unchanged, zero sessions and no model calls.
+  Receipts: `schema{47,48}-refusal-receipt.json`; new binary SHA350db0ae9ae9d49fb2e45d1f13aa12e03e220ce3af4a474f0b8d596fe1ccc7a3.
+- This commit adds only the qualification ledger. Fresh hosted/Codex review, child
+  propagation and named performance gates remain open; no performance gate is waived.
+
+### 2026-10-14 — AB3 durable projection integration
+
+- Integrated qualified AB2e93c4e8a and merged main007adcda. Retained the complete
+  AB3 parallel-read fixture and AB2 deferred-search execution-slice fixture.
+- Descriptor15/schema49 and exact projection/legacy replay/reservation isolation
+  are inherited; window, masking and repair reservations remain the AB3 change.
+  Fresh source gates and independent integration review precede publication.
+
+### 2026-10-14 — AB3 durable projection qualification
+
+- Immutable source `cddc1fa4c826f1566ba65e483957ab799b009431` integrates qualified
+  AB2e93c4e8a/main007adcda. Fresh workspace: 2,394passed,0failed,14ignored
+  (38blocks); formatting, all-target/all-feature Clippy and build exit0.
+- Logs: `target/qq-perf/ab3-2026-10-14/durable-projection-integrated-gate-{0,1,2,3,4}.log`.
+  Independent integration review approves byte windows/masking/repair reservations
+  and preservation of both complete runtime regressions after conflict resolution.
+- This publication adds only the ledger receipt. Fresh hosted/Codex and named
+  performance gates remain open; no performance gate is waived.
+
+### 2026-10-14 — AB4 durable projection parent integration
+
+- Integrated qualified AB3 source15a03980 and main007adcda, inheriting descriptor15
+  and projection schema49. Preserve historical13/prompt20–22 and14/prompt20,22
+  digests while refreshing the current15/prompt22 fixture from the real encoder.
+- Fresh prompt-history and restricted external-tool documentation fixes are included.
+  Current golden refresh, independent integration review and full gates precede push.
+
+- Focused encoder check atd77352c9:18passed and the current15/prompt22 golden
+  fails against the inherited20 digest, producingd8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683.
+  Both historical14/prompt20,22 and13/prompt20–22 fixtures pass unchanged.
+  Independent authority/projection integration review approves; golden updated
+  and source frozen for all workspace gates before publication.
+
+### 2026-10-14 — AB4 integrated local qualification; parent review pending
+
+- Immutable8aac1a62:2,405workspacepassed,0failed,14ignored (38blocks);
+  formatting, all-target/all-feature Clippy and build exit0. Evidence:
+  `target/qq-perf/ab4-2026-10-14/durable-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Independent integration review approves authority/manifest/projection boundaries.
+  Current15/prompt22 digestd8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683;
+  historical13/prompt20–22 and14/prompt20,22 are preserved.
+- Publication awaits the new parent302 checkpoint feedback/crash review fixes;
+  these are real parent findings, and inherited source will requalify after repair.
+  The two AB4 documentation threads remain open until qualified publication.
+
+### 2026-10-14 — AB2 fresh checkpoint feedback/crash findings
+
+- Fresh Codex findingsPRRT_kwDOTmbEW86se2Ob andse2On are confirmed: raw correction
+  feedback can exceed the durable notice cap; a missing barrier can lose already
+  durable checkpoint consequences. Test-first single/aggregate Unicode feedback
+  and checkpoint-before-barrier reopen regressions precede the repair.
+- All dependent publication waits on the repaired parent. Existing event journal
+  lacks a run checkpoint index, so detection must preserve retained-context scaling
+  rather than scanning the entire workspace archive for every replayed turn.
+
+- Checkpoint repair focused checks:42AB2passed,0failed. Bounded Unicode feedback
+  covers single/aggregate tool corrections, final candidates and actual session
+  corrective request persistence/exact reopen. Missing checkpoint-enabled barrier
+  refuses reconstruction from descriptor presence; no workspace journal scan.
+- Independent source review approves checkpoint presence for all supported compiled
+  runtime paths, including empty/malformed identities and final-only reviewers.
+  Public zero-provider continuation coverage is extended before full gates.
+
+- The public checkpoint-session extension passes: actual oversize RED feedback
+  produces a corrective provider request and exact notice after reopen. Removing
+  its following barrier then settles continuation with zero new provider requests
+  and a healthy runtime. Current source freezes for fresh workspace gates.
+  Raw red/green logs are under`target/qq-perf/ab2-2026-10-14/`.
+
+- Checkpoint source6d09bb91 passes fresh workspace tests and formatting; Clippy
+  catches `.last()` on a double-ended iterator in the new final-candidate test.
+  Replace with `.next_back()`, retain the failed receipt, and rerun all gates before push.
+
+### 2026-10-14 — AB2 checkpoint projection final qualification
+
+- Immutable `fe8fce20668ea70f8d4299ac56826bb7f551bac6`: fresh workspace2,386passed,
+  0failed,14ignored (38blocks); fmt/all-target/all-feature Clippy/build exit0.
+  Logs: `target/qq-perf/ab2-2026-10-14/checkpoint-projection-final-gate-{0,1,2,3,4}.log`.
+-42focused AB2 cases pass; independent review approves bounded feedback/combined
+  notice and recorded-descriptor guard without workspace journal scans. Public
+  correction, exact reopen and zero-provider failure after missing barrier pass.
+- Any checkpoint-enabled tool turn without its exact projection refuses replay,
+  including final-only reviewers. Saved projections stay authoritative; unchecked
+  partial turns remain recoverable. Feedback24KiB/notice32KiB include truncation framing.
+- Actual47/48 readers refuse a schema49 store made by this build without changing
+  metadata/structure. `checkpoint-schema{47,48}-refusal-receipt.json`; new binary
+  SHAbeb64304bbeb4cb0d2cafd110cde8f7e07a1373e9f74dcd35f1043a2e25cd4d7.
+- This commit adds only the qualification ledger. Fresh hosted/Codex, child
+  propagation and named performance gates remain open; no performance gate is waived.
+
+### 2026-10-14 — AB3 checkpoint projection repair integration
+
+- Integrated qualified parent3b73f315, retaining read windows/masking/repair bounds.
+  Parent checkpoint feedback and missing-barrier protection are inherited.
+  Fresh workspace gates precede the next publication; named performance remains open.
+
+### 2026-10-14 — AB3 checkpoint repair integration qualification
+
+- Immutable81aa8947f693581f29d916711837b17d0edbd107 integrates parent3b73f315.
+  Fresh workspace2,398passed,0failed,14ignored (38blocks); fmt/Clippy/build exit0.
+  Logs: `target/qq-perf/ab3-2026-10-14/checkpoint-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Independent integration review approves unchanged read/mask/repair/row bounds
+  and inherited checkpoint protection. This commit adds only the receipt.
+  Fresh hosted/Codex and named performance gates remain open.
+
+### 2026-10-14 — AB4 checkpoint repair parent integration
+
+- Integrated qualified AB3bb6bc776 with both new parent checkpoint repairs.
+  Authority declarations, immutable manifests and15/prompt22 identity remain
+  unchanged. Both AB4 documentation fixes are included; all gates rerun before push.
+
+### 2026-10-14 — AB4 final checkpoint integration qualification
+
+- Immutablee1a41b1fa943f7251f7315b2dc0fc96bc8b97df6 integrates qualifiedbb6bc776.
+  Fresh workspace2,409passed,0failed,14ignored (38blocks); fmt/Clippy/build exit0.
+  Evidence: `target/qq-perf/ab4-2026-10-14/checkpoint-projection-integrated-gate-{0,1,2,3,4}.log`.
+- Authority/manifest/projection integration remains independently approved; parent
+  checkpoint fixes are inherited.15/prompt22 and historical13/14 goldens stay pinned.
+- Prompt history explicitly records21→22; the architecture restriction now omits
+  all external tools in read-only runs. This commit adds only the receipt.
+  Fresh hosted/Codex, dependent propagation and named performance gates remain open.
+
+### 2026-10-14 — AB5 schema50 migration test-first integration
+
+- Integrated qualified parent329c569c and merged main007adcda. The final notice
+  reader is50 after projection49, and must also upgrade experimental48 with its
+  root-notice codec. Test-first migration fixtures target50 before the producer bump.
+- Runbook/truth boundary is50; experimental48 notice rows are explicitly retained.
+  No new source is pushed before migration/reopen/structure gates pass.
+
+- The45→50 and49→50 structure/idempotency fixtures fail against inherited49,
+  as expected. Add an actual stored `root_stall_report` fixture with experimental48
+  layout: its text/store identity and newly nullable projection must survive50
+  migration and a second reopen. Focused red evidence precedes implementation.
+
+- Independent migration review finds an atomicity gap:48→projection49→notice50
+  could crash after publishing49 while retaining root notices its reader cannot
+  decode. Add a trigger-injected final-version failure;48 must retain both its
+  version and original structure. Publish48→50 projection/version together.
+
+- The injected failure reproduced an unsafe committed49 intermediate version.
+  Schema48 now adds projection storage, validates its shape and publishes50 in
+  one transaction. All six focused AB5 cases pass, including rollback, retained
+  notice bytes/store identity and two reopens. Parent migration expectations now
+  follow the reader version and require the notice codec before admitting48.
+
+### 2026-10-14 — AB5 schema50 qualification receipt
+
+- Immutable c3618e8b8fb0084c947708ef97acb4fabef7ab86: fresh workspace
+  2,416 passed, zero failed,14 ignored across38 result blocks; formatting,
+  all-target/all-feature Clippy with warnings denied, and workspace build pass.
+  Evidence: target/qq-perf/ab5-2026-10-14/schema50-atomic-final-gate-*.
+- Independent migration review approves all guards, atomic48 upgrade and
+  structure/notice/store identity preservation. Six focused AB5 tests and the
+  inherited projection migration regression pass; injected-failure red retained.
+- Actual retained48 and49 binaries refuse a new50 store with exit1 and unchanged
+  metadata/structure, zero sessions/model calls. Qualified binary retained as
+  legacy-schema50-qq (SHA256 cbc24a6ac38629cd00430c87010ea6d5e8ad7f0033183d378305e13c8de558e7).
+- This publication adds only the receipt. Parent304 has a new host grant
+  provenance repair in progress; final hosted/Codex and named performance gates
+  remain open. No entire-stack readiness claim.
+
+### 2026-10-14 — AB6 expanded-context parent integration
+
+- Integrated qualified schema50 parent c42882ee, including strict descriptor15
+  tool replay, bounded checkpoint corrections and atomic experimental48 upgrade.
+  Semantic shell-envelope regression remains test-first; provenance V2 and
+  export format3 work remain open, without historical qualification claims.
+
+- Two initial narrow commands targeted qq-core filters and ran zero cases; they
+  are not evidence. The actual xtask malformed-envelope regression runs15
+  cases and fails with5 lexical reads/9 malformed before the fix. Qualification
+  parsing now requires the dispatcher's pure Launch validation through canonical
+  argument digest, so invalid timeout/cwd/env/command cannot become reads.
+
+### 2026-10-14 — AB6 producer-bound execution receipts
+
+- User merged AB2–AB5; fetched main62c65930. PR306 targets main; integration
+  follows this owned core checkpoint before publication.
+- V2 carries actual tool-call ID, bounded canonical approved-image manifest,
+  build policy hash, shared producer instance/source/running executable hash.
+  Explicit deployed source/binary pin is required for qualification; V1/NULL,
+  unknown/dirty source and missing evidence remain unqualified. No schema bump:
+  the existing16KiB receipt column holds the ten-entry V2 proof.
+- Initial independent review reproduced producer loss during plan compile and
+  contradictory requested-env evidence. Both repaired; public builder→plan→
+  real exec source/identity, contradiction, call/manifest/plan/policy/producer
+  mismatch, max manifest, and transient cancelled-capture tests pass (5 cases).
+  Actual store rollback/reopen test now covers V2 and rejects swapped call ID.
+- Producer hashing is serialized on bounded preparation workers, cached after
+  successful/permanent capture, and cancellation/expiry are retryable. Manifest
+  bytes/digest and empty manifest are cached; no executable/source hash per call.
+  Format3 exporter/recount, concurrency/expiry tests, independent follow-up,
+  integrated checks and performance remain open.
+- At user request removed clean, confirmed merged AB1–AB5 worktrees. Preserved
+  evidence and actual47/48/49/50 binaries under main target/qq-perf/
+  merged-worktrees-2026-10-14T204742Z (manifest records original heads/paths).
+  Freed approximately65GiB; active306/performance and unrelated worktrees remain.
+### 2026-10-14 — AB4 host grant provenance regression
+
+- Fresh Codex review identifies a later duplicate host grant authorizing the
+  surviving first host. Independent investigation confirms both unattended
+  exposure and the effective descriptor must retain declaring-host provenance.
+  Add a regression covering all owner/later grant combinations and host dispatch
+  counters before changing admission. The original grant union predates AB4.
+
+- The owner regression fails against329c569c: a later-only grant appears in
+  the descriptor. Grants now travel with each host contribution and attach only
+  to admitted entries; the descriptor derives effective grants from those
+  surviving entries. Thirteen AB4 focused cases pass. Extend the regression to
+  normal Ask gates as well as unattended declarations and dispatch.
+
+### 2026-10-14 — AB4 declaring-host grant qualification
+
+- Immutable ef4403b1aefdad70cac00262b0fd01672034fe3a passes fresh workspace
+  2,410 tests, zero failed,14 ignored; formatting, all-target/all-feature Clippy
+  with warnings denied and workspace build pass. Thirteen focused AB4 cases pass.
+- Independent review approves declaring-host grants at admission and descriptor
+  derivation from surviving entries. Duplicate regression covers normalAsk and
+  unattended paths, all owner/later grant combinations and host call counters.
+  Historical descriptors and explicit human session grants remain authoritative.
+- Red/green and immutable gate evidence retained under
+  target/qq-perf/ab4-2026-10-14/host-grant-final-gate-*.
+  This publication adds only the receipt. Fresh hosted/Codex, child propagation
+  and named performance gates remain open.
+
+### 2026-10-14 — AB5 declaring-host parent propagation
+
+- Integrated qualified parent26bf4763: grants stay with the admitted declaring
+  host, and effective descriptor grants match normalAsk/unattended eligibility.
+  Schema50 atomic migration remains unchanged. Fresh integrated gates follow.
+- Actual retained experimental48 binary created an isolated store; qualified
+  schema50 upgrades it, adds projection storage and preserves store identity
+  across reopen. Evidence: actual48-upgrade50-receipt.json; zero model calls.
+
+### 2026-10-14 — AB5 declaring-host integration qualification
+
+- Immutable b004300474c96c5470e79876b925832414dcd972 passes fresh workspace
+  2,417 tests, zero failures,14 ignored; formatting, all-target/all-feature
+  Clippy with warnings denied and workspace build pass. Source remained frozen.
+  Receipt: host-grant-integrated-final-gate-receipt.json.
+- Includes qualified304 owner-bound grant fix and schema50 atomic notice
+  migration. This commit adds only the receipt; fresh hosted/Codex,306
+  propagation and named performance gates remain open.
+
+### 2026-10-14 — AB6 merged-main integration
+
+- Integrated actual origin/main62c65930 after user merged through305. Retained
+  qualified owner-bound catalog/descriptor grants and complete regression suite
+  alongside V2 producer propagation and call binding. Only bookkeeping conflicts
+  concatenate receipts; code selects qualified main grant admission.
+- PR306 already targets main. Final source qualification precedes push and
+  hosted conflict verification; current remote head still predates this merge.
+
+### 2026-10-14 — AB6 format3 bounded evidence qualification
+
+- Fourteen xtask qualification tests pass: shell+exec evidence, independent
+  producer pins, verified read versus recorded Work, V1 rejection, all states,
+  each SQL value bound/overflow with retained calls, no-clobber output, exact
+  parser validation, ordering/footer/build identity and worst escaping.
+- Format3 separates lexical shell share, verified context/read counts, recorded
+  Work accounting and closed coverage reasons. Missing/oversized/V1 evidence
+  leaves whole-cohort context qualification false and verified read share null.
+  Neither Work nor a NULL receipt is promoted to mutation/never-started proof.
+- Both passes use the same core validator and require externally pinned clean
+  runtime source/executable for new qualification. Final independent review,
+  integrated workspace/hosted checks, compatibility proof and measurements open.
+
+- Independent core post-repair review approves provenance propagation, requested
+  environment binding, cancellation/deadline contention and retryable capture.
+  Format3 review identifies ignored call state; a valid-footer state-tampering
+  regression reproduced qualification of a requested call. The shared validator
+  now requires Completed/Failed for V2; all other states stay in the denominator
+  with unsupported-call-state coverage. Both read and Work tampering cases pass.
+- Added concurrent producer capture coverage: simultaneous callers receive the
+  same complete cached identity. No observational or paid qualification claimed.
+
+### 2026-10-14 — AB6 full-gate deadline regression
+
+- Fresh workspace gate at73db0dbc fails two actual process-deadline cases:
+  duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirmed and
+  duration_stops_shell_while_output_persistence_is_blocked. Unknown-source
+  embedding runtimes were spending their short startup budgets hashing an
+  executable that cannot qualify against a clean source pin.
+- Unknown/dirty producers now retain explicit unavailable executable evidence
+  and skip that unnecessary I/O. Clean identified producers still capture the
+  running image once with cancellation/deadline bounds. Narrow deadline tests
+  and fresh integrated gates must rerun before any qualification/publication.
+
+- All12 narrow deadline cases pass after skipping unqualified producer hashes.
+  PR306 now carries hosted turn/H0 qualification directly: accepted main62c65930
+  is the immutable baseline and common official turn fixture; the actual PR
+  head is candidate. Preserve manual turn dispatch and existing native jobs.
+  Full/minimal H0 and unchanged budget checks run A/B plus same-binary A/A with
+  raw pressure/artifact receipts; no gate is waived. Process-path measurement
+  still needs a focused receipt/capture fixture before final qualification.
+
+### 2026-10-14 — AB6 final integrated source verification
+
+- Immutable source21a911f6fbd07e444902ec79644be2c0656aa859 passes fresh workspace-package clean/rebuild, workspace tests, formatting, all-target/all-feature Clippy with warnings denied, and workspace build. Gate receipt: target/qq-perf/ab6-2026-10-14/v2-deadline-repair-integrated-gate-receipt.json.
+- Workspace totals: 2438 passed, 0 failed, 14 ignored. Both previously failing process-deadline tests pass. Focused logs retained in focused-v2-format3/.
+- Independent read-only review approves the final producer/CI repair. Actionlint passes with pre-existing SC2129 style warning excluded; recorder/fixture Python tests pass16+4. Accepted main62c65930 is an ancestor of this head and remains the live remote main.
+- Publication, fresh hosted Codex/CI and performance qualification remain pending. Historical execution context and the deployed seven-day research cohort remain unavailable; no observational or performance completion is claimed.
+- Five clean merged AB1–AB5 worktrees removed after exact-head checks; performance evidence preserved under root target/qq-perf/merged-worktrees-2026-10-14T204742Z. Unrelated worktrees retained.
+
+### 2026-10-14 — hosted H0 fixture guard repair
+
+- Hosted job116122591431 failed before measurement because the guard compared nonexistent xtask/src/perf directories; the implemented H0 fixture is the single xtask/src/perf.rs file. Remove only that nonexistent-directory comparison, retaining exact source, toolchain and budget equality guards. No measurement/gate pass is inferred from this failure.
+
+### 2026-10-14 — H0 compiler setup correction
+
+- Job116124285386 reached recording but the unchanged baseline build failed: dependency rustc proxies selected runner-default stable1.99 while cargo1.97.1 was used, and concurrent rust-src downloads collided. Artifact retained at target/qq-perf/ab6-2026-10-14/hosted-run-38643410247/h0-baseline-build-failure.zip. No performance result exists.
+- Set the runner default to the exact matching repository toolchain before recording; the existing recorder clears RUSTUP_TOOLCHAIN/RUSTC overrides, so the default must also be pinned for dependency build-script compiler proxies. Fixture and budgets stay unchanged. Windows/wasm hosted checks passed; latest Codex/other CI remain active.
+
+### 2026-10-14 — hosted and Codex AB6 repairs
+
+- Codex6878b065 found two valid issues. Public LoadedRuntime reconstruction discarded a configured producer; real-process regression reproduces Unknown instead of Clean. Exec-only cohorts emitted lexical0 despite no shell denominator; an export/recount fixture reproduces it. Red logs: /tmp/qq-ab6-loaded-runtime-red.log and /tmp/qq-ab6-zero-shell-red.log.
+- Preserve the exact producer Arc through LoadedRuntime, emit null for zero-shell lexical shares, and document it. Empty cohorts continue to be rejected.
+- Hosted unit tests1067pass/2fail/3ignored: producer capture tests exhausted their10-second debug-image hashing budget under parallel load; the30-second concurrency case passed. Increase only test capture budgets to60seconds; production deadlines/cancellation are unchanged. Full local/hosted checks and independent review must verify these fixes before acceptance.
+- Focused green: six core AB6 cases pass (including public LoadedRuntime real exec), and all15 export/recount cases pass. Independent read-only review approves the loader, zero-denominator and test-budget fixes. Update the plan to record the user-authorized new-call capture scope while preserving historical unqualification. Fresh integrated source verification is next.
+
+### 2026-10-14 — AB6 review-repair integrated verification
+
+- Immutable sourceb5a3ebaacb3fc88e2393b80f5ff50ca61e5fe445 passes fresh workspace-package clean/rebuild, workspace tests, formatting, all-target/all-feature Clippy with warnings denied, and workspace build. Receipt: target/qq-perf/ab6-2026-10-14/loaded-producer-zero-shell-integrated-gate-receipt.json.
+- Workspace totals: 2439 passed, 0 failed, 14 ignored. Six focused core/15 export-recount regressions pass; independent review approves.
+- Previous hosted6878b065 passed controlled turn-overhead, Windows teardown and wasm; H0 baseline compiler setup and parallel debug-hash tests failed as recorded above. These repairs require latest-head hosted CI/Codex before readiness. No failed performance budget or observational gate is waived.
+
+### 2026-10-14 — H0 direct compiler path
+
+- Job116130357434 now avoids stable downloads but baseline convert_case selected its dependency-local1.83.0 toolchain via rustup proxies, producing incompatible rmeta. Pinning the default alone does not override per-directory toolchain files. Prepend the exact pinned toolchain binary directory to GITHUB_PATH before sanitized recorder builds; fixture/code/budgets remain unchanged. Failed artifact11931624160 retained; no performance comparison was produced.
+
+### 2026-10-14 — same-build producer restarts and capture measurement
+
+- Codex3ca513e1 mixed-instance finding conflates per-call execution_context_qualified with full treatment-cohort acceptance. Independent review confirms same pinned source/executable instances may restart; raw export retains instance IDs. Deployment continuity and process-free runs require separate evidence. Add regression with two instances on one pin (qualified call coverage) and one changed source/hash (unqualified); clarify runbook without rejecting legitimate restarts.
+- Focused release capture diagnostic on3ca513e1 plus retained measurement-only patch:30 first captures and30x10,000cached captures, same-binary repeat.29,967,568-byte fixture SHA3e7deaf982606ddd90a774596015708f4b190b42aacbb3538d03795b0f3ccb91. First p95=12.743ms/control12.800ms; cached p95=29ns/control31ns. Raw fixture, patch, pressure, logs and receipt at target/qq-perf/ab6-2026-10-14/capture-measurement/. Temporary measurement worktree removed; no production-first-shell or quiet-host performance acceptance claimed.
+- Same-build/mismatched-pin regression passes. Immutablee88d49fa passes workspace tests(2,439passed/0failed/14ignored),fmt/all-target-all-featureClippy/build; receipt compiler-path-and-restart-proof/receipt.json. Independent review approves directcompilerPATH and the same-build restart decision. Publication and latest hosted gates follow; no performance acceptance inferred.
+
+### 2026-10-14 — aggregate artifact and cwd traversal repairs
+
+- Codex928c1a63 found practical aggregate output growth and cwd-root traversal accepted by the pure parser. Regression reproduces both cwd forms as reads (17calls/2reads/15malformed) and missing export/recount aggregate checks; red log /tmp/qq-ab6-cwd-and-aggregate-red.log.
+- Cap complete export/recount at512MiB (including header/footer), reject before exceeding it, and preserve no-clobber/all-or-unqualified publication. Shared Launch validation rejects cwd lexical root-underflow; safe within-root parent normalization remains accepted, with filesystem/symlink containment still checked at preparation.
+- Pinned928 baseline completed:4,086calls(1,886shell/2,200exec),214lexicalreads(11.35%),all4,086contexts unqualified. Private artifacts at format3-baseline-928c1a63; a new pinned recount must supersede it after parser repair. Hosted928workspace/turn/Windows/wasm passed; H0 remains recording.
+- Focused green: all17 export/recount cases pass after cap/traversal fixes; safe cwd parent normalization remains accepted. Green log /tmp/qq-ab6-cwd-and-aggregate-green.log. Full gates and independent review remain required before push.
+- Immutable3587eee1 passes fresh workspace-package clean/rebuild: 2441 passed/0 failed/14 ignored;fmt/all-target-all-featureClippy/build pass. Receipt aggregate-and-cwd-integrated-gate-receipt.json. Independent review approves cap/publication/stream-growth and cwd traversal coverage. Latest hosted review/performance and superseding pinned baseline remain pending.

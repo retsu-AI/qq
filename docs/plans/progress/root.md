@@ -80,6 +80,10 @@ may append a **request** row; only root changes a request's status.
 | 0054 | Progress means output: stall reports, a sub-agent answers its brief, non-blocking delegation | autonomous-core AP1–AP5 (ENG-978) | Proposed 2026-09-30: `docs/adr/0054-progress-means-output.md` |
 | 0055 | (held by open PR #249, decision-model seam; its merge was reverted in #246) | decision-models DM0 (ENG-985) | Reserved |
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
+| 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
+| 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
+| 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
+| 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -151,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0057. Reserve here before opening a PR that adds an ADR.
+Next free number: 0062. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -180,6 +184,7 @@ Next free number: 0057. Reserve here before opening a PR that adds an ADR.
 | 2026-10-04 | autonomous-core AP4.2 (ENG-1005) | `docs/design/architecture.md` § sub-agents (`wait_agents`, `cancel_agent`, interim reports); `docs/design/protocol.md` and `tools.md`; guide `troubleshooting.md` / `providers.md` version mentions | `DESCRIPTOR_VERSION` 12 → 13; store schema 41 → 42 (`child_reports`); prompt 16 → 17; no protocol change | Done in the AP4.2 PR |
 | 2026-10-05 | compaction CX4 (ENG-997) | `crates/qq-protocol` `PROTOCOL_VERSION` 30 → 31 (`RunActivity::Compacting`); `docs/design/protocol.md` version history; `docs/design/architecture.md` run loop step 3; guide `troubleshooting.md` / `providers.md` protocol mentions; Harbor trace fixtures | Clients must show that a run is compacting (compaction plan Goal 4); takes AC14's in-run compaction-activity item | Done in the CX4 PR |
 | 2026-10-05 | compaction CX3 (ENG-996) | `crates/qq-core` store schema 42 → 43 (`sessions.prune_through_ordinal`, `prune_through_turn`); `docs/design/protocol.md` store schema history; `docs/design/architecture.md` summarizer paragraph; guide `troubleshooting.md` / `providers.md` schema mentions | Assembly stubs only up to a durable watermark so cross-run requests extend each other (ADR-0056 § 6) | Done in the CX3 PR |
+| 2026-10-13 | action-bias plan (ENG-1037) | `docs/README.md` (research row), `docs/plans/README.md` (plan row, priority, ownership), `docs/plans/progress/README.md` (ledger row) | Index the new plan, research and ledger | Done in the plan PR |
 
 Shared files: root `Cargo.toml` and `Cargo.lock` version bumps,
 `rust-toolchain.toml`, `flake.nix`, `.github/workflows/*`,
@@ -490,3 +495,267 @@ Relative performance/size evidence in autonomous-core ledger; inherited 48 MB ab
 - Homebrew tap formula fetched from main: version 0.1.6, four matching release archive URLs and SHA-256 entries. No native macOS/Windows, Homebrew execution, Nix build, or cargo-binstall execution claimed.
 - `cargo xtask release --docs` moved nine pins; example SHA/date taken from the installed release binary. Removed stale unpublished-tap caveats and corrected upgrade compatibility guidance.
 - Docs-truth 23/23, fmt and diff checks passed. Local website build failed on missing html-escaper after frozen reinstall; clean PR site CI remains required.
+
+### 2026-10-13 — T20 ownership clarification (ENG-1035)
+
+- The task index limited `runtime/run_loop.rs` to `read_tool_result` dispatch, but T20 also explicitly requires strict refusals to distinguish hint-only prefixed/outside-path commands. Its existing refusal lives in the same file. Extend ownership to that refusal expression; no classifier or broader dispatch changes.
+- Acceptance harness ownership includes `lib.rs` (one test-module declaration), `src/tests/t20.rs`, and `tools.rs` bounds tests. Independent second-agent review approved these policy changes; no shared manifest, dependency, CI, or system boundary change.
+
+### 2026-10-13 — T20 prerequisite resource repair
+
+- Integrated T18 `89a5582f` during qualification. Independent reviewer found its repeated `env -S` substitution can recursively double inserted assignment values. This new resource regression blocks the stack merge, outside the existing follow-up decision.
+- Extend this integration's ownership narrowly to `approval/classify.rs`: test-first bounded reproduction, one-pass substitution with last-assignment precedence, and `MAX_CLASSIFIED_BYTES` expansion cap. Carry the repair through the stack before main; no changes in another author's checkout.
+
+### 2026-10-13 — T18–T20 shipped-status reconciliation ownership
+
+T20 owns the immediate docs follow-up for tool-layer plan/ledger status and ADR-0058 acceptance in the ADR file, index, and root reservation after native stack merge. Source unchanged; remaining observations and ENG-1032/ENG-1033 stay open.
+
+### 2026-10-13 — Reliability consolidation shared-doc ownership (ENG-1036)
+
+User-authorized docs-only slice owns autonomous-core plan/ledger, retirement of run-reliability plan/ledger, and stale-reference corrections in docs indexes, related plans/research and tools design. AC3's source/review work remains separately owned. Accepted ADRs and historical root/ledger entries are preserved; dead receipt pointers use pinned Git history. No ADR number, protocol or schema change is reserved by this consolidation.
+
+### 2026-10-13 — Full autonomous-core implementation stack
+
+User authorizes completing the entire autonomous-core plan as stacked PRs, including its referenced goal slices and review repairs until Codex bot approval on each opening description. Isolated `.worktrees/autonomous-core-stack` begins on consolidation #291 (`ee8bffa5`); this intentionally uses the reviewed parent branch rather than claiming it merged. AC17/ENG-872 starts first; source, safety caps and shipped fast-path behavior remain explicit gates. AC3 in `.worktrees/ac3` remains separately owned; coordinate its reviewed branch before dependent run-loop changes. Root/shared protocol, schema, CI and design changes belong to the respective documented stack slices, with reservations recorded before editing. Full goal retains resource/performance, live AP5/G5/Goal7 evidence and final design/doc collapse; no qualification is waived by source completion.
+
+
+### 2026-10-14 — AB1 regression harness ownership
+
+- AB1 acceptance needs a scripted one-call-per-turn root run. Extend test
+  ownership to `crates/qq-core/src/tests/progress.rs` for a fixture knob,
+  deterministic subdirectory input and the request-65 regression. The
+  production classifier remains limited to `read_only_shell_command`.
+
+- Share `approval/rules.rs::branch_lists` with the progress classifier via
+  `pub(super)` visibility only. It is already the closed Git listing
+  predicate; its verdicts do not change, and no approval authority is used
+  by progress. This extends AB1 ownership by one visibility line rather
+  than duplicating Git option-order and value parsing.
+
+
+### 2026-10-14 — AB2 ignored-worktree regression ownership
+
+- Add tests in `crates/qq-core/src/tools.rs`, the existing built-in behavior
+  harness, for AB2's explicit ignored-root names/content search acceptance.
+  Production search/walk behavior is unchanged. Runtime prompt tests stay
+  in `runtime/prompt.rs`; existing prompt assertions in `lib.rs` are updated
+  with v20, preserving historical compatibility evidence.
+
+### 2026-10-14 — AB2 headless prompt identity assertion
+
+AB2 owns the `src/headless.rs` JSONL regression's expected prompt version
+19 → 20. Workspace test exposed the additional public identity assertion;
+no headless production behavior changes.
+
+### 2026-10-14 — AB2 persisted identity and delegation assertions
+
+AB2 additionally owns test-only golden prompt identity in `plan.rs` and
+role-contract assertions in `sessions/tests/delegation.rs`. No descriptor
+encoding or session production behavior changes; prompt version 20 changes
+its digest, and write/read child assertions must pin the new action bullet.
+
+### 2026-10-14 — AB3 public read regression fixture ownership
+
+AB3 owns `tools.rs` focused read-window and turn-budget projection tests,
+using the existing dispatch helper; production scope remains read.rs/specs.rs.
+
+### 2026-10-14 — AB3 parallel runtime regression ownership
+
+AB3 owns one `lib.rs` six-parallel-read runtime regression and its existing
+schema-identity assertion. The provider accounts for only model-visible
+rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
+
+### 2026-10-14 — AB4 shared eligibility ownership
+
+- AB4 owns `runtime/run_loop.rs` and `sessions/execution.rs` capability/filter
+  propagation in addition to plan/catalog/prompt/direct entrypoints. Reserve
+  `docs/design/architecture.md`, `docs/design/protocol.md`, ADR-0059 and its
+  index amendment for shipped behavior; no mutable approval mode in cache keys.
+- AB4 additionally owns the read-only child user-follow-up assertion in
+  `sessions/tests/delegation.rs`: it has root framing but retains ReadOnly
+  authority. This updates expected wording, without weakening child policy.
+### 2026-10-14 — AB2 filtered tool description ownership
+
+- AB2 owns `plan.rs` compilation of filtered builtin descriptions: shell
+  recommendations name only present companion tools; edit-only profiles
+  refer to a content hash without naming unavailable read_file. Descriptions
+  are adjusted once after catalog-input policy filtering, off requests.
+
+### 2026-10-14 — AB5 schema and notice ownership
+
+- Reserve `sessions/store/schema.rs` version-only45→46 migration and
+  historical skip lists, `sessions/tests/migrations.rs`, root progress/
+  replay fixtures and protocol/guide schema mentions. Preserve every old
+  notice byte; reject46 at open in the pinned45 binary. Branch
+  `feat/eng-1042-ab5-root-stall-action` stacks on AB4, source qualification open.
+- AB5 also owns the exhaustive stored-report decode in `sessions/deliveries.rs`;
+  RootStallReport is a report there, while unknown values remain CODEC errors.
+
+- AB5 also updates the independent reference-history decoder in
+  `sessions/tests.rs` to recognize RootStallReport in replay comparisons.
+### 2026-10-14 — AB2 instruction discovery completion ownership
+
+- AB2 additionally owns tools/search.rs and tools/walk.rs for bounded names
+  discovery of safe instruction-file symlinks and truthful depth omissions,
+  with public fixtures in tools.rs. Preserve content-search link exclusion
+  and directory-link exclusion; emit blockers for unsafe instruction links.
+- Depth-limited discovery uses only justified target ancestors at64-component
+  boundaries; parent contract and research qualification must account for
+  these scopes before claiming instruction coverage.
+
+### 2026-10-14 — AB6.1 qualification tooling ownership
+
+- Reserve xtask/src/main.rs, existing CLI routing in xtask/src/providers.rs,
+  new xtask/src/action_bias.rs, xtask/Cargo.toml and Cargo.lock for the existing
+  workspace rusqlite dependency. The qq-core hidden classification support
+  wrapper in approval.rs exposes the actual progress-read predicate; ordinary
+  runtime requests add no work. Research/runbook and action-bias ledger owned.
+- Export reads SQLite in one read-only snapshot and never opens SessionRuntime
+  or applies migrations. Header binds schema/store/window/cutoff/cohort count.
+  Recount bounds input, rejects incomplete/duplicate/malformed exports and
+  leaves unclassified overflow unqualified. No paid or post-merge run claimed.
+
+### 2026-10-14 — AB1 exact argv classification
+
+- Extend AB1 to sessions/approvals.rs solely to ignore the new cached read
+  classification field in its existing shell preview pattern. Approval
+  authority and persisted/wire data remain unchanged. Literal exec arguments
+  share the command-effect predicate; shell syntax stays in the shell scanner.
+
+### 2026-10-14 — AB5 replay documentation completeness
+
+- Reserve docs/design/architecture.md stored-notice vocabulary, the existing
+  docs/runbooks/run-output-queries.md report predicate and src/docs_truth.rs
+  regression for root-stall documentation. Schema/history and Goal 6's
+  narrower slice-checkpoint cohort remain explicit. No runtime behavior change.
+
+- AB6.1 additionally reserves docs/README.md only for the new qualification
+  runbook index link. Existing documentation organization is preserved.
+
+
+- 2026-10-14 AB6 qualification repair owns a narrow parser bridge in
+  crates/qq-core/src/tools.rs, reusing the exact shell execution type without
+  changing dispatch or approval authority. Export format 2 binds the producing
+  binary and persisted depth-zero root role. Root is the sole writer.
+
+
+- 2026-10-14 AB6's exact parser bridge reads the existing private shell env
+  field through parent-module visibility, exporting only a requested-env
+  boolean. No dispatch or policy behavior is changed.
+### 2026-10-14 — AB3 masked read admission
+
+- Reserve tools/output.rs shared allocation-free masked escaped-size measure
+  and tools/dispatch.rs actual repaired-argument note byte reservation. Read
+  construction uses post-mask costs and retains unmasked spill semantics.
+  Returned line bounds preserve manually clipped complete rows and gutters.
+
+
+- 2026-10-14 AB4 owns the prompt-version assertion in src/headless.rs for
+  JSONL provenance: the expected current value follows the version-21 bump.
+  No production CLI behavior is changed; root is the sole writer.
+
+
+- 2026-10-14 AB4 qualification owns a narrow inherited fixture repair in
+  sessions/tests/nonblocking.rs: separate child gates remove shared-semaphore
+  arrival-order assumptions. No production session behavior is changed.
+- 2026-10-14 AB3 owns one Windows exact-test step in .github/workflows/ci.yml
+  for the native Unicode-path contiguous-window regression. The existing job
+  selected teardown tests only. A test-only read/output hook exercises the
+  actual dispatch mask/bound pipeline using valid Windows metadata on Linux.
+
+- 2026-10-14 AB2 reserves tools/output.rs and live/replay turn-projection
+  call sites in runtime/run_loop.rs and sessions/{transcript,tests}.rs.
+  Actual tool identity preserves complete bounded search pages so cursors
+  never advance beyond omitted matches; root remains the sole writer.
+
+- AB2 additionally reserves tools/walk.rs for search-specific cancellable,
+  deadline-aware entry/name-byte enumeration ceilings before sorting. Existing
+  callers retain their listing API; incomplete search listings are errors.
+### 2026-10-14 — AB1 execution-context shared-path request
+
+- User authorized host execution-context capture/verification and required every PR to stay out of draft. AB1 owns the concrete process preparation/receipt seam, startup approval flags in `src/{cli,main,runtime}.rs`, descriptor v14, and nullable store receipt migration; AB5 must follow the current main schema with its notice-only migration. ADR-0060 is reserved in the parent follow-up.
+- Newly merged main includes #295/#296/#297. Integrating it before publishing AB1; migration numbering must preserve AC3's schema46 rather than reuse it. Historical process qualification stays unavailable.
+### 2026-10-13 — AC3 dependent integration and spend repair ownership
+
+The full-stack executor owns `fix/eng-1029-ac3-durable-summary-spend` in `.worktrees/autonomous-core-stack`, based on qualified AC17 #294 (`10ad59a9`). Read-only audit of AC3 #279 (`455d3181`) approves adopting its three commits as inputs for repair, not submitting unchanged. No AC3 writing agent is live in this thread; its original worktree stays untouched and its draft remains open until replacement is qualified. Integration preserves newer consolidation/AC17 ledger receipts.
+
+Scope includes `lib.rs`, `runtime/{compaction,run_loop,budget}.rs`, `sessions/{in_run_compaction,store,streaming,compaction,settlement}.rs` as needed, deterministic soak/accounting/replay tests, architecture/protocol design amendments and autonomous-core ledger. Known usage from completed summarizer subturns must be durable before the next request; unknown aggregate usage remains unknown. Prompt caller token/cost remainder must constrain both successful compaction and failed retries without double-counting session spend. Deadline, cancellation, unchanged request retries and persisted replay need qualification. Existing model-turn rows provide the initial persistence seam; no protocol/schema/ADR number bump reserved absent a demonstrated need. Capture `turn_overhead` baseline before source changes.
+
+- AC3 accounting scope extends to `sessions/deliveries.rs` and focused delegation/spend tests: owned prompt spend must include internal compactions exactly once so a parent cannot regrant a child’s spent token/cost allowance. This is a concrete safety finding from independent prototype review, not a new public boundary.
+
+### 2026-10-13 — AC3 owned compaction lookup schema reservation
+
+AC3 reserves session-store schema 44 → 45 for a non-unique partial `runs_owned_compaction` index on `auto_compaction_for_run_id`, restricted to internal compaction owners. The new exact child-spend receipt needs this lookup; test-first query-plan evidence currently shows `SCAN runs`, which scales with stored history. Own `sessions/store/schema.rs`, migration/receipt tests, protocol schema-history and guide version amendments. No new columns, wire or descriptor change. Upgrade/reopen/data-preservation and index-use evidence are required before push.
+
+### 2026-10-13 — AC3 shared client regression ownership
+
+AC3 stack additionally owns `crates/qq-client/src/state/tests.rs` for the existing ModelTurnCompleted/RunFinished projection: internal measured summarizer turns must remain scoped to their run, serialized replay must match live application, and internal failure must preserve the prompt's activity/approval state. No client wire or production seam change is authorized absent a concrete failing regression.
+
+AC3 client ownership extends to `state.rs` and `state/reduce.rs`: terminal-order regression reproduces a second completion attention/unread when a prompt settles before its owned internal step. Persist the inferred internal classification in existing run stats across owner settlement and snapshot installation; retain only unfinished step entries until their terminal event. No protocol or schema bump.
+
+AC3 client repair also amends `docs/design/transcript.md` for internal completion ordering and snapshot classification, without new transcript rows or protocol fields.
+
+### 2026-10-13 — AC0.2.1 controlled CI recorder ownership (ENG-1044)
+
+User's full autonomous-core goal owns CI diagnostic recording in isolated `.worktrees/autonomous-perf-ci`, branch `ci/eng-1044-turn-overhead-recording`, stacked on draft AC3 #296 at a76b7cd9. Reserve `.github/workflows/ci.yml`, focused `.github/scripts/record-turn-overhead.py` and its CLI tests, performance runbook/inventory and autonomous ledger. Add an explicitly dispatched job using immutable 40-hex SHAs, separate baseline/candidate target directories, saved optimized binaries and 30 A/B +30 A/A pairs with raw artifacts. Contents-read permissions, no persisted checkout credentials or provider calls; regular PR CI behavior unchanged. This is AC0.2.1's concrete diagnostic seam, not completion of H0 registration, concurrency/fsync or live gates. Existing AC0.1 ENG-986 remains Done; new issue ENG-1044 tracks this work. No protocol/schema/descriptor/prompt reservation.
+
+### 2026-10-13 — AC0.2.1 compiled fixture identity review repair
+
+Recorder review reproduces materially different included soak fixtures across earlier A/B arms. Extend this slice to the concrete `turn_overhead.rs` benchmark, source-manifest/dep-info verification script and tests. Pin its two direct source files from one immutable fixture checkout in both production arms; embedded source SHA-256 binds each sample to the compiled fixture. Production crates remain the comparison variable. Earlier recordings are retained as confounded whole-build diagnostics, not attributed runtime measurements. No new dependency, public protocol or schema change.
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
+
+### 2026-10-14 — AB2 exact tool-turn projection ownership
+
+- Reserve ADR-0061 for the durable model-facing tool projection barrier.
+- AB2 additionally owns `runtime/events.rs`, `sessions/{execution,streaming,
+  store,transcript}.rs`, the store schema and projection tests for bounded
+  exact projected replies/correction notice persisted before the next request.
+- AB2 introduces schema 48 after receipt schema 47. AB5's notice-only step
+  moves to schema 49. Descriptor 15 records explicit strict projection
+  identity while retaining descriptor 13/14 canonical domains.
+- Root remains sole writer; store/identity/output integration requires
+  independent review and fresh qualification before any push.
+
+### 2026-10-14 — AB2 projection version reservation correction
+
+- Projection storage is schema49, following accepted receipt schema47. Schema48
+  is already used by the published experimental AB5 notice build and is refused
+  by the AB2 reader, whose codec cannot decode those notices.
+- The final AB5 reader is schema50 and must migrate experimental48 and projection49
+  while retaining the root notice codec. Descriptor15 remains the projection identity.
+
+- AB2 also owns the synthetic seed in `sessions.rs` and context/replay test
+  fixtures so they explicitly identify the projector under test. These fixture
+  identities are not evidence assigning a policy to unversioned stored history.
+
+- AB2 owns root `src/runtime.rs` error translation for the new unresolved replay
+  error, preserving its actionable recovery message in server responses.
+
+- AB2 additionally owns `sessions/{claim,compaction,settlement}.rs` constructor
+  integration to isolate unresolved replay to its reservation, rather than failing
+  the shared scheduler. Existing fatal persistence/codec handling stays intact.
+
+- AB2 owns `runtime/checkpoint.rs` for shared feedback/correction-notice bounds.
+  Checkpoint-enabled tool history without the exact barrier fails only its
+  reservation; recorded descriptor identity avoids per-turn archive scans.
+
+### 2026-10-14 — AB6 expanded execution-context ownership
+
+- User authorizes producer/context capture and verification, with historical
+  qualification unavailable. Root owns qq-core/build.rs/Cargo.toml, existing
+  tools/process_context.rs and its evidence/provenance children, process
+  dispatch/shell wiring, runtime/plan producer propagation, manifest caching,
+  receipt persistence tests and root RuntimeFactory source wiring.
+- Existing schema50 receipt column remains16KiB; no wire/descriptor/schema bump.
+  xtask format3 retains bounded shell+exec arguments/receipt/descriptor/identity
+  and uses one core validator with explicit deployed source/binary pins.
+  Private artifact handling and research acceptance gates remain explicit.
+
+- AB6 additionally owns sessions/runtime.rs for preserving configured producer
+  identity through the public LoadedRuntime embedding compiler. No schema or
+  public wire change; exact producer Arc is retained.
+
+- AB6 owns the tools/design cwd-contract amendment alongside shared Launch
+  root-underflow validation and the export/recount aggregate-byte budget repair.

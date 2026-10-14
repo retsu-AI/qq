@@ -49,6 +49,8 @@ mod sessions;
 mod tools;
 
 #[doc(hidden)]
+pub use tools::process_context::ProcessProducer;
+
 pub use approval::bench_support as classify_bench;
 #[doc(hidden)]
 pub use sessions::bench_support as context_assembly_bench;
@@ -81,12 +83,13 @@ pub use hosts::{
     ToolHints,
 };
 pub use runtime::{
-    AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
-    BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
-    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
-    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
+    AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, CheckpointFuture,
+    CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
+    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract,
+    ReadImageFamily, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
@@ -148,6 +151,11 @@ The last 64 tool calls changed nothing and produced no answer. Do not call tools
 Write a short report: what is established (with path:line evidence), what is still unknown, and \
 the one next action. QQ keeps this report and continues the same run with tools available \
 again.";
+pub(crate) const ROOT_STALL_REPORT_NOTICE: &str = "[QQ runtime notice; not a user instruction]\n\
+The last 64 tool calls changed nothing. Do not call tools in this reply. In three lines: what \
+you now know, the next action permitted by this task and run (path and what changes, or the \
+finding for an analysis task), or the concrete blocker. Continue with that permitted action \
+next turn.";
 const STALL_REPORT_REJECTION: &str = "not executed: this reply was a progress report, which \
 records what is established without running tools; the run continues and tools are available \
 on the next turn, so re-issue this call then";
@@ -521,6 +529,13 @@ fn note_audited_action(
     result: &tools::ToolOutput,
 ) {
     triggers.tool_calls = triggers.tool_calls.saturating_add(1);
+    if result
+        .execution_context
+        .as_ref()
+        .is_some_and(|receipt| receipt.is_work())
+    {
+        triggers.non_read_shell = true;
+    }
     // Classification here only asks "was it a mutation or a non-read shell";
     // the network policy is irrelevant to that, so the default is enough.
     match approval::classify(
@@ -530,13 +545,6 @@ fn note_audited_action(
         &tools::network::NetworkPolicy::default(),
     ) {
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
-        // Read-only shell (allowlisted VCS reads and the like) does not by
-        // itself make a run worth auditing; anything else does.
-        approval::ToolClass::Shell { command, .. }
-            if !result.is_error && !approval::read_only_shell_command(&command) =>
-        {
-            triggers.non_read_shell = true;
-        }
         _ => {}
     }
     if call.name == tools::SPAWN_AGENT_TOOL && !result.is_error {
@@ -622,6 +630,7 @@ fn select_tools(
     catalog: &catalog::ToolCatalog,
     pins: &mut catalog::PinSet,
     arguments: &str,
+    filter: &catalog::StaticFilter,
 ) -> (tools::ToolOutput, bool) {
     let arguments = match serde_json::from_str::<catalog::SelectToolsArgs>(arguments) {
         Ok(arguments) if arguments.query.trim().is_empty() => {
@@ -645,7 +654,7 @@ fn select_tools(
         );
     }
     let limit = arguments.limit.clamp(1, catalog::MAX_SELECT_MATCHES);
-    let matches = catalog.rank(&arguments.query, pins, limit);
+    let matches = catalog.rank(&arguments.query, pins, limit, filter);
     let mut pinned = Vec::new();
     let mut refused = Vec::new();
     for entry in matches {
@@ -662,6 +671,12 @@ fn select_tools(
             .names()
             .iter()
             .filter(|name| {
+                if !catalog
+                    .lookup(name)
+                    .is_some_and(|entry| filter.allows(entry))
+                {
+                    return false;
+                }
                 let lower = arguments.query.to_ascii_lowercase();
                 name.to_ascii_lowercase().contains(lower.trim())
             })
@@ -677,7 +692,12 @@ fn select_tools(
 /// Re-pins every tool an earlier `select_tools` result in `messages` pinned,
 /// so a recovered run offers the schemas the model already selected. Only
 /// names the catalog still holds are pinned.
-fn recover_pins(messages: &[Message], catalog: &catalog::ToolCatalog, pins: &mut catalog::PinSet) {
+fn recover_pins(
+    messages: &[Message],
+    catalog: &catalog::ToolCatalog,
+    pins: &mut catalog::PinSet,
+    filter: &catalog::StaticFilter,
+) {
     let mut select_call_ids = std::collections::HashSet::new();
     for message in messages {
         for block in message.content() {
@@ -695,6 +715,7 @@ fn recover_pins(messages: &[Message], catalog: &catalog::ToolCatalog, pins: &mut
                         for name in result.pinned {
                             if catalog.lookup(&name).is_some_and(|entry| {
                                 matches!(entry.host, catalog::ToolHost::External { .. })
+                                    && filter.allows(entry)
                             }) {
                                 pins.pin(&name);
                             }
@@ -729,6 +750,7 @@ pub(crate) struct RunCapabilities {
     /// external schemas are withheld from the request instead of offered and
     /// denied. Policy still evaluates every call; this only saves the tokens.
     read_only: bool,
+    unattended: bool,
     max_output_tokens: Option<u32>,
     /// Caller-imposed budgets and the pricing that makes the cost bound
     /// measurable. Admission rejects a cost cap without pricing before this
@@ -785,6 +807,7 @@ impl RunCapabilities {
             slash_is_literal: false,
             allow_tools: true,
             read_only: false,
+            unattended: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
             routing_spend: None,
@@ -921,6 +944,7 @@ impl RunCapabilities {
             slash_is_literal: false,
             allow_tools: true,
             read_only: false,
+            unattended: false,
             max_output_tokens: None,
             limits: RunLimits {
                 max_duration_ms: None,
@@ -1012,6 +1036,8 @@ pub struct Runtime {
     pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
+    pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
+    pub(crate) process_producer: Arc<ProcessProducer>,
     pub(crate) network: Arc<tools::network::NetworkPolicy>,
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
@@ -1068,6 +1094,8 @@ impl Runtime {
             task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
+            approved_read_images: Arc::new(runtime::ApprovedReadImages::default()),
+            process_producer: Arc::default(),
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
@@ -1109,18 +1137,24 @@ impl Runtime {
     /// that calls tools gets a rejection result for each call and is asked
     /// again once, dropping what it wrote; a second such turn, a refusal, a
     /// protocol violation, or a transport failure is an error naming it, and
-    /// the caller settles the compaction run failed. Returns the joined text
-    /// and the summed usage. The provider owns retries as for any request.
-    pub(crate) async fn summarize(
+    /// the caller settles the compaction run failed. A provider fault the run
+    /// loop would retry for a model turn, or a stream that ends without a
+    /// terminal event, is `Transient`; everything else is `Rejected`. Returns
+    /// the joined text and the summed usage. The provider owns retries before
+    /// the stream starts, as for any request.
+    pub(crate) fn summarize(
         &self,
         messages: Vec<Message>,
         system: Arc<str>,
         tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
-    ) -> Result<(String, Option<TokenUsage>), String> {
+    ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
+    {
+        stream! {
         let mut messages = messages;
         let mut summary = String::new();
-        let mut total_usage: Option<TokenUsage> = None;
+        let mut total_usage = Some(TokenUsage::default());
+        let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
         // One turn of calls is answered with rejections so the model can
         // still write the summary; a second fails the step.
@@ -1140,10 +1174,11 @@ impl Runtime {
                 Some(effort) => request.with_reasoning_effort(effort),
                 None => request,
             };
+            yield Ok(runtime::SummarizeStep::RequestStarting);
             let mut events = self.provider.stream(request);
             let mut text = String::new();
             let mut truncated = None;
-            let mut usage = None;
+            let usage;
             // Calls in this turn, in order, and the turn's replay data: a
             // rejected-call turn is sent back exactly as it was produced.
             struct SummarizerCall {
@@ -1155,7 +1190,10 @@ impl Runtime {
             let mut replay = None;
             loop {
                 let Some(event) = events.next().await else {
-                    return Err("summarizer stream ended without completing".to_owned());
+                    yield Err(runtime::SummarizeError::Transient {
+                        kind: RunFailureKind::ProviderTransport,
+                        message: "summarizer stream ended without completing".to_owned(),
+                    }); return;
                 };
                 match event {
                     Ok(ProviderEvent::Replay { data }) => replay = Some(data),
@@ -1166,7 +1204,9 @@ impl Runtime {
                             .saturating_add(delta.len())
                             > MAX_RUN_MODEL_TEXT_BYTES
                         {
-                            return Err("summarizer output exceeded the run text bound".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer output exceeded the run text bound".to_owned(),
+                            )); return;
                         }
                         text.push_str(&delta);
                     }
@@ -1176,11 +1216,15 @@ impl Runtime {
                         | ProviderEvent::ReasoningCompleted { .. },
                     ) => {}
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
-                        return Err("summarizer refused".to_owned());
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer refused".to_owned(),
+                        )); return;
                     }
                     Ok(ProviderEvent::ToolCallStarted { id, name }) => {
                         if rejected_call_turn {
-                            return Err("summarizer called a tool on two turns".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer called a tool on two turns".to_owned(),
+                            )); return;
                         }
                         if calls.len() >= MAX_ADMITTED_TOOL_CALLS_PER_TURN
                             || id.is_empty()
@@ -1189,7 +1233,9 @@ impl Runtime {
                             || name.len() > MAX_TOOL_NAME_BYTES
                             || calls.iter().any(|call| call.id == id)
                         {
-                            return Err("summarizer streamed a malformed tool call".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed a malformed tool call".to_owned(),
+                            )); return;
                         }
                         calls.push(SummarizerCall {
                             id,
@@ -1199,13 +1245,15 @@ impl Runtime {
                     }
                     Ok(ProviderEvent::ToolCallArgumentsDelta { id, json }) => {
                         let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
-                            return Err(
-                                "summarizer streamed arguments for an unknown call".to_owned()
-                            );
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer streamed arguments for an unknown call".to_owned(),
+                            )); return;
                         };
                         if call.arguments.len().saturating_add(json.len()) > MAX_TOOL_ARGUMENT_BYTES
                         {
-                            return Err("summarizer tool arguments exceeded their bound".to_owned());
+                            yield Err(runtime::SummarizeError::Rejected(
+                                "summarizer tool arguments exceeded their bound".to_owned(),
+                            )); return;
                         }
                         call.arguments.push_str(&json);
                     }
@@ -1214,29 +1262,72 @@ impl Runtime {
                         usage = reported.map(provider_usage);
                         break;
                     }
-                    Ok(ProviderEvent::Incomplete { reason, .. }) => {
+                    Ok(ProviderEvent::Incomplete { reason, usage: reported }) => {
+                        usage = reported.map(provider_usage);
                         truncated = Some(reason);
                         break;
                     }
-                    Err(error) => return Err(error.to_string()),
+                    // A transient fault (overload, rate limit, transport loss)
+                    // is the provider's moment; the run loop retries the
+                    // summarizer like a model turn (ADR-0048 § 2).
+                    Err(error) => {
+                        let kind = run_failure_kind(error.kind());
+                        let message = error.to_string();
+                        yield Err(if recoverable_turn_fault(kind) {
+                            runtime::SummarizeError::Transient { kind, message }
+                        } else {
+                            runtime::SummarizeError::Rejected(message)
+                        }); return;
+                    }
                 }
             }
+            ordinal += 1;
+            let mut completed_blocks = Vec::with_capacity(calls.len() + 1);
+            if !text.is_empty() {
+                completed_blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+            for call in &calls {
+                let encoded = if call.arguments.trim().is_empty() { "{}" } else { &call.arguments };
+                match serde_json::value::RawValue::from_string(encoded.to_owned()) {
+                    Ok(arguments) => completed_blocks.push(ContentBlock::ToolCall {
+                        id: call.id.clone(), name: call.name.clone(), arguments,
+                    }),
+                    // Preserve measured spend even when malformed arguments
+                    // make this turn unusable; these calls are never executed.
+                    Err(_) => completed_blocks.push(ContentBlock::Text {
+                        text: format!("[Malformed summarizer call {} {}: {}]", call.id, call.name, call.arguments),
+                    }),
+                }
+            }
+            let completed = Message::new(Role::Assistant, completed_blocks);
+            let completed = match &replay {
+                Some(data) => completed.with_replay(data.clone()),
+                None => completed,
+            };
+            yield Ok(runtime::SummarizeStep::TurnCompleted {
+                ordinal, message: completed, usage, truncated: truncated.is_some(),
+            });
             // Overflowing the sum is a provider protocol fault; fail the
             // compaction rather than persist an understated total.
             total_usage = match (total_usage, usage) {
                 (Some(total), Some(turn)) => match sessions::add_usage(total, turn) {
                     Some(sum) => Some(sum),
-                    None => return Err("summarizer usage overflowed".to_owned()),
+                    None => {
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer usage overflowed".to_owned(),
+                        )); return;
+                    }
                 },
-                (Some(total), None) | (None, Some(total)) => Some(total),
-                (None, None) => None,
+                (Some(_), None) | (None, Some(_)) | (None, None) => None,
             };
             if !calls.is_empty() {
                 // Answer each call with a rejection and ask again. The model
                 // abandoned its reply, so nothing written so far is kept. A
                 // cut turn's calls are incomplete and cannot be answered.
                 if truncated.is_some() {
-                    return Err("summarizer called a tool and was cut off".to_owned());
+                    yield Err(runtime::SummarizeError::Rejected(
+                        "summarizer called a tool and was cut off".to_owned(),
+                    )); return;
                 }
                 rejected_call_turn = true;
                 summary.clear();
@@ -1258,9 +1349,9 @@ impl Runtime {
                         arguments
                     };
                     let Ok(arguments) = serde_json::value::RawValue::from_string(arguments) else {
-                        return Err(
-                            "summarizer streamed tool arguments that are not JSON".to_owned()
-                        );
+                        yield Err(runtime::SummarizeError::Rejected(
+                            "summarizer streamed tool arguments that are not JSON".to_owned(),
+                        )); return;
                     };
                     blocks.push(ContentBlock::ToolCall {
                         id: id.clone(),
@@ -1285,25 +1376,26 @@ impl Runtime {
             }
             summary.push_str(&text);
             let Some(reason) = truncated else {
-                return Ok((summary, total_usage));
+                yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
             if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
                 // Nothing visible: the cap went to hidden reasoning. A
                 // continuation would resend the same request. (A provider
                 // pause with no text is resent as the provider requires.)
-                return Err(format!(
+                yield Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) without producing any visible text; the limit was spent on reasoning. Lower `reasoning_effort` or raise `max_output_tokens`"
-                ));
+                ))); return;
             }
             if continuations >= MAX_OUTPUT_CONTINUATIONS {
-                return Err(format!(
+                yield Err(runtime::SummarizeError::Rejected(format!(
                     "summarizer output was cut off at the output token limit ({max_output_tokens} tokens) on {} consecutive turns",
                     u32::from(MAX_OUTPUT_CONTINUATIONS) + 1
-                ));
+                ))); return;
             }
             continuations += 1;
             messages.push(Message::assistant(text));
             messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
+        }
         }
     }
 
@@ -1404,13 +1496,6 @@ impl Runtime {
         self
     }
 
-    fn config_grants(&self) -> std::collections::HashSet<String> {
-        self.hosts
-            .iter()
-            .flat_map(|host| host.config_grants())
-            .collect()
-    }
-
     /// Restricts model-visible sub-agent overrides to authenticated canonical
     /// routes supplied by the embedding application. Omission still resolves
     /// through the configured worker model and persisted parent selection.
@@ -1434,6 +1519,21 @@ impl Runtime {
     #[must_use]
     pub const fn with_audit(mut self, audit: runtime::AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Share the executing host's provenance across this runtime's plans and children.
+    #[must_use]
+    pub fn with_process_producer(mut self, producer: Arc<ProcessProducer>) -> Self {
+        self.process_producer = producer;
+        self
+    }
+
+    /// Approve exact self-contained native read implementations for this host.
+    /// Empty by default; this trust must never come from tool or workspace input.
+    #[must_use]
+    pub fn with_approved_read_images(mut self, images: runtime::ApprovedReadImages) -> Self {
+        self.approved_read_images = Arc::new(images);
         self
     }
 
@@ -1497,27 +1597,23 @@ impl Runtime {
         workspace: PathBuf,
         cancelled: RunCancellation,
     ) -> RuntimeStream {
-        // Configuration allowlists are the only grants a gate-less run has;
-        // read-only mode still denies them inside `evaluate`.
-        let grants = approval::SessionGrants {
-            tools: self.config_grants(),
-            shell_prefixes: Vec::new(),
-            hosts: Vec::new(),
-            delegate: approval::DelegateGrants::default(),
-        };
-        self.run_loop(
+        let mut capabilities = RunCapabilities::user(None);
+        capabilities.unattended = true;
+        self.run_loop_with_spawner(
             messages,
             workspace,
             cancelled,
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Ask,
-                grants,
+                grants: approval::SessionGrants::default(),
                 network: Arc::clone(&self.network),
             }),
             Arc::new(workspace::FileState::default()),
+            capabilities,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn run_loop(
         &self,
         messages: Vec<Message>,
@@ -1631,6 +1727,16 @@ impl Runtime {
                 }
             };
             drop(opened);
+            let gate = if capabilities.unattended {
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Ask,
+                    grants: approval::SessionGrants {
+                        tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
+                        ..approval::SessionGrants::default()
+                    },
+                    network: Arc::clone(&compiled.runtime.network),
+                }) as Arc<dyn ToolGate>
+            } else { gate };
             let mut events = compiled.execute(messages, cancelled, gate, file_state, capabilities);
             while let Some(event) = events.next().await {
                 match event {
@@ -1648,8 +1754,16 @@ impl plan::CompiledAgentPlan {
     /// plan's workspace, the direct (non-durable) counterpart of a session
     /// run. Configuration allowlists are the only grants.
     pub fn run(self: &Arc<Self>, command: RunCommand) -> RunStream {
+        let mut capabilities = RunCapabilities::user(None);
+        capabilities.unattended = true;
         let grants = approval::SessionGrants {
-            tools: self.runtime.config_grants(),
+            tools: self
+                .descriptor()
+                .tools
+                .config_grants
+                .iter()
+                .cloned()
+                .collect(),
             shell_prefixes: Vec::new(),
             hosts: Vec::new(),
             delegate: approval::DelegateGrants::default(),
@@ -1664,7 +1778,7 @@ impl plan::CompiledAgentPlan {
                     network: Arc::clone(&self.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None),
+                capabilities,
             ),
             self.runtime.context_window,
         )
@@ -1748,6 +1862,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
+                | RuntimeEvent::ToolResultsProjected { .. }
                 // Direct runs have no steering channel, so these never fire.
                 | RuntimeEvent::SteeringApplied { .. }
                 | RuntimeEvent::Interrupted { .. }
@@ -1970,6 +2085,7 @@ pub enum RuntimeConfigError {
 #[cfg(test)]
 mod tests {
     mod progress;
+    mod t20;
 
     use std::{
         sync::{
@@ -2308,12 +2424,14 @@ mod tests {
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             runtime::PromptSections {
                 tool_index: plan.catalog.index_text().map(Arc::as_ref),
                 roster: plan.roster_text.as_deref(),
                 skill_index: plan.skills.disclosure_text(),
                 subagent: None,
+                ..runtime::PromptSections::default()
             },
             &plan.instructions,
             plan.persona.as_deref(),
@@ -2378,15 +2496,27 @@ mod tests {
             "read",
             serde_json::json!({"type": "object"}),
         )]);
-        let result = runtime
-            .summarize(
-                vec![Message::user("summarize")],
-                Arc::from("system"),
-                tools,
-                256,
-            )
-            .await
-            .map(|(summary, _)| summary);
+        let steps = runtime.summarize(
+            vec![Message::user("summarize")],
+            Arc::from("system"),
+            tools,
+            256,
+        );
+        tokio::pin!(steps);
+        let mut result = Err("summarizer ended without a summary".to_owned());
+        while let Some(step) = steps.next().await {
+            match step {
+                Ok(runtime::SummarizeStep::Summary(summary)) => {
+                    result = Ok(summary);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    result = Err(error.to_string());
+                    break;
+                }
+            }
+        }
         let requests = requests.lock().unwrap().clone();
         (result, requests)
     }
@@ -2551,6 +2681,7 @@ mod tests {
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             guidance: true,
             subagent: None,
@@ -2665,8 +2796,9 @@ mod tests {
             .expect("the provider request must carry a system prompt");
         assert!(system.contains("Workspace instructions from AGENTS.md"));
         assert!(system.contains("Run the repository's focused checks"));
-        assert!(system.contains("observable completion criteria"));
-        assert!(system.contains("preserve unrelated work"));
+        assert!(system.contains("This unattended run"));
+        assert!(!system.contains("Do the work. Decide what done looks like"));
+        assert!(system.contains("Preserve unrelated work"));
         assert!(system.contains("analysis-only"));
         assert!(system.contains("failed tools and tests as evidence"));
         assert!(system.contains("continue when a safe path remains"));
@@ -2674,7 +2806,7 @@ mod tests {
         assert!(system.contains("Do not claim success without evidence"));
         assert!(system.contains("remaining failures and uncertainty honestly"));
         assert!(system.contains("time, token, cost, and safety budgets"));
-        assert!(system.contains("root-to-leaf"));
+        assert!(system.contains("more specific first"));
     }
 
     #[tokio::test]
@@ -3863,14 +3995,11 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].tools().len(),
-            8 + usize::from(cfg!(feature = "tool-fetch"))
-        );
+        assert_eq!(tool_names(&requests[0]), ["read_file", "tree", "search"]);
         let system = requests[0]
             .system()
             .expect("agent runs set a system prompt");
-        assert!(system.contains("edit_file"));
+        assert!(!system.contains("edit_file"));
         assert!(system.contains(directory.path().to_str().unwrap()));
         let result_message = &requests[1].messages()[2];
         assert!(matches!(
@@ -4010,6 +4139,413 @@ mod tests {
         let result = execution.await.unwrap();
         assert!(result.is_error);
         assert!(result.model_text.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn ab3_parallel_default_reads_recover_every_line_under_the_turn_budget() {
+        struct State {
+            turn: usize,
+            seen: Vec<Vec<bool>>,
+            results: std::collections::HashSet<String>,
+            cuts: usize,
+            calls: usize,
+        }
+        struct BatchReader(Arc<Mutex<State>>);
+        impl Provider for BatchReader {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let mut state = self.0.lock().unwrap();
+                for block in request
+                    .messages()
+                    .iter()
+                    .flat_map(|message| message.content())
+                {
+                    if let ContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        is_error,
+                    } = block
+                    {
+                        if !state.results.insert(call_id.clone()) {
+                            continue;
+                        }
+                        assert!(!is_error, "{content}");
+                        state.cuts += usize::from(content.contains("turn budget reached"));
+                        let file = content
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap();
+                        let index: usize = file.strip_prefix("batch-").unwrap().parse().unwrap();
+                        for row in content.lines().skip(1) {
+                            if let Some((number, _)) = row.split_once('\t')
+                                && let Ok(number) = number.trim().parse::<usize>()
+                            {
+                                assert!((1..=1_000).contains(&number));
+                                state.seen[index][number - 1] = true;
+                            }
+                        }
+                    }
+                }
+                if state.seen.iter().all(|file| file.iter().all(|seen| *seen)) {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "all lines read".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                assert!(
+                    state.turn < 20,
+                    "bounded fixture failed to recover every line"
+                );
+                let turn = state.turn;
+                state.turn += 1;
+                let mut events = Vec::new();
+                for index in 0..6 {
+                    if let Some(offset) = state.seen[index].iter().position(|seen| !seen) {
+                        state.calls += 1;
+                        let id = format!("batch-{turn}-{index}");
+                        events.push(Ok(ProviderEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: "read_file".to_owned(),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: id.clone(),
+                            json: format!(r#"{{"path":"batch-{index}","offset":{}}}"#, offset + 1),
+                        }));
+                        events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
+                    }
+                }
+                events.push(Ok(ProviderEvent::Completed { usage: None }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..6 {
+            std::fs::write(
+                directory.path().join(format!("batch-{index}")),
+                "012345678901234567890123456789\n".repeat(1_000),
+            )
+            .unwrap();
+        }
+        let state = Arc::new(Mutex::new(State {
+            turn: 0,
+            seen: vec![vec![false; 1_000]; 6],
+            results: Default::default(),
+            cuts: 0,
+            calls: 0,
+        }));
+        let runtime = Runtime::new(BatchReader(Arc::clone(&state)), "gpt-test", 256).unwrap();
+        let events = runtime
+            .run_messages_in_workspace(
+                vec![Message::user("read all six files")],
+                directory.path().to_owned(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let state = state.lock().unwrap();
+        assert!(state.seen.iter().all(|file| file.iter().all(|seen| *seen)));
+        assert!(state.calls <= 30);
+        assert!(
+            state.cuts == 0 || state.calls < 30,
+            "more cuts must buy fewer calls"
+        );
+        eprintln!(
+            "AB3 parallel runtime: calls={} turn_budget_cuts={}",
+            state.calls, state.cuts
+        );
+    }
+
+    #[tokio::test]
+    async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
+        let arguments = serde_json::json!({"query":"AGENTS.md","mode":"names"}).to_string();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![("search", arguments); 16]; 20],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_loop_with_spawner(
+                vec![Message::user("inspect")],
+                directory.path().to_owned(),
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::Full,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).stall_exempt(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|request| request
+                .messages()
+                .iter()
+                .any(|message| { *message == Message::user(SLICE_CHECKPOINT_NOTICE) })),
+            "140 executed searches must not trigger the 256-execution slice boundary"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
+                ))
+                .count(),
+            140
+        );
+    }
+
+    #[tokio::test]
+    async fn ab2_batched_searches_defer_before_execution_and_retry_unchanged() {
+        for count in [16, 64] {
+            let directory = tempfile::tempdir().unwrap();
+            // Long names fill a page and force an actual continuation cursor.
+            for index in 0..100 {
+                std::fs::write(
+                    directory
+                        .path()
+                        .join(format!("{index:03}{}", "x".repeat(220))),
+                    "",
+                )
+                .unwrap();
+            }
+            let arguments = serde_json::json!({"query":"x","mode":"names"}).to_string();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![
+                        vec![("search", arguments.clone()); count],
+                        vec![("search", arguments.clone())],
+                    ],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requested = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::AssistantTurnCompleted { calls, .. } if !calls.is_empty() => {
+                        Some(calls)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
+                - count * tools::output::result_reserve_bytes("search"))
+                / tools::output::search_reservation_bytes(false);
+            assert_eq!(requested[0].len(), count);
+            for (index, call) in requested[0].iter().enumerate() {
+                assert_eq!(call.arguments, arguments);
+                if index >= MAX_TOOL_CALLS_PER_TURN {
+                    assert!(matches!(
+                        call.rejection,
+                        Some(runtime::CallRejection::Runtime(_))
+                    ));
+                } else {
+                    assert_eq!(
+                        call.rejection,
+                        (index >= admitted).then_some(runtime::CallRejection::OutputBudget)
+                    );
+                }
+            }
+            assert!(requested[1][0].rejection.is_none());
+            let completed = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        result, is_error, ..
+                    } => Some((result, *is_error)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(completed.len(), count + 1);
+            let pages = completed
+                .iter()
+                .filter(|(_, error)| !error)
+                .map(|(text, _)| *text)
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), admitted + 1);
+            assert!(pages[0].len() > 10 * 1024);
+            assert!(pages[0].lines().next().unwrap().contains("next="));
+            assert!(pages.iter().all(|page| *page == pages[0]));
+            assert!(
+                completed
+                    .iter()
+                    .filter(|(_, error)| *error)
+                    .all(|(text, _)| text.starts_with("turn_output_budget:")
+                        || text.contains("not executed"))
+            );
+            let requests = requests.lock().unwrap();
+            for request in requests.iter().skip(1) {
+                for message in request.messages() {
+                    let total = message
+                        .content()
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                            _ => None,
+                        })
+                        .sum::<usize>();
+                    assert!(
+                        total <= tools::output::MAX_TURN_TOOL_OUTPUT_BYTES,
+                        "{total}"
+                    );
+                    for block in message.content() {
+                        if let ContentBlock::ToolResult {
+                            content,
+                            is_error: false,
+                            ..
+                        } = block
+                        {
+                            assert_eq!(content, pages[0], "admitted page must remain whole");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_late_direct_search_preserves_complete_pages_and_continuation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::iter::repeat_n("a".repeat(240), 8)
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(directory.path().join(&root)).unwrap();
+        for index in 0..10 {
+            std::fs::write(
+                directory
+                    .path()
+                    .join(&root)
+                    .join(format!("{index:02}{}", "x".repeat(200))),
+                "",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            directory.path().join("big.txt"),
+            format!("{}\n", "b".repeat(1_900)).repeat(17),
+        )
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![vec![
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    ("read_file", r#"{"path":"big.txt"}"#.to_owned()),
+                    (
+                        "search",
+                        r#"{"query":"x{10}","regex":true,"mode":"names"}"#.to_owned(),
+                    ),
+                ]],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let recorded = events
+            .iter()
+            .filter_map(|e| match e {
+                RuntimeEvent::ToolCallFinished { result, .. } if result.starts_with("search ") => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recorded.len(), 1);
+        let mut page = {
+            let captured = requests.lock().unwrap();
+            let results = captured[1].messages()[2].content();
+            let ContentBlock::ToolResult { content, .. } = &results[3] else {
+                panic!("search result");
+            };
+            assert_eq!(
+                content, &recorded[0],
+                "live projection must retain every page row and its cursor"
+            );
+            assert!(!content.contains("turn budget reached"));
+            assert!(content.len() > 4 * 1024);
+            content.clone()
+        };
+        let workspace = workspace::Workspace::open(directory.path()).unwrap();
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            for path in page.lines().skip(1) {
+                assert!(found.insert(path.to_owned()), "duplicate match");
+            }
+            let next = page
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|f| f.strip_prefix("next="));
+            let Some(next) = next else {
+                break;
+            };
+            let result = tools::execute(
+                workspace.clone(),
+                Arc::new(workspace::FileState::default()),
+                "search".to_owned(),
+                serde_json::json!({"query":"x{10}","regex":true,"mode":"names","cursor":next})
+                    .to_string(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::default(),
+            )
+            .await;
+            assert!(!result.is_error, "{}", result.model_text);
+            page = result.model_text;
+        }
+        assert_eq!(found.len(), 10);
     }
 
     #[tokio::test]
@@ -4559,6 +5095,124 @@ mod tests {
                 matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
                 "{events:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_checkpoint_feedback_and_combined_correction_notice_are_bounded() {
+        struct Oversized;
+        impl CheckpointReviewer for Oversized {
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: if request.phase == runtime::CheckpointPhase::ToolResult {
+                        CheckpointOutcome::Contradicted
+                    } else {
+                        CheckpointOutcome::Supported
+                    },
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        for count in [1, 3] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("note"), "evidence").unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("read_file", r#"{"path":"note"}"#.to_owned()); count]],
+                    requests: Arc::clone(&requests),
+                },
+                "test",
+                256,
+            )
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(Oversized));
+            let events = runtime
+                .run_messages_in_workspace(
+                    vec![Message::user("inspect")],
+                    directory.path().to_owned(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                events.last(),
+                Some(RuntimeEvent::Completed { .. })
+            ));
+            let notice = events
+                .iter()
+                .find_map(|event| match event {
+                    RuntimeEvent::ToolResultsProjected { projection, .. } => {
+                        projection.correction_notice.as_deref()
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                notice.len() <= 32 * 1024,
+                "{count} results: {} notice bytes",
+                notice.len()
+            );
+            assert!(notice.starts_with("JEV RED"));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].messages().contains(&Message::user(notice)));
+        }
+    }
+
+    #[tokio::test]
+    async fn ab2_final_candidate_correction_feedback_is_bounded() {
+        struct FinalRed;
+        impl CheckpointReviewer for FinalRed {
+            fn reviews_tools(&self) -> bool {
+                false
+            }
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    spend: qq_protocol::CheckpointSpend::default(),
+                    outcome: CheckpointOutcome::Contradicted,
+                    confidence: Some(1.0),
+                    feedback: "界".repeat(12 * 1024),
+                }))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: Vec::new(),
+                requests: Arc::clone(&requests),
+            },
+            "test",
+            256,
+        )
+        .unwrap()
+        .with_checkpoint_reviewer(Arc::new(FinalRed));
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("finish")], directory.path().to_owned())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            let notice = request
+                .messages()
+                .iter()
+                .flat_map(Message::content)
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap();
+            assert!(notice.len() <= 32 * 1024);
+            assert!(notice.ends_with("…[truncated]"));
         }
     }
 
@@ -8538,10 +9192,7 @@ mod tests {
             !names.contains(&"rogue_tool"),
             "specs outside the mcp__ namespace must be discarded"
         );
-        assert_eq!(
-            requests[0].tools().len(),
-            9 + usize::from(cfg!(feature = "tool-fetch"))
-        );
+        assert_eq!(names, ["read_file", "tree", "search", "mcp__srv__ping"]);
         let system = requests[0].system().unwrap();
         assert!(system.contains("mcp__srv__ping"));
         assert!(system.contains("external tool hosts"));
@@ -8707,6 +9358,81 @@ mod tests {
             events.last(),
             Some(RuntimeEvent::Completed { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ab1_inherited_path_shadowed_read_counts_as_work_and_audit() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("QQ_CONTEXT_SHADOW_WORKER").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let bin = directory.path().join("bin");
+            let workspace = directory.path().join("workspace");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::create_dir(&workspace).unwrap();
+            let program = bin.join("grep");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\nprintf changed > written.txt\nprintf 'match\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::ab1_inherited_path_shadowed_read_counts_as_work_and_audit",
+                    "--nocapture",
+                ])
+                .env("QQ_CONTEXT_SHADOW_WORKER", "1")
+                .env("QQ_CONTEXT_SHADOW_ROOT", &workspace)
+                .env("PATH", &bin)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "shadowed executable classification worker failed"
+            );
+            return;
+        }
+        let path = std::path::PathBuf::from(std::env::var_os("QQ_CONTEXT_SHADOW_ROOT").unwrap());
+        let arguments = r#"{"program":"grep","args":["-n","x","f"]}"#.to_owned();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tools::execute(
+                workspace::Workspace::open(&path).unwrap(),
+                Arc::new(workspace::FileState::default()),
+                "exec".to_owned(),
+                arguments.clone(),
+                RunCancellation::new(),
+                None,
+                tools::ToolTasks::default(),
+                Arc::new(runtime::ShellPolicy::default()),
+                Arc::new(tools::network::NetworkPolicy::default()),
+            ));
+        assert!(!output.is_error, "{}", output.model_text);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        let call = RuntimeToolCall {
+            id: ToolCallId::from_bytes([42; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "shadow".to_owned(),
+            name: "exec".to_owned(),
+            arguments,
+            effect: catalog::EffectClass::Shell,
+            rejection: None,
+        };
+        assert!(
+            runtime::is_progress(&call, None, &output),
+            "unverified executable must count as work"
+        );
+        let mut triggers = runtime::AuditTriggers::default();
+        note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &output);
+        assert!(
+            triggers.non_read_shell,
+            "unverified mutation must not suppress audit"
+        );
     }
 
     /// Scripts one `spawn_agent` call on the first turn, then completes.
@@ -9460,7 +10186,7 @@ mod tests {
 
     #[test]
     fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
-        const IMPLEMENT: &str = "- Implement requested changes rather than stopping at analysis";
+        const IMPLEMENT: &str = "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n";
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let render = |subagent| {
@@ -9503,15 +10229,7 @@ mod tests {
             head.to_owned()
         };
         assert_eq!(without_section(&write), root);
-        assert_eq!(
-            without_section(&read),
-            root.replacen(
-                "- Implement requested changes rather than stopping at analysis unless the user \
-                 requested analysis-only work.\n",
-                "",
-                1
-            )
-        );
+        assert_eq!(without_section(&read), root.replacen(IMPLEMENT, "", 1).replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change.", "- Explore only as far as the next finding needs. Once you can answer the brief, return the evidence.", 1));
     }
 
     #[test]
@@ -9596,6 +10314,14 @@ mod tests {
         const CONTROL_BULLET: &str = "- A sub-agent still working may also send its latest \
             progress report as a notice. Call wait_agents when your next step needs specific \
             answers, and cancel_agent for a sub-agent whose answer you no longer need.\n";
+        const READ_FIRST_BULLET: &str = "- Read a file with read_file before editing or \
+            overwriting it; edits without a prior read in this session are rejected unless \
+            if_hash carries the h:<hash> from that file's header.";
+        const EXACT_EDIT_BULLET: &str = "- Read a file with read_file before overwriting it or \
+            editing by anchor; an edit to a file not read in this session (or changed since) \
+            applies only when its old matches exactly once, and the result says note=unread or \
+            note=changed_since_read. If one is refused, extend old until it is exact and \
+            unique, or read the lines around it.";
         const CONCURRENT: &str = "because sub-agents run concurrently.";
         const CONCURRENT_WITH_YOU: &str =
             "because sub-agents run concurrently with each other and with you.";
@@ -9627,10 +10353,25 @@ mod tests {
             None,
             None,
         );
+        // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
+        // older prompt-14 golden below stays unchanged.
+        let prompt = prompt
+            .replacen("- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n", "- Determine observable completion criteria from the user's request before acting.\n", 1)
+            .replacen("- Explore only as far as your next action needs. Once you can name the file and the change, make the change. Search an exact name once; if it finds only a definition, act on what you know or say what is missing.\n", "", 1)
+            .replacen("- Do not re-read text that is still in your context; re-read only lines you have not seen, lines that may have changed, or a read that shows as a [pruned: …] stub. Read the region you need in one call, with ranges for several windows, rather than paging in slices.\n", "", 1)
+            .replacen("Preserve unrelated work in the files you change.", "Inspect existing state before changing it and preserve unrelated work.", 1)
+            .replacen("Read with the built-ins: read_file instead of cat, head, tail, or sed -n; search instead of grep or rg; tree instead of ls or find. They accept a path inside ignored directories, such as a worktree under target/ or .worktrees/: pass path and include_ignored=true to search or tree rather than cd. Prefer search over guessing file paths;", "Prefer search over guessing file paths, and search/tree over shell grep, rg, find, and ls;", 1)
+            .replacen("mode=outline for the shape of a long file", "mode=outline to see a file's shape before reading it", 1)
+            .replacen("Instructions from nested AGENTS.md files (CLAUDE.md where there is none) apply below their directory, more specific first. Before editing below the root, find them once per distinct search root with search mode=names regex=true query=\"(^|/)(AGENTS|CLAUDE)\\.md$\", and read only those on the path to your target. Always search the workspace root to cover nonignored ancestors. For a target inside an ignored directory, also search its highest ignored ancestor below the workspace with path and include_ignored=true, covering instructions within that subtree. Search each distinct discovery root once, covering every edit target; read only applicable instruction files. For a target deeper than 64 directory components, also search its target ancestor at each 64-component boundary with path and include_ignored=true. A partial=depth or depth_limited marker requires these bounded target scopes; cursor pages cannot recover skipped depths. Names discovery reports safe instruction-file symlinks; an unresolved instruction link is a blocker before editing. Cursor continuations belong to that discovery; do not restart it unchanged. The host supplies workspace-root instructions.", "Before changing files below a subdirectory, inspect each directory from the workspace root to the target for AGENTS.md; when AGENTS.md is absent at one scope, check CLAUDE.md. Apply selected instructions root-to-leaf, with more-specific instructions taking precedence.\n- Implement requested changes rather than stopping at analysis unless the user requested analysis-only work.", 1)
+            .replacen("read_file, tree, search are read-only;", "read_file, tree, search, search_history, and read_tool_result are read-only;", 1)
+            .replacen("- Give every tool path relative to the workspace root; absolute paths are rejected.\n", "- Give every tool path relative to the workspace root; absolute paths are rejected.\n- When a result ends in a …[qq: … omitted; full output t:…]… marker, the complete output is stored: call read_tool_result with that handle (offset/limit to page, query to search) instead of re-running the command.\n", 1);
         assert!(prompt.contains(NEW_BULLET), "{prompt}");
-        // Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control bullet, and
-        // prompt 16 rewords only the first and last delegation bullets; undo
-        // them, then the brief bullet.
+        // Prompt 19 (T19, ADR-0058) rewords only the read-before-edit
+        // bullet. Prompt 17 (ADR-0054 § 4, AP4.2) adds only the control
+        // bullet, and prompt 16 rewords only the first and last delegation
+        // bullets; undo them, then the brief bullet.
+        assert!(prompt.contains(EXACT_EDIT_BULLET), "{prompt}");
+        let prompt = prompt.replacen(EXACT_EDIT_BULLET, READ_FIRST_BULLET, 1);
         assert!(prompt.contains(CONTROL_BULLET), "{prompt}");
         let v16 = prompt.replacen(CONTROL_BULLET, "", 1);
         assert!(v16.contains(BACKGROUND_SPAWN), "{v16}");
@@ -9646,12 +10387,13 @@ mod tests {
             format!("{:x}", Sha256::digest(v14.as_bytes())),
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
-        // Every built-in declaration is unchanged.
+        // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
+        // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "568cef80e021a4c69625eb992086993b9c0f43857ae74ff253f70253a752f24f"
+            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -9683,7 +10425,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_root_keeps_the_implement_line_and_has_no_subagent_section() {
+    fn ab4_read_only_root_states_authority_and_has_no_action_obligation() {
         let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         // The schemas a ReadOnly root is offered: the mutating, shell and
@@ -9696,12 +10438,17 @@ mod tests {
         let prompt = runtime::agent_system_prompt(
             workspace,
             &read_only,
-            runtime::PromptSections::default(),
+            runtime::PromptSections {
+                read_only: true,
+                ..runtime::PromptSections::default()
+            },
             &instructions,
             None,
             None,
         );
-        assert!(prompt.contains("- Implement requested changes rather than stopping at analysis"));
+        assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+        assert!(prompt.contains("This run cannot change files or run commands"));
+        assert!(!prompt.contains("make the change. Search an exact name once"));
         assert!(!prompt.contains("Sub-agent:"));
     }
 
@@ -10008,6 +10755,7 @@ mod tests {
         read_only_hint: bool,
         /// Whether the host declares configuration grants for its tools.
         granted: bool,
+        live_granted: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl WideHost {
@@ -10019,6 +10767,7 @@ mod tests {
                 failure: None,
                 read_only_hint: false,
                 granted: true,
+                live_granted: None,
             }
         }
     }
@@ -10057,7 +10806,9 @@ mod tests {
         }
 
         fn config_grants(&self) -> Vec<String> {
-            if !self.granted {
+            if !self.live_granted.as_ref().map_or(self.granted, |granted| {
+                granted.load(std::sync::atomic::Ordering::SeqCst)
+            }) {
                 return Vec::new();
             }
             (0..self.count)
@@ -10415,6 +11166,545 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_interactive_inspection_only_profiles_have_no_action_obligation() {
+        for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .execute(
+                    vec![Message::user("make the requested change")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::clone(&plan.runtime.network),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            let system = requests[0].system().unwrap();
+            assert!(
+                !system.contains("- Do the work. Decide what done looks like"),
+                "{system}"
+            );
+            assert!(!system.contains("make the change. Search an exact name once"));
+            assert!(system.contains("caller-applied"), "{system}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_direct_external_grants_control_declaration_and_execution() {
+        for granted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            host.granted = granted;
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                    &runtime, workspace,
+                ))
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .run(RunCommand::new("perform the requested operation"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_duplicate_host_grants_authorize_only_the_surviving_owner() {
+        for unattended in [false, true] {
+            for (first_granted, later_granted) in
+                [(false, true), (true, false), (false, false), (true, true)]
+            {
+                let directory = tempfile::tempdir().unwrap();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let mut first = WideHost::new(2);
+                first.granted = first_granted;
+                let first_calls = Arc::clone(&first.calls);
+                let mut later = WideHost::new(2);
+                later.granted = later_granted;
+                let later_calls = Arc::clone(&later.calls);
+                let runtime = Runtime::new(
+                    TurnScript {
+                        turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                        requests: Arc::clone(&requests),
+                    },
+                    "test-model",
+                    256,
+                )
+                .unwrap()
+                .with_tool_host(Arc::new(first))
+                .with_tool_host(Arc::new(later));
+                let workspace = std::fs::canonicalize(directory.path()).unwrap();
+                let plan = tokio::task::spawn_blocking(move || {
+                    plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                        &runtime, workspace,
+                    ))
+                    .unwrap()
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    plan.descriptor()
+                        .tools
+                        .config_grants
+                        .iter()
+                        .any(|name| name == "ext__wide__tool01"),
+                    first_granted
+                );
+                if unattended {
+                    let events = plan
+                        .run(RunCommand::new("perform the requested operation"))
+                        .collect::<Vec<_>>()
+                        .await;
+                    assert!(
+                        matches!(events.last(), Some(RunEvent::Completed)),
+                        "{events:?}"
+                    );
+                } else {
+                    let events = plan
+                        .execute(
+                            vec![Message::user("perform the requested operation")],
+                            RunCancellation::new(),
+                            Arc::new(StaticPolicyGate {
+                                mode: ApprovalMode::Ask,
+                                grants: approval::SessionGrants {
+                                    tools: plan
+                                        .descriptor()
+                                        .tools
+                                        .config_grants
+                                        .iter()
+                                        .cloned()
+                                        .collect(),
+                                    ..approval::SessionGrants::default()
+                                },
+                                network: Arc::default(),
+                            }),
+                            Arc::new(workspace::FileState::default()),
+                            RunCapabilities::user(None),
+                        )
+                        .collect::<Vec<_>>()
+                        .await;
+                    assert!(
+                        matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                        "{events:?}"
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .any(|event| matches!(event, RuntimeEvent::ToolCallDenied { .. })),
+                        !first_granted
+                    );
+                }
+                assert_eq!(
+                    first_calls.lock().unwrap().len(),
+                    usize::from(first_granted)
+                );
+                assert!(later_calls.lock().unwrap().is_empty());
+                for request in requests.lock().unwrap().iter() {
+                    assert_eq!(
+                        tool_names(request).contains(&"ext__wide__tool01"),
+                        !unattended || first_granted
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_direct_gate_and_declarations_share_the_compiled_grant_snapshot() {
+        for granted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            let live_granted = Arc::new(std::sync::atomic::AtomicBool::new(granted));
+            host.live_granted = Some(Arc::clone(&live_granted));
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                    &runtime, workspace,
+                ))
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            live_granted.store(!granted, std::sync::atomic::Ordering::SeqCst);
+            let events = plan
+                .run(RunCommand::new("perform the requested operation"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_run_messages_uses_grants_at_first_poll_for_gate_and_declarations() {
+        for granted in [false, true] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut host = WideHost::new(2);
+            let live_granted = Arc::new(std::sync::atomic::AtomicBool::new(granted));
+            host.live_granted = Some(Arc::clone(&live_granted));
+            host.read_only_hint = !granted;
+            let calls = Arc::clone(&host.calls);
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![vec![("ext__wide__tool01", "{}".to_owned())], Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap()
+            .with_tool_host(Arc::new(host));
+            let events =
+                runtime.run_messages(vec![Message::user("perform the requested operation")]);
+            live_granted.store(!granted, std::sync::atomic::Ordering::SeqCst);
+            let events = events.collect::<Vec<_>>().await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            assert_eq!(calls.lock().unwrap().len(), usize::from(!granted));
+            let requests = requests.lock().unwrap();
+            for request in requests.iter() {
+                assert_eq!(tool_names(request).contains(&"ext__wide__tool01"), !granted);
+                let prompt = request.system().unwrap();
+                assert!(prompt.contains("This unattended run"), "{prompt}");
+                assert!(!prompt.contains("- Do the work. Decide what done looks like"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_read_only_root_hides_write_child_authority_and_denies_injection() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let spawner = Arc::new(StubSpawner::new(
+            SpawnAgentOutcome {
+                content: "must not run".to_owned(),
+                is_error: false,
+                spend: SpawnAgentSpend::NONE,
+                session_id: None,
+                detached: false,
+            },
+            Arc::new(Mutex::new(Vec::new())),
+        ));
+        let runtime = Runtime::new(TurnScript {
+            turns: vec![vec![("spawn_agent", r#"{"task":"edit a file","authority":"write","reviewer_model":"test-model"}"#.to_owned())], Vec::new()],
+            requests: Arc::clone(&requests),
+        }, "test-model", 256).unwrap().with_delegation(DelegationRoster {
+            write_children: true, ..DelegationRoster::default()
+        });
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![Message::user("inspect")],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::clone(&plan.runtime.network),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(Some(Arc::clone(&spawner) as Arc<dyn SubagentSpawner>))
+                    .read_only(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert!(spawner.requests.lock().unwrap().is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::ToolCallDenied { .. }))
+        );
+        for request in requests.lock().unwrap().iter() {
+            let spec = request
+                .tools()
+                .iter()
+                .find(|spec| spec.name() == "spawn_agent")
+                .unwrap();
+            let schema: serde_json::Value =
+                serde_json::from_str(spec.input_schema().get()).unwrap();
+            assert!(schema["properties"]["authority"].is_null(), "{schema}");
+            let prompt = request.system().unwrap();
+            assert!(prompt.contains("read-only sub-agent"), "{prompt}");
+            assert!(!prompt.contains("Choose authority: write"), "{prompt}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ab4_direct_requests_declare_only_executable_tools_and_state_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![Vec::new()],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .run(RunCommand::new("make the requested change"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RunEvent::Completed)),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        let names = tool_names(&requests[0]);
+        for denied in [
+            "edit_file",
+            "write_file",
+            "shell",
+            "exec",
+            "ask_user",
+            "fetch",
+        ] {
+            assert!(
+                !names.contains(&denied),
+                "denied schema {denied}: {names:?}"
+            );
+        }
+        assert!(names.contains(&"read_file"));
+        let prompt = requests[0].system().unwrap();
+        assert!(
+            !prompt.contains("- Do the work. Decide what done looks like"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("This unattended run"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
+        for exposed in [
+            Vec::new(),
+            vec!["read_file".to_owned()],
+            vec!["search".to_owned()],
+            vec!["tree".to_owned()],
+            vec!["shell".to_owned()],
+            vec!["exec".to_owned()],
+            vec!["edit_file".to_owned()],
+            vec!["write_file".to_owned()],
+            vec!["read_file".to_owned(), "write_file".to_owned()],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let expected = exposed.clone();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .execute(
+                    vec![Message::user("review the available context")],
+                    RunCancellation::new(),
+                    Arc::new(StaticPolicyGate {
+                        mode: ApprovalMode::Auto,
+                        grants: approval::SessionGrants::default(),
+                        network: Arc::clone(&plan.runtime.network),
+                    }),
+                    Arc::new(workspace::FileState::default()),
+                    RunCapabilities::user(None),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                tool_names(&requests[0]),
+                expected.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            let prompt = requests[0].system().unwrap();
+            if !expected.iter().any(|name| name == "read_file") {
+                assert!(
+                    !prompt.contains("with ranges"),
+                    "absent read_file ranges guidance: {prompt}"
+                );
+            }
+            if expected == ["search"] || expected == ["tree"] {
+                assert!(
+                    requests[0].tools()[0]
+                        .description()
+                        .contains("path and include_ignored=true")
+                );
+            }
+            if expected == ["read_file", "write_file"] {
+                for absent in ["old matches", "note=unread", "extend old", "anchor"] {
+                    assert!(!prompt.contains(absent), "{absent}: {prompt}");
+                }
+            }
+            if expected == ["write_file"] {
+                let description = requests[0].tools()[0].description();
+                assert!(description.contains("create_only"), "{description}");
+                assert!(description.contains("independently known"), "{description}");
+                assert!(!description.contains("read earlier"), "{description}");
+            }
+            if expected == ["exec"] {
+                assert!(
+                    !requests[0].tools()[0]
+                        .description()
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .any(|token| token == "shell")
+                );
+            }
+            if expected == ["shell"] {
+                let shell = &requests[0].tools()[0];
+                for absent in ["read_file", "search", "tree"] {
+                    assert!(
+                        !shell
+                            .description()
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == absent),
+                        "absent {absent} in shell description: {}",
+                        shell.description()
+                    );
+                }
+            }
+            for name in [
+                "read_file",
+                "tree",
+                "search",
+                "edit_file",
+                "write_file",
+                "shell",
+                "exec",
+                "ask_user",
+                "fetch",
+                "read_tool_result",
+                "search_history",
+            ] {
+                if !expected.iter().any(|present| present == name) {
+                    assert!(
+                        !prompt
+                            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                            .any(|token| token == name),
+                        "absent {name} advertised: {prompt}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn explicit_external_exposure_without_a_selector_is_fully_callable() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10673,6 +11963,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab4_read_only_recovery_omits_granted_external_pins_and_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![Vec::new()],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap()
+        .with_tool_host(Arc::new(WideHost::new(40)));
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let prior = serde_json::to_string(&catalog::SelectToolsResult {
+            pinned: vec!["ext__wide__tool03".to_owned()],
+            already_pinned: Vec::new(),
+            refused: Vec::new(),
+            remaining_pin_slots: 31,
+        })
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![
+                    Message::user("continue"),
+                    Message::new(
+                        Role::Assistant,
+                        vec![ContentBlock::tool_call(
+                            "c1".to_owned(),
+                            catalog::SELECT_TOOLS_TOOL.to_owned(),
+                            &serde_json::json!({"query":"widgets"}),
+                        )],
+                    ),
+                    Message::tool_results(vec![ContentBlock::ToolResult {
+                        call_id: "c1".to_owned(),
+                        content: prior,
+                        is_error: false,
+                    }]),
+                ],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::clone(&plan.runtime.network),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None).read_only(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            !tool_names(&requests[0])
+                .iter()
+                .any(|name| name.starts_with("ext__"))
+        );
+        let system = requests[0].system().unwrap();
+        assert!(!system.contains("ext__wide__tool03"));
+        assert!(system.contains("This run cannot change files or run commands"));
+    }
+
+    #[tokio::test]
     async fn recovered_runs_re_pin_from_prior_select_tools_results() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10886,5 +12250,43 @@ mod tests {
         assert!(!tool_names(&restricted_requests[0]).contains(&"load_skill"));
         assert_eq!(plan.descriptor().skills.disclosed, 1);
         assert_eq!(plan.descriptor().skills.indexed, 2);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ab1_audit_regression {
+    #[tokio::test]
+    async fn a_failed_command_that_wrote_still_triggers_audit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(directory.path()).unwrap();
+        let arguments = r#"{"command":"printf changed > written.txt; exit 3"}"#.to_owned();
+        let call = crate::runtime::RuntimeToolCall {
+            id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+            turn_ordinal: 1,
+            call_ordinal: 1,
+            provider_call_id: "ab1-write".to_owned(),
+            rejection: None,
+            name: "shell".to_owned(),
+            arguments: arguments.clone(),
+            effect: crate::catalog::EffectClass::Shell,
+        };
+        let result = crate::tools::execute(
+            crate::workspace::Workspace::open(&path).unwrap(),
+            std::sync::Arc::default(),
+            "shell".to_owned(),
+            arguments,
+            crate::RunCancellation::new(),
+            None,
+            crate::tools::ToolTasks::default(),
+            std::sync::Arc::default(),
+            std::sync::Arc::default(),
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(std::fs::read(path.join("written.txt")).unwrap(), b"changed");
+        assert!(crate::runtime::is_progress(&call, None, &result));
+        let mut triggers = crate::runtime::AuditTriggers::default();
+        crate::note_audited_action(&mut triggers, &mut Vec::new(), false, &call, &result);
+        assert!(triggers.fires(crate::runtime::AuditMode::Heuristic));
     }
 }

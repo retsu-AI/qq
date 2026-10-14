@@ -122,6 +122,7 @@ pub(crate) struct ToolEntry {
     pub(crate) hints: ToolHints,
     /// Serialized name+description+schema weight, for request budgeting.
     schema_bytes: u64,
+    config_granted: bool,
     /// Lowercased `name description`, computed once so ranking never
     /// allocates per query.
     search_text: Box<str>,
@@ -148,6 +149,7 @@ impl ToolEntry {
             schema_bytes: u64::try_from(spec.name().len() + spec.description().len() + schema_len)
                 .unwrap_or(u64::MAX)
                 .saturating_add(32),
+            config_granted: false,
             spec,
             host,
             effect,
@@ -206,6 +208,7 @@ pub struct HostSummary {
 pub(crate) struct HostContribution {
     pub(crate) name: String,
     pub(crate) catalog: HostCatalog,
+    pub(crate) config_grants: Vec<String>,
 }
 
 /// The compiled catalog. Immutable; shared by every run of a plan.
@@ -223,6 +226,7 @@ pub struct ToolCatalog {
     /// Specs of the static tools, shared into every request under
     /// progressive exposure with no pins (the common case).
     static_specs: Arc<[ToolSpec]>,
+    read_only_spawn_spec: Option<ToolSpec>,
     /// Measurement of `static_specs`, computed once from the schemas already
     /// serialized at compile so a run start does not re-serialize them.
     static_measurement: ToolSchemaMeasurement,
@@ -231,6 +235,7 @@ pub struct ToolCatalog {
     full_measurement: Option<ToolSchemaMeasurement>,
     /// Rendered once for the system prompt under progressive exposure.
     index_text: Option<Arc<str>>,
+    unattended_index_text: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for ToolCatalog {
@@ -251,11 +256,17 @@ pub(crate) struct StaticTool {
     pub(crate) spec: ToolSpec,
     pub(crate) host: ToolHost,
     pub(crate) effect: EffectClass,
+    pub(crate) read_only_spec: Option<ToolSpec>,
 }
 
 impl StaticTool {
     pub(crate) const fn new(spec: ToolSpec, host: ToolHost, effect: EffectClass) -> Self {
-        Self { spec, host, effect }
+        Self {
+            spec,
+            host,
+            effect,
+            read_only_spec: None,
+        }
     }
 }
 
@@ -267,7 +278,11 @@ impl ToolCatalog {
         let mut entries = Vec::with_capacity(static_tools.len() + 16);
         let mut names = BTreeSet::new();
         let mut static_order = Vec::with_capacity(static_tools.len());
+        let mut read_only_spawn_spec = None;
         for tool in static_tools {
+            if tool.host == ToolHost::SpawnAgent {
+                read_only_spawn_spec = tool.read_only_spec;
+            }
             names.insert(tool.spec.name().to_owned());
             static_order.push(entries.len());
             let schema_len = tool.spec.input_schema().get().len();
@@ -284,7 +299,9 @@ impl ToolCatalog {
         let mut excluded = Vec::new();
         let mut summaries = Vec::with_capacity(hosts.len());
         let mut external_schema_bytes = 0_u64;
-        for (host_index, host) in hosts.into_iter().enumerate() {
+        for (host_index, mut host) in hosts.into_iter().enumerate() {
+            host.config_grants.sort();
+            host.config_grants.dedup();
             let (ready, readiness_message) = match &host.catalog.readiness {
                 HostReadiness::Ready => (true, None),
                 HostReadiness::Degraded { message } => (true, Some(message.clone())),
@@ -349,13 +366,19 @@ impl ToolCatalog {
                 external_order.push(entries.len());
                 admitted += 1;
                 let schema_len = schema.len();
-                entries.push(ToolEntry::new(
+                let config_granted = host
+                    .config_grants
+                    .binary_search_by(|grant| grant.as_str().cmp(name))
+                    .is_ok();
+                let mut entry = ToolEntry::new(
                     tool.spec,
                     ToolHost::External { host: host_index },
                     EffectClass::External,
                     tool.hints,
                     schema_len,
-                ));
+                );
+                entry.config_granted = config_granted;
+                entries.push(entry);
             }
             summaries.push(HostSummary {
                 name: host.name,
@@ -414,6 +437,30 @@ impl ToolCatalog {
                 )
                 .collect::<Arc<[ToolSpec]>>()
         });
+        let granted_order: Vec<usize> = external_order
+            .iter()
+            .copied()
+            .filter(|index| sorted[*index].config_granted)
+            .collect();
+        let granted_hosts: Vec<HostSummary> = summaries
+            .iter()
+            .enumerate()
+            .filter_map(|(host_index, host)| {
+                let count = granted_order
+                    .iter()
+                    .filter(|index| sorted[**index].host == ToolHost::External { host: host_index })
+                    .count();
+                if count == 0 {
+                    return None;
+                }
+                let mut host = host.clone();
+                host.tool_count = count;
+                Some(host)
+            })
+            .collect();
+        let unattended_index_text = (exposure == Exposure::Progressive
+            && !granted_order.is_empty())
+        .then(|| Arc::from(render_index(&sorted, &granted_order, &granted_hosts)));
         let index_text = (exposure == Exposure::Progressive)
             .then(|| Arc::from(render_index(&sorted, &external_order, &summaries)));
         let measure = |indices: &mut dyn Iterator<Item = usize>| {
@@ -469,10 +516,12 @@ impl ToolCatalog {
             digest: ContentHash::from_bytes(digest.finalize().into()),
             external_schema_bytes,
             static_specs,
+            read_only_spawn_spec,
             static_measurement,
             full_specs,
             full_measurement,
             index_text,
+            unattended_index_text,
         }
     }
 
@@ -481,6 +530,13 @@ impl ToolCatalog {
             .binary_search_by(|entry| entry.spec.name().cmp(name))
             .ok()
             .map(|index| &self.entries[index])
+    }
+
+    pub(crate) fn config_grants(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.config_granted)
+            .map(|entry| entry.spec.name())
     }
 
     #[must_use]
@@ -537,6 +593,10 @@ impl ToolCatalog {
         usize::try_from(entries).unwrap_or(usize::MAX) * 2
             + exposed * 64
             + self.index_text.as_ref().map_or(0, |text| text.len())
+            + self
+                .unattended_index_text
+                .as_ref()
+                .map_or(0, |text| text.len())
             + std::mem::size_of::<Self>()
     }
 
@@ -565,63 +625,71 @@ impl ToolCatalog {
         crate::runtime::tool_schema_measurement(specs)
     }
 
+    pub(crate) fn eligible_index_text(&self, filter: &StaticFilter) -> Option<&Arc<str>> {
+        if filter.read_only {
+            None
+        } else if filter.unattended {
+            self.unattended_index_text.as_ref()
+        } else {
+            self.index_text.as_ref()
+        }
+    }
+
     pub(crate) fn base_specs(&self, include: &StaticFilter) -> Arc<[ToolSpec]> {
         let source = self.full_specs.as_ref().unwrap_or(&self.static_specs);
-        if include.spawn_agent && include.search_history && include.load_skill && !include.read_only
+        if include.spawn_agent
+            && include.read_tool_result
+            && include.search_history
+            && include.load_skill
+            && !include.read_only
+            && !include.unattended
         {
             return Arc::clone(source);
         }
         source
             .iter()
             .filter(|spec| {
-                let Some(entry) = self.lookup(spec.name()) else {
-                    return true;
-                };
-                // A read-only run never receives a schema its policy would
-                // deny: the model cannot waste a turn on a call that is
-                // certain to be refused. Read-only externals stay because
-                // their hosts declared them non-mutating; policy still gates
-                // them by name at dispatch.
-                if include.read_only
-                    && match entry.effect {
-                        EffectClass::Mutating | EffectClass::Shell | EffectClass::Network => true,
-                        EffectClass::External => !entry.hints.read_only,
-                        EffectClass::ReadOnly | EffectClass::Interactive => false,
-                    }
-                {
-                    return false;
-                }
-                match entry.host {
-                    ToolHost::SpawnAgent | ToolHost::WaitAgents | ToolHost::CancelAgent => {
-                        include.spawn_agent
-                    }
-                    ToolHost::SearchHistory => include.search_history,
-                    ToolHost::ReadToolResult => include.read_tool_result,
-                    ToolHost::LoadSkill => include.load_skill,
-                    ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
+                self.lookup(spec.name())
+                    .is_some_and(|entry| include.allows(entry))
+            })
+            .map(|spec| {
+                if include.read_only && spec.name() == "spawn_agent" {
+                    self.read_only_spawn_spec.as_ref().unwrap_or(spec).clone()
+                } else {
+                    spec.clone()
                 }
             })
-            .cloned()
             .collect()
     }
 
     /// The exposed list with `pins` appended, in pin order. Called only when
     /// pins change; the result is held by the run until they change again.
-    pub(crate) fn specs_with_pins(&self, base: &Arc<[ToolSpec]>, pins: &PinSet) -> Arc<[ToolSpec]> {
+    pub(crate) fn specs_with_pins(
+        &self,
+        base: &Arc<[ToolSpec]>,
+        pins: &PinSet,
+        filter: &StaticFilter,
+    ) -> Arc<[ToolSpec]> {
         base.iter()
             .cloned()
-            .chain(
-                pins.names
-                    .iter()
-                    .filter_map(|name| self.lookup(name).map(|e| e.spec.clone())),
-            )
+            .chain(pins.names.iter().filter_map(|name| {
+                self.lookup(name)
+                    .filter(|entry| filter.allows(entry))
+                    .map(|e| e.spec.clone())
+            }))
             .collect()
     }
 
     /// Ranks external tools against `query` by deterministic token overlap
     /// over name and description. Ties break by declaration order. Only
     /// tools not already pinned are returned.
-    pub(crate) fn rank(&self, query: &str, pins: &PinSet, limit: usize) -> Vec<&ToolEntry> {
+    pub(crate) fn rank(
+        &self,
+        query: &str,
+        pins: &PinSet,
+        limit: usize,
+        filter: &StaticFilter,
+    ) -> Vec<&ToolEntry> {
         let terms: Vec<String> = tokenize(query).collect();
         if terms.is_empty() {
             return Vec::new();
@@ -629,7 +697,8 @@ impl ToolCatalog {
         let mut scored: Vec<(u32, usize, &ToolEntry)> = Vec::new();
         for (order, index) in self.external_order.iter().enumerate() {
             let entry = &self.entries[*index];
-            if pins.names.iter().any(|pinned| pinned == entry.spec.name()) {
+            if !filter.allows(entry) || pins.names.iter().any(|pinned| pinned == entry.spec.name())
+            {
                 continue;
             }
             let (name_lower, description_lower) =
@@ -657,15 +726,47 @@ impl ToolCatalog {
 }
 
 /// Which optional static tools a run may see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct StaticFilter {
     pub(crate) spawn_agent: bool,
     pub(crate) search_history: bool,
     pub(crate) read_tool_result: bool,
     pub(crate) load_skill: bool,
-    /// The run's policy denies every mutating, shell, and non-read external
-    /// call, so those schemas are withheld rather than offered and refused.
+    /// Strict policy denies mutating, shell, network and all External calls.
     pub(crate) read_only: bool,
+    pub(crate) unattended: bool,
+}
+
+impl StaticFilter {
+    pub(crate) fn allows(self, entry: &ToolEntry) -> bool {
+        if self.read_only
+            && !matches!(
+                entry.effect,
+                EffectClass::ReadOnly | EffectClass::Interactive
+            )
+        {
+            return false;
+        }
+        if self.unattended
+            && match entry.effect {
+                EffectClass::ReadOnly => false,
+                EffectClass::External => !entry.config_granted,
+                EffectClass::Mutating
+                | EffectClass::Shell
+                | EffectClass::Interactive
+                | EffectClass::Network => true,
+            }
+        {
+            return false;
+        }
+        match entry.host {
+            ToolHost::SpawnAgent | ToolHost::WaitAgents | ToolHost::CancelAgent => self.spawn_agent,
+            ToolHost::SearchHistory => self.search_history,
+            ToolHost::ReadToolResult => self.read_tool_result,
+            ToolHost::LoadSkill => self.load_skill,
+            ToolHost::BuiltIn | ToolHost::SelectTools | ToolHost::External { .. } => true,
+        }
+    }
 }
 
 /// The external tools one run has pinned under progressive exposure.
@@ -828,6 +929,7 @@ mod tests {
     fn host(name: &str, tools: Vec<crate::hosts::HostTool>) -> HostContribution {
         HostContribution {
             name: name.to_owned(),
+            config_grants: Vec::new(),
             catalog: HostCatalog {
                 generation: 7,
                 tools,
@@ -849,6 +951,7 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         let names: Vec<&str> = base.iter().map(ToolSpec::name).collect();
         assert_eq!(names, ["read_file", "mcp__srv__ping"]);
@@ -938,6 +1041,7 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         let names: Vec<&str> = base.iter().map(ToolSpec::name).collect();
         assert_eq!(names, ["read_file", SELECT_TOOLS_TOOL]);
@@ -946,21 +1050,25 @@ mod tests {
         assert!(index.contains("host srv: 41 tools"));
 
         let mut pins = PinSet::default();
-        let ranked = catalog.rank("deploy the service", &pins, 3);
+        let ranked = catalog.rank("deploy the service", &pins, 3, &StaticFilter::default());
         assert_eq!(ranked[0].spec.name(), "mcp__srv__deploy_service");
-        let widgets = catalog.rank("widgets", &pins, 3);
+        let widgets = catalog.rank("widgets", &pins, 3, &StaticFilter::default());
         let widget_names: Vec<&str> = widgets.iter().map(|e| e.spec.name()).collect();
         assert_eq!(
             widget_names,
             ["mcp__srv__tool00", "mcp__srv__tool01", "mcp__srv__tool02"]
         );
-        assert!(catalog.rank("", &pins, 3).is_empty());
+        assert!(
+            catalog
+                .rank("", &pins, 3, &StaticFilter::default())
+                .is_empty()
+        );
 
         assert!(pins.pin("mcp__srv__tool00"));
         assert!(!pins.pin("mcp__srv__tool00"));
-        let ranked = catalog.rank("widgets", &pins, 1);
+        let ranked = catalog.rank("widgets", &pins, 1, &StaticFilter::default());
         assert_eq!(ranked[0].spec.name(), "mcp__srv__tool01");
-        let with_pins = catalog.specs_with_pins(&base, &pins);
+        let with_pins = catalog.specs_with_pins(&base, &pins, &StaticFilter::default());
         assert_eq!(with_pins.last().unwrap().name(), "mcp__srv__tool00");
         for i in 1..MAX_PINNED_TOOLS {
             assert!(pins.pin(&format!("mcp__srv__tool{i:02}")));
@@ -1010,6 +1118,7 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         assert!(without.iter().all(|spec| spec.name() != "spawn_agent"));
         let with = catalog.base_specs(&StaticFilter {
@@ -1018,6 +1127,7 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         assert!(with.iter().any(|spec| spec.name() == "spawn_agent"));
         assert!(
@@ -1027,7 +1137,91 @@ mod tests {
     }
 
     #[test]
-    fn read_only_runs_are_never_offered_schemas_their_policy_denies() {
+    fn ab4_cached_declarations_honor_absent_result_recall() {
+        let mut tools = statics();
+        tools.push(StaticTool::new(
+            ToolSpec::new(
+                "read_tool_result",
+                "Recall stored output",
+                json!({"type":"object"}),
+            ),
+            ToolHost::ReadToolResult,
+            EffectClass::ReadOnly,
+        ));
+        let catalog = ToolCatalog::compile(tools, Vec::new());
+        let exposed = catalog.base_specs(&StaticFilter {
+            spawn_agent: true,
+            search_history: true,
+            load_skill: true,
+            read_tool_result: false,
+            read_only: false,
+            unattended: false,
+        });
+        assert!(!exposed.iter().any(|spec| spec.name() == "read_tool_result"));
+    }
+
+    #[test]
+    fn ab4_progressive_eligibility_filters_indexes_pins_and_selector_reports() {
+        let tools = (0..40)
+            .map(|i| external(&format!("mcp__srv__tool{i:02}"), "Widget operation"))
+            .collect();
+        let catalog = ToolCatalog::compile(
+            statics(),
+            vec![HostContribution {
+                config_grants: vec!["mcp__srv__tool03".to_owned()],
+                ..host("srv", tools)
+            }],
+        );
+        assert_eq!(catalog.exposure(), Exposure::Progressive);
+        let mut pins = PinSet::default();
+        pins.pin("mcp__srv__tool03");
+        pins.pin("mcp__srv__tool07");
+        let direct = StaticFilter {
+            unattended: true,
+            ..StaticFilter::default()
+        };
+        let read_only = StaticFilter {
+            read_only: true,
+            ..StaticFilter::default()
+        };
+        let index = catalog.eligible_index_text(&direct).unwrap();
+        assert!(index.contains("mcp__srv__tool03"));
+        assert!(!index.contains("mcp__srv__tool07"));
+        assert!(index.contains(": 1 tools"));
+        assert!(catalog.eligible_index_text(&read_only).is_none());
+        for (filter, expected) in [
+            (
+                direct,
+                vec!["read_file", "select_tools", "mcp__srv__tool03"],
+            ),
+            (read_only, vec!["read_file", "select_tools"]),
+        ] {
+            let base = catalog.base_specs(&filter);
+            let exposed = catalog.specs_with_pins(&base, &pins, &filter);
+            assert_eq!(
+                exposed.iter().map(ToolSpec::name).collect::<Vec<_>>(),
+                expected
+            );
+            let mut selected = pins.clone();
+            let (result, changed) =
+                crate::select_tools(&catalog, &mut selected, r#"{"query":"tool"}"#, &filter);
+            assert!(!changed);
+            assert!(!result.model_text.contains("mcp__srv__tool07"));
+            assert_eq!(
+                result.model_text.contains("mcp__srv__tool03"),
+                !filter.read_only
+            );
+            assert!(
+                catalog
+                    .rank("Widget", &PinSet::default(), 8, &filter)
+                    .iter()
+                    .all(|entry| entry.spec.name() == "mcp__srv__tool03")
+            );
+        }
+    }
+
+    #[test]
+    fn ab4_read_only_runs_are_never_offered_schemas_their_policy_denies() {
         let mut tools = statics();
         tools.extend([
             StaticTool::new(
@@ -1056,6 +1250,7 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         let names: Vec<&str> = everything.iter().map(ToolSpec::name).collect();
         assert_eq!(
@@ -1074,12 +1269,11 @@ mod tests {
             read_tool_result: true,
             load_skill: true,
             read_only: true,
+            unattended: false,
         });
         let names: Vec<&str> = read_only.iter().map(ToolSpec::name).collect();
-        // Mutating and shell built-ins go; externals stay only when their
-        // host declared them read-only. The digest is unchanged: filtering is
-        // per request, the compiled catalog is the same.
-        assert_eq!(names, ["read_file", "mcp__srv__lookup"]);
+        // Host hints grant nothing under strict ReadOnly.
+        assert_eq!(names, ["read_file"]);
     }
 }
 
@@ -1089,7 +1283,8 @@ mod tests {
 #[doc(hidden)]
 pub mod bench_support {
     use super::{
-        EffectClass, HostContribution, PinSet, StaticTool, ToolCatalog, ToolHost, select_tools_spec,
+        EffectClass, HostContribution, PinSet, StaticFilter, StaticTool, ToolCatalog, ToolHost,
+        select_tools_spec,
     };
     use crate::hosts::{HostCatalog, HostReadiness, HostTool};
 
@@ -1108,6 +1303,7 @@ pub mod bench_support {
                 .into_iter()
                 .map(|(name, tools)| HostContribution {
                     name,
+                    config_grants: Vec::new(),
                     catalog: HostCatalog {
                         generation: 1,
                         tools,
@@ -1122,7 +1318,7 @@ pub mod bench_support {
     #[must_use]
     pub fn rank(catalog: &ToolCatalog, query: &str, limit: usize) -> Vec<String> {
         catalog
-            .rank(query, &PinSet::default(), limit)
+            .rank(query, &PinSet::default(), limit, &StaticFilter::default())
             .into_iter()
             .map(|entry| entry.spec.name().to_owned())
             .collect()
@@ -1147,6 +1343,7 @@ mod measurement_tests {
             read_tool_result: true,
             load_skill: true,
             read_only: false,
+            unattended: false,
         });
         let precomputed = catalog.schema_measurement(&base);
         let fresh = crate::runtime::tool_schema_measurement(&base);
