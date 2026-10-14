@@ -578,3 +578,10 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
 - Depth-limited discovery uses only justified target ancestors at64-component
   boundaries; parent contract and research qualification must account for
   these scopes before claiming instruction coverage.
+
+### 2026-10-14 — AB1 exact argv classification
+
+- Extend AB1 to sessions/approvals.rs solely to ignore the new cached read
+  classification field in its existing shell preview pattern. Approval
+  authority and persisted/wire data remain unchanged. Literal exec arguments
+  share the command-effect predicate; shell syntax stays in the shell scanner.

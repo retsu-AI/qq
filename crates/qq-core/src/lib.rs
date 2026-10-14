@@ -532,9 +532,9 @@ fn note_audited_action(
         approval::ToolClass::Mutating if !result.is_error => triggers.mutated_files = true,
         // Read-only shell (allowlisted VCS reads and the like) does not by
         // itself make a run worth auditing; anything else does.
-        approval::ToolClass::Shell { command, .. }
-            if !result.is_error && !approval::read_only_shell_command(&command) =>
-        {
+        approval::ToolClass::Shell {
+            read_only: false, ..
+        } if !result.is_error => {
             triggers.non_read_shell = true;
         }
         _ => {}
@@ -10562,6 +10562,7 @@ mod tests {
             vec!["shell".to_owned()],
             vec!["exec".to_owned()],
             vec!["edit_file".to_owned()],
+            vec!["write_file".to_owned()],
         ] {
             let directory = tempfile::tempdir().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -10621,6 +10622,12 @@ mod tests {
                         .description()
                         .contains("path and include_ignored=true")
                 );
+            }
+            if expected == ["write_file"] {
+                let description = requests[0].tools()[0].description();
+                assert!(description.contains("create_only"), "{description}");
+                assert!(description.contains("independently known"), "{description}");
+                assert!(!description.contains("read earlier"), "{description}");
             }
             if expected == ["exec"] {
                 assert!(
