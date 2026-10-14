@@ -975,3 +975,18 @@ newest last.
   rather than the expected recall-marker path. The fixture now uses complete
   <=200-byte rows at the same exact 12,000-byte page size. Production legacy
   behavior remains the preserved original-main implementation.
+
+### 2026-10-14 — AB2 projection repair evidence and reserved boundary
+
+- Current `c9c0ba11` passes 32 focused AB2 fixtures, including known historical
+  descriptor-14/prompt-19 replay after close/reopen; logs
+  `historical-projection-focused-final.log`. Independent frontier review
+  approves exclusion watermarks and explicit trailing-slash path bounds.
+- Reserved ADR-0061 and shared ownership for exact projected reply/notice
+  persistence before the next request, descriptor 15 policy identity and
+  schema 48; the AB5 notice step must follow at 49. This is a proposed
+  boundary, not a claim that the barrier is implemented or qualified.
+- Fresh #304 review requires prompt-history/external-tool wording corrections;
+  #305 review requires the runbook/schema truth check to follow the rebased
+  notice boundary. These corrections join the next qualified propagation.
+- No new source pushed, and no fresh review thread resolved prematurely.
