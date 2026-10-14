@@ -10431,6 +10431,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ab2_captured_subset_prompts_only_instruct_declared_tools() {
+        for exposed in [Vec::new(), vec!["read_file".to_owned()]] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                TurnScript {
+                    turns: vec![Vec::new()],
+                    requests: Arc::clone(&requests),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let workspace = std::fs::canonicalize(directory.path()).unwrap();
+            let expected = exposed.clone();
+            let plan = tokio::task::spawn_blocking(move || {
+                plan::CompiledAgentPlan::compile_blocking(
+                    plan::AgentProfile::embedded(&runtime, workspace).with_exposed_tools(exposed),
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            let events = plan
+                .run(RunCommand::new("review the available context"))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.last(), Some(RunEvent::Completed)),
+                "{events:?}"
+            );
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                tool_names(&requests[0]),
+                expected.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            let prompt = requests[0].system().unwrap();
+            for name in [
+                "read_file",
+                "tree",
+                "search",
+                "edit_file",
+                "write_file",
+                "shell",
+                "exec",
+                "ask_user",
+                "fetch",
+                "read_tool_result",
+                "search_history",
+            ] {
+                if !expected.iter().any(|present| present == name) {
+                    assert!(!prompt.contains(name), "absent {name} advertised: {prompt}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn explicit_external_exposure_without_a_selector_is_fully_callable() {
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));

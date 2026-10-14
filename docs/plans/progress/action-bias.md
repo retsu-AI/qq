@@ -7,7 +7,7 @@ newest last.
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | | Start after AP5's window (closed 2026-10-13 17:42 UTC) |
-| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, one instruction search | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | | |
+| AB2 | Prompt v20: action bias, exploration budget, built-in mapping, scoped discovery | In progress | [ENG-1039](https://linear.app/retsu-ai/issue/ENG-1039) | [#302](https://github.com/retsu-AI/qq/pull/302), `feat/eng-1039-ab2-action-prompt` | Draft; custom-subset conventions and performance open |
 
 
 | AB1 | Shell reads after a leading `cd` are reads for progress and audit | In progress | [ENG-1038](https://linear.app/retsu-ai/issue/ENG-1038) | [#301](https://github.com/retsu-AI/qq/pull/301), `fix/eng-1038-ab1-shell-reads` | Draft source review; performance gate open |
@@ -312,3 +312,8 @@ newest last.
   `f461f1c99f8dda8b83ae9289c8cfba92ccd3d27d724c9225de2d5063e4f02a85`.
   Independent review approved. Draft publication awaits hosted source review;
   plan_compile quiet-host/noise qualification remains open.
+
+- Draft [#302](https://github.com/retsu-AI/qq/pull/302) opened on `90c6b88d`,
+  stacked on #301. Fourth plan review identified fixed body conventions for
+  omitted tools. Captured read_file-only/no-tools regression fails before
+  correction (no-tools prompt still names read_file); test-first followup.
