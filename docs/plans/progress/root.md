@@ -607,3 +607,10 @@ rows, re-reads missing offsets after turn-budget cuts, and verifies all lines.
   classification field in its existing shell preview pattern. Approval
   authority and persisted/wire data remain unchanged. Literal exec arguments
   share the command-effect predicate; shell syntax stays in the shell scanner.
+
+### 2026-10-14 — AB5 replay documentation completeness
+
+- Reserve docs/design/architecture.md stored-notice vocabulary, the existing
+  docs/runbooks/run-output-queries.md report predicate and src/docs_truth.rs
+  regression for root-stall documentation. Schema/history and Goal 6's
+  narrower slice-checkpoint cohort remain explicit. No runtime behavior change.

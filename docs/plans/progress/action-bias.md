@@ -774,3 +774,11 @@ newest last.
 - Integrated accepted AB1 exact-argv/Git-helper and AB2 instruction discovery
   repairs through the AB3 parent. AB4 authority implementation is unchanged.
   Rerun immutable combined workspace gates; hosted review and performance open.
+
+### 2026-10-14 — AB5 notice documentation regression
+
+- Hosted review found architecture's stored-notice list and report-query
+  runbook omit root_stall_report. New docs-truth regression fails before
+  correction (notice-docs-red.log); shared paths reserved in root ledger.
+- Correct the report vocabulary and all-report predicate, preserving Goal 6's
+  slice-only selection explicitly. Exact SQL fixture and full gates next.

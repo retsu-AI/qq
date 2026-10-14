@@ -585,6 +585,21 @@ pub(crate) fn assert_documented<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn root_stall_reports_are_in_architecture_and_report_queries() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let architecture =
+            std::fs::read_to_string(root.join("docs/design/architecture.md")).unwrap();
+        assert!(architecture.contains("`root_stall_report`"));
+        let queries =
+            std::fs::read_to_string(root.join("docs/runbooks/run-output-queries.md")).unwrap();
+        assert!(
+            queries
+                .contains("FROM m WHERE notice IN ('report', 'stall_report', 'root_stall_report')")
+        );
+        assert!(queries.contains("schema 46"));
+    }
+
     use super::*;
 
     #[test]
