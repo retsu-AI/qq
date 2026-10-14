@@ -1022,3 +1022,8 @@ newest last.
   `SessionRuntimeError::ToolProjectionUnavailable` exhaustive match; no tests ran.
   Root maps it to an actionable request error with a regression fixture. All gates
   will rerun at the repaired immutable head; the failed receipt is retained.
+
+- Repaired workspace runb9d38c60 reached root tests:270passed,1failed,2ignored.
+  The failure pins the former v14 canonical-domain prefix; update it to v15 while
+  retaining secret-exclusion checks and both historical core digest fixtures.
+  Fresh workspace gates rerun after this test identity update.

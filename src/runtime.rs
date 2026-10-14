@@ -8651,7 +8651,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v14\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v15\0{"));
     }
 
     #[test]
