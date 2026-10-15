@@ -108,6 +108,8 @@ phase-gate evidence.
   routing, approval, and the advisory observer.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
+- [v0.1.7 preparation](plans/release-0.1.7.md) — candidate scope, open gates
+  and the separate bump/tag/documentation handoff.
 - [`website.md`](runbooks/website.md) — how the docs site is generated from
   `guide/`, built, checked, and deployed to GitHub Pages.
 

@@ -2,9 +2,11 @@
 
 ## Status
 
-AF0–AF4, AF7, AF8 and the first part of AF9 shipped in #282; AF6.1
-(cancellation audit) shipped in #311. AF9.1 closes the four remaining
-feedback-gate review gaps. AF5, remaining AF6 modules and AF10 remain planned.
+AF0–AF4, AF7, AF8 and the first part of AF9 merged in #282
+(`192c9879`, ENG-1028). AF6.1's cancellation-module audit merged in #311
+(`3b763ea1`). AF5, the remaining AF6 modules, AF9 lesson mining and AF10
+remain open. AF7's CI implementation is shipped; enabling the merge queue
+in branch protection remains an operator task, not an observed setting.
 
 ## Goal
 
@@ -54,5 +56,5 @@ internal timeout.
 
 ## Order
 
-AF5, AF6 and AF9-next are independent once this stack merges. AF10 runs
-after at least one AF6 module lands, so the eval exercises a cleaner suite.
+AF5, the remaining AF6 modules and AF9-next are independent after #282.
+AF10 can follow the merged AF6.1 audit, so the eval exercises a cleaner suite.

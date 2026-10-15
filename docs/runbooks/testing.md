@@ -131,8 +131,8 @@ Auditing existing tests (flakes, sleeps, mutation testing, duplicates) is
 | `ci` | one diagnostic retry; flaky passes fail the gate; writes JUnit to `target/nextest/ci/junit.xml` |
 
 The long `qq-core` session suites are given priority so they start first and
-overlap the fast tests. This repository has no doctests, so nextest covers
-the whole suite.
+overlap the fast tests. nextest does not execute doctests; the full gate runs
+`cargo test --doc --workspace` separately, even when there are no doctests.
 
 ## CI
 

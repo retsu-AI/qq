@@ -4,18 +4,18 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| AF0 | Baseline | Shipped (in stack) | `build/eng-1028-agent-feedback-loop` | `target/qq-perf/af0/` |
-| AF1 | Compile and link speed | In review | same | |
-| AF2 | nextest profiles | In review | same | |
-| AF3 | `cargo xtask check` | In review | same | |
-| AF4 | `cargo xtask smoke` | In review | same | |
+| AF0 | Baseline | Shipped (`192c9879`) | #282 | `target/qq-perf/af0/` |
+| AF1 | Compile and link speed | Shipped (`192c9879`) | #282 | |
+| AF2 | nextest profiles | Shipped (`192c9879`) | #282 | |
+| AF3 | `cargo xtask check` | Shipped (`192c9879`) | #282 | |
+| AF4 | `cargo xtask smoke` | Shipped (`192c9879`) | #282 | |
 | AF5 | `QQ_LOG` tracing | Planned | | ADR needed |
 | AF6 | Test audit | Planned (remaining modules) | | one module per PR |
-| AF6.1 | Cancellation module audit | In review | `test/eng-1028-af6-cancellation-audit` (stacked on #282) | deterministic wakeups, stress, mutation coverage |
-| AF7 | CI affected/full split | In review | same | merge queue setting is the operator's |
-| AF8 | AGENTS.md and skills | In review | same | |
-| AF9 | `cargo xtask lint` | In review (first rules) | same | mistake mining next |
-| AF9.1 | Feedback gate integrity | In progress | `fix/eng-1028-af9-gate-integrity` | four review gaps from #282; regressions and real-binary verification |
+| AF6.1 | Cancellation module audit | Shipped (`3b763ea1`) | #311 | deterministic wakeups, stress, mutation coverage |
+| AF7 | CI affected/full split | Shipped (`192c9879`) | #282 | merge-queue activation remains an operator task |
+| AF8 | AGENTS.md and skills | Shipped (`192c9879`) | #282 | |
+| AF9 | `cargo xtask lint` | Shipped (`192c9879`; first rules) | #282 | mistake mining remains open |
+| AF9.1 | Feedback gate integrity | Shipped (`0b4f29e3`) | #317 | four review gaps from #282; regressions and real-binary verification |
 | AF10 | Skill eval | Planned | | |
 
 #### 2026-10-11 session
@@ -155,3 +155,12 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - Full CI-profile gate attempted: fmt/lint/workspace Clippy passed; tests
   2467/2468 with the existing stopped-child-summary cleanup fixture failing.
   Focused rerun passed in 9.3s; this does not erase the full-gate failure.
+
+#### 2026-10-15 — release preparation reconciliation (ENG-1054)
+
+- Parent tooling merged in #282 (`192c9879`); cancellation audit merged in
+  #311 (`3b763ea1`). Current-state rows updated; historical pending receipts
+  remain as recorded rather than rewritten into passes.
+- Hosted main CI at `3b763ea1` passes correctness/smoke, Windows teardown and
+  WASM. No local macOS/full Windows claim or observed merge-queue activation.
+- AF5, remaining AF6 modules, AF9 mining and AF10 remain open.

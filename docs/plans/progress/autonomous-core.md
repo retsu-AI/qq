@@ -86,11 +86,11 @@ appended below, newest last.
 | AP4.2 | `wait_agents`, `cancel_agent`, interim-report delivery | Shipped (f15a4d24) | [ENG-1005](https://linear.app/retsu-ai/issue/ENG-1005) | #257 | `DESCRIPTOR_VERSION` 12 → 13; prompt 16 → 17; store schema 41 → 42 (`child_reports`); independent review |
 | AP5 | Evidence after AP3b and AP4 | In progress | | [#261](https://github.com/retsu-AI/qq/pull/261) | 2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC; schema 42; start counts below; no acceptance claimed |
 | AC0 | Soak and resource harness | AC0.1 Shipped; AC0.2 Planned | [ENG-986](https://linear.app/retsu-ai/issue/ENG-986) | #236 (`d1e51c2`) | AC0.2 = H0 registration, concurrency/fsync qualification |
-| AC0.2.1 | Isolated turn diagnostic recorder | In review | [ENG-1044](https://linear.app/retsu-ai/issue/ENG-1044) | [#297](https://github.com/retsu-AI/qq/pull/297) | Manual controlled CI seam; full AC0.2 remains open |
+| AC0.2.1 | Isolated turn diagnostic recorder | Shipped (`f87d5d9d`) | [ENG-1044](https://linear.app/retsu-ai/issue/ENG-1044) | [#297](https://github.com/retsu-AI/qq/pull/297) | Recorder merged; full AC0.2 and measured acceptance remain open |
 | AC1 | `RunState` extraction by reset scope | Shipped (13d9c585) | [ENG-1007](https://linear.app/retsu-ai/issue/ENG-1007) | [#263](https://github.com/retsu-AI/qq/pull/263) → [#271](https://github.com/retsu-AI/qq/pull/271) | Merged by lead; final qualification below: dispatch median +4.0% vs A/A +0.14%, open with the lead |
 | AC2 | Bounds reset at seams | Shipped (`9bae6937`) | [ENG-1017](https://linear.app/retsu-ai/issue/ENG-1017) | [#278](https://github.com/retsu-AI/qq/pull/278) | Performance receipt remains outstanding; ADR-0048 § 1; closes ENG-991; AC0 oracles flipped |
-| AC3 | No single-shot fatal faults | In review | [ENG-1029](https://linear.app/retsu-ai/issue/ENG-1029) | [#296](https://github.com/retsu-AI/qq/pull/296); [#279](https://github.com/retsu-AI/qq/pull/279) retained | Source10f87482 has opening Codex+1; main/schema46 integration in qualification. Comparable final-head performance and whole-plan gates remain open |
-| AC4 | Loop guard | Planned | | | ADR-0049 § 8; takes RR12's loop item; lands in the goal PR with goals G0 |
+| AC3 | No single-shot fatal faults | Shipped (`5500928c`) | [ENG-1029](https://linear.app/retsu-ai/issue/ENG-1029) | [#296](https://github.com/retsu-AI/qq/pull/296) | Replacement merged; comparable final-head performance and whole-plan gates remain open; historical #279 is not the release candidate |
+| AC4 | Loop guard | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Unmerged G0/AC4 foundation; full goal and performance acceptance remain open |
 | AC5 | `ContinueRun` | Planned | | | ADR-0048 § 3; protocol bump (continuation) |
 | AC6 | `AutoContinue` policy | Planned | | | ADR-0048 § 4; same bump as AC5 |
 | AC7 | Goal record and re-statement | Dropped (moved to goals G0) | | | Now `goals.md` G0 |
@@ -110,7 +110,7 @@ appended below, newest last.
 | RR11 baseline | Session read-hash persistence | Shipped (existing behavior) | [ENG-873](https://linear.app/retsu-ai/issue/ENG-873) | | Durable `session_files`, claim reload, restart/edit regression; obsolete hash-return acceptance superseded by ADR-0058 |
 | RR baseline | RR1–RR7, RR4.1/RR7.1, RR8.1–RR8.4, RR9 | Shipped | | | Receipt mapping below; RR8 residuals remain AC18 |
 | Goal 7 | Seven-day integrated reliability qualification | Planned | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) | | Distinct from AP5; no live acceptance claimed |
-| Docs consolidation | Absorb reliability plan and remove stale ownership | In review | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | [#291](https://github.com/retsu-AI/qq/pull/291) (`docs/eng-1036-reliability-consolidation`) | Docs only; existing open performance/live gates preserved |
+| Docs consolidation | Absorb reliability plan and remove stale ownership | Shipped (`70e43ff5`) | [ENG-1036](https://linear.app/retsu-ai/issue/ENG-1036) | Merged through #294 (`7de994b1`) | Docs-only consolidation is on main; performance/live gates preserved |
 
 ## Entries
 
@@ -1500,3 +1500,11 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Recorder16 and fixture4 tests pass. Unfiltered actionlint reports only existingSC2129 repeated-redirection style inCI/release; the previously documented focusedCI check with that exclusion passes (`ci-main46-qualified-parent-actionlint-focused.log`). Full workspace remains running; no timeout/performance exemption or push. AC3e8 parent fresh Codex review reports no major issues, opening+1 reaction566977703 at2026-10-14T07:51:14Z, all13 threads resolved.
 
 - Current-main recorder sourceaac4b95b qualifies: serial workspace2309 passed/0failed/14ignored (nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, workspace build (`ci-main46-qualified-parent-*`). Recorder16/fixture4 and focused actionlint pass. Publish and request fresh review of this integrated head; earlier common-fixture diagnostic does not measure latest parent, and full H0/performance/live gates remain open.
+
+
+### 2026-10-15 — release preparation reconciliation (ENG-1054)
+
+- AC3 #296 (`5500928c`), recorder #297 (`f87d5d9d`) and docs consolidation
+  are on main. Top table now distinguishes those merges from open evidence.
+- AC4 is in unmerged #308 with G0; #309 is a G2 checkpoint, not complete
+  autonomy acceptance. AP5, AC0.2, AC1–AC3 performance and Goal 7 remain open.
