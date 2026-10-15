@@ -1201,12 +1201,21 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
     struct HeldPolicy {
         calls: AtomicUsize,
         deny: bool,
+        ceiling: Arc<AtomicUsize>,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
     impl WorkspaceGrantAuthority for HeldPolicy {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
-            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+            let ceiling = self.ceiling.load(Ordering::SeqCst);
+            Box::pin(std::future::ready(if ceiling == 0 {
+                Err(GoalPolicyError::Unavailable)
+            } else {
+                Ok(GoalPolicy {
+                    max_goal_runs: ceiling as u32,
+                    ..GoalPolicy::default()
+                })
+            }))
         }
 
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
@@ -1233,14 +1242,23 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
             })
         }
     }
-    for mode in ["managed", "edit", "replace", "clear"] {
+    for mode in [
+        "managed",
+        "goal_limit",
+        "goal_unavailable",
+        "edit",
+        "replace",
+        "clear",
+    ] {
         let directory = TempDir::new().unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
+        let ceiling = Arc::new(AtomicUsize::new(2000));
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
         options.grant_authority = Some(Arc::new(HeldPolicy {
             calls: AtomicUsize::new(0),
             deny: mode == "managed",
+            ceiling: ceiling.clone(),
             entered: entered.clone(),
             release: release.clone(),
         }));
@@ -1313,7 +1331,12 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
             .find(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
             .unwrap()
             .id;
-        if mode != "managed" {
+        if mode == "goal_limit" {
+            ceiling.store(1, Ordering::SeqCst);
+        } else if mode == "goal_unavailable" {
+            ceiling.store(0, Ordering::SeqCst);
+        }
+        if matches!(mode, "edit" | "replace" | "clear") {
             let expected =
                 serde_json::json!({"goal_id":approved.goal_id,"revision":approved.revision});
             let command = if mode == "clear" {
@@ -1375,7 +1398,7 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
             assert_eq!(goal.counters.audits, 0);
             assert_eq!(goal.counters.check_failures, 0);
             assert!(goal.pending_run_id.is_none());
-            if mode == "managed" {
+            if matches!(mode, "managed" | "goal_limit" | "goal_unavailable") {
                 assert!(matches!(
                     goal.status,
                     qq_protocol::GoalStatus::Paused {

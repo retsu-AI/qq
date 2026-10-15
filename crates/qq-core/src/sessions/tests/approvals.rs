@@ -3925,3 +3925,106 @@ async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve()
         "nothing was approved, so nothing was recorded: {grants:?}"
     );
 }
+
+#[tokio::test]
+async fn goal_approval_wait_pauses_without_another_request_and_deadline_still_wins() {
+    struct Authority(u64);
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("a timed out goal must not promote authority")
+        }
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy {
+                approval_wait_ms: self.0,
+                ..GoalPolicy::default()
+            })))
+        }
+    }
+    for (ordinary_wait, goal_wait_ms, deadline_ms) in [
+        (None, 50, 10_000),
+        (Some(Duration::from_millis(10)), 500, 10_000),
+        (None, 5000, 1000),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.approval_timeout = ordinary_wait;
+        options.grant_authority = Some(Arc::new(Authority(goal_wait_ms)));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(ApprovalLoader {
+                requests: Arc::clone(&requests),
+                tool: "__test_mutate",
+                arguments: "{}",
+                tool_turns: 1,
+                delegate: approval::ApprovalDelegate::Off,
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: created.committed_through,
+            })
+            .unwrap();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":session_id,"objective":"ask before mutation",
+                    "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+deadline_ms}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (_, call) = collect_until_approval_requested(&mut events).await;
+        let observed = collect_through_finished(&mut events).await;
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "approval timeout must not ask the model again"
+        );
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(workspace, Some(session_id), 1, 1))
+            .await
+            .unwrap();
+        let goal = snapshot.focused.unwrap().goal.unwrap();
+        if deadline_ms < goal_wait_ms {
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::BudgetExhausted {
+                    reason: qq_protocol::GoalExhaustion::Deadline
+                }
+            ));
+        } else {
+            assert!(matches!(goal.status, qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+                }
+            } if tool_call_id == call.id));
+            assert!(observed.iter().any(|event| matches!(
+                event.event,
+                SessionEvent::ToolApprovalResolved {
+                    resolution: ApprovalResolution::DeniedTimeout,
+                    ..
+                }
+            )));
+        }
+        runtime.shutdown().await.unwrap();
+    }
+}
