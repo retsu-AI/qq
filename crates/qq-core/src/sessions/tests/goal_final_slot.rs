@@ -5,42 +5,59 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
     struct Model {
         ordinal: usize,
         prompt_final: bool,
+        scenario: &'static str,
+        admission: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
         requests: Arc<StdMutex<Vec<Vec<ModelRequest>>>>,
     }
     impl Provider for Model {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
-            let (first, handoff) = {
+            let (first, handoff, attempt) = {
                 let mut requests = self.requests.lock().unwrap();
                 let first = requests[self.ordinal].is_empty();
                 let handoff = request.tool_choice() == qq_provider::ToolChoice::None;
                 requests[self.ordinal].push(request);
-                (first, handoff)
+                (first, handoff, requests[self.ordinal].len())
             };
-            let mut events = if self.prompt_final && self.ordinal == 8 && first {
-                vec![
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "wait".to_owned(),
-                        name: "update_goal".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "wait".to_owned(),
-                        json: r#"{"wait":{"seconds":60,"reason":"await final user input"}}"#
-                            .to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                        id: "wait".to_owned(),
-                    }),
-                ]
-            } else {
-                vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: if handoff {
-                        "durable final-slot handoff"
-                    } else {
-                        "ordinary early completion"
-                    }
-                    .to_owned(),
-                })]
-            };
+            let mut events =
+                if self.scenario == "tools" && self.ordinal == 9 && handoff && attempt == 2 {
+                    vec![
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: "forbidden-update".to_owned(),
+                            name: "update_goal".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: "forbidden-update".to_owned(),
+                            json: r#"{"notes":"handoff tool unexpectedly executed"}"#.to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                            id: "forbidden-update".to_owned(),
+                        }),
+                    ]
+                } else if self.prompt_final && self.ordinal == 8 && first {
+                    vec![
+                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                            id: "wait".to_owned(),
+                            name: "update_goal".to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                            id: "wait".to_owned(),
+                            json: r#"{"wait":{"seconds":60,"reason":"await final user input"}}"#
+                                .to_owned(),
+                        }),
+                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                            id: "wait".to_owned(),
+                        }),
+                    ]
+                } else {
+                    vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: if handoff {
+                            "durable final-slot handoff"
+                        } else {
+                            "ordinary early completion"
+                        }
+                        .to_owned(),
+                    })]
+                };
             events.push(Ok(qq_provider::ProviderEvent::Completed {
                 usage: Some(qq_provider::ProviderUsage {
                     input_tokens: 11,
@@ -50,11 +67,21 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                     reasoning_tokens: None,
                 }),
             }));
-            Box::pin(stream::iter(events))
+            let held = self.ordinal == 9 && first && self.scenario == "tighten";
+            let admission = Arc::clone(&self.admission);
+            Box::pin(async_stream::stream! {
+                if held {
+                    admission.0.notify_one();
+                    admission.1.notified().await;
+                }
+                for event in events { yield event; }
+            })
         }
     }
     struct Loader {
         prompt_final: bool,
+        scenario: &'static str,
+        admission: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
         requests: Arc<StdMutex<Vec<Vec<ModelRequest>>>>,
     }
     impl RuntimeLoader for Loader {
@@ -67,12 +94,16 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 ordinal
             };
             let prompt_final = self.prompt_final;
+            let scenario = self.scenario;
+            let admission = Arc::clone(&self.admission);
             Box::pin(async move {
                 Ok(loaded_runtime(
                     Runtime::new(
                         Model {
                             ordinal,
                             prompt_final,
+                            scenario,
+                            admission,
                             requests,
                         },
                         "test-model",
@@ -85,12 +116,22 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             })
         }
     }
-    for prompt_final in [false, true] {
+    for (prompt_final, scenario) in [false, true].into_iter().flat_map(|prompt| {
+        ["early", "one_turn", "tools", "tighten"].map(|scenario| (prompt, scenario))
+    }) {
         let directory = TempDir::new().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let database = directory.path().join("sessions.sqlite3");
+        let admission = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        let final_turns = match scenario {
+            "one_turn" => 1,
+            "tools" => 3,
+            _ => 2,
+        };
         let loader = Arc::new(Loader {
             prompt_final,
+            scenario,
+            admission: Arc::clone(&admission),
             requests: Arc::clone(&requests),
         });
         let runtime =
@@ -111,12 +152,31 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             .unwrap();
         runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
             "type":"set_goal", "session_id":session_id, "objective":"finish exactly ten charged slices with a handoff",
-            "budget":{"max_goal_runs":10, "deadline_ms":now_ms()+60_000, "per_run":{"max_model_turns":3}}
+            "budget":{"max_goal_runs":if scenario=="tighten" {11} else {10}, "deadline_ms":now_ms()+60_000,
+                "per_run":{"max_model_turns":if scenario=="one_turn" && !prompt_final {1} else {3}}}
         })).unwrap()).await.unwrap();
         let mut starts = Vec::new();
         let mut submitted = false;
+        let mut tightened = false;
         let goal = tokio::time::timeout(Duration::from_secs(20), async {
-            while let Some(event) = events.next().await {
+            loop {
+                let event = tokio::select! {
+                    _ = admission.0.notified(), if scenario == "tighten" && !tightened => {
+                        let current = runtime.snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 256, 256))
+                            .await.unwrap().focused.unwrap().goal.unwrap();
+                        let expected = qq_protocol::GoalIdentity { goal_id: current.goal_id, revision: current.revision };
+                        let mut budget = current.budget;
+                        budget.max_goal_runs = 10;
+                        runtime.command(CommandId::generate().unwrap(), SessionCommand::SetGoal {
+                            session_id, objective: current.objective, check: current.check,
+                            budget: Box::new(budget), expected: Some(expected), replace: false,
+                        }).await.unwrap();
+                        tightened = true;
+                        admission.1.notify_one();
+                        continue;
+                    }
+                    event = events.next() => event.expect("goal stream ended before exhaustion"),
+                };
                 match event.unwrap().event {
                     SessionEvent::RunStarted { run_id, origin, .. } => {
                         starts.push((run_id, origin))
@@ -130,7 +190,10 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                                 SessionCommand::SubmitPrompt {
                                     session_id,
                                     input: vec![InputPart::text("give the final handoff")],
-                                    limits: RunLimits::default(),
+                                    limits: RunLimits {
+                                        max_model_turns: (scenario=="one_turn").then_some(1),
+                                        ..RunLimits::default()
+                                    },
                                     correlation: Correlation::default(),
                                     output: None,
                                 },
@@ -154,11 +217,14 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                     _ => {}
                 }
             }
-            panic!("goal stream ended before exhaustion");
         })
         .await
         .expect("ten-run goal must exhaust its finite allowance");
-        assert_eq!(goal.counters.runs, 10);
+        assert_eq!(
+            goal.counters.runs, 10,
+            "{scenario}, prompt_final={prompt_final}"
+        );
+        assert!(!goal.notes.contains("unexpectedly executed"));
         assert_eq!(
             goal.status,
             qq_protocol::GoalStatus::BudgetExhausted {
@@ -185,18 +251,19 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
         } else {
             matches!(starts[9].1, Some(qq_protocol::RunOrigin::Goal { .. }))
         });
-        runtime.shutdown().await.unwrap();
+        runtime.close().await.unwrap();
         {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 10, "no eleventh run may start");
             assert_eq!(
                 requests[9].len(),
-                2,
-                "early completion must reserve one handoff within the tenth run"
+                final_turns,
+                "final slot must honor its caller cap: {scenario}, prompt_final={prompt_final}"
             );
-            assert_eq!(requests[9][1].tool_choice(), qq_provider::ToolChoice::None);
+            let handoff = &requests[9][usize::from(scenario != "one_turn")];
+            assert_eq!(handoff.tool_choice(), qq_provider::ToolChoice::None);
             assert!(
-                request_texts(&requests[9][1])
+                request_texts(handoff)
                     .iter()
                     .any(|text| text.contains("final budgeted run"))
             );
@@ -210,9 +277,10 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             )
             .unwrap();
         assert_eq!(
-            turns, 2,
-            "both ordinary completion and handoff must be durable"
+            turns, final_turns as u32,
+            "all final-slot model turns must be durable: {scenario}"
         );
+        drop(connection);
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
             .await
             .unwrap();
