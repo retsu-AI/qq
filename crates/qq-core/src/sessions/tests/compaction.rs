@@ -6018,19 +6018,18 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
     // path (`Runtime::summarize`), so it must continue a cut reply the same
     // way and concatenate the pieces byte-for-byte; a heading split at the
     // cut still validates and the committed summary is the whole text.
+    for with_goal in [false,true] {
     let turns = 48;
     let summary = valid_summary("continued");
     // Cut inside the word "Decisions" so the seam splits a required heading.
     let cut = summary.find("Decis").unwrap() + "Decis".len();
+    let script = AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
+        turns, text:"task complete".to_owned(), summary:summary.clone(), cut,
+    };
     let mut harness = auto_compact_harness_with_loader_and_mode(
         AutoCompactLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            scripts: vec![AutoCompactScript::ShellRepeatedlyWithTruncatedSummaries {
-                turns,
-                text: "task complete".to_owned(),
-                summary: summary.clone(),
-                cut,
-            }],
+            scripts: vec![if with_goal {AutoCompactScript::Measured {script:Box::new(script),bytes_per_token:4}} else {script}],
             loads: StdMutex::new(0),
             context_window: Some(16 * 1024),
             max_output_tokens: 1_024,
@@ -6039,12 +6038,20 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
         ApprovalMode::Full,
     )
     .await;
-    let run = queue_prompt(
-        &harness.runtime,
-        harness.session_id,
-        "do the task".to_owned(),
-    )
-    .await;
+    let held = Arc::clone(&harness.runtime.inner.permits).acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32).await.unwrap();
+    if with_goal {
+        harness.runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":harness.session_id,"objective":"bounded multi-request summary",
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
+        })).unwrap()).await.unwrap();
+    }
+    let receipt=harness.runtime.command(CommandId::generate().unwrap(),SessionCommand::SubmitPrompt {
+        session_id:harness.session_id,input:vec![InputPart::text("do the task")],
+        limits:RunLimits {max_output_tokens:with_goal.then_some(1000),..RunLimits::default()},
+        correlation:Correlation::default(),output:None,
+    }).await.unwrap();
+    let CommandOutcome::PromptQueued {run_id:run,..}=receipt.outcome else {panic!("run")};
+    drop(held);
     let observed = collect_until(&mut harness.events, finished_for(run)).await;
     let outcome = observed
         .iter()
@@ -6096,6 +6103,17 @@ async fn an_in_run_summary_cut_at_the_output_limit_is_continued_and_joined_verba
         })
         .count();
     assert_eq!(continuations, compactions);
+    if with_goal {
+        let summary_caps:Vec<_>=requests.iter().filter(|request|request_texts(request).last().is_some_and(|text|
+            text.contains("Summarize this conversation") || text.contains("cut off at the output token limit")))
+            .map(ModelRequest::max_output_tokens).collect();
+        assert_eq!(summary_caps.len(),compactions*2);
+        for pair in summary_caps.chunks_exact(2) {
+            assert!(pair[0]<1000,"summary input must respect the caller's remaining output cap: {pair:?}");
+            assert_eq!(pair[1],pair[0]-1,"a continuation re-quotes the measured summary prefix");
+        }
+    }
+    }
 }
 
 /// End to end: a run reaches its slice report, keeps working, and then
