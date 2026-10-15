@@ -96,59 +96,91 @@ impl WeakRunCancellation {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{future::Future, task::Poll};
 
     use super::*;
 
     #[tokio::test]
-    async fn a_waiter_wakes_on_cancel_without_polling() {
+    async fn cancellation_wakes_every_registered_waiter_and_future_waits() {
         let token = RunCancellation::new();
         assert!(!token.is_cancelled());
-        let waiter = tokio::spawn({
-            let token = token.clone();
-            async move { token.cancelled().await }
-        });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!waiter.is_finished());
+
+        assert_eq!(format!("{token:?}"), "RunCancellation { cancelled: false }");
+        let clones = (0..16).map(|_| token.clone()).collect::<Vec<_>>();
+        let mut waits = clones
+            .iter()
+            .map(|token| Box::pin(token.cancelled()))
+            .collect::<Vec<_>>();
+        let wakes = (0..16)
+            .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let wakers = wakes
+            .iter()
+            .map(|count| futures_util::task::waker(std::sync::Arc::new(CountWake(count.clone()))))
+            .collect::<Vec<_>>();
+        for (wait, waker) in waits.iter_mut().zip(&wakers) {
+            let mut cx = std::task::Context::from_waker(waker);
+            assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
+        }
         token.cancel();
-        tokio::time::timeout(Duration::from_millis(100), waiter)
-            .await
-            .expect("the waiter wakes promptly")
-            .unwrap();
+        for (index, count) in wakes.iter().enumerate() {
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "waiter {index} must be notified independently"
+            );
+        }
+        for (wait, waker) in waits.iter_mut().zip(&wakers) {
+            let mut cx = std::task::Context::from_waker(waker);
+            assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(()));
+        }
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(token.is_cancelled());
+        assert_eq!(format!("{token:?}"), "RunCancellation { cancelled: true }");
+        token.cancel();
+        assert_eq!(
+            Box::pin(token.cancelled()).as_mut().poll(&mut cx),
+            Poll::Ready(())
+        );
+    }
+
+    struct CountWake(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl futures_util::task::ArcWake for CountWake {
+        fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+            arc_self
+                .0
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[tokio::test]
     async fn cancel_before_the_wait_resolves_immediately_and_repeats() {
         let token = RunCancellation::already_cancelled();
-        tokio::time::timeout(Duration::from_millis(10), token.cancelled())
-            .await
-            .unwrap();
-        // A second wait on a cancelled token also resolves: the flag, not a
-        // one-shot permit, is the truth.
-        tokio::time::timeout(Duration::from_millis(10), token.cancelled())
-            .await
-            .unwrap();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..2 {
+            assert_eq!(
+                Box::pin(token.cancelled()).as_mut().poll(&mut cx),
+                Poll::Ready(())
+            );
+        }
         token.cancel();
         assert!(token.is_cancelled());
     }
 
     #[tokio::test]
-    async fn a_cancel_between_check_and_await_is_not_lost() {
-        // Deterministic: cancel from a task that runs only once the waiter
-        // has registered; `enable()` before the flag read is what makes
-        // this safe, and a lost wake here would hang the test.
+    async fn dropped_waiters_do_not_consume_the_live_waiters_wakeup() {
         let token = RunCancellation::new();
-        let cancel = tokio::spawn({
-            let token = token.clone();
-            async move {
-                tokio::task::yield_now().await;
-                token.cancel();
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
-            .await
-            .unwrap();
-        cancel.await.unwrap();
+        let wake = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = futures_util::task::waker(std::sync::Arc::new(CountWake(wake.clone())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut dropped = Box::pin(token.cancelled());
+        let mut live = Box::pin(token.cancelled());
+        assert_eq!(dropped.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(live.as_mut().poll(&mut cx), Poll::Pending);
+        drop(dropped);
+        token.cancel();
+        assert_eq!(wake.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(live.as_mut().poll(&mut cx), Poll::Ready(()));
     }
 }
