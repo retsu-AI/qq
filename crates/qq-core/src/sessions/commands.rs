@@ -1243,6 +1243,8 @@ pub(super) fn execute_command(
                         tool_call,
                         resolution,
                         delegate: None,
+                        delegate_model: None,
+                        delegate_request_id: None,
                     },
                 )?;
                 (

@@ -141,6 +141,8 @@ impl JevAbstain {
 struct JevAnswer {
     decision: Result<ReviewDecision, JevAbstain>,
     spend: qq_core::ReviewSpend,
+    response_model: Option<String>,
+    response_id: Option<String>,
 }
 
 impl ApprovalReviewer for JevApprovalReviewer {
@@ -174,16 +176,22 @@ impl ApprovalReviewer for JevApprovalReviewer {
                                 "TypeSafe request timed out".to_owned(),
                             )),
                             spend: qq_core::ReviewSpend::default(),
+                            response_model: None,
+                            response_id: None,
                         },
                     }
                 }
                 Ok(Err(why)) => JevAnswer {
                     decision: Err(JevAbstain::NoKey(why)),
                     spend: free,
+                    response_model: None,
+                    response_id: None,
                 },
                 Err(_) => JevAnswer {
                     decision: Err(JevAbstain::NoKey("credential resolution stopped")),
                     spend: free,
+                    response_model: None,
+                    response_id: None,
                 },
             };
             match answer.decision {
@@ -191,6 +199,8 @@ impl ApprovalReviewer for JevApprovalReviewer {
                     decision,
                     spend: answer.spend,
                     delegate: DelegateIdentity::Jev,
+                    delegate_model: answer.response_model,
+                    delegate_request_id: answer.response_id,
                 },
                 // Jev did not decide: the reviewer model is next, then the
                 // human. Jev's spend is still charged; the fallback's spend is
@@ -318,6 +328,8 @@ async fn ask_jev(
                 usage: None,
                 cost_usd_nanos: Some(0),
             },
+            response_model: None,
+            response_id: None,
         };
     };
     match routing::typesafe_evaluate(client, endpoint, &body).await {
@@ -325,6 +337,8 @@ async fn ask_jev(
         Err(error) => JevAnswer {
             decision: Err(JevAbstain::Transport(error.to_string())),
             spend: qq_core::ReviewSpend::default(),
+            response_model: None,
+            response_id: None,
         },
     }
 }
@@ -341,6 +355,8 @@ fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Valu
             return JevAnswer {
                 decision: Err(JevAbstain::Malformed),
                 spend: qq_core::ReviewSpend::default(),
+                response_model: None,
+                response_id: None,
             };
         }
     };
@@ -353,6 +369,8 @@ fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Valu
     let malformed = || JevAnswer {
         decision: Err(JevAbstain::Malformed),
         spend,
+        response_model: None,
+        response_id: None,
     };
     if !model.matches_response(value["model"].as_str()) {
         return malformed();
@@ -413,7 +431,20 @@ fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Valu
             _ => unreachable!("validated choice"),
         }
     };
-    JevAnswer { decision, spend }
+    let response_model = decision
+        .as_ref()
+        .ok()
+        .map(|_| value["model"].as_str().unwrap_or("unknown").to_owned());
+    let response_id = decision
+        .as_ref()
+        .ok()
+        .and_then(|_| value["id"].as_str().map(str::to_owned));
+    JevAnswer {
+        decision,
+        spend,
+        response_model,
+        response_id,
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +485,7 @@ mod tests {
         let mut probabilities = serde_json::json!({"approve": 0.05, "deny": 0.05, "abstain": 0.05});
         probabilities[choice] = serde_json::json!(0.9);
         serde_json::json!({
+            "id": "jev-response-42",
             "model": "jev-1.13.0",
             "usage": {"input_tokens": 100, "output_tokens": 0},
             "answers": {"approval": {
@@ -469,6 +501,7 @@ mod tests {
         assert_eq!(approve.decision, Ok(ReviewDecision::Approve));
         assert_eq!(approve.spend.cost_usd_nanos, Some(4200));
         assert_eq!(approve.spend.usage.unwrap().input_tokens, 100);
+        assert_eq!(approve.response_id.as_deref(), Some("jev-response-42"));
 
         let deny = parse_jev_approval(&model(), &response("deny", 0.9));
         assert!(matches!(deny.decision, Ok(ReviewDecision::Deny { .. })));
@@ -832,6 +865,8 @@ mod tests {
                     cost_usd_nanos: Some(7),
                 },
                 delegate: DelegateIdentity::Reviewer,
+                delegate_model: None,
+                delegate_request_id: None,
             },
         });
         let (factory, workspace) = factory_with_key(Some(b"test-key"));
@@ -916,6 +951,11 @@ mod tests {
                 "approve" => {
                     assert_eq!(verdict.decision, ReviewDecision::Approve);
                     assert_eq!(verdict.delegate, DelegateIdentity::Jev);
+                    assert_eq!(verdict.delegate_model.as_deref(), Some("jev-1.13.0"));
+                    assert_eq!(
+                        verdict.delegate_request_id.as_deref(),
+                        Some("jev-response-42")
+                    );
                     assert_eq!(verdict.spend.cost_usd_nanos, Some(4200));
                 }
                 "deny" => {

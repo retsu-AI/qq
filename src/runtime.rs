@@ -2950,6 +2950,8 @@ async fn collect_reviewer_verdict(
                         cost_usd_nanos: None,
                     },
                     delegate: qq_core::DelegateIdentity::Reviewer,
+                    delegate_model: None,
+                    delegate_request_id: None,
                 };
             }
             None => break,
@@ -2959,6 +2961,8 @@ async fn collect_reviewer_verdict(
         decision: parse_reviewer_decision(&text),
         spend,
         delegate: qq_core::DelegateIdentity::Reviewer,
+        delegate_model: None,
+        delegate_request_id: None,
     }
 }
 
@@ -3777,10 +3781,7 @@ fn checkpoint_claim_and_instructions(tool_phase: bool) -> (&'static str, &'stati
 
 fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
     let model = crate::runtime::jev::ModelRequest::from_environment();
-    let spend = match crate::runtime::jev::spend(value, &model) {
-        Ok(spend) => spend,
-        Err(_) => qq_protocol::CheckpointSpend::default(),
-    };
+    let spend = crate::runtime::jev::spend(value, &model).unwrap_or_default();
     let unavailable = || CheckpointVerdict {
         spend,
         outcome: CheckpointOutcome::Unavailable,
