@@ -953,6 +953,9 @@ impl RunState {
                         // provider request. A spent work budget grants one final
                         // response that asks for no tool calls; a second spent check, an elapsed wall
                         // clock, or unmeasurable cost settles the run here.
+                        if let Some(cap) = goal.as_ref().and_then(sessions::GoalRunInput::final_slot_turn_cap) {
+                            run.budget.constrain_model_turns(cap);
+                        }
                         let budget_final_turn = match run.budget.before_turn(
                             tokio::time::Instant::now(),
                             if allow_tools { MAX_TOOL_CALLS_PER_TURN } else { 0 },
@@ -1710,7 +1713,7 @@ impl RunState {
                                     yield TurnStep::Emit( RuntimeEvent::RefusalDelta { text });
                                 }
                                 Ok(ProviderEvent::ToolCallStarted { id, name }) => {
-                                    if budget_final_turn {
+                                    if budget_final_turn && !run.goal_handoff_requested {
                                         // The model called a tool on the final
                                         // response anyway (Bedrock Converse cannot
                                         // ask for none). The budget still settles

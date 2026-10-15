@@ -74,6 +74,18 @@ impl GoalRunInput {
         &self.initial_notice
     }
 
+    pub(crate) fn final_slot_turn_cap(&self) -> Option<u32> {
+        self.final_slot().then(|| {
+            self.display
+                .as_deref()
+                .unwrap_or(self.captured.as_ref())
+                .budget
+                .per_run
+                .max_model_turns
+                .unwrap_or(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS)
+        })
+    }
+
     async fn refresh_display(&mut self) -> Result<(), SessionRuntimeError> {
         let session = self.identity.session_id;
         let captured_id = self.captured.goal_id;
@@ -1244,9 +1256,26 @@ pub(super) fn admit_run(
         return Ok(GoalAdmission::Exhausted(reason));
     }
     let original_duration = limits.max_duration_ms;
-    // Queued automatic limits are a cache; prompts retain their own limits.
+    let final_slot = matches!(
+        origin,
+        Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+    ) && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs;
+    // Queued automatic limits are a cache; prompts retain their own limits
+    // except for the final slot's finite turn ceiling.
     if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
         *limits = current.budget.per_run;
+    }
+    if final_slot {
+        let cap = current
+            .budget
+            .per_run
+            .max_model_turns
+            .unwrap_or(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS);
+        limits.max_model_turns = Some(
+            limits
+                .max_model_turns
+                .map_or(cap, |existing| existing.min(cap)),
+        );
     }
     let remaining = current.budget.deadline_ms.saturating_sub(anchor_ms);
     limits.max_duration_ms = Some(
@@ -1290,10 +1319,7 @@ pub(super) fn admit_run(
         );
     }
     Ok(GoalAdmission::Allowed {
-        final_slot: matches!(
-            origin,
-            Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
-        ) && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs,
+        final_slot,
         deadline_ms: current.budget.deadline_ms,
         anchor_ms,
         execution_started: None,

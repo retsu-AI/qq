@@ -18,46 +18,52 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 requests[self.ordinal].push(request);
                 (first, handoff, requests[self.ordinal].len())
             };
-            let mut events =
-                if self.scenario == "tools" && self.ordinal == 9 && handoff && attempt == 2 {
-                    vec![
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "forbidden-update".to_owned(),
-                            name: "update_goal".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "forbidden-update".to_owned(),
-                            json: r#"{"notes":"handoff tool unexpectedly executed"}"#.to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "forbidden-update".to_owned(),
-                        }),
-                    ]
-                } else if self.prompt_final && self.ordinal == 8 && first {
-                    vec![
-                        Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                            id: "wait".to_owned(),
-                            name: "update_goal".to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                            id: "wait".to_owned(),
-                            json: r#"{"wait":{"seconds":60,"reason":"await final user input"}}"#
-                                .to_owned(),
-                        }),
-                        Ok(qq_provider::ProviderEvent::ToolCallCompleted {
-                            id: "wait".to_owned(),
-                        }),
-                    ]
-                } else {
-                    vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                        text: if handoff {
-                            "durable final-slot handoff"
-                        } else {
-                            "ordinary early completion"
-                        }
-                        .to_owned(),
-                    })]
-                };
+            let mut events = if self.ordinal == 9
+                && handoff
+                && ((self.scenario == "tools" && attempt == 2)
+                    || (self.scenario == "tighten" && attempt >= 2))
+            {
+                vec![
+                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: "durable final-slot handoff".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: "forbidden-update".to_owned(),
+                        name: "update_goal".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: "forbidden-update".to_owned(),
+                        json: r#"{"notes":"handoff tool unexpectedly executed"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                        id: "forbidden-update".to_owned(),
+                    }),
+                ]
+            } else if self.prompt_final && self.ordinal == 8 && first {
+                vec![
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: "wait".to_owned(),
+                        name: "update_goal".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: "wait".to_owned(),
+                        json: r#"{"wait":{"seconds":60,"reason":"await final user input"}}"#
+                            .to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                        id: "wait".to_owned(),
+                    }),
+                ]
+            } else {
+                vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: if handoff {
+                        "durable final-slot handoff"
+                    } else {
+                        "ordinary early completion"
+                    }
+                    .to_owned(),
+                })]
+            };
             events.push(Ok(qq_provider::ProviderEvent::Completed {
                 usage: Some(qq_provider::ProviderUsage {
                     input_tokens: 11,
@@ -125,7 +131,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
         let admission = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
         let final_turns = match scenario {
             "one_turn" => 1,
-            "tools" => 3,
+            "tools" | "tighten" => 3,
             _ => 2,
         };
         let loader = Arc::new(Loader {
@@ -287,8 +293,12 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
         let limits: RunLimits = serde_json::from_str(&limits_json).unwrap();
         assert_eq!(
             limits.max_model_turns,
-            Some(if scenario == "one_turn" { 1 } else { 3 }),
-            "the final slot inherits the finite goal cap without widening a stricter prompt: {scenario}, user_prompt={prompt_final}"
+            if prompt_final && scenario == "tighten" {
+                None
+            } else {
+                Some(if scenario == "one_turn" { 1 } else { 3 })
+            },
+            "admission applies the final-slot cap only when already classified final: {scenario}, user_prompt={prompt_final}"
         );
         let turns: u32 = connection
             .query_row(

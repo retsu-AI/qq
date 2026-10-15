@@ -1761,6 +1761,11 @@ one tool-free handoff within the existing run allowance. A caller's stricter
 one-turn cap uses that turn for the handoff; hard token, cost and deadline bounds
 still take precedence. Tools requested during the handoff are refused. The
 handoff follows normal output-contract validation and survives in-run compaction.
+Final-slot prompt admission intersects its model-turn cap with the finite goal
+per-run cap. If a live edit makes an already-running prompt final, the next turn
+boundary tightens its meter without resetting spend. A fully consumed tightened
+cap permits no additional response; the final response is reserved only when a
+turn remains. Rejected tools on that response retain a durable completed turn.
 Completion refreshes the live goal display without acknowledging a new revision
 until a subsequent request actually carries its notice.
 
