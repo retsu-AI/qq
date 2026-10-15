@@ -8,11 +8,12 @@ This is not a published prerelease, a version bump, or permission to tag.
 The manifest, lockfile, generated changelog and guide install pins remain at
 v0.1.6 until their respective release steps.
 
-**Not ready to tag yet.** Main's hosted correctness, smoke, Windows teardown,
-WASM and website checks pass, but release performance/size qualification is
-not complete. The CI job called `release build size` builds and reports bytes;
-it does not enforce the 48,000,000-byte default or 41,000,000-byte minimal
-budgets in `benchmarks/perf/budgets-v1.json`.
+**Bump authorized; not tagged.** Preparation merged as `9df32a5b` and main CI
+passes. ENG-834 is closed by explicit maintainer acceptance of #315's known
+H0 qualification gap; H0 remains failed/unqualified, not a passing performance
+result. The user requested the v0.1.7 release handoff after preparation merged.
+The CI size-report job is not executable budget enforcement; budgets remain
+unchanged. The bump PR still requires full checks, smoke and review.
 
 ## Merged release scope
 
@@ -32,13 +33,14 @@ budgets in `benchmarks/perf/budgets-v1.json`.
   merged as `21332992`. Final source `3dc36557` records default 44,849,176
   bytes and minimal 40,778,584 bytes, within unchanged ceilings. Correctness
   passes, but audited H0 reports have 18 A/B and 20 A/A failures with host
-  pressure above the documented threshold. Merge does not waive qualification;
-  unchanged H0 on an exclusive quiet host remains required.
-- [ ] Attach accepted final-head performance/size receipts, including A/B and
-  same-binary A/A controls and host-pressure checks, to the owning ledgers.
-  Recheck after any runtime or release-profile merge; inherited receipts do
-  not qualify a different candidate.
-- [ ] Merge this preparation PR after its documentation checks and review.
+  pressure above the documented threshold. ENG-834's subsequent closure
+  records maintainer acceptance of that known gap, not a passing H0 result.
+- [x] Record the qualification disposition: maintainer accepted #315 with the
+  known H0 gap and closed ENG-834. Preserve failed receipts; do not change
+  budgets or infer performance gains. User authorized the release handoff
+  after preparation merge and passing main CI.
+- [x] Merge this preparation PR after its documentation checks and review
+  (#316, `9df32a5b`).
 - [ ] Freeze the candidate and run `cargo xtask check --full` and
   `cargo xtask smoke`; record exact commit, counts, skips and failures.
   Main's [hosted check](https://github.com/retsu-AI/qq/actions/runs/38688545712)
