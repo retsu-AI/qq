@@ -2512,6 +2512,111 @@ mod tests {
         }
     }
 
+    struct GoalVerdictProvider {
+        blocked: bool,
+        turns: Mutex<usize>,
+    }
+    impl Provider for GoalVerdictProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let mut turns = self.turns.lock().unwrap();
+            let mut events = if request.tools().is_empty() {
+                assert!(!self.blocked);
+                vec![Ok(ProviderEvent::OutputTextDelta {
+                    text: r#"{"achieved":true,"evidence":"independently verified the persisted work and evidence"}"#.to_owned(),
+                })]
+            } else if *turns == 0 {
+                assert!(
+                    request
+                        .tools()
+                        .iter()
+                        .any(|tool| tool.name() == "update_goal")
+                );
+                vec![
+                    Ok(ProviderEvent::ToolCallStarted { id: "goal-update".into(), name: "update_goal".into() }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta { id: "goal-update".into(),
+                        json: if self.blocked {
+                            r#"{"status":{"type":"blocked","reason":"missing external input"}}"#
+                        } else {
+                            r#"{"status":{"type":"achieved","evidence":"the requested work is ready"}}"#
+                        }.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "goal-update".into() }),
+                ]
+            } else {
+                vec![Ok(ProviderEvent::OutputTextDelta {
+                    text: "work ready".into(),
+                })]
+            };
+            *turns += 1;
+            events.push(Ok(ProviderEvent::Completed {
+                usage: Some(ProviderUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                }),
+            }));
+            Box::pin(stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_achievement_and_blocking_emit_every_direct_run_before_final_state() {
+        for blocked in [true, false] {
+            let fixture = fixture(move || GoalVerdictProvider {
+                blocked,
+                turns: Mutex::new(0),
+            })
+            .await;
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_goal(
+                    &fixture.sessions,
+                    options(&fixture.workspace),
+                    request,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                code,
+                if blocked { 7 } else { 0 },
+                "{}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let final_record = records.last().unwrap();
+            assert_eq!(final_record["type"], "goal");
+            assert_eq!(final_record["exit_code"], code);
+            let runs: Vec<_> = records
+                .iter()
+                .filter(|record| record["type"] == "goal_run")
+                .collect();
+            assert_eq!(runs.len(), if blocked { 1 } else { 2 }, "{records:?}");
+            for run in runs {
+                assert!(run["run"]["outcome"].is_object());
+                assert_eq!(run["goal"], run["run"]["goal"]);
+                assert_eq!(run["session_id"], final_record["goal"]["session_id"]);
+            }
+            assert_eq!(
+                final_record["goal"]["status"]["type"],
+                if blocked { "blocked" } else { "achieved" }
+            );
+            if !blocked {
+                assert_eq!(final_record["goal"]["counters"]["audits"], 1);
+            }
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
     fn goal_request() -> GoalInvocation {
         GoalInvocation {
             objective: Some("finish the task".to_owned()),
