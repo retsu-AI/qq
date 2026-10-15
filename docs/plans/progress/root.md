@@ -777,3 +777,11 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   ADR-0010's thin-LTO choice while retaining its 48/41 MB ceilings. Root owns
   the new ADR, ADR index/status and retry measurement inventory reconciliation
   in PR #315. Hosted speed/correctness qualification remains required.
+
+### 2026-10-15 — ENG-834 per-run retry measurement repair
+
+- Root additionally owns `xtask/src/perf.rs` and the H0 common-fixture receipt
+  in CI for PR #315's follow-up Codex finding: the mean can hide one seven-send
+  run among nineteen six-send runs. Preserve the average metric and its budget;
+  enforce the correctness bound independently on every sampled run. Both
+  immutable production arms use the candidate's same repaired fixture source.

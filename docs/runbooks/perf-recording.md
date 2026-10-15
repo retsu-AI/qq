@@ -34,7 +34,14 @@ version: 4.
 ## Focused fixtures
 
 The ENG-834 hosted repair job compares merged main `9868038c` against the PR
-candidate using the unchanged H0 fixture and toolchain. Size ceilings stay
+candidate using the same H0 fixture and toolchain in both arms. Both immutable
+production checkouts overlay only `xtask/src/perf.rs` from the immutable PR
+head before recording. The artifact retains `fixture-receipt.json` with the
+fixture commit, production commits, original hashes and equal effective hashes;
+the baseline report truthfully records its modified workspace. The repaired
+fixture preserves the average retry metric and validates every run's send bound,
+so one seven-send run among nineteen six-send runs cannot pass correctness.
+Earlier recordings without this check do not prove the per-run invariant. Size ceilings stay
 48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
 correction described in the performance inventory; all other limits must match
 the pinned baseline. The artifact retains the exact budget file used.

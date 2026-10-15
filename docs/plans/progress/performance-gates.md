@@ -99,3 +99,19 @@
 - Hosted fmt/Clippy/workspace tests, wasm and Windows pass at `f05340b2`. H0
   job 116247138155 and turn job 116247138237 are still running; runtime
   qualification and final-head checks remain open.
+
+## 2026-10-15 — per-run retry bound
+
+- Codex finds averaging hides a rare overrun: nineteen six-entry runs plus one
+  seven-entry run report 6,050 milli and pass the old 6,300 correctness gate.
+  Regression-first commit `7c92c057` reproduces this (0 pass/1 fail).
+- Keep the mean metric and unchanged budgets; independently require every
+  sampled run to stay within `MAX_TURN_RETRIES + 1`, retaining all counts in
+  the correctness receipt. Regression and real retry fixture pass (2/2).
+- H0 overlays only candidate-pinned `xtask/src/perf.rs` into both immutable
+  production arms. Receipt records original/effective hashes and commits;
+  baseline workspace modification remains explicit. Guard checks pass for
+  the valid overlay and refusal of dirty input, wrong SHA and a relaxed budget.
+- Workspace build, Clippy, formatting and workflow lint pass; independent
+  review approves. Local socket creation still returns EPERM, so full hosted tests
+  remain required. Earlier H0 records do not prove the repaired per-run bound.

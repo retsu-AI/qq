@@ -3708,8 +3708,8 @@ async fn cancellation_workloads(
 /// stream before its first event, the number of provider entries per paused
 /// run is the number of sends the runtime issued for one logical turn. Under
 /// ADR-0040 the run owns turn recovery, so the expected value is exactly
-/// `MAX_TURN_RETRIES + 1` and the gate is 5 % above it; anything more means
-/// a second retry owner crept in above the loop.
+/// `MAX_TURN_RETRIES + 1`. The metric retains its cross-run average, while
+/// correctness bounds every sampled run so an occasional extra send cannot hide.
 async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
@@ -3766,8 +3766,6 @@ fn retry_amplification_result(
         ));
     }
     let expected_entries = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
-    let expected_milli = expected_entries * 1_000;
-    let gate_milli = expected_milli + expected_milli / 20;
     let runs = entries_per_run.len();
     let total: u64 = entries_per_run.iter().sum();
     let ratio_milli = total.saturating_mul(1_000) / runs as u64;
@@ -3780,7 +3778,9 @@ fn retry_amplification_result(
         )?,
         CorrectnessCheck {
             name: "retry_amplification_bounded".to_owned(),
-            passed: ratio_milli <= gate_milli,
+            passed: entries_per_run
+                .iter()
+                .all(|&entries| entries <= expected_entries),
             detail: format!(
                 "{total} provider entries across {runs} paused runs ({ratio_milli} milli); entries per run {entries_per_run:?}, at most {expected_entries} each"
             ),

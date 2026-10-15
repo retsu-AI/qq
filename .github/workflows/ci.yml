@@ -264,10 +264,26 @@ jobs:
           [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           diff -u baseline/rust-toolchain.toml candidate/rust-toolchain.toml
-          diff -u baseline/xtask/src/perf.rs candidate/xtask/src/perf.rs
+          mkdir -p "$RUNNER_TEMP/h0-recording"
           python3 - <<'PYTHON'
-          import json
+          import hashlib, json, os, subprocess
           from pathlib import Path
+          receipt = {'fixture_sha': os.environ['CANDIDATE_SHA'], 'path': 'xtask/src/perf.rs', 'arms': {}}
+          fixture = Path('candidate/xtask/src/perf.rs').read_bytes()
+          for arm, sha in [('baseline', os.environ['BASELINE_SHA']), ('candidate', os.environ['CANDIDATE_SHA'])]:
+              root = Path(arm)
+              if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() != sha:
+                  raise SystemExit(f'{arm} is not the pinned commit')
+              subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', receipt['path']], cwd=root, check=True)
+              path = root / receipt['path']
+              original = path.read_bytes()
+              path.write_bytes(fixture)
+              receipt['arms'][arm] = {'production_sha': sha,
+                  'original_sha256': hashlib.sha256(original).hexdigest(),
+                  'effective_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+          if receipt['arms']['baseline']['effective_sha256'] != receipt['arms']['candidate']['effective_sha256']:
+              raise SystemExit('H0 fixture sources differ')
+          (Path(os.environ['RUNNER_TEMP']) / 'h0-recording/fixture-receipt.json').write_text(json.dumps(receipt, indent=2))
           baseline = json.loads(Path('baseline/benchmarks/perf/budgets-v1.json').read_text())
           candidate = json.loads(Path('candidate/benchmarks/perf/budgets-v1.json').read_text())
           retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
