@@ -9166,3 +9166,138 @@ fn goal_policy_checks_each_budget_dimension_against_its_fixed_anchor() {
         Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Check))
     ));
 }
+
+#[tokio::test]
+async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work() {
+    struct Authority(Arc<AtomicUsize>);
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("policy checks cannot promote grants")
+        }
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            let max = self.0.load(Ordering::SeqCst);
+            Box::pin(std::future::ready(if max == 0 {
+                Err(GoalPolicyError::Unavailable)
+            } else {
+                Ok(GoalPolicy { max_goal_runs: max as u32, ..GoalPolicy::default() })
+            }))
+        }
+    }
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed { usage: None })]))
+        }
+    }
+    struct Loader {
+        loads: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        hold: bool,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            let requests = Arc::clone(&self.requests);
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let hold = self.hold;
+            Box::pin(async move {
+                entered.notify_one();
+                if hold { release.notified().await; }
+                Ok(loaded_runtime(Runtime::new(Model(requests), "test-model", 256).unwrap(),
+                    &request.workspace, None))
+            })
+        }
+    }
+    for (during_loading, lowered) in [(false, 19), (true, 19), (false, 0), (true, 0)] {
+        let directory = TempDir::new().unwrap();
+        let ceiling = Arc::new(AtomicUsize::new(20));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.grant_authority = Some(Arc::new(Authority(Arc::clone(&ceiling))));
+        let runtime = SessionRuntime::open(options, Arc::new(Loader {
+            loads: Arc::clone(&loads), requests: Arc::clone(&requests),
+            entered: Arc::clone(&entered), release: Arc::clone(&release), hold: during_loading,
+        })).await.unwrap();
+        let held = Arc::clone(&runtime.inner.permits).acquire_many_owned(
+            runtime.inner.permits.available_permits() as u32
+        ).await.unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else { panic!("session") };
+        let mut events = runtime.subscribe(SubscribeRequest {
+            workspace_id: workspace, after: created.committed_through
+        }).unwrap();
+        let command = serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"honor current policy",
+            "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
+        })).unwrap();
+        runtime.command(CommandId::generate().unwrap(), command).await.unwrap();
+        if during_loading {
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(2), entered.notified()).await.unwrap();
+            ceiling.store(lowered, Ordering::SeqCst);
+            release.notify_one();
+        } else {
+            ceiling.store(lowered, Ordering::SeqCst);
+            drop(held);
+        }
+        let _ = collect_through_finished(&mut events).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "no provider request after policy changed");
+        assert_eq!(loads.load(Ordering::SeqCst), usize::from(during_loading));
+        let snapshot = runtime.snapshot(SnapshotRequest::new(workspace, Some(session_id), 1, 1)).await.unwrap();
+        assert!(matches!(snapshot.focused.unwrap().goal.unwrap().status,
+            qq_protocol::GoalStatus::Paused { reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::Configuration { .. }
+            }}));
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_provider_backoff_uses_durable_policy_without_shortening_model_wait() {
+    for wait_ms in [0, 60_000] {
+        let (directory, store, claim) = model_goal_claim(true).await;
+        let session = claim.identity.session_id;
+        let id = claim.goal.as_ref().unwrap().goal_id;
+        store.call(Priority::Control, move |connection| {
+            let (_, at) = goal_policy::load(connection, id)?;
+            goal_policy::save(connection, id, GoalPolicy {
+                max_backoff_ms: 1000, ..GoalPolicy::default()
+            }, at)?;
+            if wait_ms > 0 {
+                let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                goal.wait = Some(qq_protocol::GoalWait { until_ms: now_ms()+wait_ms, reason: "model wait".to_owned() });
+                crate::sessions::goals::save(connection, &goal)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let before = now_ms();
+        store.finish_run(&claim, RunOutcome::Paused { pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+            kind: RunFailureKind::ProviderUnavailable, message: "offline".to_owned(),
+            turn_ordinal: 1, attempts: 1,
+        })}, None, TeardownComplete::nothing_ran()).await.unwrap();
+        let goal = store.call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        }).await.unwrap();
+        assert!(goal.next_run_at_ms >= before + 1000);
+        if wait_ms == 0 {
+            assert!(goal.next_run_at_ms <= now_ms()+1000);
+        } else {
+            assert_eq!(goal.next_run_at_ms, goal.wait.as_ref().unwrap().until_ms);
+        }
+        store.close().await.unwrap();
+        let (connection, _) = open_database(&directory.path().join("sessions.sqlite3")).unwrap();
+        assert_eq!(goal_policy::load(&connection, id).unwrap().0.max_backoff_ms, 1000);
+        assert_eq!(crate::sessions::goals::load_live(&connection, session).unwrap().unwrap(), goal);
+    }
+}
