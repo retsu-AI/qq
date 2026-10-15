@@ -107,7 +107,7 @@ its qualification procedure to § Qualification procedure.
   provider's returned version in evidence. Per-field nullable usage remains
   unknown and is never priced; malformed, missing or negative values reject
   the response. The explicit long-context header is sent only for
-  `JEV_LONG_CONTEXT=true`.
+  `JEV_LONG_CONTEXT=1`.
 - Successful approval receipts retain the returned Jev model and optional
   response ID in additive `tool_approval_resolved` fields. Checkpoint and
   passive advisory feedback now retain bounded `provider_model` and
