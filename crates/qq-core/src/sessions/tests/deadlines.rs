@@ -783,15 +783,30 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     )
     .await;
     runtime.shutdown().await.unwrap();
-    assert!(overlap.is_err(), "same-session preparation overlapped cleanup");
-    assert!(resumed.is_ok(), "queued preparation did not resume after drain");
+    assert!(
+        overlap.is_err(),
+        "same-session preparation overlapped cleanup"
+    );
+    assert!(
+        resumed.is_ok(),
+        "queued preparation did not resume after drain"
+    );
     assert_eq!(expired_requests, 0, "expired loader sent a request");
     let recovered = recovered.expect("queued run did not finish after drain");
-    assert!(matches!(finished_outcome(&recovered, next), Some(RunOutcome::Completed)));
+    assert!(matches!(
+        finished_outcome(&recovered, next),
+        Some(RunOutcome::Completed)
+    ));
     observed.extend(recovered);
-    assert_eq!(observed.iter().filter(|event| matches!(event.event,
-        SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id
-    )).count(), 1);
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event,
+                SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id
+            ))
+            .count(),
+        1
+    );
     let exhaustion = observed
         .iter()
         .find_map(|event| match &event.event {

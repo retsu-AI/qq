@@ -1255,6 +1255,15 @@ impl Store {
         claimed: &ClaimedRun,
         outcome: RunOutcome,
     ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        self.settle_reserved_run(claimed, outcome, false).await
+    }
+
+    pub(super) async fn settle_reserved_run(
+        &self,
+        claimed: &ClaimedRun,
+        outcome: RunOutcome,
+        retain_preparation: bool,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
         #[cfg(test)]
         if let Some(failure) =
             take_targeted_failure(&RESERVED_SETTLEMENT_FAILURES, claimed.identity.run_id)
@@ -1264,7 +1273,23 @@ impl Store {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(connection, store_id, identity, outcome)
+            finish_reserved_run(connection, store_id, identity, outcome, retain_preparation)
+        })
+        .await
+    }
+
+    pub(super) async fn release_preparation(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "UPDATE sessions SET preparing_run_id = NULL
+                 WHERE id = ?1 AND preparing_run_id = ?2",
+                params![identity.session_id.to_string(), identity.run_id.to_string()],
+            )?;
+            Ok(())
         })
         .await
     }

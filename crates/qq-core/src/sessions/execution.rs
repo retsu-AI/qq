@@ -866,15 +866,26 @@ pub(super) async fn execute_run(
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
-            // The loader owns construction until it returns, even after expiry.
-            let _ = load.await;
             let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
             exhaustion.message.push_str("; runtime preparation was still ");
             exhaustion.message.push_str(unfinished_stage.description());
             exhaustion.message.push_str(" when the budget expired; no model request was started");
-            finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
+            match inner.store.settle_reserved_run(&claimed, RunOutcome::BudgetExhausted {
                 exhaustion: Box::new(exhaustion),
-            }).await;
+            }, true).await {
+                Ok(events) => {
+                    for event in events {
+                        inner.notify(event.cursor);
+                    }
+                    inner.settlements.send_modify(|generation| *generation = generation.wrapping_add(1));
+                }
+                Err(_) => { inner.failed.send_replace(true); }
+            }
+            let _ = load.await;
+            if inner.store.release_preparation(&claimed).await.is_err() {
+                inner.failed.send_replace(true);
+            }
+            clear_run_registration(&inner, claimed.identity.run_id);
             return;
         }
         result = &mut load => match result {

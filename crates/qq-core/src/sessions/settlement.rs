@@ -518,6 +518,7 @@ pub(super) fn finish_reserved_run(
     store_id: StoreId,
     identity: RunIdentity,
     outcome: RunOutcome,
+    retain_preparation: bool,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let state = transaction
@@ -545,6 +546,13 @@ pub(super) fn finish_reserved_run(
         outcome,
         now_ms(),
     )?)?];
+    if retain_preparation {
+        transaction.execute(
+            "UPDATE sessions SET preparing_run_id = ?2
+             WHERE id = ?1 AND active_run_id IS NULL AND preparing_run_id IS NULL",
+            params![identity.session_id.to_string(), identity.run_id.to_string()],
+        )?;
+    }
     append_parent_session_update(
         &transaction,
         store_id,
@@ -770,6 +778,10 @@ pub(super) fn settle_panicked_execution(
             now_ms(),
         )?)?);
     }
+    transaction.execute(
+        "UPDATE sessions SET preparing_run_id = NULL WHERE id = ?1 AND preparing_run_id = ?2",
+        params![original.identity.session_id.to_string(), original_id],
+    )?;
     if !events.is_empty() {
         append_parent_session_update(
             &transaction,

@@ -1036,13 +1036,15 @@ Already-dispatched store operations remain awaited, so cleanup and terminal
 publication can finish after the execution deadline. Unconfirmed cleanup fails
 the runtime closed instead of releasing its session. Runtime preparation reports
 a secret-free stage before each named construction phase. If its deadline
-expires, the terminal message retains the stage observed at expiry and states
-that provider work did not start. The loader still retains ownership until its
-blocking work returns: abandoning a started blocking credential read would only
-detach it and could leave an OS credential prompt active after false terminal
-settlement. The wall-clock bound therefore remains a cancellation request plus
-owned drain, not a promise that an uninterruptible platform operation ends at the
-deadline. A cost cap without configured
+expires, the runtime persists and publishes the terminal outcome before awaiting
+the loader, retaining the stage observed at expiry and stating that provider
+work did not start. The execution task retains its scheduler permit and durable
+session preparation fence until the loader exits; queued same-session work can
+then resume, while other sessions may use spare permits. The expired loader's
+result is discarded without starting provider work. Shutdown still waits for
+owned preparation, and cleanup or persistence failure fails the runtime closed.
+The wall-clock bound does not promise that an uninterruptible platform operation
+ends at the deadline. A cost cap without configured
 pricing is rejected before provider work. When the countable budget is nearly
 spent the last permitted turn becomes a final status response that asks for
 no tool calls. The tools stay declared with `ToolChoice::None` (OpenAI and
