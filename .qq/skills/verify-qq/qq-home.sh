@@ -78,17 +78,62 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
 }
 
-live_pids() {
-  local home=$1 pid
-  [[ -f $home/pids ]] || return 0
-  while read -r pid; do kill -0 "$pid" 2>/dev/null && echo "$pid"; done < "$home/pids"
+# Linux pidfds bind a signal to a process instance, not a reusable PID.
+# Elsewhere fail closed instead of risking another agent's process.
+process_record() {
+  python3 - "$@" <<'PY'
+import os, signal, sys
+mode, home = sys.argv[1:3]
+def identity(pid):
+    try:
+        return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[19]
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+if mode == "add":
+    pid = int(sys.argv[3])
+    start = identity(pid)
+    if start is None:
+        sys.exit("qq-home: cannot identify child; automatic cleanup requires Linux /proc")
+    with open(f"{home}/pids", "a") as f:
+        f.write(f"{pid} {start}\n")
+else:
+    try:
+        records = open(f"{home}/pids").readlines()
+    except FileNotFoundError:
+        records = []
+    for record in records:
+        fields = record.split()
+        if len(fields) != 2 or not all(s.isdecimal() for s in fields):
+            continue  # Old PID-only records are never safe to signal.
+        pid, start = fields
+        if int(pid) <= 1:
+            continue
+        if mode == "live":
+            if identity(pid) == start:
+                print(pid)
+            continue
+        try:
+            fd = os.pidfd_open(int(pid))
+        except ProcessLookupError:
+            continue
+        except (AttributeError, OSError) as e:
+            sys.exit(f"qq-home: safe automatic cleanup unavailable: {e}; stop the child manually")
+        try:
+            if identity(pid) == start:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        finally:
+            os.close(fd)
+PY
 }
+
+live_pids() { process_record live "$1"; }
 
 stop_home() {
   local home=$1
   [[ -n $home ]] || die "no home"
-  [[ -f $home/pids ]] || return 0
-  while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$home/pids"
+  process_record stop "$home"
   rm -f "$home/pids"
 }
 
@@ -107,7 +152,7 @@ case $cmd in
     port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
     echo "$port" > "$home/port"
     fake_server "$home" "$port" >"$home/fake.log" 2>&1 &
-    echo $! >> "$home/pids"
+    process_record add "$home" "$!"
     for _ in $(seq 50); do curl -sf "http://127.0.0.1:$port/health" >/dev/null && break; sleep 0.1; done
     curl -sf "http://127.0.0.1:$port/health" >/dev/null || die "fake did not start; see $home/fake.log"
     printf 'QQ_HOME=%q\nQQ_FAKE_PORT=%q\nexport QQ_HOME QQ_FAKE_PORT\n' "$home" "$port"
@@ -122,7 +167,7 @@ case $cmd in
     [[ -x $qq_bin ]] || die "$qq_bin missing; run cargo build --bin qq"
     cd "$home/workspace"
     qq_env "$home" "$qq_bin" serve --bind 127.0.0.1:0 >"$home/serve.log" 2>&1 &
-    echo $! >> "$home/pids"
+    process_record add "$home" "$!"
     for _ in $(seq 100); do grep -q 'listening at' "$home/serve.log" 2>/dev/null && break; sleep 0.1; done
     grep 'listening at' "$home/serve.log" || die "qq serve did not start; see $home/serve.log"
     echo "discovery: $home/runtime/qq/server.ron"

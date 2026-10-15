@@ -160,7 +160,18 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect::<String>();
-        if is_crate_root(path) && !compact.contains("#![forbid(unsafe_code)]") {
+        let mut attributes = compact.as_str();
+        let mut forbids_unsafe = false;
+        while let Some(rest) = attributes.strip_prefix("#![") {
+            let Some(end) = rest.find(']') else {
+                break;
+            };
+            if &rest[..end] == "forbid(unsafe_code)" {
+                forbids_unsafe = true;
+            }
+            attributes = &rest[end + 1..];
+        }
+        if is_crate_root(path) && !forbids_unsafe {
             findings.push(Finding {
                 rule: Rule::ForbidUnsafe,
                 path: path.to_owned(),
@@ -681,7 +692,7 @@ mod tests {
 
     #[test]
     fn a_bare_ignore_is_reported_and_a_reasoned_one_is_not() {
-        for reason in ["", "   "] {
+        for reason in ["", "   ", "\\t\\n", "\\u{20}"] {
             let source = format!("#[ignore = \"{reason}\"]\nfn skipped() {{}}\n");
             assert!(
                 rules(
@@ -707,6 +718,37 @@ mod tests {
                 "crates/qq-x/tests/soak.rs".to_owned(),
                 2
             )]
+        );
+    }
+
+    #[test]
+    fn nested_forbid_does_not_satisfy_crate_policy() {
+        for text in [
+            "#[cfg(any())] mod disabled { #![forbid(unsafe_code)] }",
+            "mod nested { #![forbid(unsafe_code)] }",
+        ] {
+            assert!(
+                rules(
+                    &[Source {
+                        path: "src/lib.rs",
+                        text: Some(text)
+                    }],
+                    0
+                )
+                .iter()
+                .any(|(rule, ..)| *rule == Rule::ForbidUnsafe)
+            );
+        }
+        let text = "#![allow(dead_code)]\n#![forbid(unsafe_code)]\nfn main() {}";
+        assert!(
+            rules(
+                &[Source {
+                    path: "src/main.rs",
+                    text: Some(text)
+                }],
+                0
+            )
+            .is_empty()
         );
     }
 

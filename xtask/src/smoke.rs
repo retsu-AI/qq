@@ -145,6 +145,12 @@ impl FakeProvider {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
+                if served >= 16 {
+                    log.lock()
+                        .expect("request log lock is never poisoned")
+                        .push("smoke_request_overflow: more than 16 requests".to_owned());
+                    return;
+                }
                 let reply = script[served.min(script.len() - 1)].clone();
                 served += 1;
                 let log = Arc::clone(&log);
@@ -152,17 +158,26 @@ impl FakeProvider {
                 tokio::spawn(async move {
                     let request = read_http_request(&mut stream).await;
                     let entry = format!("----- request {served} -----\n{request}\n\n");
-                    log.lock()
-                        .expect("request log lock is never poisoned")
-                        .push(request);
+                    {
+                        let mut retained = log.lock().expect("request log lock is never poisoned");
+                        let total = retained.iter().map(String::len).sum::<usize>();
+                        if total.saturating_add(request.len()) > 16 * 1024 * 1024 {
+                            retained.push(
+                                "smoke_request_overflow: retained requests exceed 16 MiB"
+                                    .to_owned(),
+                            );
+                            return;
+                        }
+                        retained.push(request);
+                    }
                     // Evidence only; a failed append loses detail, not the result.
-                    if let Ok(mut file) = fs::OpenOptions::new()
+                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&log_path)
+                        .await
                     {
-                        use std::io::Write as _;
-                        let _ = file.write_all(entry.as_bytes());
+                        let _ = file.write_all(entry.as_bytes()).await;
                     }
                     // A client that hung up early is the scenario's failure to
                     // report, not the fake's; the write result is irrelevant.
@@ -178,11 +193,18 @@ impl FakeProvider {
         })
     }
 
-    fn requests(&self) -> Vec<String> {
-        self.requests
+    fn requests(&self) -> Result<Vec<String>, String> {
+        let requests = self
+            .requests
             .lock()
-            .expect("request log lock is never poisoned")
-            .clone()
+            .expect("request log lock is never poisoned");
+        if let Some(error) = requests
+            .iter()
+            .find(|entry| entry.starts_with("smoke_request_overflow:"))
+        {
+            return Err(error.clone());
+        }
+        Ok(requests.clone())
     }
 }
 
@@ -438,7 +460,7 @@ async fn ask_streams_text(home: &Home) -> Result<(), String> {
         "stdout lacks the model text: {:?}",
         output.stdout
     );
-    let requests = provider.requests();
+    let requests = provider.requests()?;
     ensure!(
         requests.len() == 1,
         "expected 1 provider request, saw {}",
@@ -500,7 +522,7 @@ async fn run_tool_call(home: &Home) -> Result<(), String> {
         outcome.is_some_and(|value| value["status"] == "completed" && value["exit_code"] == 0),
         "outcome: {outcome:?}"
     );
-    let requests = provider.requests();
+    let requests = provider.requests()?;
     ensure!(
         requests.len() == 2,
         "expected 2 provider requests, saw {}",
@@ -534,15 +556,15 @@ async fn run_provider_401(home: &Home) -> Result<(), String> {
     let outcome = outcome(&records);
     ensure!(
         outcome.is_some_and(|value| value["status"] == "task_failed"
-            && value["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("401"))),
+            && value["message"].as_str().is_some_and(
+                |message| message.contains("401") && message.contains("smoke: bad key")
+            )),
         "outcome: {outcome:?}"
     );
     ensure!(
-        provider.requests().len() == 1,
+        provider.requests()?.len() == 1,
         "a 401 must not be retried; saw {} requests",
-        provider.requests().len()
+        provider.requests()?.len()
     );
     Ok(())
 }
@@ -599,15 +621,17 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
         resumed_session == Some(session.as_str()),
         "resumed into {resumed_session:?}, want {session}"
     );
-    let requests = provider.requests();
+    let requests = provider.requests()?;
     ensure!(
         requests.len() == 2,
         "expected 2 provider requests, saw {}",
         requests.len()
     );
     ensure!(
-        requests[1].contains("remember: blue") && requests[1].contains("first answer"),
-        "the resumed request lacks the prior turn"
+        requests[1].contains("remember: blue")
+            && requests[1].contains("first answer")
+            && requests[1].contains("what colour?"),
+        "the resumed request lacks the prior turn or new prompt"
     );
     Ok(())
 }
@@ -849,7 +873,14 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
         let mut selected = Vec::new();
         for name in &args.only {
             match SCENARIOS.iter().find(|scenario| scenario.name == name) {
-                Some(scenario) => selected.push(scenario),
+                Some(scenario) => {
+                    if !selected
+                        .iter()
+                        .any(|item: &&Scenario| item.name == scenario.name)
+                    {
+                        selected.push(scenario);
+                    }
+                }
                 None => return Err(SmokeError::UnknownScenario(name.clone())),
             }
         }
@@ -874,7 +905,9 @@ pub async fn run(args: SmokeArgs) -> Result<(), SmokeError> {
             if !status.success() {
                 return Err(SmokeError::BuildFailed);
             }
-            target_dir(&root).join("debug/qq")
+            target_dir(&root)
+                .join("debug")
+                .join(if cfg!(windows) { "qq.exe" } else { "qq" })
         }
     };
     // Evidence stays in this checkout even when `CARGO_TARGET_DIR` is shared.
@@ -975,6 +1008,49 @@ pub fn target_dir(root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{Reply, SCENARIOS, event_types, jsonl, outcome};
+
+    #[tokio::test]
+    async fn request_overflow_is_a_scenario_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider =
+            super::FakeProvider::start(dir.path().join("requests"), vec![Reply::Text("ok")])
+                .await
+                .unwrap();
+        for _ in 0..16 {
+            let mut stream = tokio::net::TcpStream::connect(
+                provider
+                    .base_url
+                    .trim_start_matches("http://")
+                    .trim_end_matches("/v1"),
+            )
+            .await
+            .unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"POST /v1/responses HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let mut response = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+                .await
+                .unwrap();
+        }
+        assert_eq!(provider.requests().unwrap().len(), 16);
+        let mut stream = tokio::net::TcpStream::connect(
+            provider
+                .base_url
+                .trim_start_matches("http://")
+                .trim_end_matches("/v1"),
+        )
+        .await
+        .unwrap();
+        let mut response = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+            .await
+            .unwrap();
+        assert!(provider.requests().unwrap_err().contains("more than 16"));
+    }
 
     #[test]
     fn scenario_names_are_unique_and_kebab_case() {

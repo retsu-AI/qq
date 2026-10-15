@@ -27,6 +27,7 @@ use std::{
 
 use clap::Args;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Args)]
@@ -118,6 +119,8 @@ pub struct Selection {
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
     ("docs/guide/", "qq"),
     ("docs/design/protocol.md", "qq"),
+    ("docs/design/architecture.md", "qq"),
+    ("docs/runbooks/run-output-queries.md", "qq"),
     ("install.sh", "qq"),
     ("benchmarks/harbor/", "qq"),
     ("benchmarks/arms/", "qq-config"),
@@ -301,7 +304,7 @@ fn workspace_packages(root: &Path) -> Result<Vec<Package>, CheckError> {
                 .manifest_path
                 .parent()
                 .and_then(|dir| dir.strip_prefix(&metadata.workspace_root).ok())
-                .map(|dir| dir.to_string_lossy().into_owned())
+                .map(|dir| dir.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             let deps = package
                 .dependencies
@@ -414,6 +417,9 @@ pub struct Report {
     /// uncommitted changes that `head` does not contain.
     #[serde(default)]
     pub dirty: bool,
+    /// Digest of index, working-tree diffs and untracked bytes.
+    #[serde(default)]
+    pub tree_digest: String,
     pub base: String,
     pub changed: Vec<String>,
     pub selection: Selection,
@@ -787,23 +793,80 @@ fn report_path(root: &Path) -> PathBuf {
     root.join("target/qq-check/last.json")
 }
 
-fn git_head(root: &Path) -> (String, bool) {
+fn git_head(root: &Path) -> Result<(String, bool, String), CheckError> {
     let head = capture(
         ProcessCommand::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(root),
         "git rev-parse",
-    )
-    .map(|head| head.trim().to_owned())
-    .unwrap_or_default();
-    let dirty = capture(
+    )?;
+    let status = capture(
         ProcessCommand::new("git")
-            .args(["status", "--porcelain"])
+            .args(["status", "--porcelain", "-z", "--untracked-files=all"])
             .current_dir(root),
         "git status",
-    )
-    .is_ok_and(|status| !status.trim().is_empty());
-    (head, dirty)
+    )?;
+    let mut digest = Sha256::new();
+    for args in [
+        &["diff", "--binary", "--no-ext-diff", "--no-textconv"][..],
+        &[
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+        ][..],
+        &["ls-files", "--stage", "-z"][..],
+    ] {
+        let bytes = capture(
+            ProcessCommand::new("git").args(args).current_dir(root),
+            "git snapshot",
+        )?;
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes.as_bytes());
+    }
+    let untracked = capture(
+        ProcessCommand::new("git")
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .current_dir(root),
+        "git untracked",
+    )?;
+    for name in untracked.split('\0').filter(|name| !name.is_empty()) {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        let path = root.join(name);
+        if path.is_symlink() {
+            let bytes = fs::read_link(&path)
+                .map(|target| target.as_os_str().as_encoded_bytes().to_vec())
+                .map_err(|error| CheckError::Read(path.clone(), error))?;
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(&bytes);
+        } else {
+            use std::io::Read as _;
+            let mut file =
+                fs::File::open(&path).map_err(|error| CheckError::Read(path.clone(), error))?;
+            let mut content = Sha256::new();
+            let mut size = 0u64;
+            let mut buffer = [0u8; 65536];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| CheckError::Read(path.clone(), error))?;
+                if read == 0 {
+                    break;
+                }
+                size += read as u64;
+                content.update(&buffer[..read]);
+            }
+            digest.update(size.to_le_bytes());
+            digest.update(content.finalize());
+        }
+    }
+    Ok((
+        head.trim().to_owned(),
+        !status.is_empty(),
+        format!("{:x}", digest.finalize()),
+    ))
 }
 
 pub fn evidence_markdown(report: &Report) -> String {
@@ -871,8 +934,8 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         let report: Report =
             serde_json::from_str(&text).map_err(|error| CheckError::Report(path.clone(), error))?;
         // Evidence for a commit the report did not check is false evidence.
-        let (head, dirty) = git_head(&root);
-        if report.head != head || report.dirty != dirty {
+        let (head, dirty, tree_digest) = git_head(&root)?;
+        if report.head != head || report.dirty != dirty || report.tree_digest != tree_digest {
             return Err(CheckError::StaleReport {
                 path,
                 report: format!(
@@ -900,14 +963,18 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         );
     }
     let started = Instant::now();
-    let (head, dirty) = git_head(&root);
+    let (head, dirty, tree_digest) = git_head(&root)?;
     let packages = workspace_packages(&root)?;
     for name in &args.packages {
         if !packages.iter().any(|package| &package.name == name) {
             return Err(CheckError::UnknownPackage(name.clone()));
         }
     }
-    let changed = changed_files(&root, &args.base)?;
+    let changed = if args.full {
+        Vec::new()
+    } else {
+        changed_files(&root, &args.base)?
+    };
     let selection = if args.full {
         Selection {
             scope: Scope::Full,
@@ -984,9 +1051,24 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
         }
     }
     let passed = reports.len() == gates.len() && reports.iter().all(|report| report.passed);
+    let (end_head, end_dirty, end_digest) = git_head(&root)?;
+    if (head.as_str(), dirty, tree_digest.as_str())
+        != (end_head.as_str(), end_dirty, end_digest.as_str())
+    {
+        return Err(CheckError::StaleReport {
+            path,
+            report: format!("{}:{}", short(&head), short(&tree_digest)),
+            head: format!(
+                "{}:{} (changed during check)",
+                short(&end_head),
+                short(&end_digest)
+            ),
+        });
+    }
     let report = Report {
         head,
         dirty,
+        tree_digest,
         base: args.base.clone(),
         changed,
         selection,
@@ -1038,6 +1120,49 @@ fn indent(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    #[test]
+    fn snapshot_detects_staged_unstaged_and_untracked_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a"), "one").unwrap();
+        git(&["add", "a"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ]);
+        let initial = super::git_head(root).unwrap();
+        std::fs::write(root.join("a"), "two").unwrap();
+        let unstaged = super::git_head(root).unwrap();
+        assert_ne!(initial.2, unstaged.2);
+        std::fs::write(root.join("a"), "three").unwrap();
+        assert_ne!(unstaged.2, super::git_head(root).unwrap().2);
+        git(&["add", "a"]);
+        let staged = super::git_head(root).unwrap();
+        assert_ne!(unstaged.2, staged.2);
+        std::fs::write(root.join("new"), "one").unwrap();
+        let new = super::git_head(root).unwrap();
+        std::fs::write(root.join("new"), "two").unwrap();
+        assert_ne!(new.2, super::git_head(root).unwrap().2);
+        std::fs::remove_file(root.join("new")).unwrap();
+        assert_eq!(staged.2, super::git_head(root).unwrap().2);
+    }
 
     use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};
 
@@ -1109,6 +1234,13 @@ mod tests {
         assert_eq!(scope(&["docs/guide/cli.md"]), packages(&["qq", "xtask"]));
         assert_eq!(scope(&["README.md"]), packages(&["qq", "xtask"]));
         assert_eq!(scope(&["build.rs"]), packages(&["qq"]));
+
+        for path in [
+            "docs/design/architecture.md",
+            "docs/runbooks/run-output-queries.md",
+        ] {
+            assert_eq!(scope(&[path]), packages(&["qq"]));
+        }
     }
 
     #[test]
@@ -1196,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_profile_retries_are_parsed_and_flaky_passes_are_not_failures() {
+    fn ci_profile_retries_and_flaky_failures_are_parsed() {
         assert_eq!(
             names(
                 "  FLKY-FL 2/2 [ 12.580s] (2438/2439) qq-core tools::tests::ab2_depth_skip_does_not_block_later_directory_watermarks\n"
@@ -1205,7 +1337,7 @@ mod tests {
         );
         assert_eq!(
             names(CI_PROFILE),
-            ["tests::bad", "tests::seg", "tests::slow"]
+            ["tests::bad", "tests::seg", "tests::slow", "tests::flaky"]
         );
         let failures = parse_nextest_failures(CI_PROFILE, " --no-default-features");
         assert!(failures[0].message.contains("boom"));
