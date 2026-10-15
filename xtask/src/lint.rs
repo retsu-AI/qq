@@ -53,6 +53,7 @@ pub enum Rule {
     UnboundedChannel,
     SleepInTests,
     AdrIndexed,
+    SkillCopies,
 }
 
 impl Rule {
@@ -64,6 +65,7 @@ impl Rule {
             Self::UnboundedChannel => "unbounded-channel",
             Self::SleepInTests => "sleep-in-tests",
             Self::AdrIndexed => "adr-indexed",
+            Self::SkillCopies => "skill-copies",
         }
     }
 
@@ -81,6 +83,9 @@ impl Rule {
                 "wait on a signal/channel or use `#[tokio::test(start_paused = true)]`; a sleep that must stay gets `// lint: allow(sleep) <reason>`"
             }
             Self::AdrIndexed => "add a row for the ADR to `docs/adr/README.md`",
+            Self::SkillCopies => {
+                "synchronize .qq/skills and .agents/skills, including executable permissions"
+            }
         }
     }
 }
@@ -248,6 +253,15 @@ pub fn evaluate(files: &[Source<'_>], sleep_ceiling: usize) -> (Vec<Finding>, us
             }
             previous = line;
         }
+    }
+
+    if adr_index.is_none() && !adrs.is_empty() {
+        findings.push(Finding {
+            rule: Rule::AdrIndexed,
+            path: "docs/adr/README.md".to_owned(),
+            line: 0,
+            detail: "ADR index is missing".to_owned(),
+        });
     }
 
     if let Some(index) = adr_index {
@@ -523,8 +537,104 @@ pub fn tracked_files(root: &Path) -> Result<Vec<String>, LintError> {
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).into_owned())
-        .filter(|path| root.join(path).is_file())
+        .filter(|path| root.join(path).is_file() || root.join(path).is_symlink())
         .collect())
+}
+
+fn legacy_sleep_findings(files: &[Source<'_>], baseline: &str) -> Vec<Finding> {
+    let mut remaining = baseline.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    for sleep in evaluate(files, 0)
+        .0
+        .into_iter()
+        .filter(|f| f.rule == Rule::SleepInTests && f.line > 0)
+    {
+        let text = files
+            .iter()
+            .find(|file| file.path == sleep.path)
+            .and_then(|file| file.text)
+            .expect("sleep has source");
+        let context = text
+            .lines()
+            .take(sleep.line)
+            .filter(|line| line.contains("fn "))
+            .last()
+            .unwrap_or("")
+            .trim();
+        let code = text
+            .lines()
+            .nth(sleep.line - 1)
+            .expect("sleep has line")
+            .trim();
+        let key = format!("{}\t{}\t{context}\t{code}", sleep.path, sleep.line);
+        if let Some(index) = remaining.iter().position(|entry| entry == &key) {
+            remaining.remove(index);
+        } else {
+            findings.push(sleep);
+        }
+    }
+    for stale in remaining {
+        findings.push(Finding {
+            rule: Rule::SleepInTests,
+            path: "xtask/src/legacy-sleeps.txt".to_owned(),
+            line: 0,
+            detail: format!("remove stale legacy sleep entry: {stale}"),
+        });
+    }
+    findings
+}
+
+fn skill_copies(root: &Path, paths: &[String]) -> Result<Vec<Finding>, LintError> {
+    let mut findings = Vec::new();
+    for path in paths {
+        let counterpart = if let Some(rest) = path.strip_prefix(".qq/skills/") {
+            format!(".agents/skills/{rest}")
+        } else if let Some(rest) = path.strip_prefix(".agents/skills/") {
+            if paths.iter().any(|p| p == &format!(".qq/skills/{rest}")) {
+                continue;
+            }
+            format!(".qq/skills/{rest}")
+        } else {
+            continue;
+        };
+        let read = |name: &str| {
+            fs::read(root.join(name)).map_err(|source| LintError::Read {
+                path: root.join(name),
+                source,
+            })
+        };
+        let same = if paths.contains(&counterpart)
+            && !root.join(path).is_symlink()
+            && !root.join(&counterpart).is_symlink()
+        {
+            let equal = read(path)? == read(&counterpart)?;
+            #[cfg(unix)]
+            let equal = {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = |name: &str| {
+                    fs::metadata(root.join(name))
+                        .map(|m| m.permissions().mode() & 0o111)
+                        .map_err(|source| LintError::Read {
+                            path: root.join(name),
+                            source,
+                        })
+                };
+                equal && mode(path)? == mode(&counterpart)?
+            };
+            equal
+        } else {
+            false
+        };
+        if !same {
+            findings.push(Finding {
+                rule: Rule::SkillCopies,
+                path: path.clone(),
+                line: 0,
+                detail: format!("compatibility copy differs or is missing: {counterpart}"),
+            });
+        }
+    }
+    Ok(findings)
 }
 
 /// Lints the repository at `root`, printing findings. Returns the counted
@@ -533,7 +643,8 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
     let paths = tracked_files(root)?;
     let mut texts = Vec::with_capacity(paths.len());
     for path in &paths {
-        let wanted = path.ends_with(".rs") || path == "docs/adr/README.md";
+        let wanted = (path.ends_with(".rs") || path == "docs/adr/README.md")
+            && !root.join(path).is_symlink();
         let text = if wanted {
             match fs::read_to_string(root.join(path)) {
                 Ok(text) => Some(text),
@@ -557,7 +668,13 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
             text: text.as_deref(),
         })
         .collect::<Vec<_>>();
-    let (findings, sleeps) = evaluate(&sources, SLEEP_CEILING);
+    let (mut findings, sleeps) = evaluate(&sources, SLEEP_CEILING);
+    findings.extend(skill_copies(root, &paths)?);
+
+    findings.extend(legacy_sleep_findings(
+        &sources,
+        include_str!("legacy-sleeps.txt"),
+    ));
     if findings.is_empty() {
         println!(
             "lint: ok ({} files; {sleeps}/{SLEEP_CEILING} test sleeps)",
@@ -592,6 +709,117 @@ mod tests {
 
     const ROOT: &str = "#![forbid(unsafe_code)]\n";
 
+    #[test]
+    fn replacing_a_sleep_cannot_spend_a_removed_legacy_entry() {
+        let old = "tests/a.rs\t2\tfn old() {\ttokio::time::sleep(d).await;\n";
+        for (path, text, expected) in [
+            (
+                "tests/a.rs",
+                "fn old() {\n tokio::time::sleep(d).await;\n}",
+                0,
+            ),
+            (
+                "tests/a.rs",
+                "\nfn old() {\n tokio::time::sleep(d).await;\n}",
+                2,
+            ),
+            (
+                "tests/b.rs",
+                "fn old() {\n tokio::time::sleep(d).await;\n}",
+                2,
+            ),
+            (
+                "tests/a.rs",
+                "fn new() {\n tokio::time::sleep(d).await;\n}",
+                2,
+            ),
+            (
+                "tests/a.rs",
+                "fn old() {\n tokio::time::sleep(d).await;\n tokio::time::sleep(d).await;\n}",
+                1,
+            ),
+            ("tests/a.rs", "fn old() {}", 1),
+        ] {
+            assert_eq!(
+                super::legacy_sleep_findings(
+                    &[Source {
+                        path,
+                        text: Some(text)
+                    }],
+                    old
+                )
+                .len(),
+                expected,
+                "{path}: {text}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_discovery_retains_broken_and_directory_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for target in [root.join("missing"), root.to_path_buf()] {
+            for prefix in [".qq", ".agents"] {
+                let path = root.join(prefix).join("skills/example/run.sh");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if path.is_symlink() {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, path).unwrap();
+            }
+            let paths = super::tracked_files(root).unwrap();
+            assert_eq!(paths.len(), 2, "symlinks must reach validation: {target:?}");
+            assert_eq!(super::skill_copies(root, &paths).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn compatibility_skills_require_presence_content_and_mode() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let root = temp.path();
+        let canonical = ".qq/skills/example/run.sh";
+        let copy = ".agents/skills/example/run.sh";
+        for path in [canonical, copy] {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), "same").unwrap();
+        }
+        let paths = vec![canonical.to_owned(), copy.to_owned()];
+        assert!(super::skill_copies(root, &paths).unwrap().is_empty());
+        std::fs::write(root.join(copy), "different").unwrap();
+        assert_eq!(super::skill_copies(root, &paths).unwrap().len(), 1);
+        std::fs::write(root.join(copy), "same").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join(copy), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert_eq!(super::skill_copies(root, &paths).unwrap().len(), 1);
+        }
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(root.join(copy)).unwrap();
+            std::os::unix::fs::symlink(root.join(canonical), root.join(copy)).unwrap();
+            assert_eq!(super::skill_copies(root, &paths).unwrap().len(), 1);
+        }
+        for path in [canonical, copy] {
+            assert_eq!(
+                super::skill_copies(root, &[path.to_owned()]).unwrap().len(),
+                1
+            );
+        }
+    }
     #[test]
     fn safety_attributes_must_be_code_not_comments_or_literals() {
         for text in [
@@ -846,6 +1074,15 @@ mod tests {
     #[test]
     fn an_adr_without_an_index_row_is_reported() {
         let index = "| 0001 | [One runtime](0001-one.md) | Accepted |\n| 0002 | Reserved | |\nMention: 0002-two.md\n";
+        let missing_index = [Source {
+            path: "docs/adr/0001-one.md",
+            text: None,
+        }];
+        assert!(
+            rules(&missing_index, 0).iter().any(|(rule, path, _)| {
+                *rule == Rule::AdrIndexed && path == "docs/adr/README.md"
+            })
+        );
         let files = [
             Source {
                 path: "docs/adr/README.md",
