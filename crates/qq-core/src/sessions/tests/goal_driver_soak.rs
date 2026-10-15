@@ -47,14 +47,14 @@ enum Output {
     Event(Box<SessionEventEnvelope>),
 }
 
-struct Epoch {
+pub(super) struct Epoch {
     now: Arc<std::sync::atomic::AtomicU64>,
     previous: Option<Arc<std::sync::atomic::AtomicU64>>,
     thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl Epoch {
-    fn new(now: u64) -> Self {
+    pub(super) fn new(now: u64) -> Self {
         let now = Arc::new(std::sync::atomic::AtomicU64::new(now));
         let previous = codec::TEST_EPOCH.with(|slot| slot.replace(Some(Arc::clone(&now))));
         Self {
@@ -64,7 +64,7 @@ impl Epoch {
         }
     }
 
-    fn advance(&self, next: u64) {
+    pub(super) fn advance(&self, next: u64) {
         let previous = self.now.load(Ordering::Acquire);
         assert!(next >= previous, "the scripted epoch cannot go backwards");
         self.now.store(next, Ordering::Release);

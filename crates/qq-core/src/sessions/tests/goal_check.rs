@@ -549,3 +549,192 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     }
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit_timeout() {
+    struct HeldAuthority {
+        calls: AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl WorkspaceGrantAuthority for HeldAuthority {
+        fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
+            Authority("printf checked >> goal-check-marker").seed_grants(path)
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("not an ordinary grant")
+        }
+        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+            assert_eq!(command, "printf checked >> goal-check-marker");
+            let hold = self.calls.fetch_add(1, Ordering::SeqCst) == 1;
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                if hold {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
+        }
+    }
+    struct FirstWorkOnly(Loader);
+    impl RuntimeLoader for FirstWorkOnly {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            if self.0.loads.load(Ordering::SeqCst) > 0 {
+                return Box::pin(std::future::pending());
+            }
+            self.0.load(request)
+        }
+    }
+    for goal_deadline in [false, true] {
+        let start = 1_800_000_000_000;
+        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let directory = TempDir::new().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.grant_authority = Some(Arc::new(HeldAuthority {
+            calls: AtomicUsize::new(0),
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(FirstWorkOnly(Loader {
+                failure_tail: false,
+                loads: Arc::new(AtomicUsize::new(0)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            })),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, cursor) = resolve_workspace(&runtime, directory.path()).await;
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: cursor,
+            })
+            .unwrap();
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("missing session")
+        };
+        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"verify one absolute deadline",
+            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":60_000},
+            "budget":{"max_goal_runs":10,"deadline_ms":start+600_000}
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("missing goal")
+        };
+        let approved_revision = goal.revision + 1;
+        let monotonic_start = tokio::time::Instant::now();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    action: qq_protocol::GoalControl::ApproveCheck {
+                        scope: qq_protocol::GoalCheckScope::Once,
+                        command: "printf checked >> goal-check-marker".to_owned(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .expect("check must be reserved before the calendar changes");
+        epoch.advance(start + if goal_deadline { 600_001 } else { 60_001 });
+        release.notify_one();
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::GoalUpdated { goal } = event.event
+                    && goal.revision == approved_revision
+                    && (goal.counters.check_failures > 0
+                        || goal.status != qq_protocol::GoalStatus::Active)
+                {
+                    break goal;
+                }
+            }
+        })
+        .await
+        .expect("expired acquisition must settle rather than refresh the check");
+        assert!(
+            monotonic_start.elapsed() < Duration::from_secs(60),
+            "the calendar-only case must not consume its monotonic check timeout"
+        );
+        assert_eq!(
+            observed.check_authorization,
+            Some(qq_protocol::GoalCheckAuthorization::Once),
+            "unstarted authority must remain unconsumed"
+        );
+        assert_eq!(observed.counters.audits, 0);
+        assert!(
+            tokio::fs::metadata(directory.path().join("goal-check-marker"))
+                .await
+                .is_err()
+        );
+        if goal_deadline {
+            assert_eq!(
+                observed.status,
+                qq_protocol::GoalStatus::BudgetExhausted {
+                    reason: qq_protocol::GoalExhaustion::Deadline
+                }
+            );
+        } else {
+            assert_eq!(observed.status, qq_protocol::GoalStatus::Active);
+            assert_eq!(observed.counters.check_failures, 1);
+            assert!(!observed.audit_pending);
+            assert!(
+                observed
+                    .check_output
+                    .as_ref()
+                    .unwrap()
+                    .contains("timed out")
+            );
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::GoalControl {
+                        session_id,
+                        expected: qq_protocol::GoalIdentity {
+                            goal_id: observed.goal_id,
+                            revision: observed.revision,
+                        },
+                        action: qq_protocol::GoalControl::Pause,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        runtime.shutdown().await.unwrap();
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .runs
+                .iter()
+                .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.summary.queued_prompts, 0);
+        assert!(snapshot.summary.active_run_id.is_none());
+    }
+}
