@@ -5,7 +5,7 @@ Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
 
 | Slice | Goal | Status | Notes |
 | --- | --- | --- | --- |
-| R017-prep | Reconcile docs and review candidate readiness before bump | In progress | Main reviewed at `3b763ea1`; no bump, tag or publication |
+| R017-prep | Reconcile docs and review candidate readiness before bump | In review | [#316](https://github.com/retsu-AI/qq/pull/316); main reviewed at `3b763ea1`; no bump, tag or publication |
 | R017-perf | Release size/performance repair and qualification | In progress | ENG-834, #315; hosted H0/size recording pending; not accepted |
 | R017-bump | Separate `chore/0.1.7` bump PR | Blocked (preparation and pre-bump gates pending) | `cargo xtask release 0.1.7` only after handoff |
 | R017-publish | Tag merged main and verify assets/install routes | Planned | Separate release authorization; never tag this branch |
@@ -46,3 +46,17 @@ Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
   permanent runbook link to a temporary plan. All three corrected; cleanup
   explicitly removes temporary navigation/index references. Final gates and
   independent follow-up review run before publication of the PR.
+
+
+### 2026-10-15 — PR opened and final-head follow-through
+
+- Opened [#316](https://github.com/retsu-AI/qq/pull/316), source `f46bc741`.
+  Independent follow-up review: Approve; all three findings addressed.
+- First clean-head full run: 2,463/2,464 passed; existing child-summary test
+  timed out at the 30-second event wait. Narrow rerun passed in10.50s.
+  A subsequent unmodified full run passed2,464/2,464,14skips; doctests and
+  minimal provider211/211 passed,293.7s. Retain timing instability as an AF6
+  follow-up, not a defect fixed by this documentation PR.
+- Final-head smoke6/6 passes,1.80s. PR body includes exact full evidence and
+  the prior failure. This entry changes bookkeeping only; final affected gate
+  follows on the ledger commit. Release performance/size still not accepted.
