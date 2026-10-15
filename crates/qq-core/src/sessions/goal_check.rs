@@ -454,7 +454,50 @@ fn finish(
     {
         result.outcome = ProcessOutcome::TimedOut;
     }
-    let mut events = Vec::new();
+    let output = match &completion {
+        Completion::Process(result) => {
+            let mut output = match result.outcome {
+                ProcessOutcome::Exited { code: Some(code) } => format!("exit {code}\n"),
+                ProcessOutcome::Exited { code: None } => "terminated by signal\n".to_owned(),
+                ProcessOutcome::TimedOut => "check timed out\n".to_owned(),
+                ProcessOutcome::Cancelled => "check cancelled\n".to_owned(),
+                ProcessOutcome::Failed => "check execution failed\n".to_owned(),
+            };
+            let mut start = result
+                .tail
+                .len()
+                .saturating_sub(OUTPUT_BYTES - output.len());
+            while !result.tail.is_char_boundary(start) {
+                start += 1;
+            }
+            output.push_str(&result.tail[start..]);
+            output
+        }
+        Completion::Policy(error) => {
+            truncate_utf8(format!("check policy failed: {error}"), OUTPUT_BYTES)
+        }
+        Completion::Forbidden => "check forbidden by current shell policy".to_owned(),
+        Completion::Stopped => "check not started".to_owned(),
+    };
+    let (queued, message): (bool, String) = transaction.query_row(
+        "SELECT status='queued',assistant_message_id FROM runs WHERE id=?1",
+        [claimed.identity.run_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let message_id: MessageId = parse_id(&message)?;
+    transaction.execute(
+        "INSERT INTO messages(id,session_id,run_id,ordinal,role,state,output,created_at_ms)
+         VALUES(?1,?2,?3,(SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE session_id=?2),'assistant',?4,?5,?6)",
+        params![message_id.to_string(), claimed.identity.session_id.to_string(),
+            claimed.identity.run_id.to_string(), if queued { "queued" } else { "streaming" }, output, now],
+    )?;
+    let mut events = vec![append_event(
+        &transaction,
+        EventContext::for_run(store_id, claimed.identity, now),
+        SessionEvent::AssistantMessageStarted {
+            message: load_message(&transaction, message_id)?,
+        },
+    )?];
     if let Some(mut goal) = goals::load_live(&transaction, claimed.identity.session_id)?
         && claimed
             .goal
@@ -527,22 +570,7 @@ fn finish(
             } else if let Completion::Process(result) = &completion {
                 goal.audit_pending = false;
                 goal.audit_revision = None;
-                let mut output = match result.outcome {
-                    ProcessOutcome::Exited { code: Some(code) } => format!("exit {code}\n"),
-                    ProcessOutcome::Exited { code: None } => "terminated by signal\n".to_owned(),
-                    ProcessOutcome::TimedOut => "check timed out\n".to_owned(),
-                    ProcessOutcome::Cancelled => "check cancelled\n".to_owned(),
-                    ProcessOutcome::Failed => "check execution failed\n".to_owned(),
-                };
-                let mut start = result
-                    .tail
-                    .len()
-                    .saturating_sub(OUTPUT_BYTES - output.len());
-                while !result.tail.is_char_boundary(start) {
-                    start += 1;
-                }
-                output.push_str(&result.tail[start..]);
-                goal.check_output = Some(output);
+                goal.check_output = Some(output.clone());
                 if result.outcome == (ProcessOutcome::Exited { code: Some(0) }) {
                     goal.status = qq_protocol::GoalStatus::Achieved;
                     goal.counters.check_failures = 0;
@@ -582,11 +610,6 @@ fn finish(
             _ => execution::internal_failure("goal completion check did not verify success"),
         }
     };
-    let queued: bool = transaction.query_row(
-        "SELECT status='queued' FROM runs WHERE id=?1",
-        [claimed.identity.run_id.to_string()],
-        |row| row.get(0),
-    )?;
     let settled = if queued {
         finish_queued_run_with_outcome(
             &transaction,

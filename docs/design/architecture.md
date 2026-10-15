@@ -1864,8 +1864,13 @@ closed their output pipes. Bounded blocking permits cover preparation and exit
 observation. Cancellation and the shared deadline drain the process group. A
 resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
 rather than publishing completion. Results retain an exit/timeout diagnostic and
-UTF-8 output suffix within4KiB. Goal changes and terminal settlement share one
-transaction and require the live active audit revision. Recovery pauses a
+UTF-8 output suffix within4KiB, including the diagnostic header. Every check
+settlement persists that diagnostic on its original run's assistant message and
+publishes the existing message event in the terminal transaction, even if the
+goal was edited, replaced, cleared, or cancelled. A check has no user prompt,
+so these records appear in snapshots/replay but not model context assembly.
+Goal changes and terminal settlement share one transaction; only goal changes
+require the live active audit revision. Recovery pauses a
 started check as CheckInterrupted without refunding Once authority; an unstarted
 check remains queued. An expired unstarted check retains Once authority and is settled through the
 queued-run path, releasing its preparation pointer and queue count. Admission

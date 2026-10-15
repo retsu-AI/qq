@@ -20,6 +20,14 @@ impl Provider for Model {
                     .any(|text| text.contains("exit 7")),
                 "failed check exit status must reach the next goal run"
             );
+            assert_eq!(
+                request_texts(&request)
+                    .join("\n")
+                    .matches("check-output-unique")
+                    .count(),
+                1,
+                "check-only result messages must not leak into model context alongside the goal notice"
+            );
         }
         let mut events = if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
             vec![
@@ -100,7 +108,7 @@ async fn once_check(success: bool) {
     let command = if success {
         "printf checked >> goal-check-marker"
     } else {
-        "printf checked >> goal-check-marker; exit 7"
+        "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
     };
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("sessions.sqlite3");
@@ -741,7 +749,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
 
 #[tokio::test]
 async fn goal_check_historical_result_survives_edit_replace_and_clear() {
-    const COMMAND: &str = "printf historical-check-result; exit 7";
+    const COMMAND: &str = "printf '%05000d' 0; printf historical-check-result; exit 7";
     for mutation in ["edit", "replace", "clear"] {
         let directory = TempDir::new().unwrap();
         let database = directory.path().join("sessions.sqlite3");
@@ -890,7 +898,13 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             .iter()
             .find(|message| message.run_id == check)
             .unwrap_or_else(|| panic!("{mutation}: historical check result missing"));
-        assert_eq!(message.output, "exit 7\nhistorical-check-result");
+        assert_eq!(
+            message.output,
+            format!(
+                "exit 7\n{}historical-check-result",
+                "0".repeat(4096 - "exit 7\n".len() - "historical-check-result".len())
+            )
+        );
         assert!(message.output.len() <= 4096);
         assert!(result_events.iter().any(|event|matches!(&event.event, SessionEvent::AssistantMessageStarted { message:live } if live.id==message.id)));
         drop(events);
