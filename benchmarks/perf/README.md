@@ -20,10 +20,12 @@ Fixture version 4 establishes live subscriber attachment with a FIFO store
 barrier and observes fan-out subscribers concurrently. Earlier fixtures used
 a timed readiness assumption and waited for each subscriber's terminal event
 sequentially, which mixed persistence latency into later delivery samples.
-Re-record both baseline and candidate with version 4; version 3 fan-out
-samples are retained as historical evidence and are not comparable to the
-corrected metric. The focused feed worker declares `feed_fixture_version: 2`
-and `h0_fixture_version: 4`.
+Version 5 additionally requires exactly `MAX_TURN_RETRIES + 1` provider entries
+in every always-faulting run. Re-record both baseline and candidate with version
+5; earlier retry receipts do not prove this per-run recovery invariant. Version
+3 fan-out samples remain historical and are not comparable to the corrected
+metric. The focused feed worker declares `feed_fixture_version: 2` and
+`h0_fixture_version: 5`.
 
 ## Record A Baseline
 
@@ -157,7 +159,7 @@ RSS and WAL high-water samples do not claim continuous peaks or fsync counts.
 See the [recording procedure](../../docs/runbooks/perf-recording.md#autonomous-core-characterization-ac0).
 AC0.2 owns the full concurrency/fsync recording and H0 registration; a new
 budget is added only alongside the metric emitter and a comparable fixture
-version. Existing H0 fixture version 4 and budgets are unchanged.
+version. AC0.1 adds no H0 metrics or budgets; the current H0 fixture is version 5.
 
 The deterministic runtime loader carries a known version-2 provider
 request-shape identity. Provider-handoff and completion samples therefore

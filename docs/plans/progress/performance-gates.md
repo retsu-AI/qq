@@ -214,3 +214,33 @@
   replacing the prior 45–64% regression. Three A/B and two A/A tail checks
   still fail; load medians are within 1%, with candidate tails returning near
   baseline in control. Retain failures; current-head qualification is still open.
+
+
+## 2026-10-15 — version retry proof and remove wall-clock watchdog
+
+- Codex review of `645e2fdb` identifies stale version-4 retry receipts accepted
+  against the old budget version, and the in-test 30s setup watchdog's dependence
+  on host speed. Red commit `77a42b53` reproduces accepting the old 5,950-milli
+  receipt. Fixture and budget version 5 now reject it; four focused retry and
+  compatibility checks pass. Real CLI comparison of an actual historical hosted
+  v4 report rejects it with `fixture versions differ`.
+- H0's pinned-baseline guard allows only fixture 4 → 5 and retry 1,050 → 6,300;
+  existing size/speed limits remain unchanged. Inline overlay and streaming
+  checks pass 4/4 each. Both delegation cases pass with the wall-clock watchdog
+  removed; paused readiness and explicit deadline advancement remain. Independent
+  review approves. Nextest retains its existing external process timeout.
+- Before these fixes, head `645e2fdb` passed hosted checks, smoke 6/6, Windows
+  and wasm. Local embedding example, minimal-core suite (1,052 unit + 26
+  integration passes, 10 existing ignores), minimal-core Clippy and dependency
+  closure check pass. This evidence is historical after the review fixes.
+- Its turn artifact `11953521330` SHA-256
+  `22ac91a6aaa8e025716eee207be54f555a8afbcc224f5315b4b4b0eff4a27358`
+  verifies 120 logs, source/fixture receipts, binary hashes and summaries.
+  A/B 1,000-turn median −2.342%, p95 −9.686%; A/A p95 +0.922%. I/O avg10
+  reaches 21.79 with 85/240 snapshots above 20; retain as diagnostic evidence.
+  Raw ZIP and audit remain in private `target/qq-perf/eng834-recovered/`.
+
+- Review-fix full `cargo xtask check` passes all seven stages in 212.9s. A
+  standalone xtask invocation had one socket EPERM; the full gate passes that
+  test without source changes or skips. Actionlint passes; the overlay guard
+  additionally rejects wrong baseline/candidate versions (6/6 cases).

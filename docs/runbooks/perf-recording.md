@@ -29,7 +29,9 @@ cargo xtask perf check --baseline target/qq-perf/<slice>-<date>/baseline.json \
 
 The fixture version is embedded in each report; reports with different fixture
 versions, sample counts, or warmup counts are not comparable. Current fixture
-version: 4.
+version: 5. Version 5 requires exactly `MAX_TURN_RETRIES + 1` entries in every
+always-faulting run. Older aggregate-only retry receipts cannot be compared
+against the current budgets; re-record both arms with the current fixture.
 
 ## Focused fixtures
 
@@ -46,7 +48,7 @@ every always-faulting run. Too few attempts lose recovery; too many exceed it.
 Neither defect can hide among otherwise correct runs.
 Earlier recordings without this check do not prove the per-run invariant. Size ceilings stay
 48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
-correction described in the performance inventory; all other limits must match
+correction and fixture-version 4 → 5 transition; all other limits must match
 the pinned baseline. The artifact retains the exact budget file used.
 
 Each arm streams compiler output to the Actions console while retaining its

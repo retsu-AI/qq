@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": 4,
+  "fixture_version": 5,
   "max_median_absolute_deviation_percent": 50,
   "metrics": [
     { "metric": "qq_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 48000000 },

@@ -5203,22 +5203,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             .unwrap();
             (root, *summary, child_prompt, entered, release)
         };
-        let (root, summary, child_prompt, entered, release) = if deadline {
-            // Paused Tokio timers cannot bound real store/tool preparation.
-            let (finished, preparation) = std::sync::mpsc::sync_channel(1);
-            let mut watchdog = tokio::task::spawn_blocking(move || {
-                preparation.recv_timeout(Duration::from_secs(30))
-            });
-            let ready = tokio::select! {
-                ready = setup => ready,
-                result = &mut watchdog => panic!("frozen summary setup did not finish: {result:?}"),
-            };
-            finished.try_send(()).unwrap();
-            watchdog.await.unwrap().unwrap();
-            ready
-        } else {
-            setup.await
-        };
+        let (root, summary, child_prompt, entered, release) = setup.await;
         if deadline {
             tokio::time::advance(Duration::from_millis(5001)).await;
         } else {

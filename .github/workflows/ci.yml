@@ -324,12 +324,15 @@ jobs:
           (Path(os.environ['RUNNER_TEMP']) / 'h0-recording/fixture-receipt.json').write_text(json.dumps(receipt, indent=2))
           baseline = json.loads(Path('baseline/benchmarks/perf/budgets-v1.json').read_text())
           candidate = json.loads(Path('candidate/benchmarks/perf/budgets-v1.json').read_text())
+          if baseline['fixture_version'] != 4:
+              raise SystemExit('baseline fixture version changed; review the comparison contract')
+          baseline['fixture_version'] = 5  # Exact per-run retry recovery receipt.
           retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
           if retry['maximum_p95'] != 1050:
               raise SystemExit('baseline retry budget changed; review the comparison contract')
           retry['maximum_p95'] = 6300  # ADR-0040: six sends, with the existing 5% allowance.
           if baseline != candidate:
-              raise SystemExit('only the approved retry-contract correction may change budgets')
+              raise SystemExit('only the approved retry-contract/version correction may change budgets')
           PYTHON
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           # The recorder clears toolchain overrides before native builds.
