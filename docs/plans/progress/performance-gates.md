@@ -133,3 +133,17 @@
 - CI streaming preserves complete logs while exposing compiler output, arm
   durations, exit codes and workload stages outside sample timing. Fake-command
   success/failure checks retain stdout/stderr, reports and stop-on-error behavior.
+
+## 2026-10-15 — balanced profile and observable recording
+
+- Clean-source `9fbe5307` normal release builds pass unchanged limits: default
+  44,969,760 / 48,000,000 bytes; minimal 40,896,752 / 41,000,000 bytes.
+  Binary hashes, logs and source receipts remain in the ignored ENG-834 artifacts.
+- Independent review approves profile and timing placement, but finds a console/log
+  write error can abandon recorder descendants. Failed sinks are disabled while
+  output continues draining; record exit status/reports before failing the step.
+  Fake-command regressions pass success, command failure, console failure and log
+  failure, including descendant completion and retained receipts (4/4).
+- Common-fixture guards pass all four positive/negative cases; workflow actionlint
+  passes with ShellCheck disabled (existing SC2129 style finding is unchanged).
+  Current-head workspace checks and hosted performance qualification remain open.

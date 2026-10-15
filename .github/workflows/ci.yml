@@ -314,28 +314,43 @@ jobs:
               started = time.monotonic()
               print(f'::group::{output}: build and record', flush=True)
               before = Path('/proc/pressure/io').read_text()
-              with (root / f'{output}.log').open('wb') as log:
-                  result = subprocess.Popen(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
-                      'gha-action-bias-controlled', '--output', f'target/qq-perf/action-bias/{output}.json'],
-                      cwd=workspace / arm, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                  try:
-                      while chunk := result.stdout.read1(64 * 1024):
-                          log.write(chunk)
-                          log.flush()
-                          sys.stdout.buffer.write(chunk)
-                          sys.stdout.buffer.flush()
-                      result.wait()
-                  finally:
-                      if result.poll() is None:
-                          result.terminate()
+              log = (root / f'{output}.log').open('wb')
+              stream_error = None
+              log_enabled = console_enabled = True
+              result = subprocess.Popen(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
+                  'gha-action-bias-controlled', '--output', f'target/qq-perf/action-bias/{output}.json'],
+                  cwd=workspace / arm, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              try:
+                  while chunk := result.stdout.read1(64 * 1024):
+                      # Drain after a sink failure so the recorder can finish its bounded work.
+                      if log_enabled:
                           try:
-                              result.wait(timeout=10)
-                          except subprocess.TimeoutExpired:
-                              result.kill()
-                              result.wait()
-                      result.stdout.close()
-              print(f'{output}: exit={result.returncode}, elapsed={time.monotonic() - started:.1f}s', flush=True)
-              print('::endgroup::', flush=True)
+                              log.write(chunk)
+                              log.flush()
+                          except OSError as error:
+                              stream_error = stream_error or error
+                              log_enabled = False
+                      if console_enabled:
+                          try:
+                              sys.stdout.buffer.write(chunk)
+                              sys.stdout.buffer.flush()
+                          except OSError as error:
+                              stream_error = stream_error or error
+                              console_enabled = False
+                  result.wait()
+              finally:
+                  if result.poll() is None:
+                      result.terminate()
+                      try:
+                          result.wait(timeout=10)
+                      except subprocess.TimeoutExpired:
+                          result.kill()
+                          result.wait()
+                  result.stdout.close()
+                  try:
+                      log.close()
+                  except OSError as error:
+                      stream_error = stream_error or error
               after = Path('/proc/pressure/io').read_text()
               pressure.append({'arm': output, 'before': before, 'after': after})
               results.append({'arm': output, 'exit': result.returncode})
@@ -344,6 +359,10 @@ jobs:
                   (root / f'{output}.json').write_bytes(report.read_bytes())
               (root / 'pressure.json').write_text(json.dumps(pressure, indent=2))
               (root / 'results.json').write_text(json.dumps(results, indent=2))
+              print(f'{output}: exit={result.returncode}, elapsed={time.monotonic() - started:.1f}s', flush=True)
+              print('::endgroup::', flush=True)
+              if stream_error is not None:
+                  raise stream_error
               if result.returncode:
                   raise SystemExit(result.returncode)
           PYTHON
