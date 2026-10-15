@@ -806,3 +806,12 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - Keep runtime/retry behavior and all timeouts/assertions unchanged. Use the
   established paused-clock setup pattern, fewer real shell turns with measured
   dense token usage, and retain actual-compaction/spend/order assertions.
+
+### 2026-10-15 — ENG-834 receipt version and deterministic preparation review
+
+- Root retains ownership of the two delegation fixtures, H0 fixture/budgets,
+  repair workflow and runbook. Codex identifies version-4 receipts that lack the
+  exact per-run retry proof and an added host-speed-dependent setup watchdog.
+- Version the stricter receipt contract and budget together; reject old receipts
+  against current budgets. Remove the in-test wall-clock watchdog while keeping
+  readiness synchronization, paused deadline and all behavioral assertions.

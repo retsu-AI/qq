@@ -5935,6 +5935,26 @@ mod tests {
     }
 
     #[test]
+    fn report_compatibility_rejects_aggregate_retry_receipts() {
+        let mut baseline = compatible_report();
+        baseline.fixture_version = 4;
+        baseline.metrics = vec![metric("provider_retry_amplification_milli", 5_950)];
+        let candidate = baseline.clone();
+        let budgets: BudgetFile =
+            serde_json::from_str(include_str!("../../benchmarks/perf/budgets-v1.json")).unwrap();
+
+        let error = validate_compatibility(&baseline, &candidate, &budgets).unwrap_err();
+        assert!(matches!(
+            error,
+            PerfError::Incompatible(reason) if reason == "fixture versions differ"
+        ));
+
+        baseline.fixture_version = FIXTURE_VERSION;
+        let candidate = baseline.clone();
+        validate_compatibility(&baseline, &candidate, &budgets).unwrap();
+    }
+
+    #[test]
     fn report_compatibility_rejects_different_cargo_versions() {
         let baseline = compatible_report();
         let mut candidate = baseline.clone();
