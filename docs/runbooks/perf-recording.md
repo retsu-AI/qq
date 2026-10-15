@@ -46,6 +46,12 @@ Earlier recordings without this check do not prove the per-run invariant. Size c
 correction described in the performance inventory; all other limits must match
 the pinned baseline. The artifact retains the exact budget file used.
 
+Each arm streams compiler output to the Actions console while retaining its
+complete log artifact. Console groups identify baseline, candidate and control,
+and report each arm's duration and exit code. The recorder announces release
+builds and each workload family with elapsed times; these messages are outside
+individual sample timing regions. A silent step is not evidence of progress.
+
 Its same-binary control repeats the candidate, verifies both default/minimal
 executable hashes, and checks candidate versus control with the same budgets.
 H0's optimized xtask driver uses the same final optimization level as the

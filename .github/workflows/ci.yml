@@ -304,18 +304,38 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PYTHON'
-          import json, os, subprocess
+          import json, os, subprocess, sys, time
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'h0-recording'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           pressure = []
           results = []
           for arm, output in [('baseline', 'baseline'), ('candidate', 'candidate'), ('candidate', 'control')]:
+              started = time.monotonic()
+              print(f'::group::{output}: build and record', flush=True)
               before = Path('/proc/pressure/io').read_text()
-              with (root / f'{output}.log').open('w') as log:
-                  result = subprocess.run(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
+              with (root / f'{output}.log').open('wb') as log:
+                  result = subprocess.Popen(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
                       'gha-action-bias-controlled', '--output', f'target/qq-perf/action-bias/{output}.json'],
-                      cwd=workspace / arm, stdout=log, stderr=subprocess.STDOUT)
+                      cwd=workspace / arm, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                  try:
+                      while chunk := result.stdout.read1(64 * 1024):
+                          log.write(chunk)
+                          log.flush()
+                          sys.stdout.buffer.write(chunk)
+                          sys.stdout.buffer.flush()
+                      result.wait()
+                  finally:
+                      if result.poll() is None:
+                          result.terminate()
+                          try:
+                              result.wait(timeout=10)
+                          except subprocess.TimeoutExpired:
+                              result.kill()
+                              result.wait()
+                      result.stdout.close()
+              print(f'{output}: exit={result.returncode}, elapsed={time.monotonic() - started:.1f}s', flush=True)
+              print('::endgroup::', flush=True)
               after = Path('/proc/pressure/io').read_text()
               pressure.append({'arm': output, 'before': before, 'after': after})
               results.append({'arm': output, 'exit': result.returncode})

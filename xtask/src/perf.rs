@@ -642,6 +642,7 @@ async fn record_baseline(args: BaselineArgs) -> Result<(), PerfError> {
     let (mut metrics, mut checks, unsupported) =
         run_workloads(&binary, args.samples, args.warmups).await?;
     verify_artifact_unchanged(&binary, &artifact)?;
+    eprintln!("[perf] minimal-profile startup and memory");
     let (minimal_metrics, minimal_checks) = minimal_profile_workloads(
         &minimal_binary,
         &minimal_artifact,
@@ -1550,6 +1551,8 @@ async fn run_status_bounded(
     timeout: Duration,
     command: &mut TokioCommand,
 ) -> Result<(), PerfError> {
+    let started = Instant::now();
+    eprintln!("[perf] starting {case}");
     let display = format!("{command:?}");
     command
         .stdin(Stdio::null())
@@ -1577,6 +1580,7 @@ async fn run_status_bounded(
         }
     };
     terminate_process_group(process_group);
+    eprintln!("[perf +{:?}] finished {case}: {status}", started.elapsed());
     if status.success() {
         Ok(())
     } else {
@@ -2519,62 +2523,85 @@ async fn run_workloads(
     samples: u16,
     warmups: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>, Vec<String>), PerfError> {
+    let started = Instant::now();
     let mut metrics = Vec::new();
     let mut checks = Vec::new();
     let mut unsupported = Vec::new();
 
+    eprintln!("[perf +{:?}] process startup and memory", started.elapsed());
     let (process_metrics, process_checks, process_unsupported) =
         process_workloads(binary, samples, warmups).await?;
     metrics.extend(process_metrics);
     checks.extend(process_checks);
     unsupported.extend(process_unsupported);
 
+    eprintln!(
+        "[perf +{:?}] SQLite runtime startup and shutdown",
+        started.elapsed()
+    );
     let (startup_metrics, startup_checks) = runtime_startup_workloads(samples, warmups).await?;
     metrics.extend(startup_metrics);
     checks.extend(startup_checks);
 
+    eprintln!("[perf +{:?}] direct prompt pipeline", started.elapsed());
     let (pipeline_metrics, pipeline_checks) = direct_pipeline_workloads(samples, warmups).await?;
     metrics.extend(pipeline_metrics);
     checks.extend(pipeline_checks);
 
+    eprintln!("[perf +{:?}] HTTP/SSE pipeline", started.elapsed());
     let (http_metrics, http_checks) = http_pipeline_workloads(samples, warmups).await?;
     metrics.extend(http_metrics);
     checks.extend(http_checks);
 
+    eprintln!("[perf +{:?}] file and shell tools", started.elapsed());
     let (tool_metrics, tool_checks) = tool_workloads(samples, warmups).await?;
     metrics.extend(tool_metrics);
     checks.extend(tool_checks);
 
+    eprintln!("[perf +{:?}] cancellation", started.elapsed());
     let (cancellation_metrics, cancellation_checks) =
         cancellation_workloads(samples, warmups).await?;
     metrics.extend(cancellation_metrics);
     checks.extend(cancellation_checks);
 
+    eprintln!("[perf +{:?}] retry amplification", started.elapsed());
     let (amplification_metrics, amplification_checks) =
         retry_amplification_workloads(samples).await?;
     metrics.extend(amplification_metrics);
     checks.extend(amplification_checks);
 
+    eprintln!("[perf +{:?}] subscriber fan-out", started.elapsed());
     let (fan_out_metrics, fan_out_checks) = subscriber_fan_out_workloads(samples).await?;
     metrics.extend(fan_out_metrics);
     checks.extend(fan_out_checks);
 
+    eprintln!(
+        "[perf +{:?}] busy-workspace acknowledgements",
+        started.elapsed()
+    );
     let (busy_metrics, busy_checks) = busy_workspace_ack_workloads(samples).await?;
     metrics.extend(busy_metrics);
     checks.extend(busy_checks);
 
+    eprintln!("[perf +{:?}] stream scaling", started.elapsed());
     let (stream_metrics, stream_checks) = long_stream_workloads(samples).await?;
     metrics.extend(stream_metrics);
     checks.extend(stream_checks);
 
+    eprintln!(
+        "[perf +{:?}] large outputs and restart/replay",
+        started.elapsed()
+    );
     let (r4_metrics, r4_checks) = r4_workloads(samples).await?;
     metrics.extend(r4_metrics);
     checks.extend(r4_checks);
 
+    eprintln!("[perf +{:?}] concurrent session loads", started.elapsed());
     let (load_metrics, load_checks) = load_workloads(samples).await?;
     metrics.extend(load_metrics);
     checks.extend(load_checks);
 
+    eprintln!("[perf +{:?}] default workloads complete", started.elapsed());
     unsupported.extend([
         "true page-cache-cold startup requires a fresh machine or privileged cache control; the report records first and repeated fresh-process startup instead".to_owned(),
         "the recorder refuses non-Linux hosts until native path isolation and RSS samplers are implemented".to_owned(),
