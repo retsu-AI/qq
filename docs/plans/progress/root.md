@@ -155,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0062. Reserve here before opening a PR that adds an ADR.
+Next free number: 0063. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -759,3 +759,59 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 
 - AB6 owns the tools/design cwd-contract amendment alongside shared Launch
   root-underflow validation and the export/recount aggregate-byte budget repair.
+
+### 2026-10-14 — ENG-834 inherited performance gate repair
+
+- User authorizes a nondraft follow-up after merging AB6 (#306, `9868038c`).
+  Root owns `fix/eng-834-performance-gates` in its isolated worktree. Shared
+  requests cover release profile settings in root `Cargo.toml`, performance
+  budget/CI contract repairs, focused xtask regression tests and performance
+  recording documentation. Preserve features and the existing 48/41 MB size
+  ceilings; measure speed before accepting a compiler/profile change.
+- Existing size failures are tracked by ENG-834. ADR-0040 already specifies
+  six sends per exhausted turn; repair the stale 1.05-send external budget.
+  Retain failures and controls. Ledger: `performance-gates.md`.
+
+### 2026-10-15 — ENG-834 release-profile decision reservation
+
+- Reserve ADR-0062 for the full-LTO executable-size profile, superseding
+  ADR-0010's thin-LTO choice while retaining its 48/41 MB ceilings. Root owns
+  the new ADR, ADR index/status and retry measurement inventory reconciliation
+  in PR #315. Hosted speed/correctness qualification remains required.
+
+### 2026-10-15 — ENG-834 per-run retry measurement repair
+
+- Root additionally owns `xtask/src/perf.rs` and the H0 common-fixture receipt
+  in CI for PR #315's follow-up Codex finding: the mean can hide one seven-send
+  run among nineteen six-send runs. Preserve the average metric and its budget;
+  enforce the correctness bound independently on every sampled run. Both
+  immutable production arms use the candidate's same repaired fixture source.
+
+### 2026-10-15 — ENG-834 speed-preserving profile and visible qualification
+
+- Root owns the `s` profile experiments for qq/xtask and auth/config libraries
+  after H0 and a focused JSON probe expose `z` serialization cost. Runtime and
+  provider packages retain level 3; dependencies/features and budgets stay fixed.
+- Root owns live CI log streaming and build/workload phase announcements in the
+  existing H0 recorder. Preserve all reports and failure exit codes; update the
+  unmerged ADR-0062 to the final measured choice before publishing.
+
+### 2026-10-15 — ENG-834 pre-push fixture blocker
+
+- Reserve the two compaction delegation fixtures in
+  `crates/qq-core/src/sessions/tests/delegation.rs` and the sleep ceiling in
+  `xtask/src/lint.rs`. Pre-push exposes a five-second deadline racing 48 real
+  shell turns before summary admission; the related spend fixture takes 25.67s
+  in isolation against its existing 30s liveness bound.
+- Keep runtime/retry behavior and all timeouts/assertions unchanged. Use the
+  established paused-clock setup pattern, fewer real shell turns with measured
+  dense token usage, and retain actual-compaction/spend/order assertions.
+
+### 2026-10-15 — ENG-834 receipt version and deterministic preparation review
+
+- Root retains ownership of the two delegation fixtures, H0 fixture/budgets,
+  repair workflow and runbook. Codex identifies version-4 receipts that lack the
+  exact per-run retry proof and an added host-speed-dependent setup watchdog.
+- Version the stricter receipt contract and budget together; reject old receipts
+  against current budgets. Remove the in-test wall-clock watchdog while keeping
+  readiness synchronization, paused deadline and all behavioral assertions.

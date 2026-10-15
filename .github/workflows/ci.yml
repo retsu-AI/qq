@@ -167,15 +167,15 @@ jobs:
 
   turn-overhead:
     name: controlled turn overhead
-    if: (github.event_name == 'workflow_dispatch' && inputs.perf_baseline_sha != '') || (github.event_name == 'pull_request' && github.head_ref == 'feat/eng-1043-ab6-qualification')
+    if: (github.event_name == 'workflow_dispatch' && inputs.perf_baseline_sha != '') || (github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
       contents: read
     env:
-      BASELINE_SHA: ${{ github.event_name == 'pull_request' && '62c65930c2f50c471edff74388d9b2079a5f8f71' || inputs.perf_baseline_sha }}
+      BASELINE_SHA: ${{ github.event_name == 'pull_request' && '3b763ea17699a9d7650b99750c0220ab7206aa5d' || inputs.perf_baseline_sha }}
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      FIXTURE_SHA: ${{ github.event_name == 'pull_request' && '62c65930c2f50c471edff74388d9b2079a5f8f71' || inputs.perf_fixture_sha || github.sha }}
+      FIXTURE_SHA: ${{ github.event_name == 'pull_request' && '9868038c994cc0c0b64795731d1402ca21ff6348' || inputs.perf_fixture_sha || github.sha }}
       CARGO_BUILD_JOBS: '2'
     steps:
       - name: Require immutable inputs
@@ -230,7 +230,10 @@ jobs:
             production_sha="$CANDIDATE_SHA"
             if [[ "$arm" == baseline ]]; then production_sha="$BASELINE_SHA"; fi
             python3 "$GITHUB_WORKSPACE/candidate/.github/scripts/turn-fixture.py" prepare --production-root "$PWD" --fixture-root "$GITHUB_WORKSPACE/fixture" --production-sha "$production_sha" --fixture-sha "$FIXTURE_SHA" --receipt "$RUNNER_TEMP/turn-recording/$arm-fixture.json"
-            CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo bench --locked -p qq-core --bench turn_overhead --no-run --message-format=json > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
+            final_opt=$(python3 -c 'import tomllib; p=tomllib.load(open("Cargo.toml", "rb")).get("profile", {}).get("release", {}); print(p.get("package", {}).get("qq", {}).get("opt-level", p.get("opt-level", 3)))')
+            [[ "$final_opt" =~ ^[0-3sz]$ ]]
+            printf '%s\n' "$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-final-opt-level.txt"
+            CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo rustc --locked --profile bench -p qq-core --bench turn_overhead --message-format=json -- -C "opt-level=$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
             python3 - "$arm" <<'PYTHON'
           import json, os, shutil, subprocess, sys
           from pathlib import Path
@@ -241,6 +244,8 @@ jobs:
           if len(artifacts) != 1:
               raise SystemExit('expected one optimized benchmark artifact')
           artifact = artifacts[0]
+          # Cargo reports the bench profile before trailing rustc overrides.
+          # The effective final opt-level is retained separately for each arm.
           profile = artifact['profile']
           if profile['opt_level'] != '3' or profile['debug_assertions']:
               raise SystemExit('benchmark is not the optimized profile')
@@ -271,13 +276,13 @@ jobs:
 
   action-bias-h0:
     name: controlled action-bias H0 and size
-    if: github.event_name == 'pull_request' && github.head_ref == 'feat/eng-1043-ab6-qualification'
+    if: github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
       contents: read
     env:
-      BASELINE_SHA: 62c65930c2f50c471edff74388d9b2079a5f8f71
+      BASELINE_SHA: 3b763ea17699a9d7650b99750c0220ab7206aa5d
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
       CARGO_BUILD_JOBS: '2'
     steps:
@@ -288,7 +293,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 62c65930c2f50c471edff74388d9b2079a5f8f71
+          ref: 3b763ea17699a9d7650b99750c0220ab7206aa5d
           path: baseline
           persist-credentials: false
       - name: Require matching H0 fixture source and toolchain
@@ -297,30 +302,96 @@ jobs:
           [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           diff -u baseline/rust-toolchain.toml candidate/rust-toolchain.toml
-          diff -u baseline/xtask/src/perf.rs candidate/xtask/src/perf.rs
-          diff -u baseline/benchmarks/perf/budgets-v1.json candidate/benchmarks/perf/budgets-v1.json
+          mkdir -p "$RUNNER_TEMP/h0-recording"
+          python3 - <<'PYTHON'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          receipt = {'fixture_sha': os.environ['CANDIDATE_SHA'], 'path': 'xtask/src/perf.rs', 'arms': {}}
+          fixture = Path('candidate/xtask/src/perf.rs').read_bytes()
+          for arm, sha in [('baseline', os.environ['BASELINE_SHA']), ('candidate', os.environ['CANDIDATE_SHA'])]:
+              root = Path(arm)
+              if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() != sha:
+                  raise SystemExit(f'{arm} is not the pinned commit')
+              subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', receipt['path']], cwd=root, check=True)
+              path = root / receipt['path']
+              original = path.read_bytes()
+              path.write_bytes(fixture)
+              receipt['arms'][arm] = {'production_sha': sha,
+                  'original_sha256': hashlib.sha256(original).hexdigest(),
+                  'effective_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+          if receipt['arms']['baseline']['effective_sha256'] != receipt['arms']['candidate']['effective_sha256']:
+              raise SystemExit('H0 fixture sources differ')
+          (Path(os.environ['RUNNER_TEMP']) / 'h0-recording/fixture-receipt.json').write_text(json.dumps(receipt, indent=2))
+          baseline = json.loads(Path('baseline/benchmarks/perf/budgets-v1.json').read_text())
+          candidate = json.loads(Path('candidate/benchmarks/perf/budgets-v1.json').read_text())
+          if baseline['fixture_version'] != 4:
+              raise SystemExit('baseline fixture version changed; review the comparison contract')
+          baseline['fixture_version'] = 5  # Exact per-run retry recovery receipt.
+          retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
+          if retry['maximum_p95'] != 1050:
+              raise SystemExit('baseline retry budget changed; review the comparison contract')
+          retry['maximum_p95'] = 6300  # ADR-0040: six sends, with the existing 5% allowance.
+          if baseline != candidate:
+              raise SystemExit('only the approved retry-contract/version correction may change budgets')
+          PYTHON
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           # The recorder clears toolchain overrides before native builds.
           rustup default "$channel"
           # Dependency-local toolchain files must not redirect rustc proxies.
           dirname "$(rustup which rustc --toolchain "$channel")" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/h0-recording"
+          cp candidate/benchmarks/perf/budgets-v1.json "$RUNNER_TEMP/h0-recording/budgets.json"
       - name: Record baseline, candidate and same-binary control
         shell: bash
         run: |
           python3 - <<'PYTHON'
-          import json, os, subprocess
+          import json, os, subprocess, sys, time
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'h0-recording'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           pressure = []
           results = []
-          for arm, output in [('baseline', 'baseline'), ('candidate', 'candidate'), ('baseline', 'control')]:
+          for arm, output in [('baseline', 'baseline'), ('candidate', 'candidate'), ('candidate', 'control')]:
+              started = time.monotonic()
+              print(f'::group::{output}: build and record', flush=True)
               before = Path('/proc/pressure/io').read_text()
-              with (root / f'{output}.log').open('w') as log:
-                  result = subprocess.run(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
-                      'gha-action-bias-controlled', '--output', f'target/qq-perf/action-bias/{output}.json'],
-                      cwd=workspace / arm, stdout=log, stderr=subprocess.STDOUT)
+              log = (root / f'{output}.log').open('wb')
+              stream_error = None
+              log_enabled = console_enabled = True
+              result = subprocess.Popen(['cargo', 'xtask', 'perf', 'baseline', '--machine-class',
+                  'gha-action-bias-controlled', '--output', f'target/qq-perf/action-bias/{output}.json'],
+                  cwd=workspace / arm, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              try:
+                  while chunk := result.stdout.read1(64 * 1024):
+                      # Drain after a sink failure so the recorder can finish its bounded work.
+                      if log_enabled:
+                          try:
+                              log.write(chunk)
+                              log.flush()
+                          except OSError as error:
+                              stream_error = stream_error or error
+                              log_enabled = False
+                      if console_enabled:
+                          try:
+                              sys.stdout.buffer.write(chunk)
+                              sys.stdout.buffer.flush()
+                          except OSError as error:
+                              stream_error = stream_error or error
+                              console_enabled = False
+                  result.wait()
+              finally:
+                  if result.poll() is None:
+                      result.terminate()
+                      try:
+                          result.wait(timeout=10)
+                      except subprocess.TimeoutExpired:
+                          result.kill()
+                          result.wait()
+                  result.stdout.close()
+                  try:
+                      log.close()
+                  except OSError as error:
+                      stream_error = stream_error or error
               after = Path('/proc/pressure/io').read_text()
               pressure.append({'arm': output, 'before': before, 'after': after})
               results.append({'arm': output, 'exit': result.returncode})
@@ -329,6 +400,10 @@ jobs:
                   (root / f'{output}.json').write_bytes(report.read_bytes())
               (root / 'pressure.json').write_text(json.dumps(pressure, indent=2))
               (root / 'results.json').write_text(json.dumps(results, indent=2))
+              print(f'{output}: exit={result.returncode}, elapsed={time.monotonic() - started:.1f}s', flush=True)
+              print('::endgroup::', flush=True)
+              if stream_error is not None:
+                  raise stream_error
               if result.returncode:
                   raise SystemExit(result.returncode)
           PYTHON
@@ -340,22 +415,22 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'h0-recording'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
-          baseline = json.loads((root / 'baseline.json').read_text())
+          candidate = json.loads((root / 'candidate.json').read_text())
           control = json.loads((root / 'control.json').read_text())
           identities = {}
           for profile in ['artifact', 'minimal_artifact']:
-              left = baseline[profile]['binary_sha256']
+              left = candidate[profile]['binary_sha256']
               right = control[profile]['binary_sha256']
               if re.fullmatch('[0-9a-f]{64}', left) is None or left != right:
                   raise SystemExit(f'{profile} control is not the same immutable binary')
               identities[profile] = left
           (root / 'control-identities.json').write_text(json.dumps(identities, indent=2))
           exits = []
-          for name, candidate in [('ab', 'candidate'), ('aa', 'control')]:
+          for name, baseline, candidate in [('ab', 'baseline', 'candidate'), ('aa', 'candidate', 'control')]:
               with (root / f'{name}-check.log').open('w') as log:
                   result = subprocess.run(['cargo', 'xtask', 'perf', 'check', '--baseline',
-                      str(root / 'baseline.json'), '--candidate', str(root / f'{candidate}.json'),
-                      '--budgets', 'benchmarks/perf/budgets-v1.json'], cwd=workspace / 'candidate',
+                      str(root / f'{baseline}.json'), '--candidate', str(root / f'{candidate}.json'),
+                      '--budgets', str(root / 'budgets.json')], cwd=workspace / 'candidate',
                       stdout=log, stderr=subprocess.STDOUT)
               exits.append(result.returncode)
           for row in json.loads((root / 'pressure.json').read_text()):

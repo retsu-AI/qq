@@ -137,11 +137,28 @@ rustix = { workspace = true, features = ["fs"] }
 [profile.release]
 # The shipped binary is size- and latency-gated (`benchmarks/perf`). Symbols
 # are stripped because panics print locations, not backtraces, in release;
-# one codegen unit with thin LTO lets LLVM inline across the store/feed hot
-# path and drop unreferenced monomorphs.
+# one codegen unit with full LTO removes duplicated code across crate boundaries.
 strip = "symbols"
 codegen-units = 1
-lto = "thin"
+lto = "fat"
+
+# Optimize application glue for size; keep runtime/provider libraries at level 3.
+[profile.release.package.qq]
+opt-level = "s"
+strip = "symbols"
+
+# Exercise the runtime in H0 with the same final optimization as the shipped bin.
+[profile.release.package.xtask]
+opt-level = "s"
+strip = "symbols"
+
+# Keep configuration and authentication compact without changing streaming crates.
+
+[profile.release.package.qq-auth]
+opt-level = "s"
+
+[profile.release.package.qq-config]
+opt-level = "s"
 
 # The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
 # ~600 MB. Line tables keep file:line backtraces for workspace code; deps

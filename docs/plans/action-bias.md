@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | Proposed 2026-10-13. AB1 and AB2 are independent and can start at once; AB3 and AB4 follow; AB5 after AB1; AB6 after seven full UTC days on a deployed pinned AB1–AB5 main build |
+| Now | AB1–AB6.1 merged (#301–#306, 2026-10-14). Inherited performance failures are carried to the user-authorized ENG-834 follow-up; AB6 research remains pending seven full UTC days on a deployed pinned build |
 | Research | [`../research/action-bias.md`](../research/action-bias.md): live store, 30 days to 2026-10-13, findings AB-F1–AB-F7; reference prompts and tools from Codex, OpenCode, Pi, fx |
 | Ledger | [`progress/action-bias.md`](./progress/action-bias.md) |
 | Linear | [ENG-1037](https://linear.app/retsu-ai/issue/ENG-1037) (program), milestone `Action Bias`; AB1–AB6 are ENG-1038–ENG-1043 |

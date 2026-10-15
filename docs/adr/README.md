@@ -21,7 +21,7 @@ written.
 | 0007 | [Classify tool approval from the catalog effect class, not the name](0007-effect-classified-approval.md) | Accepted |
 | 0008 | [Feature-gate the Bedrock family inside `qq-provider`; no provider-per-crate split](0008-feature-gated-bedrock.md) | Accepted |
 | 0009 | [QQ ends at the headless contract; supervisors own hosting](0009-headless-hosting-boundary.md) | Accepted |
-| 0010 | [Ship a stripped, thin-LTO release profile and tighten size budgets](0010-release-profile.md) | Accepted |
+| 0010 | [Ship a stripped, thin-LTO release profile and tighten size budgets](0010-release-profile.md) | Superseded in part by ADR-0062 |
 | 0011 | [One commit discipline for both store lanes; wakeups do not close groups](0011-shared-commit-across-lanes.md) | Accepted |
 | 0012 | [One settlement path with a pre-read guard; teardown is a typed prerequisite for a started run's terminal event](0012-structural-settlement.md) | Accepted |
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
@@ -63,6 +63,7 @@ written.
 
 | 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed (action-bias AB2, ENG-1039) |
+| 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet

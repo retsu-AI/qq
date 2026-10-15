@@ -29,9 +29,46 @@ cargo xtask perf check --baseline target/qq-perf/<slice>-<date>/baseline.json \
 
 The fixture version is embedded in each report; reports with different fixture
 versions, sample counts, or warmup counts are not comparable. Current fixture
-version: 4.
+version: 5. Version 5 requires exactly `MAX_TURN_RETRIES + 1` entries in every
+always-faulting run. Older aggregate-only retry receipts cannot be compared
+against the current budgets; re-record both arms with the current fixture.
 
 ## Focused fixtures
+
+The ENG-834 hosted repair job compares merged main `3b763ea1` against the PR
+candidate using the same H0 fixture and toolchain in both arms. The turn
+diagnostic retains common fixture `9868038c` independently of production commits.
+Both immutable
+production checkouts overlay only `xtask/src/perf.rs` from the immutable PR
+head before recording. The artifact retains `fixture-receipt.json` with the
+fixture commit, production commits, original hashes and equal effective hashes;
+the baseline report truthfully records its modified workspace. The repaired
+fixture preserves the average retry metric and requires exactly six sends in
+every always-faulting run. Too few attempts lose recovery; too many exceed it.
+Neither defect can hide among otherwise correct runs.
+Earlier recordings without this check do not prove the per-run invariant. Size ceilings stay
+48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
+correction and fixture-version 4 → 5 transition; all other limits must match
+the pinned baseline. The artifact retains the exact budget file used.
+
+Each arm streams compiler output to the Actions console while retaining its
+complete log artifact. Console groups identify baseline, candidate and control,
+and report each arm's duration and exit code. The recorder announces release
+builds and each workload family with elapsed times; these messages are outside
+individual sample timing regions. A silent step is not evidence of progress.
+
+Its same-binary control repeats the candidate, verifies both default/minimal
+executable hashes, and checks candidate versus control with the same budgets.
+H0's optimized xtask driver uses the same final optimization level as the
+shipped executable. The turn diagnostic sets only its final benchmark target's
+optimization to each arm's `qq` package setting; dependency crates retain their
+normal profile. Artifacts retain the explicit final optimization flag alongside
+Cargo's pre-override profile metadata and the compiled binary hashes.
+
+This tests repeatability of the improved build while still requiring both
+candidate recordings to satisfy absolute limits. Baseline versus candidate
+checks relative regressions against merged main. Neither inherited failures nor
+noisy controls are waived.
 
 Use these while iterating; they are faster and isolate one gate. The worker
 rows are hidden `xtask perf` subcommands that refuse a debug build and run only

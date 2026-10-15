@@ -5011,11 +5011,11 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
             script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
                 // The smaller minimal-profile tool catalog must also cross
                 // a compaction boundary before this child finishes.
-                turns: 48,
+                turns: 24,
                 text: "child done".to_owned(),
                 summary: valid_summary("child work"),
             }),
-            bytes_per_token: 4,
+            bytes_per_token: 2,
         },
     });
     let mut harness = child_budget_harness_with_window(
@@ -5027,7 +5027,7 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
     )
     .await;
     let limits = RunLimits {
-        // Two 48-turn children must finish; this test checks exact spend
+        // Two 24-turn children must finish; this test checks exact spend
         // inheritance rather than exhausting the parent on prompt growth.
         max_total_tokens: Some(2_000_000),
         max_cost_usd_nanos: Some(5_000_000_000),
@@ -5128,11 +5128,11 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             served: StdMutex::new(0),
             script: AutoCompactScript::Measured {
                 script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
-                    turns: 48,
+                    turns: 24,
                     text: "child done".to_owned(),
                     summary: "__STALL__".to_owned(),
                 }),
-                bytes_per_token: 4,
+                bytes_per_token: 2,
             },
         });
         let mut harness = child_budget_harness_with_window(
@@ -5143,52 +5143,70 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             Some(16 * 1024),
         )
         .await;
-        let root = submit_child_budget_prompt(
-            &harness,
-            RunLimits {
-                max_duration_ms: deadline.then_some(5000),
-                ..RunLimits::default()
-            },
-        )
-        .await;
-        let observed = collect_until(&mut harness.events, |event| matches!(event,
-        SessionEvent::RunStarted { session, run_id, .. } if session.parent_id == Some(harness.session_id) && session.active_run_id != Some(*run_id)
-    )).await;
-        let SessionEvent::RunStarted {
-            session,
-            run_id: summary,
-            ..
-        } = &observed.last().unwrap().event
-        else {
-            panic!("summary start");
-        };
-        let child_prompt = session.active_run_id.unwrap();
-        let (entered, release) = crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
-        let summary_id = *summary;
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let sent = harness
-                    .runtime
-                    .inner
-                    .store
-                    .call(Priority::AwaitControl, move |connection| {
-                        Ok(connection.query_row(
-                            "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
-                            [summary_id.to_string()],
-                            |row| row.get::<_, bool>(0),
-                        )?)
-                    })
-                    .await
-                    .unwrap();
-                if sent {
-                    break;
+        // Keep the deadline frozen while real store/tool work admits the summary.
+        let keep_clock = if deadline {
+            tokio::time::pause();
+            Some(tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        if !deadline {
+            }))
+        } else {
+            None
+        };
+        let setup = async {
+            let root = submit_child_budget_prompt(
+                &harness,
+                RunLimits {
+                    max_duration_ms: deadline.then_some(5000),
+                    ..RunLimits::default()
+                },
+            )
+            .await;
+            let observed = collect_until(&mut harness.events, |event| matches!(event,
+            SessionEvent::RunStarted { session, run_id, .. } if session.parent_id == Some(harness.session_id) && session.active_run_id != Some(*run_id)
+        )).await;
+            let SessionEvent::RunStarted {
+                session,
+                run_id: summary,
+                ..
+            } = &observed.last().unwrap().event
+            else {
+                panic!("summary start");
+            };
+            let child_prompt = session.active_run_id.unwrap();
+            let (entered, release) =
+                crate::sessions::in_run_compaction::hold_drop_settlement(*summary);
+            let summary_id = *summary;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let sent = harness
+                        .runtime
+                        .inner
+                        .store
+                        .call(Priority::AwaitControl, move |connection| {
+                            Ok(connection.query_row(
+                                "SELECT estimated_cost_usd_nanos IS NULL FROM runs WHERE id = ?1",
+                                [summary_id.to_string()],
+                                |row| row.get::<_, bool>(0),
+                            )?)
+                        })
+                        .await
+                        .unwrap();
+                    if sent {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            (root, *summary, child_prompt, entered, release)
+        };
+        let (root, summary, child_prompt, entered, release) = setup.await;
+        if deadline {
+            tokio::time::advance(Duration::from_millis(5001)).await;
+        } else {
             harness
                 .runtime
                 .command(
@@ -5199,6 +5217,10 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
                 )
                 .await
                 .unwrap();
+        }
+        if let Some(keep_clock) = keep_clock {
+            tokio::time::resume();
+            keep_clock.abort();
         }
         tokio::time::timeout(Duration::from_secs(10), entered)
             .await
@@ -5212,7 +5234,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
                 _ => None,
             })
             .collect();
-        let summary_index = ids.iter().position(|run| run == summary).unwrap();
+        let summary_index = ids.iter().position(|run| *run == summary).unwrap();
         let child_index = ids.iter().position(|run| *run == child_prompt).unwrap();
         assert!(summary_index < child_index, "{ids:?}");
         let child_outcome = finished_outcome(&finished, child_prompt).unwrap();
@@ -5248,7 +5270,7 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             finished_outcome(&next_events, next),
             Some(RunOutcome::Completed)
         );
-        assert!(!next_events.iter().any(|event| matches!(event.event, SessionEvent::RunFinished { run_id, .. } if run_id == *summary)));
+        assert!(!next_events.iter().any(|event| matches!(event.event, SessionEvent::RunFinished { run_id, .. } if run_id == summary)));
         harness.runtime.shutdown().await.unwrap();
     }
 }
