@@ -23,6 +23,8 @@
       "is_error": false
     },
     "resolution": "approved_by_reviewer",
-    "delegate": "jev"
+    "delegate": "jev",
+    "delegate_model": "jev-1.13.0",
+    "delegate_request_id": "jev-response-42"
   }
 }
