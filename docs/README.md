@@ -88,6 +88,9 @@ phase-gate evidence.
 
 ## Runbooks — `runbooks/`
 
+- [`testing.md`](runbooks/testing.md) — the feedback loop (`cargo xtask
+  check`, `smoke`, `lint`), reading failures, test policy, nextest, and what
+  CI runs on pull requests versus the merge queue.
 - [`local-dev.md`](runbooks/local-dev.md) — toolchain, gates, test
   environment, worktrees.
 - [`windows-ci.md`](runbooks/windows-ci.md) — the targeted Windows job and how

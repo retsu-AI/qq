@@ -1,0 +1,79 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+────────────
+ Nextest run ID 0dced1b7-f4f1-419d-b12e-e5e197a6e7a1 with nextest profile: ci
+    Starting 5 tests across 1 binary
+  TRY 2 FAIL [   0.002s] (2/5) nx tests::bad
+  stdout ───
+
+    running 1 test
+    test tests::bad ... FAILED
+
+    failures:
+
+    failures:
+        tests::bad
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::bad' (1504974) panicked at src/lib.rs:4:24:
+    assertion `left == right` failed: boom
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 ABRT [   0.045s] (4/5) nx tests::seg
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 6: SIGABRT)
+
+ TERMINATING [>  2.000s] (───) nx tests::slow
+   TRY 2 TMT [   2.003s] (5/5) nx tests::slow
+  stdout ───
+
+    running 1 test
+
+    (test timed out)
+
+────────────
+     Summary [   4.006s] 5 tests run: 2 passed (1 flaky), 2 failed, 1 timed out, 0 skipped
+   FLAKY 2/2 [   0.003s] (3/5) nx tests::flaky
+  TRY 2 FAIL [   0.002s] (2/5) nx tests::bad
+  stdout ───
+
+    running 1 test
+    test tests::bad ... FAILED
+
+    failures:
+
+    failures:
+        tests::bad
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::bad' (1504974) panicked at src/lib.rs:4:24:
+    assertion `left == right` failed: boom
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 ABRT [   0.045s] (4/5) nx tests::seg
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 6: SIGABRT)
+
+   TRY 2 TMT [   2.003s] (5/5) nx tests::slow
+  stdout ───
+
+    running 1 test
+
+    (test timed out)
+
+error: test run failed

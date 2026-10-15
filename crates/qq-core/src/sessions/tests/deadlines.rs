@@ -283,9 +283,12 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
     for kind in ["attachment", "guidance", "skill"] {
+        if kind != "attachment" {
+            tokio::time::pause();
+        }
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut harness = DeadlineSession::open(
             Arc::new(ApprovalLoader {
@@ -322,7 +325,7 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
                     session_id: harness.session_id,
                     input,
                     limits: RunLimits {
-                        max_duration_ms: Some(500),
+                        max_duration_ms: Some(30_000),
                         ..RunLimits::default()
                     },
                     correlation: Correlation::default(),
@@ -334,10 +337,18 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
         let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
             panic!("prompt")
         };
-        tokio::time::timeout(Duration::from_secs(2), entered)
-            .await
-            .unwrap()
-            .unwrap();
+        // Keep paused time from auto-advancing while real blocking/store
+        // threads admit the work. Deadline starts only after hook entry.
+        let keep_clock = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        entered.await.unwrap();
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        tokio::time::resume();
+        keep_clock.abort();
         let premature = tokio::time::timeout(Duration::from_millis(750), async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();

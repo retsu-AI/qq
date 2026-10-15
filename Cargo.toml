@@ -160,6 +160,17 @@ opt-level = "s"
 [profile.release.package.qq-config]
 opt-level = "s"
 
+# The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
+# ~600 MB. Line tables keep file:line backtraces for workspace code; deps
+# carry none. For a debugger session: `CARGO_PROFILE_DEV_DEBUG=full`
+# (workspace crates) plus `--config 'profile.dev.package."*".debug="full"'`
+# (dependencies).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
 # every supported provider family. The minimal embedding profile is

@@ -1774,73 +1774,77 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ab2_names_scan_budget_advances_past_nonmatching_links() {
-        use std::os::unix::fs::symlink;
-        let directory = tempfile::tempdir().unwrap();
-        for index in 0..search::MAX_SCAN_ENTRIES {
-            symlink("missing", directory.path().join(format!("s{index:05}"))).unwrap();
-        }
-        fs::create_dir(directory.path().join("z")).unwrap();
-        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_tool(
-            &workspace,
-            &FileState::default(),
-            "search",
-            r#"{"query":"AGENTS.md","mode":"names"}"#,
-        );
-        assert!(!result.is_error, "{}", result.model_text);
-        let header = result.model_text.lines().next().unwrap();
-        assert!(header.contains("partial=scan"), "{header}");
-        let cursor = header
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("next="))
-            .expect("scan prefix must produce a resumable cursor");
-        let arguments =
-            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
-        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
-        assert!(!next.is_error, "{}", next.model_text);
-        assert!(
-            next.model_text.contains("z/AGENTS.md"),
-            "{}",
-            next.model_text
-        );
-        assert!(!next.model_text.contains("partial=scan"));
+        search::with_scan_entries(128, || {
+            use std::os::unix::fs::symlink;
+            let directory = tempfile::tempdir().unwrap();
+            for index in 0..128 {
+                symlink("missing", directory.path().join(format!("s{index:05}"))).unwrap();
+            }
+            fs::create_dir(directory.path().join("z")).unwrap();
+            fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"AGENTS.md","mode":"names"}"#,
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            let header = result.model_text.lines().next().unwrap();
+            assert!(header.contains("partial=scan"), "{header}");
+            let cursor = header
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .expect("scan prefix must produce a resumable cursor");
+            let arguments =
+                serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+            let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+            assert!(!next.is_error, "{}", next.model_text);
+            assert!(
+                next.model_text.contains("z/AGENTS.md"),
+                "{}",
+                next.model_text
+            );
+            assert!(!next.model_text.contains("partial=scan"));
+        });
     }
 
     #[test]
     fn ab2_names_scan_budget_advances_past_empty_directories() {
-        let directory = tempfile::tempdir().unwrap();
-        for index in 0..search::MAX_SCAN_ENTRIES {
-            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
-        }
-        fs::create_dir(directory.path().join("z")).unwrap();
-        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_tool(
-            &workspace,
-            &FileState::default(),
-            "search",
-            r#"{"query":"AGENTS.md","mode":"names"}"#,
-        );
-        assert!(!result.is_error, "{}", result.model_text);
-        let cursor = result
-            .model_text
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("next="))
-            .expect("completed directories must provide a cursor");
-        let arguments =
-            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
-        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
-        assert!(!next.is_error, "{}", next.model_text);
-        assert!(
-            next.model_text.contains("z/AGENTS.md"),
-            "{}",
-            next.model_text
-        );
-        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+        search::with_scan_entries(128, || {
+            let directory = tempfile::tempdir().unwrap();
+            for index in 0..128 {
+                fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
+            }
+            fs::create_dir(directory.path().join("z")).unwrap();
+            fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"AGENTS.md","mode":"names"}"#,
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            let cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .expect("completed directories must provide a cursor");
+            let arguments =
+                serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+            let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+            assert!(!next.is_error, "{}", next.model_text);
+            assert!(
+                next.model_text.contains("z/AGENTS.md"),
+                "{}",
+                next.model_text
+            );
+            assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+        });
     }
 
     #[test]
@@ -1989,81 +1993,42 @@ mod tests {
 
     #[test]
     fn ab2_long_directory_watermark_decodes_and_reaches_later_instructions() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
-        fs::create_dir_all(directory.path().join(&root)).unwrap();
-        for index in 0..search::MAX_SCAN_ENTRIES {
-            fs::create_dir(directory.path().join(&root).join(format!("d{index:05}"))).unwrap();
-        }
-        fs::create_dir(directory.path().join("z")).unwrap();
-        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_tool(
-            &workspace,
-            &FileState::default(),
-            "search",
-            r#"{"query":"AGENTS.md","mode":"names"}"#,
-        );
-        assert!(!result.is_error, "{}", result.model_text);
-        let cursor = result
-            .model_text
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("next="))
-            .expect("completed directories must provide a cursor");
-        let arguments =
-            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
-        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
-        assert!(!next.is_error, "{}", next.model_text);
-        assert!(
-            next.model_text.contains("z/AGENTS.md"),
-            "{}",
-            next.model_text
-        );
-        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
-    }
-
-    #[test]
-    fn ab2_depth_skip_does_not_block_later_directory_watermarks() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut deep = directory.path().join("a");
-        for _ in 0..66 {
-            fs::create_dir(&deep).unwrap();
-            deep.push("d");
-        }
-        for index in 0..search::MAX_SCAN_ENTRIES {
-            fs::create_dir(directory.path().join(format!("d{index:05}"))).unwrap();
-        }
-        fs::create_dir(directory.path().join("z")).unwrap();
-        fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
-        let workspace = Workspace::open(directory.path()).unwrap();
-        let result = run_tool(
-            &workspace,
-            &FileState::default(),
-            "search",
-            r#"{"query":"AGENTS.md","mode":"names"}"#,
-        );
-        assert!(!result.is_error, "{}", result.model_text);
-        let cursor = result
-            .model_text
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("next="))
-            .expect("completed directories must provide a cursor");
-        let arguments =
-            serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
-        let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
-        assert!(!next.is_error, "{}", next.model_text);
-        assert!(
-            next.model_text.contains("z/AGENTS.md"),
-            "{}",
-            next.model_text
-        );
-        assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+        search::with_scan_entries(128, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = format!("{}/{}", "a".repeat(250), "a".repeat(250));
+            fs::create_dir_all(directory.path().join(&root)).unwrap();
+            for index in 0..128 {
+                fs::create_dir(directory.path().join(&root).join(format!("d{index:05}"))).unwrap();
+            }
+            fs::create_dir(directory.path().join("z")).unwrap();
+            fs::write(directory.path().join("z/AGENTS.md"), "rules\n").unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"AGENTS.md","mode":"names"}"#,
+            );
+            assert!(!result.is_error, "{}", result.model_text);
+            let cursor = result
+                .model_text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("next="))
+                .expect("completed directories must provide a cursor");
+            let arguments =
+                serde_json::json!({"query":"AGENTS.md","mode":"names","cursor":cursor}).to_string();
+            let next = run_tool(&workspace, &FileState::default(), "search", &arguments);
+            assert!(!next.is_error, "{}", next.model_text);
+            assert!(
+                next.model_text.contains("z/AGENTS.md"),
+                "{}",
+                next.model_text
+            );
+            assert!(!next.model_text.contains("partial="), "{}", next.model_text);
+        });
     }
 
     #[test]

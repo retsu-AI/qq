@@ -147,3 +147,16 @@
 - Common-fixture guards pass all four positive/negative cases; workflow actionlint
   passes with ShellCheck disabled (existing SC2129 style finding is unchanged).
   Current-head workspace checks and hosted performance qualification remain open.
+
+## 2026-10-15 — current-main integration
+
+- Remote main advances to `3b763ea1` with the agent feedback gate and test
+  cancellation audit while `25dff5af` CI is active. Merge main without conflicts;
+  retain the new check/lint/smoke workflow and existing performance jobs. Pin
+  production baselines to current main; the immutable turn fixture remains
+  `9868038c`, with original/effective hashes still required. No budget changes.
+- Exact clean `25dff5af` release sizes confirm 44,969,760/40,896,752 bytes,
+  Codex reports no major issues (comment6185400887), and all four threads are
+  resolved. These pre-integration receipts do not qualify the merged head.
+- Re-run the current-main gates and hosted qualification before merge. Local
+  loopback bind remains EPERM; socket-dependent gates require hosted evidence.
