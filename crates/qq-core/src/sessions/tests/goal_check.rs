@@ -738,3 +738,180 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         assert!(snapshot.summary.active_run_id.is_none());
     }
 }
+
+#[tokio::test]
+async fn goal_check_historical_result_survives_edit_replace_and_clear() {
+    const COMMAND: &str = "printf historical-check-result; exit 7";
+    for mutation in ["edit", "replace", "clear"] {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("sessions.sqlite3");
+        let loader = Arc::new(Loader {
+            failure_tail: false,
+            loads: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut options = SessionRuntimeOptions::new(database.clone());
+        options.grant_authority = Some(Arc::new(Authority(COMMAND)));
+        let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("missing session")
+        };
+        let (entered, release) = super::super::goal_check::hold_result(session_id);
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":session_id,"objective":"old objective",
+                    "check":{"command":COMMAND,"timeout_ms":5000},
+                    "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("missing goal")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        let approved = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    action: qq_protocol::GoalControl::ApproveCheck {
+                        scope: qq_protocol::GoalCheckScope::Once,
+                        command: COMMAND.to_owned(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = approved.outcome else {
+            panic!("missing approved goal")
+        };
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        let check = before
+            .runs
+            .iter()
+            .find(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+            .unwrap()
+            .id;
+        let expected = serde_json::json!({"goal_id":goal.goal_id,"revision":goal.revision});
+        let command = if mutation == "clear" {
+            serde_json::json!({"type":"goal_control","session_id":session_id,"expected":expected,"action":{"type":"clear"}})
+        } else {
+            serde_json::json!({"type":"set_goal","session_id":session_id,"objective":"new objective","expected":expected,"replace":mutation=="replace",
+                "check":{"command":"printf replacement","timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})
+        };
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(command).unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut changed = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .goal;
+        if let Some(goal) = &mut changed {
+            assert!(goal.pending_run_id.is_none() || goal.pending_run_id == Some(check));
+            // Settlement may release only its own draining reservation.
+            goal.pending_run_id = None;
+        }
+        release.send(()).unwrap();
+        let result_events = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut seen = Vec::new();
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                let done =
+                    matches!(event.event,SessionEvent::RunFinished { run_id, .. } if run_id==check);
+                seen.push(event);
+                if done {
+                    break seen;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await.unwrap();
+        let finished = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(
+            finished.goal, changed,
+            "{mutation}: stale completion changed current goal"
+        );
+        let message = finished
+            .messages
+            .iter()
+            .find(|message| message.run_id == check)
+            .unwrap_or_else(|| panic!("{mutation}: historical check result missing"));
+        assert_eq!(message.output, "exit 7\nhistorical-check-result");
+        assert!(message.output.len() <= 4096);
+        assert!(result_events.iter().any(|event|matches!(&event.event, SessionEvent::AssistantMessageStarted { message:live } if live.id==message.id)));
+        drop(events);
+        drop(runtime);
+        let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
+            .await
+            .unwrap();
+        let restored = reopened
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(restored.messages, finished.messages);
+        assert_eq!(restored.runs, finished.runs);
+        assert_eq!(restored.goal, finished.goal);
+        reopened.shutdown().await.unwrap();
+    }
+}

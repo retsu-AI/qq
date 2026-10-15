@@ -11,6 +11,47 @@ use tokio::io::AsyncReadExt;
 
 const OUTPUT_BYTES: usize = 4096;
 
+#[cfg(test)]
+struct ResultHold {
+    session: SessionId,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static RESULT_HOLDS: Mutex<Vec<ResultHold>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn hold_result(
+    session: SessionId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    RESULT_HOLDS.lock().unwrap().push(ResultHold {
+        session,
+        entered,
+        release: release_rx,
+    });
+    (entered_rx, release)
+}
+
+#[cfg(test)]
+async fn pause_result(session: SessionId) {
+    let hold = {
+        let mut holds = RESULT_HOLDS.lock().unwrap();
+        holds
+            .iter()
+            .position(|hold| hold.session == session)
+            .map(|index| holds.remove(index))
+    };
+    if let Some(hold) = hold {
+        let _ = hold.entered.send(());
+        let _ = hold.release.await;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ProcessOutcome {
     Exited { code: Option<i32> },
@@ -709,6 +750,8 @@ pub(super) async fn execute(
             return;
         }
     };
+    #[cfg(test)]
+    pause_result(claimed.identity.session_id).await;
     let claim = claimed.clone();
     match inner
         .store
