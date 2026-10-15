@@ -23,3 +23,48 @@
   10,545,999 bytes, of which 10,024,360 are static data. These diagnostic
   sizes are not hosted qualification. Fat-LTO experiment remains live;
   no production profile change yet.
+
+## 2026-10-14 — focused repairs and compiler experiments
+
+- Regression `retry_performance_budget_accepts_turn_recovery_but_rejects_an_extra_send`
+  fails on the old budget (0 pass/1 fail), then passes after the ADR-0040
+  correction to 6,300 milli. Relative allowance remains zero; a seventh send
+  exceeds the absolute ceiling. The real faulting-provider fixture
+  `retry_amplification_fixture_observes_the_turn_retry_bound` also passes.
+  Red/green logs: `/tmp/qq-eng834-retry-budget-{red,green}.log`; real fixture
+  log: `/tmp/qq-eng834-retry-fixture.log`.
+- Full LTO at unchanged optimization level reduces the optimized local default
+  binary from 53,112,568 to 48,288,920 bytes (-9.08%). Full LTO with level 2
+  only for the final `qq` package produces 47,919,896 bytes, below 48 MB;
+  runtime libraries keep level 3. All features remain present. Proposed root
+  profile adopts this combination; minimal measurement and speed qualification
+  remain pending. Symbol-preserving and stripped binaries, hashes, build logs
+  and receipts remain in the pre-change diagnostic directory; local sizes are
+  not hosted qualification.
+- CI pins merged #306 as the baseline/common fixture, retains every speed/size
+  limit except the approved retry-contract correction, and repeats the
+  candidate as its same-binary control. Exact inline budget guard admits the
+  retry correction and rejects a one-byte relaxation of the size ceiling.
+  All four inline Python blocks compile; actionlint passes with the existing
+  unrelated SC2129 release-step style warning excluded.
+
+## 2026-10-14 — resumed after explicit pause
+
+- User explicitly resumes the follow-up. Main remains `9868038c`. Root-only
+  size optimization with full LTO gives minimal 41,198,312 bytes, still
+  198,312 bytes above the unchanged ceiling. Stronger root-only size
+  optimization is being measured before selecting the final profile.
+- AB6 hosted H0 run `38649895250` completed with failure; artifact
+  `11935749016` is retained on GitHub. No performance acceptance is claimed.
+
+## 2026-10-14 — selected profile for verification
+
+- Full LTO with root-only optimization `z` gives local minimal 40,330,088
+  bytes, below the unchanged 41 MB limit. Features and dependencies are
+  unchanged; dependency crates retain level 3. Both `qq` and the H0 driver
+  adopt this final optimization. This supersedes the provisional level-2
+  setting above. Runtime speed remains unqualified pending matched checks.
+- Protected root Git metadata is read-only in the resumed environment. An
+  independent local clone under `/tmp` holds the exact verification snapshot;
+  original worktrees and their unrelated changes remain intact. GitHub
+  publication uses the connector.

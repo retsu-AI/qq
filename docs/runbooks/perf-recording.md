@@ -33,6 +33,25 @@ version: 4.
 
 ## Focused fixtures
 
+The ENG-834 hosted repair job compares merged main `9868038c` against the PR
+candidate using the unchanged H0 fixture and toolchain. Size ceilings stay
+48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
+correction described in the performance inventory; all other limits must match
+the pinned baseline. The artifact retains the exact budget file used.
+
+Its same-binary control repeats the candidate, verifies both default/minimal
+executable hashes, and checks candidate versus control with the same budgets.
+H0's optimized xtask driver uses the same final optimization level as the
+shipped executable. The turn diagnostic sets only its final benchmark target's
+optimization to each arm's `qq` package setting; dependency crates retain their
+normal profile. Artifacts retain the explicit final optimization flag alongside
+Cargo's pre-override profile metadata and the compiled binary hashes.
+
+This tests repeatability of the improved build while still requiring both
+candidate recordings to satisfy absolute limits. Baseline versus candidate
+checks relative regressions against merged main. Neither inherited failures nor
+noisy controls are waived.
+
 Use these while iterating; they are faster and isolate one gate. The worker
 rows are hidden `xtask perf` subcommands that refuse a debug build and run only
 on Linux, so they go through `cargo run --release` rather than the debug

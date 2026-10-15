@@ -112,6 +112,11 @@ sample. Re-record the reference report on the same quiet machine class and
 review intentional budget changes rather than copying local measurements into
 source control.
 
+The faulting-provider retry metric counts one send plus the run's five retries
+under ADR-0040: 6,000 milli entries per exhausted logical turn. Its absolute
+ceiling is 6,300 milli (the fixture's existing 5% allowance), while the relative
+regression allowance remains zero. A seventh send fails the contract.
+
 ## Measurement Inventory
 
 | Area | Metrics | Boundary |

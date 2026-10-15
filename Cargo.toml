@@ -137,11 +137,18 @@ rustix = { workspace = true, features = ["fs"] }
 [profile.release]
 # The shipped binary is size- and latency-gated (`benchmarks/perf`). Symbols
 # are stripped because panics print locations, not backtraces, in release;
-# one codegen unit with thin LTO lets LLVM inline across the store/feed hot
-# path and drop unreferenced monomorphs.
+# one codegen unit with full LTO removes duplicated code across crate boundaries.
 strip = "symbols"
 codegen-units = 1
-lto = "thin"
+lto = "fat"
+
+# Optimize final executable size; dependency crates compile at level 3.
+[profile.release.package.qq]
+opt-level = "z"
+
+# Exercise the runtime in H0 with the same final optimization as the shipped bin.
+[profile.release.package.xtask]
+opt-level = "z"
 
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
