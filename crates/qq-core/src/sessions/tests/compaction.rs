@@ -2312,7 +2312,27 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
         )
         .await
         .unwrap();
-    let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    let mut observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    if !observed
+        .iter()
+        .any(|event| matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==prompt))
+    {
+        observed.extend(collect_until(&mut harness.events, finished_for(prompt)).await);
+    }
+    for run in [prompt, compaction] {
+        assert!(observed.iter().any(|event|matches!(event.event,SessionEvent::RunFinished {run_id,outcome:RunOutcome::Cancelled,..} if run_id==run)),"both owner and helper settle cancelled");
+        assert_eq!(observed.iter().filter(|event|matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==run)).count(),1,"each owner/helper settles once");
+    }
+    assert!(
+        position_of(
+            &observed,
+            |event| matches!(event,SessionEvent::RunFinished {run_id,..} if *run_id==compaction)
+        ) < position_of(
+            &observed,
+            |event| matches!(event,SessionEvent::RunFinished {run_id,..} if *run_id==prompt)
+        ),
+        "owner reservation is released after helper drain"
+    );
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
@@ -2327,7 +2347,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // The compaction settled cancelled and the session ended idle.
+    // The owner settles after its helper drains, leaving the session idle.
     let session = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -2336,7 +2356,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
                 outcome: RunOutcome::Cancelled,
                 session,
                 ..
-            } if *run_id == compaction => Some(session.clone()),
+            } if *run_id == prompt => Some(session.clone()),
             _ => None,
         })
         .unwrap();
@@ -4516,6 +4536,10 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
 #[tokio::test]
 async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
     let mut harness = in_run_compaction_harness(72, 16 * 1024, "goal progress").await;
+    let held = Arc::clone(&harness.runtime.inner.permits)
+        .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
     let session = harness.session_id;
     harness
         .runtime
@@ -4540,6 +4564,14 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
                 timeout_ms: 3_600_000,
             });
             goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::ForGoal);
+            // Explicit prompt work still runs first; preserve a model-style
+            // wait so automatic follow-up cannot consume the single script.
+            let until_ms = now_ms() + 86_000_000;
+            goal.next_run_at_ms = until_ms;
+            goal.wait = Some(qq_protocol::GoalWait {
+                until_ms,
+                reason: "wait after the explicit compaction fixture".to_owned(),
+            });
             goal.notes = "n".repeat(1024);
             goal.check_output = Some("o".repeat(4096));
             goal.checklist = (1..=24)
@@ -4555,6 +4587,7 @@ async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
         .await
         .unwrap();
     let run = queue_prompt(&harness.runtime, session, "work toward the goal".to_owned()).await;
+    drop(held);
     let observed = collect_until(&mut harness.events, finished_for(run)).await;
     assert!(observed.iter().any(|event| matches!(event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run

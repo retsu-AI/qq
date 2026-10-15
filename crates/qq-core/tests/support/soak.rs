@@ -53,6 +53,7 @@ pub struct Script {
     pub summary_faults: usize,
     /// HTTP status of each scripted summarizer fault.
     pub summary_fault_status: u16,
+    pub summary_fault_after_output: bool,
     /// One measured call-bearing summarizer turn before a later fault.
     pub summary_prefix: Option<SummaryPrefix>,
     pub summary_hang_after_prefix: bool,
@@ -90,6 +91,7 @@ impl Script {
             fault_attempts: 0,
             summary_faults: 0,
             summary_fault_status: 529,
+            summary_fault_after_output: false,
             summary_prefix: None,
             summary_hang_after_prefix: false,
             pricing: None,
@@ -185,10 +187,19 @@ impl Provider for ScriptedProvider {
             }
             if observed.summary_faults < self.script.summary_faults {
                 observed.summary_faults += 1;
-                return Box::pin(stream::iter([Err(ProviderError::Api {
+                let fault = Err(ProviderError::Api {
                     status: self.script.summary_fault_status,
                     message: "scripted summarizer outage".to_owned(),
-                })]));
+                });
+                if self.script.summary_fault_after_output {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "partial summary".to_owned(),
+                        }),
+                        fault,
+                    ]));
+                }
+                return Box::pin(stream::iter([fault]));
             }
             drop(observed);
             return text_with_usage(

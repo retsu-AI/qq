@@ -4259,7 +4259,7 @@ mod tests {
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
-            r#"{"command":"echo pid:$$; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
+            r#"{"command":"echo pid:$$; while [ ! -e start-output ]; do sleep 0.01; done; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
             cancelled.clone(),
             Some(output),
             tasks.clone(),
@@ -4272,6 +4272,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let pid = parse_marked_pid(&first);
+        // Do not spend the live-output budget before the PID chunk is consumed.
+        fs::write(directory.path().join("start-output"), "go").unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while chunks.capacity() != 0 {
                 tokio::task::yield_now().await;

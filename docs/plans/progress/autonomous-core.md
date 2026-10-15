@@ -1764,6 +1764,44 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Integrated deployed main `62c65930` into #308; source and fixture repairs are committed through `0ee34c6b`, independently reviewed Approve. Goal schema is 51, preserving deployed 47–50 upgrade boundaries and descriptor 15.
 - Formatting, workspace Clippy and build passed (1.46s, 19.03s, 18.37s). First workspace test attempt failed one delegation event-collection timeout; isolated rerun passed. The complete workspace rerun now passes: 2512 raw reported passes including nested subprocess tests, zero failures, 15 skips. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g0-main-workspace-timeout-recheck.log`.
 - No production changes followed these gates. Performance/T13 and the broader autonomous-core acceptance remain open; this receipt qualifies the merge integration, not those remaining gates.
+### 2026-10-14 — G2 preparing prompt cancellation review regression
+
+- Fresh #309 finding 4276954471 reproduced: `paused_goal_fences_preparing_user_prompt_until_cancelled` fails because Pause leaves the preparing user prompt uncancelled and Resume succeeds. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g2-review-preparing-prompt-red.log`.
+- Freeze the existing full active claim and notice in the reservation transaction; goal-less absence still freezes at paid admission. Existing control transactions now see ownership without another query or store hop. Validation and independent review pending; no push claimed.
+- Parent integration full test gate: 1142 core passes, one delegation collection timeout, four skips. The timed-out test passed alone; full gate remains unqualified.
+- New cancellation regression passes (1/0, 0.33s). Goal suite passes 71/0 with one pre-existing skip (27.83s) after updating the former start-only binding expectation to preparing ownership. Independent source review Approve. Workspace qualification and the separate early-failure accounting fix remain pending.
+
+### 2026-10-14 — G2 post-start failure accounting review regression
+
+- Fresh #309 finding 4276954480 reproduced by `goal_failure_after_start_before_provider_poll_preserves_known_zero`: inject the existing cancellation-read failure after the committed start using two scoped read holds. No provider call occurs; public direct/inclusive accounting incorrectly becomes unknown. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g2-review-post-start-hook-zero-red.log`.
+- A valid post-start cancellation control case passed before any patch. Earlier malformed-row trigger attempts failed the runtime instead of isolating this error; those attempts are not correctness evidence. No production patch or publication yet.
+- Fixed post-start accounting seed before cancellation/error/runtime-failure checks, preserving prior routing uncertainty and goal-less behavior. All8 admission regressions pass (4.78s), including pending-dispatch uncertainty and routing crash/recovery controls; independent source review Approve. Updated routing rollback expectation to preserve the already-frozen reservation claim. No push until integrated workspace gates pass.
+
+### 2026-10-14 — G2 review fixes integrated with published foundation
+
+- Branch `fix/eng-1053-driver-main-review` integrates parent #308 `390110c1`, preserved G2 schema54 integration `7a829bfd`, finite-cap rejection proof, preparing ownership fence and post-start zero accounting fixes through `e854b6d9`. Preserved sponsor expected-red branch `c397f48c` remains separate.
+- Merge conflicts joined append-only receipts and retained both deployed migration and new preparing prompt tests. Source formatting and diff checks pass. Integrated workspace gates and independent review follow; no new driver publication claimed.
+
+### 2026-10-14 — G2 integrated gate fixture boundary correction
+
+- Integrated driver fmt1.42s, Clippy17.71s and build13.89s pass. Workspace tests fail only the paid-owner migration rollback fixture (1187core passes, one failure, four skips): its source metadata was correctly moved to52, but its expected unchanged metadata still said49. Change that expectation to52; retain both invalid shape cases and unchanged-version assertion. No production change.
+- #308 published390110c1 remains mergeable; Codex's latest summary marks that head Completed at23:12:24Z and the opening description carries genuine connector +1. No current-head inline finding was returned. Remaining performance/T13 acceptance stays open.
+- Corrected fixture passes1/0 in0.75s; independent review Approve. Current plan/ledger labels now reflect both PRs as open review PRs, retaining full G0/G2 incompleteness. Source unchanged; workspace publication checks repeat.
+
+### 2026-10-14 — G2 second Codex review
+
+- Review5527773322 on publishedc18e831a raises explicit CancelRun restart4278782507, replay/empty-reasoning work evidence4278782514, unresolved legacy sends4278782521, and replayed activation wake4278782526. Work is isolated on `fix/eng-1053-goal-review-outcomes`, `/tmp/qq-autonomous-core-20261014-g32trn1z/review2`, separate from the unqualified sponsored-budget feature.
+- Test-first: replayed goal command schedule false (1failure,0.25s); replay marker before529 charges0runs instead of1 (1failure,0.67s); explicit queued goal cancellation leaves Active instead of Paused(User) (1failure,0.29s). Raw evidence `target/qq-perf/ac3-stack-2026-10-13/g2-review2-*-red.log`. Other matrix cases are not claimed executed after the first failure.
+- Independent read-only investigations confirm command-time user pause can preserve neutral runtime cleanup/preemption without a provenance column; a versioned unfinished-dispatch repair is needed in addition to prior turn backfill. Full plan and sponsored/deadline/performance acceptance remain open.
+
+### 2026-10-14 — synchronize current-main goal PRs
+
+- Local G0parent3d4ea08f integrates main9868038c; driverfd873edb includes that parent plus reviewed explicit-stop, replay wake-up, provider work-evidence, schema55 legacy dispatch repair and drained-owner settlement fixes. Goal-focused92unit+1soak passes/0failures/1skip before this main sync; new helper/router upgrade matrix3/0,28new fixturecases. Source integration independent review Approve; combined Clippy pass.
+- Current published heads390110c1/c18e831a remain stale until atomic parent/child push. Only root ownership ledger conflicted in the source merges. One existing cancellation fixture's early-owner ordering is corrected to verify helper drain before owner settlement, retaining both Cancelled/exactly-once/no-marker/final-idle assertions. Full combined workspace and build are running; socket denial is recorded separately from source/test failures. Full G0/G2/performance and all other autonomous-core work remain unfinished.
+
+- Published synchronization succeeds atomically: #308head3d4ea08f includes main9868038c; #309headbe13240f includes that parent. Both live mergeable/non-draft; new-head CI/Codex are running.
+- Combined workspace2,425/168/15skips comprises163environmental listener failures and5guide/fixture mismatches. Guide schema corrected55; all28settlement tests pass after retaining resources through drain, while the auto-compactor ordering correction independently passes1/0. No production patch or full-workspace success claim for these follow-ups.
+
 
 
 ### 2026-10-15 — release preparation reconciliation (ENG-1054)

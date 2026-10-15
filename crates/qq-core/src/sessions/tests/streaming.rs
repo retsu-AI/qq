@@ -13,11 +13,11 @@ async fn session_summaries_carry_the_latest_run_activity_while_running() {
     assert_eq!(idle.focused.unwrap().summary.activity, None);
 
     store
-        .append_run_activity(&claimed, RunActivity::Reasoning)
+        .append_run_activity(&claimed, RunActivity::Reasoning, false)
         .await
         .unwrap();
     store
-        .append_run_activity(&claimed, RunActivity::GeneratingResponse)
+        .append_run_activity(&claimed, RunActivity::GeneratingResponse, false)
         .await
         .unwrap();
     let live = store.snapshot(request).await.unwrap();
@@ -42,6 +42,7 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,
@@ -249,6 +250,7 @@ async fn interleaved_turn_framing_accepts_exact_capacity_and_rejects_one_over() 
             .persist_model_turn(
                 &claimed,
                 ModelTurnCommit {
+                    model_work: crate::runtime::ModelWorkDisposition::Committed,
                     goal_notices: Vec::new(),
                     reserved_goal_notices: 0,
                     turn_ordinal: 1,
@@ -381,6 +383,7 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
                 .persist_model_turn(
                     &claimed,
                     ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
                         goal_notices: Vec::new(),
                         reserved_goal_notices: 0,
                         turn_ordinal: 1,

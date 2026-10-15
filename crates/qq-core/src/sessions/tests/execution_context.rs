@@ -4,7 +4,7 @@ use crate::tools::process_context::{
     UnverifiedReason, arguments_digest,
 };
 
-async fn process_call_fixture(
+pub(super) async fn process_call_fixture(
     store: &Store,
     path: &Path,
 ) -> (ClaimedRun, ToolCallId, ExecutionContextReceipt) {
@@ -25,6 +25,7 @@ async fn process_call_fixture(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -287,6 +288,6 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
     drop(connection);
     assert!(
         open_database(&path).is_err(),
-        "schema48 without receipts must not be reinterpreted"
+        "current schema without receipts must not be reinterpreted"
     );
 }

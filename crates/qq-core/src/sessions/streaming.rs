@@ -132,6 +132,7 @@ pub(super) fn persist_model_turn(
     reserve_context: bool,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let ModelTurnCommit {
+        model_work,
         turn_ordinal,
         message,
         calls,
@@ -271,6 +272,25 @@ pub(super) fn persist_model_turn(
             goal_notice_json,
         ],
     )?;
+    if claimed.goal.is_some() || claimed.goal_spend_owner.is_some() {
+        let disposition = match model_work {
+            crate::runtime::ModelWorkDisposition::Committed => "committed",
+            crate::runtime::ModelWorkDisposition::RejectedBeforeWork => "rejected_before_work",
+            crate::runtime::ModelWorkDisposition::Uncertain => "uncertain",
+        };
+        transaction.execute(
+            "UPDATE model_turns SET work_disposition=?3 WHERE run_id=?1 AND turn_ordinal=?2",
+            params![
+                claimed.identity.run_id.to_string(),
+                turn_ordinal,
+                disposition
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE runs SET goal_request_pending=0 WHERE id=?1",
+            [claimed.identity.run_id.to_string()],
+        )?;
+    }
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
     events.push(append_event(
         &transaction,
@@ -419,7 +439,8 @@ pub(super) fn record_checkpoint_started(
     // A crash after dispatch must not leave a known total that omits it.
     // A completed receipt restores totals from the live accumulator atomically.
     transaction.execute(
-        "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1",
+        "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL,
+             goal_helper_admitted = CASE WHEN goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL THEN 1 ELSE goal_helper_admitted END WHERE id = ?1",
         [identity.run_id.to_string()],
     )?;
     let event = append_event(
@@ -578,10 +599,22 @@ pub(super) fn append_run_activity(
     store_id: StoreId,
     identity: RunIdentity,
     activity: RunActivity,
+    goal: bool,
+    rejected: bool,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     // The column and the event commit together, so the summary query reads
     // the same value a replaying client would reconstruct.
+    if goal && (activity == RunActivity::WaitingForProvider || rejected) {
+        let pending = activity == RunActivity::WaitingForProvider;
+        transaction.execute(
+            "UPDATE runs SET goal_request_pending=?2,
+             usage_json=CASE WHEN ?2 THEN NULL ELSE usage_json END,
+             estimated_cost_usd_nanos=CASE WHEN ?2 THEN NULL ELSE estimated_cost_usd_nanos END
+             WHERE id=?1 AND status='running' AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)",
+            params![identity.run_id.to_string(), pending],
+        )?;
+    }
     let running = transaction
         .prepare_cached(
             "UPDATE runs SET activity = ?3
@@ -650,30 +683,74 @@ pub(super) fn append_reasoning(
     Ok(event)
 }
 
-// A non-null value proves routing may have spent money before RunStarted.
-// Pending is replaced once by the receipt, never reset for another dispatch.
+// A paid pending route has unknown spend before RunStarted. Skipped routes
+// retain known zero until the decision receipt; neither path dispatches twice.
 const ROUTING_PENDING: &str = "{\"state\":\"pending\"}";
 
 pub(super) fn record_routing_started(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
-    goal: Option<&qq_protocol::GoalSnapshot>,
-    goal_initial_notice: Option<&str>,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    metadata: claim::RunStartMetadata<'_>,
+    paid: bool,
+    tracked: bool,
+    maximum_cost: Option<u64>,
+) -> Result<claim::RunStart, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    if metadata.goal.is_some() {
+        let refreshed =
+            match claim::refresh_goal_limits(&transaction, identity, &metadata, now_ms())? {
+                Ok(refreshed) => refreshed,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+        if refreshed != metadata.limits {
+            return Ok(Err(claim::GoalStartRefusal::Reprepare {
+                limits: Box::new(refreshed),
+            }));
+        }
+    }
+    if paid
+        && metadata.goal.is_some()
+        && let Some(limit) = metadata.limits.max_cost_usd_nanos
+    {
+        let refusal = match maximum_cost {
+            None => Some(claim::RoutingCostRefusal::Undeclared),
+            Some(cost) if cost > limit => Some(claim::RoutingCostRefusal::AboveAllowance),
+            Some(_) => None,
+        };
+        if let Some(refusal) = refusal {
+            return Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal)));
+        }
+    }
+    let usage = if paid {
+        None
+    } else {
+        Some(serde_json::to_string(&TokenUsage::default())?)
+    };
+    let cost = (!paid).then_some(0_i64);
     let changed = transaction.execute(
-        "UPDATE runs SET routing_json = ?2, usage_json = NULL, estimated_cost_usd_nanos = NULL
+        "UPDATE runs SET routing_json = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
          WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL
            AND cancel_requested = 0 AND routing_json IS NULL
            AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = runs.session_id
                        AND s.preparing_run_id = runs.id)",
-        params![identity.run_id.to_string(), ROUTING_PENDING],
+        params![identity.run_id.to_string(), ROUTING_PENDING, usage, cost],
     )?;
     if changed != 1 {
-        return Ok(None);
+        return Ok(Ok(None));
     }
-    goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
+    goals::freeze_goal_claim(
+        &transaction,
+        identity,
+        metadata.goal,
+        metadata.goal_initial_notice,
+    )?;
+    if paid && tracked {
+        transaction.execute(
+            "UPDATE runs SET goal_helper_admitted=1 WHERE id=?1",
+            [identity.run_id.to_string()],
+        )?;
+    }
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),
@@ -682,7 +759,7 @@ pub(super) fn record_routing_started(
         },
     )?;
     transaction.commit()?;
-    Ok(Some(event))
+    Ok(Ok(Some(event)))
 }
 
 /// Retain reported spend before loading the selected provider. The decision

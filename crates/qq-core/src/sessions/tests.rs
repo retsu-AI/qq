@@ -17,6 +17,9 @@ mod deadlines;
 mod delegation;
 mod execution_context;
 mod feeds;
+mod goal_admission;
+mod goal_review;
+mod goal_upgrade;
 mod goals;
 mod loop_guard;
 mod migrations;
@@ -1796,6 +1799,7 @@ async fn spill_one_call(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,
@@ -2176,8 +2180,10 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        goal_spend_owner: None,
         goal: None,
         goal_initial_notice: None,
+        goal_admission: None,
         origin: None,
         checkpoint: None,
         routing: None,
@@ -4174,6 +4180,7 @@ async fn project_terminal_run_with_tool_boundaries(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,
@@ -6570,6 +6577,7 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
                 .persist_in_run_summary_turn(
                     &summary,
                     ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
                         goal_notices: Vec::new(),
                         reserved_goal_notices: 0,
                         turn_ordinal: 1,
@@ -6784,6 +6792,7 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
     let mut receipt = Box::pin(store.persist_in_run_summary_turn(
         &summary,
         ModelTurnCommit {
+            model_work: crate::runtime::ModelWorkDisposition::Committed,
             goal_notices: Vec::new(),
             reserved_goal_notices: 0,
             turn_ordinal: 1,
@@ -6885,6 +6894,7 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
         .persist_in_run_summary_turn(
             &summary,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,
@@ -8269,8 +8279,18 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns() {
+    // Store admission and the native read use real I/O; keep fake time
+    // fixed until the blocking read reaches the phase this test exercises.
+    let keep_clock = tokio::spawn(async {
+        let began = std::time::Instant::now();
+        while began.elapsed() < Duration::from_secs(5) {
+            tokio::task::yield_now().await;
+        }
+    });
+    let cancellation = RunCancellation::new();
+    let deadline_cancelled = cancellation.clone();
     let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
     first.push(side_done());
     let directory = tempfile::tempdir().unwrap();
@@ -8292,7 +8312,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .answer_side_question(session_id, "inspect".to_owned(), RunCancellation::new())
+                .answer_side_question(session_id, "inspect".to_owned(), cancellation)
                 .await
         })
     };
@@ -8301,7 +8321,10 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         .unwrap()
         .unwrap();
     // Past the deadline with the read still blocked, nothing has settled.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::advance(Duration::from_millis(400)).await;
+    tokio::time::timeout(Duration::from_secs(1), deadline_cancelled.cancelled())
+        .await
+        .unwrap();
     assert!(!task.is_finished());
     let state = runtime
         .inner
@@ -8322,6 +8345,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         Err(SessionRuntimeError::SideQuestionTimedOut)
     ));
     runtime.shutdown().await.unwrap();
+    keep_clock.abort();
 }
 
 #[tokio::test]

@@ -150,6 +150,7 @@ struct RunEnvironment {
     spawner: Option<Arc<dyn SubagentSpawner>>,
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
+    goal_spend_tracking: bool,
     spills: Option<Arc<dyn runtime::SpillReader>>,
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -189,6 +190,7 @@ struct CompactedTurn {
 }
 /// Fresh provider-attempt state; recreated even on retries or reactive overflow.
 struct AttemptScope {
+    rejected_before_work: bool,
     activity: RunActivity,
     pending_calls: Vec<PendingToolCall>,
     calls_by_provider_id: HashMap<String, usize>,
@@ -197,6 +199,7 @@ struct AttemptScope {
     terminal_usage: Option<qq_protocol::TokenUsage>,
     completed: bool,
     reasoning_bytes: usize,
+    reasoning_observed: bool,
     open_reasoning: Option<qq_provider::ReasoningKind>,
     interrupted_turn: bool,
     truncated_turn: bool,
@@ -483,6 +486,7 @@ impl plan::CompiledAgentPlan {
                        pricing,
                        history,
                        goal,
+                       goal_spend_tracking,
                        spills,
                        steering,
                        compactor,
@@ -499,7 +503,7 @@ impl plan::CompiledAgentPlan {
                    let handled_interrupt = steering
                        .as_ref()
                        .map_or(0, |steering| *steering.interrupts.borrow());
-                   let max_output_tokens = max_output_tokens
+                   let mut max_output_tokens = max_output_tokens
                        .unwrap_or(model_max_output_tokens)
                        .min(model_max_output_tokens);
                    // Empty truncations raise the cap toward `output_ceiling` once
@@ -519,6 +523,24 @@ impl plan::CompiledAgentPlan {
                        budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
                    }
                    yield TurnStep::Emit( RuntimeEvent::Started);
+                   if goal.is_some() && routing_spend.is_some() {
+                       let now = tokio::time::Instant::now();
+                       match budget.remaining(now) {
+                           Ok(remaining) => {
+                               if let Some(tokens) = [remaining.max_total_tokens, remaining.max_output_tokens]
+                                   .into_iter().flatten().min()
+                               {
+                                   max_output_tokens = max_output_tokens.min(u32::try_from(tokens).unwrap_or(u32::MAX));
+                               }
+                           }
+                           Err(kind) => {
+                               yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                   exhaustion: budget.exhaustion(kind, false, now),
+                               });
+                               yield TurnStep::Stop; return;
+                           }
+                       }
+                   }
 
                    // Completed turns can persist an assistant message with no model-visible
                    // content (reasoning-only or a call-less empty completion). Live turns
@@ -841,7 +863,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
         });
                }
     }
@@ -1453,6 +1475,7 @@ impl RunState {
                         yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity });
                         let mut provider_events = provider.stream(request);
                     let mut attempt = AttemptScope {
+                        rejected_before_work: false,
                         activity,
                         pending_calls: Vec::<PendingToolCall>::new(),
                         calls_by_provider_id: HashMap::<String, usize>::new(),
@@ -1461,6 +1484,7 @@ impl RunState {
                         terminal_usage: None,
                         completed: false,
                         reasoning_bytes: 0_usize,
+                        reasoning_observed: false,
                         open_reasoning: None,
                         interrupted_turn: false,
                         truncated_turn: false,
@@ -1509,6 +1533,7 @@ impl RunState {
                                     attempt.replay = Some(data);
                                 }
                                 Ok(ProviderEvent::ReasoningStarted { kind }) => {
+                                    attempt.reasoning_observed = true;
                                     if attempt.open_reasoning.is_some() {
                                         yield TurnStep::Emit( RuntimeEvent::Failed {
                                             kind: RunFailureKind::ProviderProtocol,
@@ -1785,6 +1810,16 @@ impl RunState {
                                     break;
                                 }
                                 Err(error) => {
+                                    attempt.rejected_before_work = matches!(&error,
+                                        qq_provider::ProviderError::Api { .. }
+                                        | qq_provider::ProviderError::Configuration(_)
+                                        | qq_provider::ProviderError::CredentialsUnavailable(_))
+                                        && attempt.blocks.is_empty() && attempt.pending_calls.is_empty()
+                                        && attempt.reasoning_bytes == 0 && !attempt.reasoning_observed
+                                        && attempt.replay.is_none();
+                                    if attempt.rejected_before_work && env.goal_spend_tracking {
+                                        yield TurnStep::Emit(RuntimeEvent::GoalRequestRejected);
+                                    }
                                     let kind = run_failure_kind(error.kind());
                                     // The provider's window verdict overrides the
                                     // estimate. With turns to compact and a compactor
@@ -1796,6 +1831,8 @@ impl RunState {
                                         && recovery.reactive_compaction_turn != Some(turn_ordinal)
                                         && attempt.blocks.is_empty()
                                         && attempt.pending_calls.is_empty()
+                                        && !attempt.reasoning_observed
+                                        && attempt.replay.is_none()
                                         && sessions::in_run_compaction_boundary(
                                             &messages[reducible_messages.saturating_add(1)..],
                                             sessions::CONTEXT_PRUNE_KEEP_TURNS,
@@ -1916,7 +1953,7 @@ impl RunState {
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
-                    let AttemptScope { pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, .. } = attempt;
+                    let AttemptScope { rejected_before_work, reasoning_bytes, reasoning_observed, pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, .. } = attempt;
                         window.compatible_request = terminal_usage.map(|usage| {
                             (
                                 system_bytes,
@@ -1929,6 +1966,14 @@ impl RunState {
                             )
                         });
 
+                        let model_work = if rejected_before_work {
+                            runtime::ModelWorkDisposition::RejectedBeforeWork
+                        } else if (completed && turn_fault.is_none() && !interrupted_turn)
+                            || !blocks.is_empty() || !pending_calls.is_empty() || reasoning_bytes > 0 || reasoning_observed || replay.is_some() || terminal_usage.is_some() {
+                            runtime::ModelWorkDisposition::Committed
+                        } else {
+                            runtime::ModelWorkDisposition::Uncertain
+                        };
                         let assistant_content = blocks
                             .into_iter()
                             .filter_map(|block| match block {
@@ -2045,7 +2090,7 @@ impl RunState {
                         // so the store can persist them atomically.
                         slice.pending_deliveries = 0;
                         yield TurnStep::Emit( RuntimeEvent::AssistantTurnCompleted {
-                            turn_ordinal,
+                            model_work,                            turn_ordinal,
                             message: assistant.clone(),
                             usage: terminal_usage,
                             calls: calls.clone(),
@@ -2054,7 +2099,9 @@ impl RunState {
                             goal_notices: std::mem::take(&mut slice.pending_goal_notices),
                             reserved_goal_notices: std::mem::take(&mut slice.pending_reserved_goal_notices),
                         });
-                        run.budget.charge_turn(terminal_usage);
+                        if !env.goal_spend_tracking || model_work != runtime::ModelWorkDisposition::RejectedBeforeWork {
+                            run.budget.charge_turn(terminal_usage);
+                        }
                         run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
                         if summarizer.is_some() && !calls.is_empty() {
                             run.summarizer_rejected_turns += 1;

@@ -72,6 +72,7 @@ async fn historical_projection_fixture(version: u16) {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::new(Role::Assistant, blocks),
                 calls: calls.clone(),
@@ -191,6 +192,7 @@ async fn projection_fixture(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::new(Role::Assistant, blocks),
                 calls,

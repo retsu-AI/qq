@@ -131,8 +131,16 @@ impl PreparedStaticPrefix {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelWorkDisposition {
+    Committed,
+    RejectedBeforeWork,
+    Uncertain,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RuntimeEvent {
+    GoalRequestRejected,
     Started,
     Prepared {
         turn_ordinal: u32,
@@ -160,6 +168,7 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     AssistantTurnCompleted {
+        model_work: ModelWorkDisposition,
         turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,

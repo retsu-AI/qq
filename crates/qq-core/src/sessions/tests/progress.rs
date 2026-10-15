@@ -655,6 +655,7 @@ async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::assistant("report evidence"),
                 calls: Vec::new(),

@@ -41,6 +41,20 @@ retain their typed kind in the turn-notice column for report discovery, even
 when their exact positioned text also appears among goal atoms. Replay renders
 that text once. Goal-less runs retain their existing notice rendering.
 
+A client cancelling a live run bound to the current active goal pauses that
+same goal as a user stop, including after a goal revision edit. Replacement
+goals keep their identity and state. Queued preparation and already running
+paid work retain their reservations until they drain, and Resume refuses
+cancelled obligations that have not drained. Runtime settlement cancellation
+remains neutral. Repeating a cancellation restores signals for durably
+cancelled work without repeating the goal mutation.
+
+Replayed goal commands retain their scheduler wake-up. Their durable receipts
+remain identical, while a restarted caller can restore the wake-up lost after
+the original commit. Provider replay data and reasoning lifecycle markers
+establish model work even without text bytes or a usage receipt; an ensuing
+API fault keeps unknown spend and cannot become a zero-work rejection.
+
 ## Why The Turn Is The Unit
 
 The runtime originally created one assistant message per run and appended

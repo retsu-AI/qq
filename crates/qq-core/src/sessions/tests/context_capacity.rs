@@ -407,6 +407,7 @@ async fn admitted_tool_calls_store_their_effect_class() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,

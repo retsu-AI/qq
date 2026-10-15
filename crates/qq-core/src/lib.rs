@@ -761,6 +761,7 @@ pub(crate) struct RunCapabilities {
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
+    goal_spend_tracking: bool,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
     /// install one and keep spills; direct runs keep none, so their markers
     /// say `not stored`.
@@ -814,6 +815,7 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
+            goal_spend_tracking: false,
             spills: None,
             steering: None,
             compactor: None,
@@ -865,6 +867,11 @@ impl RunCapabilities {
 
     pub(crate) fn with_history(mut self, history: Arc<dyn HistorySearcher>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    pub(crate) fn with_goal_spend_tracking(mut self, enabled: bool) -> Self {
+        self.goal_spend_tracking = enabled;
         self
     }
 
@@ -968,6 +975,7 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
+            goal_spend_tracking: false,
             spills: None,
             steering: None,
             compactor: None,
@@ -1183,6 +1191,7 @@ impl Runtime {
             yield Ok(runtime::SummarizeStep::RequestStarting);
             let mut events = self.provider.stream(request);
             let mut text = String::new();
+            let mut reasoning_seen = false;
             let mut truncated = None;
             let usage;
             // Calls in this turn, in order, and the turn's replay data: a
@@ -1220,7 +1229,7 @@ impl Runtime {
                         ProviderEvent::ReasoningStarted { .. }
                         | ProviderEvent::ReasoningDelta { .. }
                         | ProviderEvent::ReasoningCompleted { .. },
-                    ) => {}
+                    ) => reasoning_seen = true,
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
                         yield Err(runtime::SummarizeError::Rejected(
                             "summarizer refused".to_owned(),
@@ -1277,8 +1286,17 @@ impl Runtime {
                     // is the provider's moment; the run loop retries the
                     // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
+                        let rejected_before_work = matches!(&error,
+                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::Configuration(_)
+                            | qq_provider::ProviderError::CredentialsUnavailable(_))
+                            && text.is_empty() && calls.is_empty() && replay.is_none()
+                            && !reasoning_seen;
                         let kind = run_failure_kind(error.kind());
                         let message = error.to_string();
+                        if rejected_before_work {
+                            yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message });
+                            return;
+                        }
                         yield Err(if recoverable_turn_fault(kind) {
                             runtime::SummarizeError::Transient { kind, message }
                         } else {
@@ -1865,6 +1883,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
+                | RuntimeEvent::GoalRequestRejected
                 | RuntimeEvent::ToolCallUnexecuted { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }

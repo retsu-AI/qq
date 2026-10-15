@@ -285,9 +285,9 @@ unrelated compactions do not. Unknown usage or cost remains unknown. Internal
 attempts do not consume the child-count or depth allowance. No wire shape changes.
 Schema 51 adds `session_goals` history with one live goal per session and
 nullable run goal identity/revision, full claim snapshot, and immutable origin
-JSON. Creation records origin; the first existing FULL routing, automatic
-compaction or main-start admission freezes the prompt owner's optional goal
-claim. SQL NULL is uncaptured; JSON null is a captured absence. Re-reservation
+JSON. Creation records origin; reservation freezes an active goal claim so
+pause and replacement see preparing ownership. Goal-less absence freezes at
+first existing FULL routing, automatic compaction or main-start admission. SQL NULL is uncaptured; JSON null is a captured absence. Re-reservation
 uses the frozen claim. Historical rows retain NULL bindings; synthetic/internal
 compaction claims grant no goal mutation capability.
 The same schema stores the exact initial notice in `runs.goal_initial_notice`,
@@ -330,6 +330,21 @@ Schema 50 adds the replay value `root_stall_report` through a version-only
 migration. Roots receive an action-oriented, authority-neutral notice;
 historical `stall_report` wording remains byte-identical and children retain
 it. Older readers refuse the new store at open before session assembly.
+Schema 52 adds durable request/helper admission evidence and nullable model-turn
+work disposition. Schema 53 binds initial delegated work to its exact paid
+owner run; historical user follow-ups remain unbound. Schema 54 repairs NULL
+work dispositions on unfinished legacy turns using typed stored content, usage
+and truncation evidence. Ambiguous turns remain uncertain; terminal rows and
+aggregates are preserved until ordinary recovery. These store migrations
+do not add another protocol or descriptor change.
+Schema 55 restores unfinished goal dispatch evidence from exact-run ordered
+activity and model-turn completion events. A later provider-wait event keeps
+aggregate spend unknown without losing measured prefix turns. Owned helper
+NULL aggregates retain uncertainty; seeded no-send zero and completed routing
+receipts keep their independently known values. Required events are bounded
+before JSON parsing, checked against run/session/workspace/store identity,
+and decoded as typed envelopes. Invalid evidence rolls back the repair.
+Terminal rows and goal counters change only through ordinary recovery.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it

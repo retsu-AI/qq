@@ -375,6 +375,10 @@ a goal.
      configuration, or rejected credentials. The goal becomes
      `paused { needs_user }` with the cause. After three consecutive failed
      goal runs of any other kind, it becomes `blocked { repeated_failure }`.
+     Per-run budget exhaustion with no committed model work contributes to
+     that same streak, so preparation that repeatedly consumes the duration
+     cannot queue uncharged attempts indefinitely. A committed-work exhaustion
+     resets the streak; overall goal exhaustion takes precedence.
    - **Approvals nobody answers.** A goal run whose tool call is held for
      approval waits at most `min(goal_approval_wait, time to the goal
      deadline)`, where `goal_approval_wait` defaults to 10 min. When that
