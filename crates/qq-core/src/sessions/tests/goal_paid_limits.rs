@@ -179,7 +179,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             } else if kind == "output" {
                 assert_eq!(
                     calls,
-                    vec![1000, 300],
+                    vec![1000, 300, 299],
                     "goal_origin={goal_origin}: each request must use the caller's remaining output allowance"
                 );
                 assert_eq!(

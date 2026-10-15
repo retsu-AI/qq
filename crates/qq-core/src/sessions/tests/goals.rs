@@ -524,11 +524,13 @@ async fn failed_turn_notice_commit_rolls_back_the_atom_events_and_capacity() {
 #[tokio::test]
 async fn client_revision_notice_reopens_as_the_exact_model_window() {
     struct Loader {
+        repair: bool,
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
     struct Model {
+        repair: bool,
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -538,6 +540,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
             let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+            let repair = self.repair;
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
@@ -545,7 +548,11 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
                     entered.notify_one();
                     release.notified().await;
                 }
-                if turn < 2 {
+                if repair {
+                    yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: if turn == 0 { "invalid JSON" } else { r#"{"done":true}"# }.to_owned(),
+                    });
+                } else if turn < 2 {
                     let id = format!("read-{turn}");
                     yield Ok(qq_provider::ProviderEvent::ToolCallStarted { id: id.clone(), name: "tree".to_owned() });
                     yield Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta { id: id.clone(), json: r#"{"path":"."}"#.to_owned() });
@@ -560,6 +567,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
     impl RuntimeLoader for Loader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let model = Model {
+                repair: self.repair,
                 requests: Arc::clone(&self.requests),
                 entered: Arc::clone(&self.entered),
                 release: Arc::clone(&self.release),
@@ -571,104 +579,119 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
             })
         }
     }
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(path.clone()),
-        Arc::new(Loader {
-            requests: Arc::clone(&requests),
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
-        }),
-    )
-    .await
-    .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session");
-    };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+    for repair in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(Loader {
+                repair,
+                requests: Arc::clone(&requests),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
         )
         .await
         .unwrap();
-    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
-        panic!("goal");
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    queue_prompt(&runtime, session_id, "work".to_owned()).await;
-    entered.notified().await;
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"revised objective",
-                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    release.notify_one();
-    let finished = collect_through_finished_generously(&mut events).await;
-    assert!(finished.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    )));
-    let expected = {
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session");
+        };
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal", "session_id":session_id, "objective":"original objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal");
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
+        session_id, input: vec![InputPart::text("work")], limits: RunLimits::default(),
+        correlation: Correlation::default(),
+        output: repair.then(|| Box::new(qq_protocol::OutputContract {
+            schema: serde_json::json!({"type":"object","properties":{"done":{"type":"boolean"}},"required":["done"],"additionalProperties":false}),
+            repair_turns: 1,
+        })),
+    }).await.unwrap();
+        entered.notified().await;
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal", "session_id":session_id, "objective":"revised objective",
+                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        release.notify_one();
+        let finished = collect_through_finished_generously(&mut events).await;
+        assert!(finished.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )));
+        let expected = {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), if repair { 2 } else { 3 });
+            assert!(
+                request_texts(&requests[1])
+                    .iter()
+                    .any(|text| text.contains("revised objective"))
+            );
+            let mut messages = requests.last().unwrap().messages().to_vec();
+            messages.push(Message::assistant(if repair {
+                r#"{"done":true}"#
+            } else {
+                "done"
+            }));
+            messages
+        };
+        runtime.close().await.unwrap();
+        drop(runtime);
+        let reopened = Store::open(path).await.unwrap();
+        let replayed = reopened
+            .call(Priority::Control, move |connection| {
+                let transaction = connection.transaction()?;
+                load_model_context(&transaction, session_id, u64::MAX)
+            })
+            .await
+            .unwrap();
         assert!(
-            request_texts(&requests[1])
-                .iter()
-                .any(|text| text.contains("revised objective"))
-        );
-        let mut messages = requests[2].messages().to_vec();
-        messages.push(Message::assistant("done"));
-        messages
-    };
-    runtime.close().await.unwrap();
-    drop(runtime);
-    let reopened = Store::open(path).await.unwrap();
-    let replayed = reopened
-        .call(Priority::Control, move |connection| {
-            let transaction = connection.transaction()?;
-            load_model_context(&transaction, session_id, u64::MAX)
-        })
-        .await
-        .unwrap();
-    assert!(
-        replayed
-            .iter()
-            .any(|message| message.content().iter().any(|block| {
+            replayed.iter().any(|message| {
+                message.content().iter().any(|block| {
                 matches!(block, ContentBlock::Text { text } if text.contains("revised objective"))
-            })),
-        "reopened context must retain the client revision notice"
-    );
-    assert_eq!(
-        replayed, expected,
-        "stored revision notice must replay in the actual request position"
-    );
-    reopened.close().await.unwrap();
+            })
+            }),
+            "reopened context must retain the client revision notice"
+        );
+        assert_eq!(
+            replayed, expected,
+            "stored revision notice must replay in the actual request position"
+        );
+        reopened.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -7563,7 +7586,11 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 .unwrap()
         );
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests.len(),
+            2,
+            "one work response and the final-slot handoff"
+        );
         let expected = if strict {
             200_000
         } else if raised {
@@ -7572,7 +7599,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             110_000
         };
         assert!(
-            requests[0] == expected.min(1024),
+            requests.iter().all(|cap| *cap == expected.min(1024)),
             "remaining goal allowance must shape the actual request: {:?}",
             *requests
         );
@@ -7606,9 +7633,9 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         assert_eq!(
             goal.counters.usage,
             Some(if raised {
-                usage(1, 1)
+                usage(2, 2)
             } else {
-                usage(80_001, 10_001)
+                usage(80_002, 10_002)
             })
         );
     }
@@ -8059,7 +8086,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 assert_eq!(
                     goal.counters.usage,
                     routing_tokens.map(|tokens| if tokens == 900_000 {
-                        usage(900_001, 1)
+                        usage(900_002, 2)
                     } else {
                         usage(tokens, 0)
                     }),
@@ -8067,12 +8094,12 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 );
                 let requests = requests.lock().unwrap();
                 if routing_tokens == Some(900_000) {
-                    assert_eq!(requests.len(), 1);
+                    assert_eq!(requests.len(), 2, "work plus final-slot handoff");
                     if strict_output {
-                        assert_eq!(requests[0], 80);
+                        assert_eq!(*requests, vec![80, 79]);
                     } else {
                         assert!(
-                            requests[0] > 0 && requests[0] < 100_000,
+                            requests.iter().all(|cap| *cap > 0 && *cap < 100_000),
                             "the request reserves input inside the post-routing remainder: {requests:?}"
                         );
                     }
