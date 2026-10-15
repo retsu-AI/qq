@@ -847,7 +847,7 @@ impl Provider for DeadlineProvider {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -870,7 +870,13 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
             after: created.committed_through,
         })
         .unwrap();
-    let began = std::time::Instant::now();
+    let workspace = std::fs::canonicalize(directory.path()).unwrap();
+    let mut spawned = crate::tools::observe_shell_spawn(&workspace, false);
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let receipt = runtime
         .command(
             CommandId::generate().unwrap(),
@@ -890,12 +896,30 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
         panic!("unexpected receipt")
     };
-    let mut tool_started = false;
+    let spawn_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let pid = loop {
+        match spawned.try_recv() {
+            Ok(pid) => break pid,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                if std::time::Instant::now() < spawn_deadline =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(error) => {
+                tokio::time::resume();
+                keep_clock.abort();
+                runtime.shutdown().await.unwrap();
+                panic!("shell did not start: {error:?}");
+            }
+        }
+    };
+    tokio::time::advance(Duration::from_millis(301)).await;
+    tokio::time::resume();
+    keep_clock.abort();
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let event = events.next().await.unwrap().unwrap();
             match event.event {
-                SessionEvent::ToolCallStarted { .. } => tool_started = true,
                 SessionEvent::RunFinished {
                     run_id: finished,
                     outcome,
@@ -906,19 +930,19 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         }
     })
     .await;
-    let elapsed = began.elapsed();
-    // Even the red baseline must clean up its sleeping process before failing.
-    if terminal.is_err() {
+    let outcome = match terminal {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // Even a failing assertion must clean up its sleeping process.
+            runtime.shutdown().await.unwrap();
+            panic!("pid={pid}, terminal wait failed: {error}");
+        }
+    };
+    if !matches!(outcome, RunOutcome::BudgetExhausted { ref exhaustion } if exhaustion.limit == BudgetLimitKind::Duration)
+    {
         runtime.shutdown().await.unwrap();
+        panic!("pid={pid}, outcome={outcome:?}");
     }
-    assert!(
-        tool_started,
-        "the deadline must interrupt an executing tool, not just preparation"
-    );
-    assert!(
-        matches!(terminal, Ok(RunOutcome::BudgetExhausted { ref exhaustion }) if exhaustion.limit == BudgetLimitKind::Duration),
-        "elapsed={elapsed:?}, outcome={terminal:?}"
-    );
     assert_eq!(
         requests.load(Ordering::SeqCst),
         1,
