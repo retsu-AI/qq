@@ -6060,7 +6060,8 @@ fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
     let mut initial = fixtures::workspace_snapshot();
     let session = initial.focused.as_ref().unwrap().summary.id;
     let mut goal = fixtures::goal_snapshot(session);
-    goal.check.as_mut().unwrap().command = format!("printf '{}'", "x".repeat(800));
+    goal.check.as_mut().unwrap().command =
+        format!("printf '{}final-command-marker'", "x".repeat(800));
     let exact = goal.check.as_ref().unwrap().command.clone();
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
@@ -6089,6 +6090,10 @@ fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
     }
     let rows = super::overlay::goal_check_picker(&app, 80, 20);
     assert!(rows.iter().all(|row| row.width() <= 80));
+    assert!(
+        frame_rows(&rows).join("").contains("final-command-marker"),
+        "the complete command must be reachable by scrolling"
+    );
     let Some(crate::input::Overlay::GoalCheck { target, .. }) = &app.overlay else {
         panic!("goal check target")
     };

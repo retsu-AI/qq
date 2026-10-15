@@ -1,0 +1,24 @@
+ qq  Session 0                                           openai/gpt-test  $0.00
+ GOAL CHECK explicit consent
+PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels
+  search: deny, once, repeated
+Workspace: /workspace
+Command:
+cargo test -p billing
+
+
+
+
+
+
+
+> Deny
+withhold check consent; pause an active goal
+  Allow once
+one start only; failure does not refund consent
+  Allow repeated checks for this goal
+only this goal and its exact check command
+ 3 agents
+────────────────────────────────────────────────────────────────────────────────
+ › Ask QQ...
+

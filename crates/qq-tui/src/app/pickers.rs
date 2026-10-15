@@ -15,16 +15,160 @@ use crate::{
     commands::{Command, SlashAction},
     effect::{Effects, Redraw},
     input::{
-        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, HistoryRow, ModelRow, Overlay,
-        PickerOutcome, ProfileRow, SessionConfirm, SessionRow, SkillRow, ThemeRow,
-        approval_mode_label, approval_mode_row, command_rows, delegate_label, delegate_row,
-        effort_label, effort_row,
+        ApprovalModeRow, CommandRow, DelegateRow, EffortRow, GOAL_CHECK_ROWS, GoalCheckTarget,
+        HistoryRow, ModelRow, Overlay, PickerOutcome, ProfileRow, SessionConfirm, SessionRow,
+        SkillRow, ThemeRow, approval_mode_label, approval_mode_row, command_rows, delegate_label,
+        delegate_row, effort_label, effort_row,
     },
     picker::Picker,
     theme::Theme,
 };
 
 impl App {
+    pub(super) fn control_goal(&mut self, action: qq_protocol::GoalControl) -> Effects {
+        let Some(session_id) = self.focused() else {
+            self.set_warning("focus a session before controlling its goal".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Effects::none();
+        };
+        if !session.is_warm() {
+            self.set_warning(
+                "goal status is loading; try the command again after it refreshes".to_owned(),
+            );
+            return match self.workspace_id {
+                Some(workspace_id) => Effects::send_now(crate::ClientRequest::Snapshot(
+                    qq_client::state::body_request(workspace_id, session_id),
+                )),
+                None => Effects::redraw(Redraw::Immediate),
+            };
+        }
+        let Some(goal) = session.goal.as_deref() else {
+            self.set_warning("this session has no goal".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let expected = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
+        let effects = self.send(
+            PendingIntent::GoalControl { session_id },
+            SessionCommand::GoalControl {
+                session_id,
+                expected,
+                action,
+            },
+        );
+        if effects.requests_anything() {
+            self.composer.clear();
+        }
+        effects
+    }
+
+    pub(super) fn open_goal_check(&mut self) -> Effects {
+        let Some(session_id) = self.focused() else {
+            self.set_warning("focus a session before choosing check consent".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let Some(workspace_id) = self.workspace_id else {
+            self.set_warning("connect to a workspace before choosing check consent".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Effects::none();
+        };
+        if !session.is_warm() {
+            self.set_warning(
+                "goal status is loading; reopen check consent after it refreshes".to_owned(),
+            );
+            return Effects::send_now(crate::ClientRequest::Snapshot(
+                qq_client::state::body_request(workspace_id, session_id),
+            ));
+        }
+        let Some(goal) = session.goal.as_deref() else {
+            self.set_warning("this session has no goal".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let Some(check) = goal.check.as_ref() else {
+            self.set_warning(
+                "this goal uses model verification and has no check command".to_owned(),
+            );
+            return Effects::redraw(Redraw::Immediate);
+        };
+        if goal.status == qq_protocol::GoalStatus::Achieved {
+            self.set_warning(
+                "this goal is achieved; replace it before authorizing another check".to_owned(),
+            );
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let target = GoalCheckTarget {
+            session_id,
+            workspace_id,
+            workspace_path: self.workspace_path.clone(),
+            expected: qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            },
+            command: check.command.clone(),
+        };
+        if self.view() != crate::viewport::View::Goal(session_id) {
+            self.show_workspace_view(crate::viewport::View::Goal(session_id));
+        }
+        self.overlay = Some(Overlay::GoalCheck {
+            target,
+            picker: Picker::with_items(GOAL_CHECK_ROWS.to_vec()),
+            detail_row: 0,
+        });
+        self.composer.clear();
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn accept_goal_check(
+        &mut self,
+        target: GoalCheckTarget,
+        scope: Option<qq_protocol::GoalCheckScope>,
+    ) -> Effects {
+        let current = self
+            .sessions
+            .get(&target.session_id)
+            .and_then(|session| session.goal.as_deref());
+        let valid = self.workspace_id == Some(target.workspace_id)
+            && current.is_some_and(|goal| {
+                goal.goal_id == target.expected.goal_id
+                    && goal.revision == target.expected.revision
+                    && goal
+                        .check
+                        .as_ref()
+                        .is_some_and(|check| check.command == target.command)
+            });
+        self.overlay = None;
+        if !valid {
+            self.set_warning(
+                "the goal or workspace changed; reopen /goal check before choosing consent"
+                    .to_owned(),
+            );
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let action = match scope {
+            Some(scope) => qq_protocol::GoalControl::ApproveCheck {
+                scope,
+                command: target.command,
+            },
+            None => qq_protocol::GoalControl::DenyCheck,
+        };
+        self.send(
+            PendingIntent::GoalControl {
+                session_id: target.session_id,
+            },
+            SessionCommand::GoalControl {
+                session_id: target.session_id,
+                expected: target.expected,
+                action,
+            },
+        )
+    }
+
     /// Route a key to the open overlay. Called only while one is open.
     pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) -> Effects {
         // A pending yes/no question in the session picker captures every key.
@@ -55,6 +199,13 @@ impl App {
             (PickerOutcome::Cancel, _) => {
                 self.overlay = None;
                 Effects::redraw(Redraw::Immediate)
+            }
+            (PickerOutcome::Accept, Overlay::GoalCheck { target, picker, .. }) => {
+                let Some(scope) = picker.current().map(|row| row.scope) else {
+                    return Effects::none();
+                };
+                let target = target.clone();
+                self.accept_goal_check(target, scope)
             }
             (PickerOutcome::Accept, Overlay::Models(picker)) => {
                 let Some(row) = picker.current().cloned() else {

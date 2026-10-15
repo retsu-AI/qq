@@ -333,7 +333,8 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
         Mode::Approval | Mode::Trust => {
             hints.push((Command::OpenHelp, "help"));
         }
-        Mode::Models
+        Mode::GoalCheck
+        | Mode::Models
         | Mode::Profiles
         | Mode::ApprovalModes
         | Mode::Effort

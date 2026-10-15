@@ -236,6 +236,18 @@ start or resume work. An interrupted-check workspace hold stays visible even
 when the original goal is cleared or replaced. Resolve its uncertain effects
 before acknowledging it through the API.
 
+Use `/goal pause`, `/goal resume`, or `/goal clear` to control the observed
+goal revision. State changes appear after the server commits them. A conflict
+or failed command is reported without automatically retrying a newer goal.
+If the session body has not loaded, retry after its snapshot arrives.
+
+`/goal check` opens consent for the exact displayed command and workspace.
+Choose **Deny**, **Allow once**, or **Allow repeated checks for this goal**,
+then press Enter. Deny is selected initially; Esc cancels. PgUp/PgDn scroll
+long command details while the choices stay visible. Changing the goal,
+command or workspace invalidates an open panel. Ordinary tool approval settings
+do not grant check consent.
+
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,

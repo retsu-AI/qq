@@ -596,6 +596,8 @@ pub const GOLDEN_SIZES: &[(u16, u16)] = &[(80, 24), (120, 40), (200, 60), (320, 
 pub enum Scene {
     /// A durable goal waiting for renewed check consent, with progress and budgets.
     Goal,
+    /// Explicit scoped consent for a frozen goal check command.
+    GoalCheck,
     /// Every markdown element, as a completed message.
     MarkdownGallery,
     /// The first minute of a real session: prompt, reads, a failing test,
@@ -618,8 +620,9 @@ pub enum Scene {
 }
 
 impl Scene {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Goal,
+        Self::GoalCheck,
         Self::MarkdownGallery,
         Self::GoldenPath,
         Self::ToolsExpanded,
@@ -635,6 +638,7 @@ impl Scene {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Goal => "goal",
+            Self::GoalCheck => "goal-check",
             Self::MarkdownGallery => "markdown-gallery",
             Self::GoldenPath => "golden-path",
             Self::ToolsExpanded => "tools-expanded",
@@ -660,7 +664,7 @@ impl BenchHarness {
     pub fn scene_with_options(scene: Scene, size: (u16, u16), options: TuiOptions) -> Self {
         let mut harness = Self::with_options(size, 3, 0, options);
         match scene {
-            Scene::Goal => {
+            Scene::Goal | Scene::GoalCheck => {
                 let mut goal = fixtures::goal_snapshot(session_id(0));
                 goal.status = qq_protocol::GoalStatus::Paused {
                     reason: qq_protocol::GoalPauseReason::NeedsUser {
@@ -672,7 +676,15 @@ impl BenchHarness {
                 goal.counters.audits = 1;
                 goal.counters.check_failures = 1;
                 harness.apply(0, SessionEvent::GoalUpdated { goal });
-                harness.app.execute(crate::commands::Command::ShowGoal);
+                if scene == Scene::GoalCheck {
+                    harness.app.composer.replace("/goal check".to_owned());
+                    harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )));
+                } else {
+                    harness.app.execute(crate::commands::Command::ShowGoal);
+                }
             }
             Scene::MarkdownGallery => {
                 harness.completed_turn("show me every markdown element", MARKDOWN_GALLERY);

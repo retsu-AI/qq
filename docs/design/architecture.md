@@ -1773,6 +1773,12 @@ check consent, progress, budgets, UTC times and bounded check diagnostics,
 including a workspace hold independent of the live goal. It opens at the top
 and preserves the visible position as diagnostics grow. Snapshot refreshes keep
 the view open, deletion closes it, and navigation submits no work.
+Pause/resume/clear submit the observed goal identity and revision, with no
+optimistic state mutation or conflict retry. Check consent freezes the session,
+workspace, goal identity/revision and exact command in a scrollable panel.
+Its default is denial; explicit one-shot or repeated-goal consent uses existing
+GoalControl commands. A changed target invalidates the panel, and ordinary tool
+approval settings cannot grant check authority.
 
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the

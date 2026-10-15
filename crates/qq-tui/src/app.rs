@@ -289,6 +289,9 @@ fn has_mention_syntax(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum PendingIntent {
+    GoalControl {
+        session_id: SessionId,
+    },
     /// A side question in flight; `text` returns to the composer if the
     /// server refuses it.
     Side {
@@ -1333,7 +1336,8 @@ impl App {
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
-            Some(PendingIntent::Side { session_id, .. })
+            Some(PendingIntent::GoalControl { session_id })
+            | Some(PendingIntent::Side { session_id, .. })
             | Some(PendingIntent::CancelSide { session_id })
             | Some(PendingIntent::Prompt { session_id, .. })
             | Some(PendingIntent::Cancel { session_id })
@@ -1415,7 +1419,8 @@ impl App {
             return self.execute(Command::Quit);
         }
         match self.mode() {
-            Mode::Sessions
+            Mode::GoalCheck
+            | Mode::Sessions
             | Mode::Models
             | Mode::Profiles
             | Mode::ApprovalModes
@@ -2052,8 +2057,19 @@ impl App {
             .split_once(char::is_whitespace)
             .unwrap_or((&prompt, ""));
         if name == "/goal" && !question.trim().is_empty() {
-            self.set_warning("Use /goal to view goal status.".to_owned());
-            return Effects::redraw(Redraw::Immediate);
+            return match question.trim() {
+                "pause" => self.control_goal(qq_protocol::GoalControl::Pause),
+                "resume" => self.control_goal(qq_protocol::GoalControl::Resume),
+                "clear" => self.control_goal(qq_protocol::GoalControl::Clear),
+                "check" => self.open_goal_check(),
+                _ => {
+                    self.set_warning(
+                        "Use /goal, /goal pause, /goal resume, /goal clear, or /goal check."
+                            .to_owned(),
+                    );
+                    Effects::redraw(Redraw::Immediate)
+                }
+            };
         }
         if matches!(name, "/btw" | "/ask" | "/btw-new") {
             let Some(session_id) = self.focused().or(self.view_return) else {
@@ -3064,6 +3080,7 @@ impl App {
                     text,
                 } if *candidate == session_id => Some(text.as_str()),
                 PendingIntent::Create
+                | PendingIntent::GoalControl { .. }
                 | PendingIntent::Prompt { .. }
                 | PendingIntent::Steer { .. }
                 | PendingIntent::Cancel { .. }

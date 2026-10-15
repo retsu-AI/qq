@@ -777,3 +777,70 @@ pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line
         },
     )
 }
+
+pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::GoalCheck {
+        target,
+        picker,
+        detail_row,
+    }) = &app.overlay
+    else {
+        return fit_height(Vec::new(), height);
+    };
+    let width = width.max(1);
+    let mut details = Vec::new();
+    for text in format!(
+        "Workspace: {}\nCommand:\n{}",
+        target.workspace_path, target.command
+    )
+    .lines()
+    {
+        let safe: String = text.chars().filter_map(terminal_safe_character).collect();
+        details.extend(wrap_line(Line::styled(safe, normal()), width));
+    }
+    let mut choices = Vec::new();
+    let mut selected_row = 0;
+    for (index, (_, row)) in picker.filtered().enumerate() {
+        let selected = index == picker.cursor();
+        if selected {
+            selected_row = choices.len();
+        }
+        let style = if selected {
+            selection(normal().bold())
+        } else {
+            normal()
+        };
+        choices.extend(wrap_line(
+            Line::styled(
+                format!("{}{}", if selected { "> " } else { "  " }, row.label),
+                style,
+            ),
+            width,
+        ));
+        choices.extend(wrap_line(Line::styled(row.description, muted()), width));
+    }
+    if choices.is_empty() {
+        choices.push(Line::styled("No matching choice. Esc cancels.", muted()));
+    }
+    let body_height = height.saturating_sub(3);
+    let choice_height = choices.len().min(body_height / 2);
+    let detail_height = body_height.saturating_sub(choice_height);
+    let mut rows = vec![
+        truncate_line(section("GOAL CHECK", "explicit consent"), width),
+        truncate_line(
+            Line::styled(
+                "PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels",
+                muted(),
+            ),
+            width,
+        ),
+        truncate_line(search_line(&picker.query, "deny, once, repeated"), width),
+    ];
+    let detail_row = (*detail_row).min(details.len().saturating_sub(1));
+    rows.extend(fit_height(
+        selection_viewport(details, detail_height, detail_row),
+        detail_height,
+    ));
+    rows.extend(selection_viewport(choices, choice_height, selected_row));
+    fit_height(rows, height)
+}
