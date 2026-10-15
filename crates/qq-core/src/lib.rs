@@ -839,7 +839,6 @@ impl RunCapabilities {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn without_tools(mut self) -> Self {
         self.allow_tools = false;
         self

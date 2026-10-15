@@ -329,7 +329,7 @@ fn try_start(
             qq_protocol::GoalCheckAuthorization::Once
                 | qq_protocol::GoalCheckAuthorization::ForGoal
         )
-    ) || goal.counters.audits >= 8
+    ) || goal.counters.audits >= goals::MAX_GOAL_AUDITS
     {
         return Ok(Start::Stop);
     }
@@ -463,7 +463,9 @@ fn finish(
                         },
                     },
                 };
-            } else if goal.counters.audits >= 8 && matches!(completion, Completion::Stopped) {
+            } else if goal.counters.audits >= goals::MAX_GOAL_AUDITS
+                && matches!(completion, Completion::Stopped)
+            {
                 goal.status = qq_protocol::GoalStatus::Blocked {
                     reason: qq_protocol::GoalBlockedReason::AuditExhausted,
                 };

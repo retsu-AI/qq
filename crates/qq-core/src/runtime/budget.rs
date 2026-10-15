@@ -349,6 +349,23 @@ impl BudgetMeter {
         }
     }
 
+    /// A goal audit spends its sole primary turn on verification, rather
+    /// than reserving that turn for a budget handoff. It never gets a retry
+    /// or a final response after another hard bound trips.
+    pub(crate) fn before_goal_audit(&mut self, now: Instant) -> BudgetDecision {
+        if let Some(kind) = self.exceeded(now) {
+            return BudgetDecision::Exhausted(self.exhaustion(kind, false, now));
+        }
+        if self.turns >= self.limits.max_model_turns.unwrap_or(1).min(1) {
+            return BudgetDecision::Exhausted(self.exhaustion(
+                BudgetLimitKind::ModelTurns,
+                false,
+                now,
+            ));
+        }
+        BudgetDecision::Continue
+    }
+
     fn settle(&mut self, kind: BudgetLimitKind, now: Instant) -> BudgetDecision {
         // The reserve is one more provider turn. A tripped wall clock or an
         // unmeasurable cost cannot afford it; the countable bounds can.

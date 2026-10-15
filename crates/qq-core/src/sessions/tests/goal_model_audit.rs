@@ -1,15 +1,22 @@
 use super::*;
 
+struct AuditGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
 struct Loader {
     scenario: &'static str,
     prepared: AtomicUsize,
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    gate: Option<Arc<AuditGate>>,
 }
 struct Model {
     scenario: &'static str,
     audit: bool,
     turns: AtomicUsize,
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    gate: Option<Arc<AuditGate>>,
 }
 impl RuntimeLoader for Loader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
@@ -23,6 +30,7 @@ impl RuntimeLoader for Loader {
             audit: ordinal % 2 == 1,
             turns: AtomicUsize::new(0),
             requests: self.requests.clone(),
+            gate: self.gate.clone(),
         };
         Box::pin(async move {
             Ok(loaded_runtime(
@@ -66,7 +74,8 @@ impl Provider for Model {
                 let text = if self.scenario == "invalid" {
                     "not a JSON verdict".to_owned()
                 } else {
-                    serde_json::json!({"achieved":self.scenario=="confirm","evidence":"independently reviewed the persisted work and claim"}).to_string()
+                    serde_json::json!({"achieved":matches!(self.scenario,"confirm"|"stale"|"deadline"|"empty_evidence"|"oversized_evidence"),
+                        "evidence":match self.scenario {"empty_evidence"=>" ".to_owned(),"oversized_evidence"=>"x".repeat(513),_=>"independently reviewed the persisted work and claim".to_owned()}}).to_string()
                 };
                 vec![Ok(qq_provider::ProviderEvent::OutputTextDelta { text })]
             }
@@ -91,7 +100,14 @@ impl Provider for Model {
                 reasoning_tokens: None,
             }),
         }));
-        Box::pin(stream::iter(events))
+        let gate = self.gate.clone().filter(|_| self.audit);
+        Box::pin(async_stream::stream! {
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.release.acquire().await.unwrap().forget();
+            }
+            for event in events { yield event; }
+        })
     }
 }
 
@@ -101,7 +117,13 @@ async fn goal_model_audit_confirms_only_an_independent_valid_evidence_verdict() 
 }
 #[tokio::test]
 async fn goal_model_audit_rejection_invalid_output_and_tools_return_to_work_without_repairs() {
-    for scenario in ["reject", "invalid", "tools"] {
+    for scenario in [
+        "reject",
+        "invalid",
+        "tools",
+        "empty_evidence",
+        "oversized_evidence",
+    ] {
         exercise(scenario).await;
     }
 }
@@ -118,6 +140,7 @@ async fn exercise(scenario: &'static str) {
         scenario,
         prepared: AtomicUsize::new(0),
         requests: requests.clone(),
+        gate: None,
     });
     let runtime =
         SessionRuntime::open(SessionRuntimeOptions::new(database.clone()), loader.clone())
@@ -159,14 +182,22 @@ async fn exercise(scenario: &'static str) {
         }
     })
     .await
-    .expect("a pending no-check goal must receive an independent bounded audit");
+    .unwrap_or_else(|error| {
+        panic!("{scenario}: independent bounded audit did not settle: {error}")
+    });
     assert_eq!(
         observed.counters.audits,
         if scenario == "allowance" { 8 } else { 1 }
     );
     assert_eq!(
         observed.counters.runs,
-        if scenario == "allowance" { 17 } else { 2 }
+        if scenario == "allowance" {
+            17
+        } else if scenario == "tools" {
+            1
+        } else {
+            2
+        }
     );
     assert!(!directory.path().join("marker").exists());
     if !matches!(scenario, "confirm" | "allowance") {
@@ -241,4 +272,131 @@ async fn exercise(scenario: &'static str) {
         if scenario == "allowance" { 26 } else { 3 }
     );
     reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
+    for scenario in ["deadline", "stale"] {
+        let start = now_ms();
+        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let directory = TempDir::new().unwrap();
+        let gate = Arc::new(AuditGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let loader = Arc::new(Loader {
+            scenario,
+            prepared: AtomicUsize::new(0),
+            requests: requests.clone(),
+            gate: Some(gate.clone()),
+        });
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            loader,
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("missing session")
+        };
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":session_id,"objective":"original objective",
+                    "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        let (audit, goal) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut latest = None;
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                match event.event {
+                    SessionEvent::GoalUpdated { goal } => latest = Some(goal),
+                    SessionEvent::RunStarted { run_id, .. }
+                        if latest
+                            .as_ref()
+                            .is_some_and(|goal| goal.counters.audits == 1) =>
+                    {
+                        break (run_id, latest.unwrap());
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        if scenario == "deadline" {
+            epoch.advance(start + 600_001);
+        } else {
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    serde_json::from_value(serde_json::json!({
+                        "type":"set_goal","session_id":session_id,"objective":"edited objective",
+                        "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                        "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        gate.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let SessionEvent::RunFinished { run_id, .. } =
+                    events.next().await.unwrap().unwrap().event
+                    && run_id == audit
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await.unwrap();
+        let focused = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        let actual = focused.goal.unwrap();
+        if scenario == "deadline" {
+            assert!(matches!(
+                actual.status,
+                qq_protocol::GoalStatus::BudgetExhausted { .. }
+            ));
+        } else {
+            assert_eq!(actual.objective, "edited objective");
+            assert_eq!(actual.revision, goal.revision + 1);
+            assert_eq!(actual.status, qq_protocol::GoalStatus::Active);
+            assert!(!actual.audit_pending);
+        }
+        assert_ne!(actual.status, qq_protocol::GoalStatus::Achieved);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
 }

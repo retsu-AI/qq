@@ -6,6 +6,14 @@ use qq_protocol::{
     GoalId, GoalIdentity, GoalNeedsUser, GoalPauseReason, GoalSnapshot, GoalStatus,
 };
 
+pub(super) const MAX_GOAL_AUDITS: u8 = 8;
+
+pub(super) fn is_model_audit(goal: &GoalSnapshot, origin: Option<qq_protocol::RunOrigin>) -> bool {
+    goal.audit_pending
+        && goal.check.is_none()
+        && matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+}
+
 pub(super) struct Specification {
     pub(super) objective: String,
     pub(super) check: Option<GoalCheck>,
@@ -58,8 +66,13 @@ impl GoalRunInput {
 
     pub(crate) const HANDOFF_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThis is the final budgeted run for this goal. Give a concise handoff: what is completed, the evidence, what remains, and any blockers. Do not call tools or claim unfinished work is complete.";
 
+    pub(crate) fn audit(&self) -> bool {
+        is_model_audit(&self.captured, self.origin)
+    }
+
     pub(crate) fn final_slot(&self) -> bool {
         self.identity.kind == RunKind::Prompt
+            && !self.audit()
             && matches!(
                 self.origin,
                 Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
@@ -972,15 +985,19 @@ pub(super) fn finalize_spend(
     };
     let base: RunId = parse_id(&base)?;
     let terminal = if own_goal.is_some() && base == run_id {
-        let (revision, outcome, finished): (u32, String, u64) = connection.query_row(
-            "SELECT goal_revision,outcome_json,finished_at_ms FROM runs WHERE id=?1",
+        let (revision, outcome, finished, model_audit, final_output): (u32, String, u64,bool,Option<String>) = connection.query_row(
+            "SELECT goal_revision,outcome_json,finished_at_ms,
+                COALESCE(json_extract(goal_snapshot_json,'$.audit_pending')=1 AND json_type(goal_snapshot_json,'$.check')='null'
+                    AND json_extract(origin_json,'$.type')='goal',0),final_output_json FROM runs WHERE id=?1",
             [run_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?,row.get(4)?)),
         )?;
         Some((
             revision,
             serde_json::from_str::<RunOutcome>(&outcome)?,
             finished,
+            model_audit,
+            final_output,
         ))
     } else {
         None
@@ -1050,11 +1067,39 @@ pub(super) fn finalize_spend(
         if live
             && direct
             && goal.status == GoalStatus::Active
-            && let Some((revision, outcome, now)) = &terminal
+            && let Some((revision, outcome, now, model_audit, final_output)) = &terminal
             && goal.revision == *revision
         {
             changed |=
                 apply_terminal_outcome(connection, &mut goal, run_id, outcome, completed, *now)?;
+            if *model_audit
+                && matches!(
+                    outcome,
+                    RunOutcome::Completed
+                        | RunOutcome::BudgetExhausted { .. }
+                        | RunOutcome::Failed { .. }
+                )
+                && goal.status == GoalStatus::Active
+                && goal.audit_pending
+                && goal.audit_revision == Some(*revision)
+            {
+                let verdict = final_output
+                    .as_deref()
+                    .map(serde_json::from_str::<FinalOutput>)
+                    .transpose()?;
+                let confirmed = matches!(verdict,Some(FinalOutput::Valid {ref value,..})
+                    if value.get("achieved").and_then(serde_json::Value::as_bool)==Some(true)
+                        && value.get("evidence").and_then(serde_json::Value::as_str).is_some_and(|evidence|!evidence.trim().is_empty()))
+                    && matches!(outcome, RunOutcome::Completed);
+                goal.audit_pending = false;
+                goal.audit_revision = None;
+                if confirmed {
+                    goal.status = GoalStatus::Achieved;
+                } else {
+                    goal.achievement_claim = None;
+                }
+                changed = true;
+            }
         }
         if changed {
             save(connection, &goal)?;
@@ -1255,15 +1300,29 @@ pub(super) fn admit_run(
     if let Some(reason) = goal_exhaustion(&current, now) {
         return Ok(GoalAdmission::Exhausted(reason));
     }
+    let model_audit = is_model_audit(captured, origin);
+    if model_audit
+        && (current.revision != captured.revision
+            || !current.audit_pending
+            || current.audit_revision != Some(current.revision)
+            || current.counters.audits >= MAX_GOAL_AUDITS)
+    {
+        return Ok(GoalAdmission::Cancelled);
+    }
     let original_duration = limits.max_duration_ms;
-    let final_slot = matches!(
-        origin,
-        Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
-    ) && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs;
+    let final_slot = !model_audit
+        && matches!(
+            origin,
+            Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+        )
+        && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs;
     // Queued automatic limits are a cache; prompts retain their own limits
     // except for the final slot's finite turn ceiling.
     if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
         *limits = current.budget.per_run;
+    }
+    if model_audit {
+        limits.max_model_turns = Some(1);
     }
     if final_slot {
         let cap = current
@@ -1483,7 +1542,6 @@ pub(super) fn queue_due_goals(
         .replace("?3", &MAX_CHILD_DEPTH.to_string());
     let eligible=format!("g.live=1 AND json_extract(g.payload_json,'$.status.type')='active'
         AND json_extract(g.payload_json,'$.pending_run_id') IS NULL
-        AND (json_extract(g.payload_json,'$.audit_pending')=0 OR json_type(g.payload_json,'$.check')='object')
         AND s.active_run_id IS NULL AND s.preparing_run_id IS NULL AND s.queued_prompts=0
         AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=s.id AND r.status IN ('queued','running'))
         AND NOT EXISTS({drainage_cte} SELECT 1 FROM obligations JOIN runs r ON r.id=obligations.id
@@ -1522,7 +1580,24 @@ pub(super) fn queue_due_goals(
             );
             continue;
         }
-        if goal.audit_pending {
+        if goal.audit_pending && goal.counters.audits >= MAX_GOAL_AUDITS {
+            goal.status = GoalStatus::Blocked {
+                reason: qq_protocol::GoalBlockedReason::AuditExhausted,
+            };
+            save(&transaction, &goal)?;
+            cursors.push(
+                append_event(
+                    &transaction,
+                    EventContext::for_session(store_id, workspace, goal.session_id, None, now),
+                    SessionEvent::GoalUpdated {
+                        goal: Box::new(goal),
+                    },
+                )?
+                .cursor,
+            );
+            continue;
+        }
+        if goal.audit_pending && goal.check.is_some() {
             cursors.extend(super::goal_check::queue(
                 &transaction,
                 store_id,
@@ -1569,12 +1644,32 @@ pub(super) fn queue_due_goals(
             revision: goal.revision,
         };
         let notice = crate::tools::goal::render_notice(&goal, now);
-        let prompt =
-            "Work toward the current goal. Keep its checklist and notes current with update_goal.";
+        let model_audit = is_model_audit(&goal, Some(origin));
+        let (prompt, contract) = if model_audit {
+            limits.max_model_turns = Some(1);
+            let contract = qq_protocol::OutputContract {
+                schema: serde_json::json!({
+                    "type":"object","properties":{"achieved":{"type":"boolean"},"evidence":{"type":"string","minLength":1,"maxLength":512}},
+                    "required":["achieved","evidence"],"additionalProperties":false,
+                }),
+                repair_turns: 0,
+            };
+            crate::output::CompiledOutputSchema::compile(&contract)
+                .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+            (
+                format!(
+                    "Independently audit the current goal's achievement claim against the persisted work. Do not assume the claim is correct. Use one tool-free turn. Return JSON with achieved (boolean) and evidence (a specific nonempty reason, at most 512 characters). Confirm only if the evidence supports completion.\nClaim under review: {}",
+                    serde_json::to_string(&goal.achievement_claim)?
+                ),
+                Some(serde_json::to_string(&contract)?),
+            )
+        } else {
+            ("Work toward the current goal. Keep its checklist and notes current with update_goal.".to_owned(),None)
+        };
         transaction.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms,limits_json,origin_json,
-            goal_id,goal_revision,goal_snapshot_json,goal_initial_notice) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?8,?9,?10,?11,?12)",
+            goal_id,goal_revision,goal_snapshot_json,goal_initial_notice,output_contract_json) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?8,?9,?10,?11,?12,?13)",
             params![run.to_string(),goal.session_id.to_string(),command.to_string(),message.to_string(),assistant.to_string(),now,
-                serde_json::to_string(&limits)?,serde_json::to_string(&origin)?,goal.goal_id.to_string(),goal.revision,serde_json::to_string(&goal)?,notice])?;
+                serde_json::to_string(&limits)?,serde_json::to_string(&origin)?,goal.goal_id.to_string(),goal.revision,serde_json::to_string(&goal)?,notice,contract])?;
         transaction.execute("INSERT INTO messages(id,session_id,run_id,ordinal,role,state,output,created_at_ms)
             VALUES(?1,?2,?3,(SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE session_id=?2),'user','queued',?4,?5)",
             params![message.to_string(),goal.session_id.to_string(),run.to_string(),prompt,now])?;
@@ -1621,4 +1716,31 @@ pub(super) fn queue_due_goals(
         next_wake: next,
         cursors,
     })
+}
+
+pub(super) fn start_model_audit(
+    connection: &Connection,
+    identity: RunIdentity,
+    captured: Option<&GoalSnapshot>,
+    origin: Option<qq_protocol::RunOrigin>,
+) -> Result<Option<GoalSnapshot>, SessionRuntimeError> {
+    let Some(captured) = captured.filter(|goal| is_model_audit(goal, origin)) else {
+        return Ok(None);
+    };
+    let Some(mut goal) = load_live(connection, identity.session_id)? else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    if goal.goal_id != captured.goal_id
+        || goal.revision != captured.revision
+        || goal.status != GoalStatus::Active
+        || !goal.audit_pending
+        || goal.audit_revision != Some(goal.revision)
+        || goal.pending_run_id != Some(identity.run_id)
+        || goal.counters.audits >= MAX_GOAL_AUDITS
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    goal.counters.audits += 1;
+    save(connection, &goal)?;
+    Ok(Some(goal))
 }

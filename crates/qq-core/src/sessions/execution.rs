@@ -510,6 +510,15 @@ async fn prepare_execution(
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
+    if claimed
+        .goal
+        .as_ref()
+        .is_some_and(|goal| goals::is_model_audit(goal, claimed.origin))
+    {
+        capabilities = capabilities.without_tools();
+        capabilities.audit_hook = None;
+        capabilities.spawner = None;
+    }
     if !internal {
         capabilities.routing_spend = loaded.routing_spend;
         if (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())

@@ -956,10 +956,13 @@ impl RunState {
                         if let Some(cap) = goal.as_ref().and_then(sessions::GoalRunInput::final_slot_turn_cap) {
                             run.budget.constrain_model_turns(cap);
                         }
-                        let budget_final_turn = match run.budget.before_turn(
+                        let decision=if goal.as_ref().is_some_and(sessions::GoalRunInput::audit) {
+                            run.budget.before_goal_audit(tokio::time::Instant::now())
+                        } else {run.budget.before_turn(
                             tokio::time::Instant::now(),
                             if allow_tools { MAX_TOOL_CALLS_PER_TURN } else { 0 },
-                        ) {
+                        )};
+                        let budget_final_turn = match decision {
                             BudgetDecision::Continue => false,
                             BudgetDecision::FinalResponse(_) => true,
                             BudgetDecision::Exhausted(exhaustion) => {
@@ -1448,7 +1451,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<StreamedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, .. } = env;
+                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, goal, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let provider = &plan.runtime.provider;
                     let model = &plan.runtime.model;
@@ -1565,7 +1568,7 @@ impl RunState {
                         } else {
                             request.with_system(Arc::clone(&request_system))
                         };
-                        let request = if run.goal_handoff_requested {
+                        let request = if run.goal_handoff_requested || goal.as_ref().is_some_and(sessions::GoalRunInput::audit) {
                             request.with_tool_choice(qq_provider::ToolChoice::None)
                         } else {
                             request

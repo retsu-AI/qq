@@ -1874,6 +1874,17 @@ process clock; ordinary timeout counts as a failed check, while the goal
 deadline takes exhaustion precedence. Native process supervision outside Unix
 is unavailable.
 
+A no-check achievement claim queues a separate Goal-origin prompt run with a
+persisted zero-repair output contract. Its single primary turn has no tools,
+children, or nested audit hook; the first turn verifies rather than reserving a
+budget handoff, and no second request is allowed. Starting atomically charges
+one of eight audits. Only a valid positive verdict with nonblank evidence can
+achieve the live active claimed revision, after current overall exhaustion has
+been checked. Negative or invalid verdicts and protocol failures clear that
+claim and return to ordinary work; cancellation, interruption, provider retry,
+and authentication/configuration stops retain their existing recovery rules.
+The verdict is retained on the run through existing FinalOutput persistence.
+
 ## Workspaces And Tools
 
 The server executes tools on the machine where it runs. In local `qq` mode,

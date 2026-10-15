@@ -1187,6 +1187,15 @@ pub(super) fn start_reserved_run(
         return Ok(Ok(None));
     }
     goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
+    if let Some(updated) = goals::start_model_audit(&transaction, identity, goal, origin)? {
+        append_event(
+            &transaction,
+            EventContext::for_run(store_id, identity, now),
+            SessionEvent::GoalUpdated {
+                goal: Box::new(updated),
+            },
+        )?;
+    }
     transaction.execute(
         "UPDATE messages SET state = 'complete'
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
