@@ -116,8 +116,9 @@ The faulting-provider retry metric counts one send plus the run's five retries
 under ADR-0040: 6,000 milli entries per exhausted logical turn. Its absolute
 ceiling is 6,300 milli (the fixture's existing 5% allowance), while the relative
 regression allowance remains zero. The metric retains its average across runs;
-a separate correctness check enforces the send bound on every sampled run and
-retains each count. A seventh send in any one run fails the contract.
+a separate correctness check requires exactly six sends on every sampled run
+and retains each count. Too few attempts lose recovery; too many exceed the
+policy. Either defect in any one run fails the contract.
 
 ## Measurement Inventory
 

@@ -167,3 +167,17 @@
   Re-run in the private clone's target. Prior shared binary/log receipts were
   removed too; recover available hosted ZIPs/probe data from `/tmp`. Earlier size
   observations remain historical; merged-head measurements are still required.
+
+## 2026-10-15 — require complete recovery in faulting H0 runs
+
+- Codex thread4279627949 finds the per-run upper bound accepts lost attempts:
+  nineteen six-send runs plus one five-send run passes at 5,950 milli. Red
+  commit `e828f39c` reproduces this (1 failed regression).
+- Require exactly `MAX_TURN_RETRIES + 1` entries per always-faulting run. Keep
+  the mean metric, runtime policy and all budgets unchanged. Regression covers
+  occasional five/seven entries and uniformly five entries; focused Nextest
+  retry checks pass 3/3, including the real runtime fixture. Independent review
+  approves; inventory and runbook describe both under-runs and over-runs.
+- Current-head full checks and hosted qualification still required. Previous
+  `2f7c5af2` hosted verification passes all seven gates plus smoke 6/6; its
+  recordings do not qualify this stricter assertion.

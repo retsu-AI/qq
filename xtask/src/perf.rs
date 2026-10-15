@@ -3736,7 +3736,7 @@ async fn cancellation_workloads(
 /// run is the number of sends the runtime issued for one logical turn. Under
 /// ADR-0040 the run owns turn recovery, so the expected value is exactly
 /// `MAX_TURN_RETRIES + 1`. The metric retains its cross-run average, while
-/// correctness bounds every sampled run so an occasional extra send cannot hide.
+/// correctness requires every sampled run to exhaust recovery exactly.
 async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
@@ -3807,9 +3807,9 @@ fn retry_amplification_result(
             name: "retry_amplification_bounded".to_owned(),
             passed: entries_per_run
                 .iter()
-                .all(|&entries| entries <= expected_entries),
+                .all(|&entries| entries == expected_entries),
             detail: format!(
-                "{total} provider entries across {runs} paused runs ({ratio_milli} milli); entries per run {entries_per_run:?}, at most {expected_entries} each"
+                "{total} provider entries across {runs} paused runs ({ratio_milli} milli); entries per run {entries_per_run:?}, exactly {expected_entries} each"
             ),
         },
     ))
@@ -5448,7 +5448,7 @@ mod tests {
             assert_eq!(metric.summary.p95, (expected * 19 + observed) * 50);
             assert!(!check.passed, "{}", check.detail);
         }
-        let (_, check) = retry_amplification_result(&vec![expected - 1; 20]).unwrap();
+        let (_, check) = retry_amplification_result(&[expected - 1; 20]).unwrap();
         assert!(!check.passed, "{}", check.detail);
         assert!(retry_amplification_result(&[]).is_err());
     }

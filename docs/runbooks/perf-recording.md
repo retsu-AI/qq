@@ -41,8 +41,9 @@ production checkouts overlay only `xtask/src/perf.rs` from the immutable PR
 head before recording. The artifact retains `fixture-receipt.json` with the
 fixture commit, production commits, original hashes and equal effective hashes;
 the baseline report truthfully records its modified workspace. The repaired
-fixture preserves the average retry metric and validates every run's send bound,
-so one seven-send run among nineteen six-send runs cannot pass correctness.
+fixture preserves the average retry metric and requires exactly six sends in
+every always-faulting run. Too few attempts lose recovery; too many exceed it.
+Neither defect can hide among otherwise correct runs.
 Earlier recordings without this check do not prove the per-run invariant. Size ceilings stay
 48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
 correction described in the performance inventory; all other limits must match
