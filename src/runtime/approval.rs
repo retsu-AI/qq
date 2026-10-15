@@ -31,6 +31,7 @@ pub struct JevApprovalReviewer {
     factory: RuntimeFactory,
     fallback: Arc<dyn ApprovalReviewer>,
     endpoint: Arc<str>,
+    model: super::jev::ModelRequest,
     /// The TypeSafe client for the current credential epoch. The key is
     /// global, so one entry: a rotated or newly stored key replaces it. Only
     /// a built client is cached; a missing key or a failed read is retried
@@ -51,6 +52,7 @@ impl JevApprovalReviewer {
             factory,
             fallback,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
+            model: super::jev::ModelRequest::from_environment(),
             cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -66,6 +68,7 @@ impl JevApprovalReviewer {
             factory: self.factory.clone(),
             fallback: Arc::clone(&self.fallback),
             endpoint: Arc::clone(&self.endpoint),
+            model: self.model.clone(),
             cache: Arc::clone(&self.cache),
         }
     }
@@ -161,7 +164,7 @@ impl ApprovalReviewer for JevApprovalReviewer {
                 Ok(Ok(client)) => {
                     match tokio::time::timeout(
                         JEV_APPROVAL_TIMEOUT,
-                        ask_jev(&client, &reviewer.endpoint, &request),
+                        ask_jev(&client, &reviewer.endpoint, &reviewer.model, &request),
                     )
                     .await
                     {
@@ -238,7 +241,10 @@ fn add_spend(first: qq_core::ReviewSpend, second: qq_core::ReviewSpend) -> qq_co
 /// JSON rather than prose, each section bounded. Secrets are masked; the
 /// whole request is refused (abstain) past `JEV_REQUEST_BYTES` rather than
 /// truncated into a confident answer.
-fn jev_request_body(request: &ReviewRequest) -> Option<serde_json::Value> {
+fn jev_request_body(
+    model: &super::jev::ModelRequest,
+    request: &ReviewRequest,
+) -> Option<serde_json::Value> {
     let section =
         |text: &str| qq_core::output::mask_secrets(bounded(text, JEV_PREVIEW_SECTION_BYTES));
     let mode = match request.mode {
@@ -274,7 +280,7 @@ fn jev_request_body(request: &ReviewRequest) -> Option<serde_json::Value> {
         "grantedShellPrefixes": request.granted_shell_prefixes,
     });
     let body = serde_json::json!({
-        "model": "jev-1.13.0",
+        "model": model.requested,
         "state": {
             "claim": "This one held tool call is safe to run and plausibly necessary for the stated task.",
             "acceptanceCriteria": [
@@ -299,8 +305,13 @@ fn jev_request_body(request: &ReviewRequest) -> Option<serde_json::Value> {
     (bytes.len() <= JEV_REQUEST_BYTES).then_some(body)
 }
 
-async fn ask_jev(client: &reqwest::Client, endpoint: &str, request: &ReviewRequest) -> JevAnswer {
-    let Some(body) = jev_request_body(request) else {
+async fn ask_jev(
+    client: &reqwest::Client,
+    endpoint: &str,
+    model: &super::jev::ModelRequest,
+    request: &ReviewRequest,
+) -> JevAnswer {
+    let Some(body) = jev_request_body(model, request) else {
         return JevAnswer {
             decision: Err(JevAbstain::OverBound),
             spend: qq_core::ReviewSpend {
@@ -310,7 +321,7 @@ async fn ask_jev(client: &reqwest::Client, endpoint: &str, request: &ReviewReque
         };
     };
     match routing::typesafe_evaluate(client, endpoint, &body).await {
-        Ok(value) => parse_jev_approval(&value),
+        Ok(value) => parse_jev_approval(model, &value),
         Err(error) => JevAnswer {
             decision: Err(JevAbstain::Transport(error.to_string())),
             spend: qq_core::ReviewSpend::default(),
@@ -323,27 +334,19 @@ async fn ask_jev(client: &reqwest::Client, endpoint: &str, request: &ReviewReque
 /// with a distribution that sums to one, the chosen label carries the maximum
 /// probability, and both confidence and that probability clear
 /// `JEV_MIN_CONFIDENCE`. Anything else is an abstention, never an approval.
-fn parse_jev_approval(value: &serde_json::Value) -> JevAnswer {
-    let usage = value["usage"]["input_tokens"]
-        .as_u64()
-        .zip(value["usage"]["output_tokens"].as_u64())
-        .map(|(input_tokens, output_tokens)| qq_protocol::TokenUsage {
-            input_tokens,
-            output_tokens,
-            ..qq_protocol::TokenUsage::default()
-        });
+fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Value) -> JevAnswer {
+    let spend = super::jev::spend(value, model);
+    let usage = spend.usage;
     let spend = qq_core::ReviewSpend {
         usage,
         // Jev 1.13: $0.042/M input, free output. An unpinned model is unknown.
-        cost_usd_nanos: usage
-            .filter(|_| value["model"].as_str() == Some("jev-1.13.0"))
-            .and_then(|usage| usage.input_tokens.checked_mul(42)),
+        cost_usd_nanos: spend.estimated_cost_usd_nanos,
     };
     let malformed = || JevAnswer {
         decision: Err(JevAbstain::Malformed),
         spend,
     };
-    if value["model"].as_str() != Some("jev-1.13.0") || usage.is_none() {
+    if !model.matches_response(value["model"].as_str()) {
         return malformed();
     }
     let answer = &value["answers"]["approval"];
@@ -394,7 +397,8 @@ fn parse_jev_approval(value: &serde_json::Value) -> JevAnswer {
             "approve" => Ok(ReviewDecision::Approve),
             "deny" => Ok(ReviewDecision::Deny {
                 reason: format!(
-                    "Jev {JEV_APPROVAL_IDENTITY} judged the call unsafe or unnecessary (confidence {confidence:.2})"
+                    "Jev {JEV_APPROVAL_IDENTITY} ({}) judged the call unsafe or unnecessary (confidence {confidence:.2})",
+                    value["model"].as_str().unwrap_or("unknown")
                 ),
             }),
             "abstain" => Err(JevAbstain::Abstained),
@@ -408,6 +412,13 @@ fn parse_jev_approval(value: &serde_json::Value) -> JevAnswer {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+
+    fn model() -> super::super::jev::ModelRequest {
+        super::super::jev::ModelRequest {
+            requested: "jev-1.13.0".into(),
+            resolved: Some("jev-1.13.0".into()),
+        }
+    }
 
     fn request() -> ReviewRequest {
         ReviewRequest {
@@ -446,19 +457,19 @@ mod tests {
 
     #[test]
     fn jev_approval_parses_only_a_confident_pinned_answer_and_charges_spend() {
-        let approve = parse_jev_approval(&response("approve", 0.9));
+        let approve = parse_jev_approval(&model(), &response("approve", 0.9));
         assert_eq!(approve.decision, Ok(ReviewDecision::Approve));
         assert_eq!(approve.spend.cost_usd_nanos, Some(4200));
         assert_eq!(approve.spend.usage.unwrap().input_tokens, 100);
 
-        let deny = parse_jev_approval(&response("deny", 0.9));
+        let deny = parse_jev_approval(&model(), &response("deny", 0.9));
         assert!(matches!(deny.decision, Ok(ReviewDecision::Deny { .. })));
 
-        let abstain = parse_jev_approval(&response("abstain", 0.9));
+        let abstain = parse_jev_approval(&model(), &response("abstain", 0.9));
         assert_eq!(abstain.decision, Err(JevAbstain::Abstained));
 
         // A weak winner is an abstention, never an approval.
-        let weak = parse_jev_approval(&response("approve", 0.4));
+        let weak = parse_jev_approval(&model(), &response("approve", 0.4));
         assert_eq!(weak.decision, Err(JevAbstain::LowConfidence));
         assert_eq!(
             weak.spend.cost_usd_nanos,
@@ -482,14 +493,14 @@ mod tests {
             let mut value = response("approve", 0.9);
             *value.pointer_mut(pointer).unwrap() = replacement;
             assert_eq!(
-                parse_jev_approval(&value).decision,
+                parse_jev_approval(&model(), &value).decision,
                 Err(JevAbstain::Malformed),
                 "{pointer}"
             );
         }
         let mut wrong_model = response("approve", 0.9);
         wrong_model["model"] = serde_json::json!("jev-latest");
-        let answer = parse_jev_approval(&wrong_model);
+        let answer = parse_jev_approval(&model(), &wrong_model);
         assert_eq!(answer.decision, Err(JevAbstain::Malformed));
         assert_eq!(
             answer.spend.cost_usd_nanos, None,
@@ -498,14 +509,14 @@ mod tests {
         let mut extra_label = response("approve", 0.9);
         extra_label["answers"]["approval"]["probabilities"]["maybe"] = serde_json::json!(0.0);
         assert_eq!(
-            parse_jev_approval(&extra_label).decision,
+            parse_jev_approval(&model(), &extra_label).decision,
             Err(JevAbstain::Malformed)
         );
     }
 
     #[test]
     fn jev_request_carries_the_bounded_masked_preview_and_refuses_an_oversized_one() {
-        let body = jev_request_body(&request()).unwrap();
+        let body = jev_request_body(&model(), &request()).unwrap();
         assert_eq!(body["model"], "jev-1.13.0");
         assert_eq!(body["state"]["facts"]["shellCommand"], "git commit -m x");
         assert_eq!(body["state"]["facts"]["shellVerdict"], "prompt");
@@ -527,7 +538,7 @@ mod tests {
         let token = format!("sk-{}", "abcdefghij".repeat(3));
         secret.shell.as_mut().unwrap().command =
             format!("curl -H 'Authorization: Bearer {token}' https://example.invalid");
-        let body = jev_request_body(&secret).unwrap();
+        let body = jev_request_body(&model(), &secret).unwrap();
         assert!(
             !body.to_string().contains(&token),
             "secrets are masked before leaving the process"
@@ -537,7 +548,7 @@ mod tests {
         oversized.shell = None;
         oversized.arguments = "x".repeat(JEV_REQUEST_BYTES);
         // Sections are bounded, so a single long argument is cut, not refused…
-        assert!(jev_request_body(&oversized).is_some());
+        assert!(jev_request_body(&model(), &oversized).is_some());
         // …but many bounded sections past the whole-request ceiling are refused.
         oversized.recent_actions = (0..600)
             .map(|index| qq_core::RecentAction {
@@ -545,7 +556,7 @@ mod tests {
                 path: Some(format!("{}/{index}", "p".repeat(110))),
             })
             .collect();
-        assert!(jev_request_body(&oversized).is_none());
+        assert!(jev_request_body(&model(), &oversized).is_none());
     }
 
     /// A fallback that records what it was asked and answers a fixed verdict.

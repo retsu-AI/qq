@@ -1,6 +1,7 @@
 //! Application configuration to model-runtime composition.
 
 mod approval;
+mod jev;
 mod routing;
 
 use std::{

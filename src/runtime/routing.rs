@@ -1,4 +1,5 @@
 //! Concrete, bounded Jev task selection. Policy and authorization stay in QQ.
+use super::jev::{self, ModelRequest};
 use super::*;
 use qq_core::{TaskRouter, TaskRoutingFuture};
 use qq_protocol::{RoutingDecision, RoutingOutcome};
@@ -18,6 +19,7 @@ pub(super) struct TypeSafeTaskRouter {
     endpoint: Arc<str>,
     candidates: Arc<[Candidate]>,
     configuration_identity: String,
+    model: ModelRequest,
 }
 
 impl TypeSafeTaskRouter {
@@ -107,6 +109,8 @@ impl TypeSafeTaskRouter {
         let mut digest = Sha256::new();
         digest.update(ROUTER_IDENTITY.as_bytes());
         digest.update([u8::from(pinned)]);
+        let model = ModelRequest::from_environment();
+        digest.update(model.requested.as_bytes());
         for candidate in &candidates {
             // Candidate serialization contains only model selection and masked metadata.
             digest
@@ -117,6 +121,7 @@ impl TypeSafeTaskRouter {
             client: typesafe_http_client(&factory.inner.credentials)?,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             candidates: candidates.into(),
+            model,
         })
     }
 
@@ -133,23 +138,10 @@ impl TypeSafeTaskRouter {
     }
 
     fn parse(&self, value: &serde_json::Value) -> RoutingDecision {
-        let usage = value["usage"]["input_tokens"]
-            .as_u64()
-            .zip(value["usage"]["output_tokens"].as_u64())
-            .map(|(input_tokens, output_tokens)| qq_protocol::TokenUsage {
-                input_tokens,
-                output_tokens,
-                ..Default::default()
-            });
-        let spend = qq_protocol::CheckpointSpend {
-            usage,
-            estimated_cost_usd_nanos: usage
-                .filter(|_| value["model"] == "jev-1.13.0")
-                .and_then(|usage| usage.input_tokens.checked_mul(42)),
-        };
+        let spend = jev::spend(value, &self.model);
         let invalid = || self.fallback("routing response failed the pinned contract", spend);
         let answer = &value["answers"]["route"];
-        if value["model"] != "jev-1.13.0" || usage.is_none() || answer["type"] != "choice" {
+        if !self.model.matches_response(value["model"].as_str()) || answer["type"] != "choice" {
             return invalid();
         }
         let Some(confidence) = answer["confidence"]
@@ -199,7 +191,10 @@ impl TypeSafeTaskRouter {
             model: candidate.model.clone(),
             reasoning_effort: candidate.effort,
             outcome: RoutingOutcome::Selected,
-            reason: "selected from authorized model and effort candidates".to_owned(),
+            reason: format!(
+                "selected from authorized model and effort candidates via {}",
+                value["model"].as_str().unwrap_or("unknown")
+            ),
             usage: spend.usage,
             estimated_cost_usd_nanos: spend.estimated_cost_usd_nanos,
         }
@@ -226,6 +221,7 @@ impl TaskRouter for TypeSafeTaskRouter {
             endpoint: Arc::clone(&self.endpoint),
             candidates: Arc::clone(&self.candidates),
             configuration_identity: self.configuration_identity.clone(),
+            model: self.model.clone(),
         };
         Box::pin(async move {
             let free = qq_protocol::CheckpointSpend {
@@ -256,7 +252,7 @@ impl TaskRouter for TypeSafeTaskRouter {
                 })
                 .collect::<serde_json::Map<_, _>>();
             let body = serde_json::json!({
-                "model": "jev-1.13.0",
+                "model": router.model.requested,
                 "state": { "task": qq_core::output::mask_secrets(task) },
                 "questions": { "route": {
                     "type": "choice",
@@ -301,7 +297,11 @@ pub(super) async fn typesafe_evaluate(
     endpoint: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, TypeSafeRequestError> {
-    let mut response = match client.post(endpoint).json(body).send().await {
+    let mut request = client.post(endpoint);
+    if std::env::var("JEV_LONG_CONTEXT").ok().as_deref() == Some("1") {
+        request = request.header(jev::LONG_CONTEXT_HEADER, "1");
+    }
+    let mut response = match request.json(body).send().await {
         Ok(response) if response.status().is_success() => response,
         Ok(response) => return Err(TypeSafeRequestError::Http(response.status())),
         Err(error) => {
@@ -359,6 +359,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .into(),
+            model: ModelRequest {
+                requested: "jev-1.13.0".into(),
+                resolved: Some("jev-1.13.0".into()),
+            },
         }
     }
 
