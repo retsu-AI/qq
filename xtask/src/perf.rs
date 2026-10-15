@@ -3714,8 +3714,6 @@ async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
     let runs = samples.clamp(5, 20);
-    let expected_milli = (u64::from(qq_core::MAX_TURN_RETRIES) + 1) * 1_000;
-    let gate_milli = expected_milli + expected_milli / 20;
     let mut fixture = RuntimeFixture::open(ProviderMode::Faulting).await?;
     let operation = async {
         let mut entries_per_run = Vec::with_capacity(usize::from(runs));
@@ -3752,26 +3750,42 @@ async fn retry_amplification_workloads(
             }
             entries_per_run.push(entries);
         }
-        let total: u64 = entries_per_run.iter().sum();
-        let ratio_milli = total.saturating_mul(1_000) / u64::from(runs);
-        Ok((
-            vec![MetricResult::scalar(
-                "provider_retry_amplification_milli",
-                "ratio_milli",
-                "provider stream entries per logical turn when every stream fails before its first event; the run owns turn recovery (ADR-0040) so this is one send plus MAX_TURN_RETRIES and nothing above it",
-                ratio_milli,
-            )?],
-            vec![CorrectnessCheck {
-                name: "retry_amplification_bounded".to_owned(),
-                passed: ratio_milli <= gate_milli,
-                detail: format!(
-                    "{total} provider entries across {runs} paused runs ({ratio_milli} milli); expected {expected_milli}, gate is at most {gate_milli}"
-                ),
-            }],
-        ))
+        let (metric, check) = retry_amplification_result(&entries_per_run)?;
+        Ok((vec![metric], vec![check]))
     }
     .await;
     finish_runtime_fixture(&fixture, "shut down amplification runtime", operation).await
+}
+
+fn retry_amplification_result(
+    entries_per_run: &[u64],
+) -> Result<(MetricResult, CorrectnessCheck), PerfError> {
+    if entries_per_run.is_empty() {
+        return Err(PerfError::Fixture(
+            "retry amplification requires at least one paused run".to_owned(),
+        ));
+    }
+    let expected_entries = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
+    let expected_milli = expected_entries * 1_000;
+    let gate_milli = expected_milli + expected_milli / 20;
+    let runs = entries_per_run.len();
+    let total: u64 = entries_per_run.iter().sum();
+    let ratio_milli = total.saturating_mul(1_000) / runs as u64;
+    Ok((
+        MetricResult::scalar(
+            "provider_retry_amplification_milli",
+            "ratio_milli",
+            "provider stream entries per logical turn when every stream fails before its first event; the run owns turn recovery (ADR-0040) so this is one send plus MAX_TURN_RETRIES and nothing above it",
+            ratio_milli,
+        )?,
+        CorrectnessCheck {
+            name: "retry_amplification_bounded".to_owned(),
+            passed: ratio_milli <= gate_milli,
+            detail: format!(
+                "{total} provider entries across {runs} paused runs ({ratio_milli} milli); entries per run {entries_per_run:?}, at most {expected_entries} each"
+            ),
+        },
+    ))
 }
 
 async fn feed_churn_workload(
@@ -5392,6 +5406,21 @@ async fn measure_load_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_amplification_rejects_one_extra_send_among_twenty_runs() {
+        let expected = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
+        let mut entries = vec![expected; 20];
+        let (metric, check) = retry_amplification_result(&entries).unwrap();
+        assert_eq!(metric.summary.p95, expected * 1_000);
+        assert!(check.passed, "{}", check.detail);
+
+        entries[19] += 1;
+        let (metric, check) = retry_amplification_result(&entries).unwrap();
+        assert_eq!(metric.summary.p95, expected * 1_000 + 50);
+        assert!(!check.passed, "{}", check.detail);
+        assert!(retry_amplification_result(&[]).is_err());
+    }
 
     /// The fixture's amplification counter must observe exactly one send plus
     /// `MAX_TURN_RETRIES` provider entries per paused run: the run owns turn
