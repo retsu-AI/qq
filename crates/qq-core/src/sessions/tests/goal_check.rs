@@ -929,3 +929,150 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         reopened.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evidence() {
+    const COMMAND: &str = "printf checked >> three-checks; printf failure-evidence; exit 7";
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let loader = Arc::new(Loader {
+        failure_tail: false,
+        loads: Arc::new(AtomicUsize::new(0)),
+        calls: calls.clone(),
+    });
+    let mut options = SessionRuntimeOptions::new(database.clone());
+    options.grant_authority = Some(Arc::new(Authority(COMMAND)));
+    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let CommandOutcome::SessionCreated { session_id } =
+        create_session(&runtime, workspace_id, None).await.outcome
+    else {
+        panic!("session")
+    };
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session_id,"objective":"check until verified",
+                "check":{"command":COMMAND,"timeout_ms":5000},
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("goal")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: receipt.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::ApproveCheck {
+                    scope: qq_protocol::GoalCheckScope::ForGoal,
+                    command: COMMAND.to_owned(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let SessionEvent::GoalUpdated { goal } = events.next().await.unwrap().unwrap().event
+                && matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Blocked {
+                        reason: qq_protocol::GoalBlockedReason::CheckFailing
+                    }
+                )
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    runtime.shutdown().await.unwrap();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(
+            workspace_id,
+            Some(session_id),
+            256,
+            256,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap();
+    let goal = snapshot.goal.as_ref().unwrap();
+    assert_eq!(goal.counters.runs, 3);
+    assert_eq!(goal.counters.audits, 3);
+    assert_eq!(goal.counters.check_failures, 3);
+    assert_eq!(
+        goal.check_authorization,
+        Some(qq_protocol::GoalCheckAuthorization::ForGoal)
+    );
+    assert_eq!(
+        goal.check_output.as_deref(),
+        Some("exit 7\nfailure-evidence")
+    );
+    assert!(!goal.audit_pending);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert_eq!(snapshot.runs.len(), 6);
+    assert!(snapshot.runs.iter().all(|run| run.outcome.is_some()));
+    let checks: Vec<_> = snapshot
+        .runs
+        .iter()
+        .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+        .collect();
+    assert_eq!(checks.len(), 3);
+    for run in checks {
+        assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
+        assert!(snapshot.messages.iter().any(
+            |message| message.run_id == run.id && message.output == "exit 7\nfailure-evidence"
+        ));
+    }
+    assert_eq!(
+        tokio::fs::read_to_string(directory.path().join("three-checks"))
+            .await
+            .unwrap(),
+        "checkedcheckedchecked"
+    );
+    drop(events);
+    drop(runtime);
+    let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
+        .await
+        .unwrap();
+    let restored = reopened
+        .snapshot(SnapshotRequest::new(
+            workspace_id,
+            Some(session_id),
+            256,
+            256,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap();
+    assert_eq!(restored.goal, snapshot.goal);
+    assert_eq!(restored.runs, snapshot.runs);
+    assert_eq!(restored.messages, snapshot.messages);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "reopen must not resume a blocked goal"
+    );
+    reopened.shutdown().await.unwrap();
+}
