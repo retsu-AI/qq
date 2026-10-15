@@ -60,3 +60,12 @@ Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
 - Final-head smoke6/6 passes,1.80s. PR body includes exact full evidence and
   the prior failure. This entry changes bookkeeping only; final affected gate
   follows on the ledger commit. Release performance/size still not accepted.
+
+
+### 2026-10-15 — Codex review fixes
+
+- Both Codex findings are valid: blank lines split the ledger inventory and
+  ADR allocation Markdown tables. Removed both separators so the new rows
+  remain attached to their headers and preceding entries.
+- No release-scope or qualification change. Verify table continuity and the
+  affected documentation gate before replying to the two review threads.

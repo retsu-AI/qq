@@ -84,7 +84,6 @@ may append a **request** row; only root changes a request's status.
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Proposed ADR implemented in #304; no longer merely reserved; formal status remains Proposed in the decision record |
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
-
 | 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the

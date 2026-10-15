@@ -9,7 +9,6 @@ ledger is deleted with it; the receipts stay in Git history.
 
 | File | Owner | Covers |
 | --- | --- | --- |
-
 | [`release-0.1.7.md`](./release-0.1.7.md) | ENG-1054 release preparation | Reviewed candidate, open gates and separate bump/tag/docs handoff |
 | [`autonomous-core.md`](./autonomous-core.md) | agent on the autonomous-core plan | AP0–AP5 progress track; AC0–AC20: soak harness, reset scopes, continuation, loop guard, `qq-harness`, tool features, store write amplification, absorbed reliability recovery/tool tolerance/diagnostics (AC7–AC9 moved to goals) |
 | [`goals.md`](./goals.md) | agent on the goals plan | G0–G5: goal state and protocol, goal in runs, driver, completion check, surfaces, evidence |
