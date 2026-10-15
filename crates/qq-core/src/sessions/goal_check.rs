@@ -689,6 +689,14 @@ pub(super) async fn execute(
         if let Err(error) = policy {
             break Completion::Policy(error);
         }
+        match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+            Ok(true) => {}
+            Ok(false) => break Completion::Stopped,
+            Err(_) => {
+                inner.failed.send_replace(true);
+                return;
+            }
+        }
         let claim = claimed.clone();
         let started = inner
             .store

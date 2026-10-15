@@ -197,3 +197,259 @@ pub(super) fn save(
     )?;
     Ok(())
 }
+
+fn bound_goal_owners(
+    connection: &Connection,
+    identity: RunIdentity,
+) -> Result<Vec<(RunId, SessionId, Option<qq_protocol::GoalId>)>, SessionRuntimeError> {
+    if identity.kind == RunKind::GoalCheck {
+        let id: Option<String> = connection.query_row(
+            "SELECT goal_id FROM runs WHERE id=?1",
+            [identity.run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(vec![(
+            identity.run_id,
+            identity.session_id,
+            id.as_deref().map(parse_id).transpose()?,
+        )])
+    } else {
+        let base: Option<String> = connection.query_row(
+            "SELECT CASE WHEN kind='prompt' THEN id ELSE auto_compaction_for_run_id END FROM runs WHERE id=?1",
+            [identity.run_id.to_string()], |row| row.get(0))?;
+        let Some(base) = base else {
+            return Ok(Vec::new());
+        };
+        goals::paid_goal_owners(connection, parse_id(&base)?)
+    }
+}
+
+/// The immutable paid ownership chain, including archived rows for cancellation.
+fn bound_goals(
+    connection: &Connection,
+    identity: RunIdentity,
+) -> Result<Vec<(qq_protocol::GoalSnapshot, bool)>, SessionRuntimeError> {
+    let mut result: Vec<(qq_protocol::GoalSnapshot, bool)> = Vec::new();
+    for (_, session, id) in bound_goal_owners(connection, identity)? {
+        let Some(id) = id else { continue };
+        if result.iter().any(|(goal, _)| goal.goal_id == id) {
+            continue;
+        }
+        let (payload, live): (String, bool) = connection.query_row(
+            "SELECT payload_json,live FROM session_goals WHERE goal_id=?1 AND session_id=?2",
+            params![id.to_string(), session.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        result.push((serde_json::from_str(&payload)?, live));
+    }
+    Ok(result)
+}
+
+fn stop_goal(
+    connection: &Connection,
+    store_id: StoreId,
+    workspace: WorkspaceId,
+    goal: &mut qq_protocol::GoalSnapshot,
+    cause: qq_protocol::GoalNeedsUser,
+    now: u64,
+) -> Result<Vec<RunId>, SessionRuntimeError> {
+    goal.status = if matches!(cause, qq_protocol::GoalNeedsUser::Approval { .. }) {
+        qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser { cause },
+        }
+    } else {
+        match goals::goal_exhaustion(goal, now) {
+            Some(reason) => qq_protocol::GoalStatus::BudgetExhausted { reason },
+            None => qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::NeedsUser { cause },
+            },
+        }
+    };
+    goals::save(connection, goal)?;
+    append_event(
+        connection,
+        EventContext::for_session(store_id, workspace, goal.session_id, None, now),
+        SessionEvent::GoalUpdated {
+            goal: Box::new(goal.clone()),
+        },
+    )?;
+    commands::cancel_goal_work(
+        connection,
+        store_id,
+        goal.session_id,
+        goal.goal_id,
+        None,
+        now,
+        true,
+    )
+}
+
+/// Settings are resolved outside the store worker; state and cancellation commit together.
+fn apply_refresh(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    policy: Result<GoalPolicy, GoalPolicyError>,
+) -> Result<(bool, Vec<RunId>), SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let cancelled: bool = transaction.query_row(
+        "SELECT cancel_requested OR outcome_json IS NOT NULL FROM runs WHERE id=?1",
+        [identity.run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if cancelled {
+        return Ok((false, Vec::new()));
+    }
+    let mut allowed = true;
+    let mut signals = Vec::new();
+    let now = now_ms();
+    for (mut goal, live) in bound_goals(&transaction, identity)? {
+        if !live || goal.status != qq_protocol::GoalStatus::Active {
+            allowed = false;
+            continue;
+        }
+        let (previous, at) = load(&transaction, goal.goal_id)?;
+        let valid = policy.as_ref().is_ok_and(|policy| {
+            policy
+                .validate_specification(&goal.budget, goal.check.as_ref(), at)
+                .is_ok()
+        });
+        if !valid {
+            allowed = false;
+            signals.extend(stop_goal(&transaction, store_id, identity.workspace_id, &mut goal,
+                qq_protocol::GoalNeedsUser::Configuration { message:
+                    "Goal settings cannot be validated against current workspace ceilings; inspect configuration and edit or resume the goal.".to_owned()
+                }, now)?);
+        } else if let Ok(policy) = policy
+            && policy != previous
+        {
+            save(&transaction, goal.goal_id, policy, at)?;
+        }
+    }
+    transaction.commit()?;
+    Ok((allowed, signals))
+}
+
+pub(super) async fn refresh(
+    inner: &runtime::SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<bool, SessionRuntimeError> {
+    if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
+        return Ok(true);
+    }
+    if *cancellation.borrow() {
+        return Ok(false);
+    }
+    let deadline = claimed.check_deadline.map(|(_, at)| at).or_else(|| {
+        claimed.goal.as_ref().map(|goal| {
+            tokio::time::Instant::now()
+                + Duration::from_millis(goal.budget.deadline_ms.saturating_sub(now_ms()))
+        })
+    });
+    let policy = tokio::select! {
+        biased;
+        _ = cancellation.changed() => return Ok(false),
+        _ = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        } => return Ok(true), // Existing goal admission applies deadline exhaustion.
+        result = inner.resolve_goal_policy(Path::new(&claimed.workspace)) => result,
+    };
+    let identity = claimed.identity;
+    let store_id = inner.store.store_id();
+    let (allowed, signals) = inner
+        .store
+        .call(store::Priority::AwaitControl, move |connection| {
+            apply_refresh(connection, store_id, identity, policy)
+        })
+        .await?;
+    for run in signals {
+        inner.cancel(run);
+    }
+    Ok(allowed)
+}
+
+/// A goal hold is bounded even when ordinary human approval waits are unbounded.
+pub(super) fn approval_timeout(
+    connection: &Connection,
+    identity: RunIdentity,
+) -> Result<Option<Duration>, SessionRuntimeError> {
+    let now = now_ms();
+    let mut timeout = None;
+    for (goal, live) in bound_goals(connection, identity)? {
+        if live && goal.status == qq_protocol::GoalStatus::Active {
+            let (policy, _) = load(connection, goal.goal_id)?;
+            let bound = Duration::from_millis(
+                policy
+                    .approval_wait_ms
+                    .min(goal.budget.deadline_ms.saturating_sub(now)),
+            );
+            timeout = Some(timeout.map_or(bound, |previous: Duration| previous.min(bound)));
+        }
+    }
+    Ok(timeout)
+}
+
+/// A sponsor's duration clock may cancel a held child before its own clock fires.
+/// Cancellation of the owning goal run or a specification edit fences that owner.
+pub(super) fn expired_approval_owner(
+    connection: &Connection,
+    identity: RunIdentity,
+) -> Result<bool, SessionRuntimeError> {
+    for (owner, session, id) in bound_goal_owners(connection, identity)? {
+        let Some(id) = id else { continue };
+        let Some(goal) = goals::load_live(connection, session)? else {
+            continue;
+        };
+        if goal.goal_id != id
+            || goal.status != qq_protocol::GoalStatus::Active
+            || goal.budget.deadline_ms > now_ms()
+        {
+            continue;
+        }
+        let cancelled: bool = connection.query_row(
+            "SELECT cancel_requested FROM runs WHERE id=?1",
+            [owner.to_string()],
+            |row| row.get(0),
+        )?;
+        if !cancelled {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Called inside the timeout transaction, after checking for a winning client resolution.
+pub(super) fn pause_for_approval(
+    connection: &Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    call: ToolCallId,
+    now: u64,
+) -> Result<Vec<RunId>, SessionRuntimeError> {
+    let cancelled: bool = connection.query_row(
+        "SELECT cancel_requested OR outcome_json IS NOT NULL FROM runs WHERE id=?1",
+        [identity.run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if cancelled && !expired_approval_owner(connection, identity)? {
+        return Ok(Vec::new());
+    }
+    let mut signals = Vec::new();
+    for (mut goal, live) in bound_goals(connection, identity)? {
+        if live && goal.status == qq_protocol::GoalStatus::Active {
+            signals.extend(stop_goal(
+                connection,
+                store_id,
+                identity.workspace_id,
+                &mut goal,
+                qq_protocol::GoalNeedsUser::Approval { tool_call_id: call },
+                now,
+            )?);
+        }
+    }
+    Ok(signals)
+}

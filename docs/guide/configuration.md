@@ -367,6 +367,14 @@ declare them or clear them. `qq config show` prints effective defaults and
 ceilings; `qq config explain goals.default_max_runs` and
 `qq config explain policy.goals.max_runs` identify their declaring sources.
 
+Goal-bound work rechecks current workspace ceilings before starting model work
+or a completion check. A lower ceiling or unavailable configuration pauses the
+goal for configuration review; resume validates it again. Provider retries use
+the accepted backoff cap, retaining any later model-requested wait. Unanswered
+tool approvals pause the goal after `approval_wait_seconds`, including time
+spent with a reviewer, or sooner at the goal deadline or an ordinary approval
+timeout. Review escalation does not restart that goal wait.
+
 ## `audit`
 
 A second agent run that reviews the first's final answer.

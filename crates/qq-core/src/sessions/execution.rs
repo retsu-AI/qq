@@ -970,6 +970,22 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+        Ok(true) => {}
+        Ok(false) => {
+            finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
+            return;
+        }
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                persistence_failure("failed to apply current workspace goal policy", &error),
+            )
+            .await;
+            return;
+        }
+    }
     if claimed.identity.kind == RunKind::GoalCheck {
         super::goal_check::execute(inner, claimed, cancellation, resources).await;
         return;
@@ -1112,6 +1128,25 @@ pub(super) async fn execute_run(
         )
         .await;
         return;
+    }
+    match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+        Ok(true) => {}
+        Ok(false) => {
+            finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
+            return;
+        }
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                persistence_failure(
+                    "failed to refresh goal policy before paid preparation",
+                    &error,
+                ),
+            )
+            .await;
+            return;
+        }
     }
     if let Err(outcome) = route_run(
         &inner,
@@ -1283,6 +1318,32 @@ pub(super) async fn execute_run(
         }
         match plan {
             context::ContextPlan::Send { .. } => {
+                match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        finish_prepared_run(
+                            &inner,
+                            &claimed,
+                            &prepared.audit,
+                            RunOutcome::Cancelled,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(error) => {
+                        finish_prepared_run(
+                            &inner,
+                            &claimed,
+                            &prepared.audit,
+                            persistence_failure(
+                                "failed to apply current workspace goal policy",
+                                &error,
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                }
                 if *inner.failed.borrow() {
                     finish_prepared_run(
                         &inner,
@@ -2336,6 +2397,14 @@ async fn execute_started_run(
                 flush_at = None;
             }
             stopped @ (RunInput::Cancelled | RunInput::Interrupted) => {
+                if matches!(stopped, RunInput::Cancelled)
+                    && approvals::expire_goal_hold(&inner, &claimed, true)
+                        .await
+                        .is_err()
+                {
+                    inner.failed.send_replace(true);
+                    return;
+                }
                 tool_cancellation.cancel();
                 if let Err(error) = flush_pending_reasoning(
                     &inner,
@@ -4250,6 +4319,15 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     teardown: TeardownComplete,
 ) {
+    if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
+        if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+        && approvals::expire_goal_hold(inner, claimed, false)
+            .await
+            .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
+    }
     match inner
         .store
         .finish_run(claimed, outcome, accounting, teardown)

@@ -464,7 +464,7 @@ pub(super) fn execute_command(
                     store_id,
                     session_id,
                     previous.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     replace || goal.status != qq_protocol::GoalStatus::Active,
                 )?);
@@ -608,7 +608,7 @@ pub(super) fn execute_command(
                     store_id,
                     session_id,
                     goal.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     true,
                 )?);
@@ -1267,7 +1267,7 @@ pub(super) fn execute_command(
                     store_id,
                     session_id,
                     goal.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     true,
                 )?);
@@ -2510,12 +2510,12 @@ fn session_grant_recordable(
 }
 
 /// Cancellation preserves reservations until their executor has drained.
-fn cancel_goal_work(
+pub(super) fn cancel_goal_work(
     transaction: &Connection,
     store_id: StoreId,
     session: SessionId,
     goal: qq_protocol::GoalId,
-    command: CommandId,
+    command: Option<CommandId>,
     now: u64,
     drain: bool,
 ) -> Result<Vec<RunId>, SessionRuntimeError> {
@@ -2541,7 +2541,7 @@ fn cancel_goal_work(
                 obligation.workspace,
                 obligation.session,
                 run,
-                Some(command),
+                command,
                 now,
             ),
             SessionEvent::CancellationRequested {

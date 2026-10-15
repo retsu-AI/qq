@@ -1735,8 +1735,23 @@ accepted model wait and resets both streaks. A per-run limit allows fresh work
 when the overall goal allowance remains; spent or unknown capped totals exhaust
 that allowance.
 
+Goal-bound execution resolves current workspace policy before loading, after
+loading, and immediately before main-request or check start. Tightened or
+unavailable policy pauses the active goal and cancels its paid family in the
+same store transaction. Goal-less runs skip this policy work. Refresh preserves
+the specification's original deadline anchor and never resumes a stopped goal.
+
+An unanswered goal-bound tool approval has a fixed deadline spanning reviewer
+and human stages: the earlier of its persisted goal approval wait and absolute
+goal deadline. An earlier ordinary human timeout also applies. Timeout durably
+denies the call, pauses the goal for approval, and requests family cancellation
+before another model request. This approval pause takes precedence over goal
+exhaustion, including when the absolute deadline ends the hold. A client resolution
+that committed first retains precedence. Escalation does not restart the goal
+clock; ordinary goal-less approval behavior is unchanged.
+
 Provider-retry pauses keep the goal active with a1-minute exponential backoff,
-capped at30minutes and the goal deadline. The retry streak comes from at most
+capped by the persisted workspace policy (30minutes by default) and the goal deadline. The retry streak comes from at most
 five prior durable terminal prompt outcomes for the same frozen goal/revision,
 separate from ordinary failures. Committed model work in the current or preceding
 retry run resets the delay to1minute. Reopening retains this terminal evidence.

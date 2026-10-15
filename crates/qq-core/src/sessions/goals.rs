@@ -1243,7 +1243,8 @@ fn apply_terminal_outcome(
                     }
                     streak += 1;
                 }
-                let delay = (60_000_u64 << streak).min(1_800_000);
+                let policy = goal_policy::load(connection, goal.goal_id)?.0;
+                let delay = (60_000_u64 << streak).min(policy.max_backoff_ms);
                 goal.next_run_at_ms = now.saturating_add(delay).min(goal.budget.deadline_ms);
             }
         },
@@ -1459,7 +1460,10 @@ pub(super) fn admit_sponsored_run(
     })
 }
 
-fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExhaustion> {
+pub(super) fn goal_exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+) -> Option<qq_protocol::GoalExhaustion> {
     if now >= goal.budget.deadline_ms {
         return Some(qq_protocol::GoalExhaustion::Deadline);
     }

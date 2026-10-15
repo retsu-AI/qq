@@ -947,10 +947,16 @@ pub(super) fn conclude_tool_approval(
             delegate: None,
         },
     )?;
+    let run_ids =
+        goal_policy::pause_for_approval(&transaction, store_id, identity, tool_call_id, now)?;
     transaction.commit()?;
-    Ok(ConcludedApproval::Denied {
-        message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
-    })
+    if run_ids.is_empty() {
+        Ok(ConcludedApproval::Denied {
+            message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
+        })
+    } else {
+        Ok(ConcludedApproval::GoalStopped { run_ids })
+    }
 }
 
 pub(super) fn next_grant_promotion(
