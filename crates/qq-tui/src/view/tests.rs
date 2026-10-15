@@ -6102,3 +6102,52 @@ fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
         "display scrolling cannot alter authority"
     );
 }
+
+#[test]
+fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
+    use qq_protocol::{GoalPauseReason, GoalStatus};
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session_id);
+    goal.counters.runs = 12;
+    goal.budget.max_goal_runs = 200;
+    goal.budget.deadline_ms = 17 * 3_600_000;
+    goal.next_run_at_ms = 240_000;
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    for expected in ["goal", "run 12/200", "17h left", "next 4m"] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    let session = app.sessions.get_mut(&session_id).unwrap();
+    let goal = session.goal.as_mut().unwrap();
+    goal.status = GoalStatus::Paused { reason: GoalPauseReason::User };
+    goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(text.contains("paused by you"), "{text}");
+    assert!(text.contains("cancellation draining"), "{text}");
+    assert!(!text.contains("/goal resume"), "{text}");
+    app.sessions.get_mut(&session_id).unwrap().goal.as_mut().unwrap().pending_run_id = None;
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(text.contains("/goal resume"), "{text}");
+    app.sessions.get_mut(&session_id).unwrap().goal.as_mut().unwrap().status = GoalStatus::Achieved;
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    assert!(text.contains("goal") && text.contains("achieved"), "{text}");
+    assert!(!text.contains("/goal resume"), "{text}");
+    assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
+}
+
+#[test]
+fn active_goal_keeps_countdown_updates_alive_without_a_running_session() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    initial.focused.as_mut().unwrap().goal = Some(fixtures::goal_snapshot(session_id));
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    assert!(app.has_activity());
+    assert!((0..10).any(|_| app.advance_animation()));
+    app.sessions.get_mut(&session_id).unwrap().goal.as_mut().unwrap().status =
+        qq_protocol::GoalStatus::Achieved;
+    assert!(!app.has_activity());
+}
