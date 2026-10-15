@@ -8858,3 +8858,86 @@ async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
         );
     }
 }
+
+#[tokio::test]
+async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_stops() {
+    struct Authority {
+        limits: StdMutex<HashMap<PathBuf, GoalPolicy>>,
+        unavailable: AtomicBool,
+    }
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("goal policy cannot promote tool authority")
+        }
+        fn goal_policy(&self, workspace: &Path) -> GoalPolicyFuture {
+            let result = if self.unavailable.load(Ordering::SeqCst) {
+                Err(GoalPolicyError::Unavailable)
+            } else {
+                Ok(self.limits.lock().unwrap()[workspace])
+            };
+            Box::pin(std::future::ready(result))
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let other = directory.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let authority = Arc::new(Authority {
+        limits: StdMutex::new(HashMap::from([
+            (directory.path().to_owned(), GoalPolicy { max_goal_runs: 20, ..GoalPolicy::default() }),
+            (other.clone(), GoalPolicy { max_goal_runs: 100, ..GoalPolicy::default() }),
+        ])),
+        unavailable: AtomicBool::new(false),
+    });
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.grant_authority = Some(authority.clone());
+    let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader)).await.unwrap();
+    let _held = Arc::clone(&runtime.inner.permits).acquire_many_owned(
+        runtime.inner.permits.available_permits() as u32
+    ).await.unwrap();
+    for (path, ceiling) in [(directory.path(), 20_u32), (other.as_path(), 100)] {
+        let (workspace, _) = resolve_workspace(&runtime, path).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else { panic!("session") };
+        let deadline = now_ms() + 60_000;
+        let set = |runs| serde_json::from_value::<SessionCommand>(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
+            "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
+        })).unwrap();
+        assert!(matches!(
+            runtime.command(CommandId::generate().unwrap(), set(ceiling + 1)).await,
+            Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Budget))
+        ));
+        let command = CommandId::generate().unwrap();
+        let accepted = runtime.command(command, set(ceiling)).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = &accepted.outcome else { panic!("goal") };
+        let identity = qq_protocol::GoalIdentity { goal_id: goal.goal_id, revision: goal.revision };
+        authority.unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(runtime.command(command, set(ceiling)).await.unwrap(), accepted);
+        assert!(matches!(
+            runtime.command(CommandId::generate().unwrap(), set(ceiling)).await,
+            Err(SessionRuntimeError::GoalPolicy(GoalPolicyError::Unavailable))
+        ));
+        let paused = runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+            session_id, expected: identity, action: qq_protocol::GoalControl::Pause
+        }).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else { panic!("paused") };
+        let expected = qq_protocol::GoalIdentity { goal_id: goal.goal_id, revision: goal.revision };
+        authority.unavailable.store(false, Ordering::SeqCst);
+        authority.limits.lock().unwrap().get_mut(path).unwrap().max_goal_runs = ceiling - 1;
+        assert!(matches!(
+            runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+                session_id, expected, action: qq_protocol::GoalControl::Resume
+            }).await,
+            Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Budget))
+        ));
+        authority.unavailable.store(true, Ordering::SeqCst);
+        runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+            session_id, expected, action: qq_protocol::GoalControl::Clear
+        }).await.unwrap();
+        authority.unavailable.store(false, Ordering::SeqCst);
+    }
+    runtime.shutdown().await.unwrap();
+}

@@ -228,6 +228,14 @@ gap; the other G2/G3 behavior retains the initial wire contract.
 - `approval_wait`, 10 min: how long an unanswered approval holds a goal run
   before the goal pauses.
 
+Runtime enforcement stores private `policy_json` and `specification_at_ms`
+on `session_goals` in schema58. A client specification sets the timestamp;
+neutral controls do not move it. Existing rows retain explicit unknown values,
+using shipped operational defaults; a newly lowered duration ceiling requires
+an explicit specification edit when the original timestamp is unknown. Current
+workspace policy is checked before activation and paid execution. Wire protocol34,
+descriptor and prompt versions do not change; older binaries refuse schema58.
+
 Managed policy can lower any ceiling. Goal checks enforce the current
 managed shell denies as hard denies at authorization and every execution,
 not merely as ordinary grant filters (ADR-0049 § 5).
