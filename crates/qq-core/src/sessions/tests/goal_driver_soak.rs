@@ -6,6 +6,7 @@ const CHILD: &str = "QQ_GOAL_DRIVER_SOAK_CHILD";
 const PREFIX: &str = "QQ_GOAL_DRIVER ";
 const HOUR: u64 = 3_600_000;
 const CHECK: &str = "test -f completion-ready && printf checked >> completion-checks";
+const CRASH_CHECK: &str = "printf '%s' \"$$\" > check-pid; printf invoked >> check-invocations; printf r > check-ready; read -r signal < check-release; printf finished >> check-completions";
 
 #[derive(Serialize, Deserialize)]
 struct Setup {
@@ -34,10 +35,14 @@ enum Input {
     Reply(Reply),
     Snapshot,
     Close,
+    HoldSlots,
+    HoldPolicy,
+    CheckState,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Output {
+    PolicyHeld,
     Ready {
         workspace: WorkspaceId,
         session: SessionId,
@@ -151,7 +156,7 @@ async fn emit(output: Output) {
     .unwrap();
 }
 
-struct CheckAuthority;
+struct CheckAuthority(Arc<std::sync::atomic::AtomicBool>);
 impl WorkspaceGrantAuthority for CheckAuthority {
     fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
         Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
@@ -160,8 +165,15 @@ impl WorkspaceGrantAuthority for CheckAuthority {
         panic!("goal check authority is independent of ordinary grants")
     }
     fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
-        assert_eq!(command, CHECK);
-        Box::pin(std::future::ready(Ok(())))
+        assert!(command == CHECK || command == CRASH_CHECK);
+        let hold = self.0.load(Ordering::Acquire);
+        Box::pin(async move {
+            if hold {
+                emit(Output::PolicyHeld).await;
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -169,8 +181,9 @@ async fn child(setup: Setup) {
     let epoch = Epoch::new(setup.epoch);
     let (provider, mut requests) = tokio::sync::mpsc::channel(1);
     let mut options = SessionRuntimeOptions::new(setup.directory.join("sessions.sqlite3"));
+    let hold_policy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if setup.checked {
-        options.grant_authority = Some(Arc::new(CheckAuthority));
+        options.grant_authority = Some(Arc::new(CheckAuthority(hold_policy.clone())));
     }
     let runtime = SessionRuntime::open(options, Arc::new(Loader(provider)))
         .await
@@ -242,6 +255,30 @@ async fn child(setup: Setup) {
                     let snapshot = runtime.snapshot(SnapshotRequest::new(workspace,Some(session),256,256)).await.unwrap();
                     emit(Output::Ack(serde_json::to_value(snapshot.focused.unwrap()).unwrap())).await;
                 }
+                Input::HoldSlots => {
+                    let mut wait = Box::pin(Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32));
+                    assert!(futures_util::poll!(&mut wait).is_pending(), "the work run still owns a permit");
+                    tokio::spawn(async move {
+                        let held = wait.await.unwrap();
+                        std::future::pending::<()>().await;
+                        drop(held);
+                    });
+                    emit(Output::Ack(serde_json::Value::Null)).await;
+                }
+                Input::HoldPolicy => {
+                    assert!(!hold_policy.swap(true,Ordering::AcqRel));
+                    emit(Output::Ack(serde_json::Value::Null)).await;
+                }
+                Input::CheckState => {
+                    let state = runtime.inner.store.call(super::super::store::Priority::AwaitControl, move |connection| {
+                        let state:Option<(String,bool)> = connection.query_row(
+                            "SELECT r.id,COALESCE(s.preparing_run_id=r.id,0) FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.session_id=?1 AND r.kind='goal_check' ORDER BY r.rowid DESC LIMIT 1",
+                            [session.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),
+                        ).optional()?;
+                        Ok(serde_json::to_value(state)?)
+                    }).await.unwrap();
+                    emit(Output::Ack(state)).await;
+                }
                 Input::Close => {
                     runtime.close().await.unwrap();
                     emit(Output::Ack(serde_json::Value::Null)).await;
@@ -260,6 +297,7 @@ struct Driver {
     pending: std::collections::VecDeque<(RunId, Vec<String>)>,
     workspace: WorkspaceId,
     session: SessionId,
+    policy_held: bool,
 }
 
 impl Driver {
@@ -297,6 +335,7 @@ impl Driver {
             pending: std::collections::VecDeque::new(),
             workspace,
             session,
+            policy_held: false,
         }
     }
 
@@ -327,6 +366,10 @@ impl Driver {
 
     fn keep(&mut self, output: Output) {
         match output {
+            Output::PolicyHeld => {
+                assert!(!self.policy_held);
+                self.policy_held = true;
+            }
             Output::Event(event) => {
                 assert!(self.events.len() < 16_384);
                 self.events.push(*event);
@@ -765,4 +808,297 @@ async fn multi_day(checked: bool) {
     );
     reopened.ask(Input::Close).await;
     assert!(reopened.process.wait().await.unwrap().success());
+}
+
+#[cfg(target_os = "linux")]
+struct CheckProcess(tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>);
+
+#[cfg(target_os = "linux")]
+impl Drop for CheckProcess {
+    fn drop(&mut self) {
+        // A stable pidfd limits failure-path cleanup to this test's shell.
+        // ESRCH after normal completion is expected; cleanup is best effort on panic.
+        let _ = rustix::process::pidfd_send_signal(self.0.get_ref(), rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn observe_check(directory: &Path) -> CheckProcess {
+    let pid: u32 = tokio::fs::read_to_string(directory.join("check-pid"))
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
+    CheckProcess(
+        tokio::io::unix::AsyncFd::new(
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn check_ready(pipe: &tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut ready = pipe.readable().await.unwrap();
+            let mut byte = [0_u8; 1];
+            match ready.try_io(|pipe| {
+                rustix::io::read(pipe.get_ref(), &mut byte).map_err(std::io::Error::from)
+            }) {
+                Ok(Ok(1)) => {
+                    assert_eq!(byte, b"r"[..]);
+                    break;
+                }
+                Ok(other) => panic!("check ready pipe: {other:?}"),
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_started_checks() {
+    for phase in ["queued", "reserved", "running"] {
+        let directory = TempDir::new().unwrap();
+        let mut pipes = Vec::new();
+        for name in ["check-ready", "check-release"] {
+            let path = directory.path().join(name);
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                &path,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .unwrap();
+            let fd = rustix::fs::open(
+                &path,
+                rustix::fs::OFlags::RDWR
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .unwrap();
+            pipes.push(tokio::io::unix::AsyncFd::new(fd).unwrap());
+        }
+        let setup_epoch = now_ms();
+        let mut setup = Setup {
+            directory: directory.path().to_path_buf(),
+            epoch: setup_epoch,
+            session: None,
+            checked: true,
+        };
+        let mut driver = Driver::open(&setup).await;
+        setup.session = Some(driver.session);
+        let receipt:qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":driver.session,"objective":"recover completion check",
+            "check":{"command":CRASH_CHECK,"timeout_ms":5000},
+            "budget":{"max_goal_runs":10,"deadline_ms":setup_epoch+60_000}
+        })).unwrap()))).await).unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal")
+        };
+        driver
+            .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+                session_id: driver.session,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::ApproveCheck {
+                    scope: qq_protocol::GoalCheckScope::Once,
+                    command: CRASH_CHECK.to_owned(),
+                },
+            })))
+            .await;
+        let (work, _) = driver.request().await;
+        driver
+            .ask(Input::Reply(Reply::Update {
+                step: 1,
+                wait: false,
+                remove: None,
+                achieved: true,
+            }))
+            .await;
+        assert_eq!(driver.request().await.0, work);
+        match phase {
+            "queued" => {
+                driver.ask(Input::HoldSlots).await;
+            }
+            "reserved" => {
+                driver.ask(Input::HoldPolicy).await;
+            }
+            "running" => {}
+            _ => unreachable!(),
+        }
+        driver.ask(Input::Reply(Reply::Text)).await;
+        assert_eq!(driver.finished(work).await, RunOutcome::Completed);
+        if phase == "reserved" {
+            while !driver.policy_held {
+                let output = driver.read().await;
+                driver.keep(output);
+            }
+        }
+        let mut process = if phase == "running" {
+            check_ready(&pipes[0]).await;
+            Some(observe_check(directory.path()).await)
+        } else {
+            None
+        };
+        let before = loop {
+            let snapshot = driver.snapshot().await;
+            if snapshot
+                .runs
+                .iter()
+                .any(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+            {
+                break snapshot;
+            }
+            let output = driver.read().await;
+            driver.keep(output);
+        };
+        let check = before
+            .runs
+            .iter()
+            .find(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+            .unwrap();
+        let check_id = check.id;
+        let goal = before.goal.as_ref().unwrap();
+        assert_eq!(goal.counters.runs, 1);
+        assert!(goal.audit_pending);
+        if phase == "running" {
+            assert_eq!(check.status, qq_protocol::RunStatus::Running);
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Consumed)
+            );
+            assert_eq!(goal.counters.audits, 1);
+        } else {
+            assert_eq!(check.status, qq_protocol::RunStatus::Queued);
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Once)
+            );
+            assert_eq!(goal.counters.audits, 0);
+            let state: (String, bool) =
+                serde_json::from_value(driver.ask(Input::CheckState).await).unwrap();
+            assert_eq!(state, (check_id.to_string(), phase == "reserved"));
+            assert!(
+                !tokio::fs::try_exists(directory.path().join("check-invocations"))
+                    .await
+                    .unwrap()
+            );
+        }
+        driver.kill().await;
+        let mut recovered = Driver::open(&setup).await;
+        if phase == "running" {
+            let snapshot = recovered.snapshot().await;
+            let goal = snapshot.goal.as_ref().unwrap();
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+                    }
+                }
+            ));
+            assert!(goal.audit_pending);
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Consumed)
+            );
+            assert_eq!(goal.counters.audits, 1);
+            assert_eq!(
+                snapshot
+                    .runs
+                    .iter()
+                    .find(|run| run.id == check_id)
+                    .unwrap()
+                    .outcome,
+                Some(RunOutcome::Interrupted)
+            );
+            assert!(recovered.pending.is_empty());
+            recovered.ask(Input::Close).await;
+            assert!(recovered.process.wait().await.unwrap().success());
+            recovered = Driver::open(&setup).await;
+            let again = recovered.snapshot().await;
+            assert_eq!(again.goal, snapshot.goal);
+            assert_eq!(again.runs, snapshot.runs);
+            let process = process.as_ref().unwrap();
+            let mut exited = Box::pin(process.0.readable());
+            assert!(
+                futures_util::poll!(&mut exited).is_pending(),
+                "SIGKILL of QQ does not establish shell cleanup"
+            );
+        } else {
+            check_ready(&pipes[0]).await;
+            process = Some(observe_check(directory.path()).await);
+        }
+        assert_eq!(
+            rustix::io::write(pipes[1].get_ref(), b"release\n").unwrap(),
+            8
+        );
+        let mut exited = tokio::time::timeout(
+            Duration::from_secs(10),
+            process.as_ref().unwrap().0.readable(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        exited.retain_ready();
+        if phase == "running" {
+            let after = recovered.snapshot().await;
+            assert!(matches!(
+                after.goal.unwrap().status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+                    }
+                }
+            ));
+            assert_eq!(
+                after
+                    .runs
+                    .iter()
+                    .find(|run| run.id == check_id)
+                    .unwrap()
+                    .outcome,
+                Some(RunOutcome::Interrupted)
+            );
+        } else {
+            assert_eq!(recovered.finished(check_id).await, RunOutcome::Completed);
+            let after = recovered.snapshot().await;
+            let goal = after.goal.unwrap();
+            assert_eq!(goal.status, qq_protocol::GoalStatus::Achieved);
+            assert_eq!(goal.counters.runs, 1);
+            assert_eq!(goal.counters.audits, 1);
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Consumed)
+            );
+            assert_eq!(
+                after.runs.len(),
+                2,
+                "unstarted recovery must reuse its durable check row"
+            );
+        }
+        assert_eq!(
+            tokio::fs::read_to_string(directory.path().join("check-invocations"))
+                .await
+                .unwrap(),
+            "invoked"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(directory.path().join("check-completions"))
+                .await
+                .unwrap(),
+            "finished"
+        );
+        assert!(recovered.pending.is_empty());
+        recovered.ask(Input::Close).await;
+        assert!(recovered.process.wait().await.unwrap().success());
+    }
 }
