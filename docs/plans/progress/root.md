@@ -14,7 +14,7 @@ may append a **request** row; only root changes a request's status.
 | ROOT-4 | Current QQ and four-reference harness audit; lean-core priorities | Shipped (`445d740`, #65) | 2026-09-16; `../../research/harness-comparison.md`; source baseline `7956e8e`; F01/F02/F14 repaired (#55, #57, #63); F03–F28 unowned |
 | ROOT-5 | Context usability stack C1–C6: 4 bytes/token estimate, summarizer past the window, proactive and in-run compaction, audit default `off`, Anthropic/Bedrock cache breakpoints, overlapped leading reads and soft 16-call cap, measured occupancy across pruning/checkpoints | Shipped (#56 `d4fd971`, #58 `3446c54`, #59 `1c4467b`, #61 `49d4a03` incl. C5, #64 `4715226`) | 2026-09-16. Plan and ledger deleted with #66; design in `architecture.md` § run loop step 3, § resolved model, § audit; `providers.md` § breakpoints; `tools.md` § Loop Bounds. Deferred: true mid-run summarization (needs a store cutoff inside a run), estimator calibration from observed `usage`. Live qualification (cache reads on turn 2; a real long session) not yet run |
 | ROOT-6 | Docs cleanup: delete shipped plans/ledgers and superseded research; collapse speed-first to open items; move extension contract and perf targets into `architecture.md` | Shipped (#66) | 2026-09-16 |
-| ROOT-7 | Docs cleanup: `docs/research/` for dated research with undated names; plans named like their ledgers (`speed-first.md`, `terminal-bench.md`); `runbooks/run-output-queries.md`; shipped side-questions plan → `design/side-questions.md`; orphaned ledgers deleted; stale statuses reconciled with Git; ADR index normalized | In review (ENG-1016, `docs/docs-cleanup`) | 2026-10-09 |
+| ROOT-7 | Docs cleanup: `docs/research/` for dated research with undated names; `runbooks/run-output-queries.md`; shipped side-questions design; stale statuses reconciled with Git; ADR index normalized | Shipped (`f5dbf229`, #276) | ENG-1016, 2026-10-09 |
 | ENG-791.R1 | Typed reasoning effort reaches the real provider request | Shipped (#76 J6a; superseded row) | Author repaired actual wire/retry, zero-connection and lazy-initialization tests. Default provider 208 + interface 17 pass (one ignored); minimal provider 161 + interface 17 pass. Reviewer `qa_root_candidate_review`; manager integration. This dependency is not automatic routing |
 | ENG-791.R2 | JEV selects authorized model/effort pairs for root and child tasks | Shipped (#77 J6b; superseded row) | Same ENG-791 requirement, not a separate backlog. Actual dispatch, overrides, current capability/authorization checks, cancellation and declared fallback must agree with the selection; mandatory completion checkpoints remain enforced |
 | ENG-791.R3 | Durable routing identity, TUI visibility and observed runtime qualification | Partly shipped (#77 durable identity); remainder [ENG-815](https://linear.app/retsu-ai/issue/ENG-815) | Retain candidate set, selection/distribution, actual model/effort, usage and outcomes across replay; real-model and fixed-baseline comparison before any savings claim. Recorded demonstration and canonical release remain separate gates |
@@ -82,8 +82,9 @@ may append a **request** row; only root changes a request's status.
 | 0056 | Compaction summary is a model narrative plus an exact record QQ renders from the store; resolved output cap; cache-aligned summarizer; prune watermark | compaction CX1–CX3 (ENG-992) | Proposed 2026-10-02: `docs/adr/0056-compaction-narrative-and-record.md` |
 | 0057 | Skills ship supporting files; delegates may pull skills | workflow-packs WP0 | Proposed 2026-10-09 in open PR #277: `docs/adr/0057-skill-supporting-files-and-delegate-pull.md` |
 | 0058 | Edit freshness: a unique exact match proves the region was seen | tool-layer T19 (ENG-1030) | Accepted 2026-10-13; reserved 2026-10-12: `docs/adr/0058-edit-freshness-by-exact-match.md` (moved from 0057, which #277 claimed first) |
-| 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Reserved 2026-10-13 |
+| 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Proposed ADR implemented in #304; no longer merely reserved; formal status remains Proposed in the decision record |
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
+| 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -815,3 +816,17 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - Version the stricter receipt contract and budget together; reject old receipts
   against current budgets. Remove the in-test wall-clock watchdog while keeping
   readiness synchronization, paused deadline and all behavioral assertions.
+
+
+### 2026-10-15 — v0.1.7 preparation coordination (ENG-1054)
+
+- User requests reconciliation of release-relevant docs and current-state
+  tables across plans before a separate version-bump PR. Work is isolated in
+  `docs/eng-1054-0.1.7-pre-release`; only top tables and new dated receipts
+  change in existing ledgers, preserving their historical entries.
+- Reviewed main `3b763ea1`: #306/#282/#311 merged; goals, desktop and #315
+  remain unmerged. Missing performance/live evidence stays open. Release
+  scope and handoff: `../release-0.1.7.md`; evidence: `release-0.1.7.md`.
+- ADR-0059 is an implemented proposal, not an empty reservation; add the
+  missing ADR-0061 allocation. Formal acceptance is not inferred from merge.
+  No version/contract bump, tag, generated changelog or guide-pin change.

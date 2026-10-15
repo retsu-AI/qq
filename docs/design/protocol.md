@@ -51,9 +51,10 @@ adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 approval) when enabled (ADR-0052); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
 catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
-approved self-contained read images (ADR-0060). None alters the wire envelope version or
-requires a database migration; historical descriptor JSON remains historical
-evidence.
+approved self-contained read images (ADR-0060); version 15 records the strict
+model-facing tool-result projection policy (ADR-0061). Descriptor changes do not
+alter the wire envelope version; associated store migrations are documented
+separately below. Historical descriptor JSON remains historical evidence.
 
 ## Protocol Version
 
@@ -495,9 +496,12 @@ POST /v1/workspaces/snapshot
 POST /v1/models
 POST /v1/sessions
 POST /v1/sessions/prompts
+POST /v1/sessions/side-questions
+POST /v1/sessions/side-questions/cancel
 POST /v1/sessions/approval-mode
 POST /v1/sessions/approval-delegate
 POST /v1/sessions/model
+POST /v1/sessions/effort
 POST /v1/sessions/profile
 POST /v1/sessions/delete
 POST /v1/sessions/prune

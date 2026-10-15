@@ -6,7 +6,7 @@
 | --- | --- |
 | Now | No implementation phase is active. Phases 0–6 are closed (see Completed Phases). Phase 7 (H10) waits on R6 in `terminal-bench.md` and a platform threat model; Phase 8 (H11) waits on a real client; Phase 9 (H12) waits on both |
 | Next | Quiet-host recordings, not code: the Phase 5a H0 tail comparison and the H20 eight-stream p95 (then tighten the executable budget 50→20 ms). The seven H22 deferrals in § H22 deferrals are the only unscheduled code items from this plan |
-| Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20); Phase 5a full H0 tail acceptance on a quiet host; native Windows full-workspace run (carried to Phase 7 per decision #3) |
+| Open gates carried | Eight-stream output service gap ≤20 ms at p95 (median met by H20); Phase 5a full H0 tail acceptance on a quiet host. Full native Windows workspace qualification is tracked independently in ENG-840 and does not gate H10 (decision #3, revised 2026-09-19) |
 | Last closed | Phase 6, 2026-09-16 (#46 `486926b`, #47 `c7fd5c4`, ADR-0026) |
 | Versions | Authoritative in [`protocol.md`](../design/protocol.md) § Versioning; at close of Phase 6 (2026-09-16, before T8's bump to 21): `PROTOCOL_VERSION` 20, `CAPABILITIES_VERSION` 1, `DESCRIPTOR_VERSION` 6, store schema 28, H0 fixture version 4 |
 
@@ -47,8 +47,9 @@ Phases row:
 - Phase 6: the eight-stream mixed control/output fixture, p95 ≤20 ms; then
   tighten the executable budget in `budgets-v1.json` from 50 ms to 20 ms.
 
-Native Windows: the targeted CI job (`windows-teardown`) passes; a full
-Windows workspace run is carried to Phase 7 (decision #3).
+Native Windows: the targeted CI job (`windows-teardown`) passes. Full
+Windows workspace qualification and its cadence are tracked in ENG-840;
+per decision #3's 2026-09-19 revision, they do not gate H10.
 
 ### H22 deferrals
 

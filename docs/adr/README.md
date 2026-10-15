@@ -60,9 +60,9 @@ written.
 | 0054 | [Progress means output: a run reports when it stops changing things, a sub-agent answers its brief, and delegation does not block the parent](0054-progress-means-output.md) | Proposed (autonomous-core AP1–AP5); takes ADR-0048 § 2's empty-checkpoint fault |
 | 0056 | [A compaction summary is a short model narrative plus an exact record that QQ renders from the store](0056-compaction-narrative-and-record.md) | Proposed (compaction CX0–CX5); amends how ADR-0039 § 3's summarizer request is built |
 | 0058 | [Edit freshness: a unique exact match proves the region was seen](0058-edit-freshness-by-exact-match.md) | Accepted (tool-layer T19, ENG-1030); amends `tools.md` § Optimistic Concurrency step 2 |
-
-| 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
-| 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed (action-bias AB2, ENG-1039) |
+| 0059 | [Declare executable tools and state immutable run authority](0059-run-authority-in-tool-declarations.md) | Proposed; implementation merged in #304 (AB4) |
+| 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed; implementation merged in #301/#306 (AB1, ENG-1038) |
+| 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed; implementation merged in #302 (AB2, ENG-1039) |
 | 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 
 Numbers without a file are reserved in
@@ -83,7 +83,10 @@ written, or were released unused:
 ADR-0030–0034 predate the template and use a short form (status, date,
 prose); later ADRs follow [the template](0000-template.md).
 
-| 0059 | [Declare executable tools and state immutable run authority](0059-run-authority-in-tool-declarations.md) | Proposed (AB4) |
+Implementation/merge status is distinct from formal decision acceptance.
+ADRs 0054, 0056 and 0059–0061 have merged implementations but remain Proposed
+in their decision records; live qualification and formal acceptance must not
+be inferred from the merge. This index preserves those statuses.
 
 ## When to write one
 

@@ -4,11 +4,11 @@
 
 | | |
 | --- | --- |
-| Now | AB1–AB6.1 merged (#301–#306, 2026-10-14). Inherited performance failures are carried to the user-authorized ENG-834 follow-up; AB6 research remains pending seven full UTC days on a deployed pinned build |
+| Now | AB1–AB5 merged in #301–#305; AB6.1 execution-context capture and export/recount tooling merged in #306 (`9868038c`). Matched performance remains open; AB6 requires seven full UTC days on a deployed pinned AB1–AB5 main build with writer provenance. Merge dates do not establish that observation window |
 | Research | [`../research/action-bias.md`](../research/action-bias.md): live store, 30 days to 2026-10-13, findings AB-F1–AB-F7; reference prompts and tools from Codex, OpenCode, Pi, fx |
 | Ledger | [`progress/action-bias.md`](./progress/action-bias.md) |
 | Linear | [ENG-1037](https://linear.app/retsu-ai/issue/ENG-1037) (program), milestone `Action Bias`; AB1–AB6 are ENG-1038–ENG-1043 |
-| ADR | ADR-0059 reserved for AB4 (the prompt and tool set state a run's real authority; supersedes ADR-0054 § 5's read-only-root clause) |
+| ADR | ADR-0059 Proposed and implemented by AB4 (the prompt and tool set state a run's real authority; supersedes ADR-0054 § 5's read-only-root clause); ADR-0060 process context and ADR-0061 durable projection also remain Proposed |
 | Crosses | `autonomous-core.md` (progress rule, AC4 loop guard), `tool-layer.md` (built-in contracts, shell nudge), `token-efficiency.md` TE3 and `supervised-delegation.md` D6b (delegation economics). Each slice names what it borrows; § Coordination lists the requests |
 
 ## Goal

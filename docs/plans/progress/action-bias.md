@@ -2088,3 +2088,12 @@ newest last.
   `performance-gates.md` own remediation. The deployed seven-day observation
   and any authorized paid comparison remain pending; merge alone does not
   establish deployment, treatment continuity or research acceptance.
+
+
+### 2026-10-15 — release preparation reconciliation (ENG-1054)
+
+- Corrected AB2–AB5 top-table merge SHAs and marked AB6.1 instrumentation
+  merged as #306 (`9868038c`); historical pre-merge receipts remain intact.
+- Named matched performance, a superseding pinned baseline and AB6's deployed
+  seven-day cohort remain open. No historical execution-context qualification
+  or measured productivity improvement is inferred from the merge.

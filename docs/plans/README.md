@@ -8,6 +8,10 @@ system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
 
 ## Tracker
 
+Release preparation for v0.1.7 is tracked in
+[`release-0.1.7.md`](./release-0.1.7.md). It separates merged behavior from
+unqualified performance/live targets and does not authorize a version bump or tag.
+
 Open work is tracked in Linear project `qq` (team `ENG`), one milestone per
 plan below plus `Harness Audit`, `Evaluation Program`, and `Decisions`.
 Ledgers in [`progress/`](./progress/) hold receipts and gate evidence; when
@@ -30,14 +34,14 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 
 | Plan | Scope and what is open |
 | --- | --- |
-| [`autonomous-core.md`](./autonomous-core.md) | Long unattended runs and reliability: AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped; AP5 evidence pending; AC3 in review; AC17 tolerant arguments next, AC18 truncation recovery, AC19 stream repair and evidence-gated AC20 latency diagnostics. AC4–AC6 and remaining embedding/resource slices stay open |
-| [`goals.md`](./goals.md) | `/goal`: a session goal the runtime pursues across runs, restarts and days until its check passes, its budget runs out, it is blocked, or the user pauses it. G0–G5 planned (with autonomous-core AC4); ADR-0049 Proposed |
-| [`action-bias.md`](./action-bias.md) | Runs that produce results: shell reads classed as reads for the progress rule, an action-biased prompt, a byte-budgeted read window, declared tools that match the run's authority, a root stall report that asks for the next change. AB1–AB6 planned; ADR-0059 reserved. Proposed |
+| [`autonomous-core.md`](./autonomous-core.md) | AP0–AP4.2, AC0.1, AC1–AC3, AC10/AC11, AC12.1 and AC17 merged. AP5, integrated reliability and named performance evidence remain open; AC4 is in the unmerged goals stack; AC5/AC6, AC18/AC19 and remaining embedding/resource slices stay open |
+| [`goals.md`](./goals.md) | Durable session goals: G0/AC4 (#308) and the G2 driver checkpoint (#309) in review, not on main; full G2 and G3–G5 acceptance remain open. ADR-0049 Proposed |
+| [`action-bias.md`](./action-bias.md) | AB1–AB5 and AB6.1 export/recount tooling merged (#301–#306). Matched performance and AB6's pinned seven-day live qualification remain open; no measured productivity improvement claimed |
 | [`compaction.md`](./compaction.md) | Fast, exact, cache-aligned compaction (ADR-0056). CX0–CX4 shipped; CX5 live qualification open |
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T20 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
 | [`token-efficiency.md`](./token-efficiency.md) | More verified work per token: task-tree economics, tools, selective discovery, evidence reuse and context experiments. TE0 and TE1.1 shipped; the rest of TE1 and TE2–TE8 planned |
 | [`guide-expansion.md`](./guide-expansion.md) | The user guide's missing pages, each guarded by docs-truth. GE0 and GE10 shipped; GE1–GE9 planned |
-| [`agent-feedback.md`](./agent-feedback.md) | Fast, legible feedback for agents: `cargo xtask check` (affected-only), `smoke`, `lint`; nextest; CI affected-on-PR, full-in-merge-queue; `qq-mode` skills. AF0–AF4, AF7, AF8, AF9 (first rules) in review; AF5 tracing, AF6 test audit, AF10 skill eval planned |
+| [`agent-feedback.md`](./agent-feedback.md) | AF0–AF4, AF7, AF8 and AF9's first rules merged in #282; AF6.1 cancellation audit merged in #311. AF5 tracing, remaining AF6 audit, AF9 lesson mining and AF10 evaluation stay open; merge-queue activation is an operator task |
 | [`tui-redesign.md`](./tui-redesign.md) | Responsive layout and a legible transcript. U0–U7, U9 and L1–L3 shipped; open: L4 split transcripts, U8 chrome |
 | [`jev.md`](./jev.md) | The only Jev plan. JV0, JV1's activation fix and JV2 shipped; JV3–JV13 (precision, context, hold lifecycle, receipts, shadow and pilot, UX, speed, qualification) planned. Proposed |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop and mobile clients over many headless servers. W1, W2, S1 and S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
@@ -58,10 +62,10 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | # | Next slice | Plan | Why now |
 | ---: | --- | --- | --- |
 | 0 | AP5 seven-day normal-use evidence (2026-10-06–13) | [`autonomous-core.md`](./autonomous-core.md) § Order | Confirms that long runs and sub-agents now produce output, not only activity (ADR-0054) |
-| 0a | AC3 transient summarizer recovery; goal branch AC4 + G0 → G2 → G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | AC1/AC2 shipped; qualification remains open. Embedding AC12.2–AC13 runs in parallel |
-| 0a′ | AB1 progress classification and AB2 prompt v20, then AB3–AB5 | [`action-bias.md`](./action-bias.md) | Root runs read in slices and re-read before they change anything, and the stall report that should catch it misses shell reads. Both slices are small and independent |
+| 0a | Qualify merged AC3; review goal branch AC4 + G0 → G2, then G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | AC1–AC3 merged; named performance and full reliability qualification remain open. Goals #308/#309 are not shipped. Embedding AC12.2–AC13 runs in parallel |
+| 0a′ | Matched performance and AB6 seven-day qualification after merged AB1–AB5/AB6.1 | [`action-bias.md`](./action-bias.md) | Implementation and measurement tooling are on main; deploy and identify one pinned runtime before starting the seven-day window. #315's H0/size qualification is still open |
 | 0b | CX5 seven-day live qualification | [`compaction.md`](./compaction.md) | CX0–CX4 shipped; the speed and cache-read targets are unconfirmed on real sessions |
-| 0c | AC17 tolerant arguments (ENG-872), then AC18 truncation recovery (ENG-870) and AC19 stream repair (ENG-874) | [`autonomous-core.md`](./autonomous-core.md) | Remaining reliability gaps; read-hash persistence is already implemented. AC20 diagnostics require evidence |
+| 0c | AC18 truncation recovery (ENG-870) and AC19 stream repair (ENG-874) | [`autonomous-core.md`](./autonomous-core.md) | AC17 argument tolerance is merged (#294); read-hash persistence already exists. AC20 diagnostics require evidence |
 | 1 | GE5 keybindings, GE4 environment, then GE2, GE3, GE1, GE9 | [`guide-expansion.md`](./guide-expansion.md) | The references newcomers look for and cannot find. Small, independent, and each extends the docs-truth net |
 | 2 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
 | 3 | Harness-comparison findings triage | [`../research/harness-comparison.md`](../research/harness-comparison.md) § Proposed work order | F01–F07, F10, F11, F14 and F23–F25 shipped (see `progress/root.md` and Git history). F19 (build profiles) and F20 (retention) are inputs to `autonomous-core.md` AC11 and AC16; the rest are unowned |

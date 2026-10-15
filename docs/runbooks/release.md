@@ -17,6 +17,13 @@ Every install route reads these assets, so nothing else is published:
 
 ## Procedure
 
+
+Before a version-bump PR, reconcile merged behavior, current contract values,
+open release gates and deferred roadmap work. A preparation PR does not bump
+the version, generate a changelog section, move download pins, or create a tag.
+Finish the preparation's explicit pre-bump gates before following the
+procedure below. A green CI size-report job alone is not evidence that the
+executable performance/size budgets pass.
 `main` only accepts pull requests, and merging rewrites commit SHAs, so a
 release is a bump PR followed by a tag on the merged result.
 

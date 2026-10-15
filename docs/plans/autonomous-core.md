@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Now | AP0–AP4.2, AC0.1, AC1/AC2, AC10/AC11 and AC12.1 shipped through main `7de994b1` (2026-10-14), including AC17 argument tolerance (#294). AC3 is in review (#296): head10f87482 has opening Codex approval, while integration with main and schema46 is in qualification; original draft #279 is retained until replacement qualification completes. AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**, evidence pending. AC0.2, AC4–AC6, AC12.2/.3, AC13–AC16, AC18–AC20 and Goal 7 qualification remain open; AC1/AC2 performance qualification remains open. ADRs 0048–0050 and 0054 Proposed |
+| Now | AP0–AP4.2, AC0.1, AC1–AC3, AC10/AC11, AC12.1 and AC17 are merged. AC3 landed in #296 (`5500928c`); AC0.2.1's isolated recorder landed in #297 (`f87d5d9d`). AP5 observation window: **2026-10-06 17:42:25 UTC → 2026-10-13 17:42:25 UTC**, evidence still pending. AC4/G0 and the G2 checkpoint are in unmerged #308/#309. AC0.2, AC5/AC6, AC12.2/.3, AC13–AC16, AC18–AC20 and Goal 7 remain open; merging AC1–AC3 did not close their named performance qualification. ADRs 0048–0050 and 0054 remain Proposed |
 | Research | [`../research/core-autonomy.md`](../research/core-autonomy.md) (findings 1–10); session-store evidence for the progress track in ADR-0054 § Context |
 | Ledger | [`progress/autonomous-core.md`](./progress/autonomous-core.md) |
 | Linear | [ENG-978](https://linear.app/retsu-ai/issue/ENG-978) (plan). One issue per slice is filed when the plan is accepted |

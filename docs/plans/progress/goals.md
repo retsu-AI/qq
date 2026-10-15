@@ -4,9 +4,9 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | Planned | | | One PR, one protocol bump |
+| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation checkpoint; not on main, full goal acceptance incomplete |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | The driver | Planned | | | Depends on G0; fresh goal recovery, not AC5 |
+| G2 | The driver | In review | [ENG-1053](https://linear.app/retsu-ai/issue/ENG-1053) | [#309](https://github.com/retsu-AI/qq/pull/309), stacked on #308 | Implemented checkpoint only; full G2 acceptance remains open; not shipped |
 | G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
 | G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
 | G5 | Evidence | Planned | | | ENG-809 |

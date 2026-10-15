@@ -33,8 +33,7 @@ crates/qq-core/src/sessions/tests/contract.rs	103	async fn the_contract_survives
 crates/qq-core/src/sessions/tests/deadlines.rs	266	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/deadlines.rs	434	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;
 crates/qq-core/src/sessions/tests/delegation.rs	2870	async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() {	tokio::time::sleep(Duration::from_millis(1_200)).await;
-crates/qq-core/src/sessions/tests/delegation.rs	5186	async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() {	tokio::time::sleep(Duration::from_millis(10)).await;
-crates/qq-core/src/sessions/tests/delegation.rs	5636	fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {	tokio::time::sleep(Duration::from_millis(if expires_during_preflight {
+crates/qq-core/src/sessions/tests/delegation.rs	5658	fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {	tokio::time::sleep(Duration::from_millis(if expires_during_preflight {
 crates/qq-core/src/sessions/tests/nonblocking.rs	183	async fn children_started(delegation: &Delegation, count: usize) {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-core/src/sessions/tests/nonblocking.rs	1852	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-core/src/sessions/tests/nonblocking.rs	2672	fn cancel_first(children: &[String]) -> String {	tokio::time::sleep(Duration::from_millis(300)).await;
@@ -73,5 +72,5 @@ src/runtime.rs	8572	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_
 src/runtime.rs	8582	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
 src/runtime.rs	8590	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
 src/runtime.rs	8755	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
-xtask/src/perf.rs	5797	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
-xtask/src/perf.rs	5840	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
+xtask/src/perf.rs	5857	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
+xtask/src/perf.rs	5900	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;

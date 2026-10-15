@@ -7,7 +7,7 @@ dated entries appended below, newest last.
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | 5a-accept | Full version-4 H0 comparison on a quiet host | Planned | | Baseline `1c08cef`, candidate `main`. Prior recordings on the shared host: A/A fails the same tail gates as A/B; retained, not waived |
-| 5a-windows | Full native Windows workspace run | Carried to Phase 7 | | Decision #3 resolved 2026-09-16: the targeted `windows-teardown` CI job is the Phase 6 evidence; a full run gates H10, whose sandbox adapter is the next platform-specific work |
+| 5a-windows | Full native Windows workspace run | Planned | ENG-840 | Decision #3 revised 2026-09-19: targeted teardown CI is Phase 6 evidence; full workspace qualification and cadence are independent and no longer gate H10 |
 | H20 | Wake-driven control admission; delete 13 `sleep(1 ms)` loops; ≤20 ms output gap | Done; quiet-host p95 open | merged in #22 (`61682be`; slices `ab6de6f`, `d05e474`) | Gap median 24 → 20 ms, p95 28 → 33 ms (bimodal tail, 27/30 samples ≤22 ms). Executable budget stays 50 ms until a quiet-host p95 qualifies. ADR-0011 |
 | H21.1 | Behavioral settlement: `RunIdentity`, `RunSettlement`, `PersistenceFault`, teardown-before-terminal structural | Done | a+b merged in #22 (`a67b186`, `83647e0`); c merged in #24 (`e6a1399`) | Part c: `settle_run` null guard, `TeardownComplete`, ADR-0012 accepted, 2 regression tests |
 | H27 | Superseded-generation accounting, atomic refresh admission, guard reclamation | Done | merged in #22 | Pinned LRU and admission already existed (`src/plan.rs`) |
