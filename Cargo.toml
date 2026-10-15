@@ -145,10 +145,12 @@ lto = "fat"
 # Optimize final executable size; dependency crates compile at level 3.
 [profile.release.package.qq]
 opt-level = "z"
+strip = "symbols"
 
 # Exercise the runtime in H0 with the same final optimization as the shipped bin.
 [profile.release.package.xtask]
 opt-level = "z"
+strip = "symbols"
 
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with

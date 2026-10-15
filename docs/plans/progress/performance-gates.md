@@ -68,3 +68,16 @@
   independent local clone under `/tmp` holds the exact verification snapshot;
   original worktrees and their unrelated changes remain intact. GitHub
   publication uses the connector.
+
+## 2026-10-14 — normal-build stripping regression
+
+- Normal Cargo builds of local source `897aaad8` measure default 51,730,520
+  and minimal 46,691,400 bytes, failing both ceilings. Captured rustc
+  invocation has `opt-level=z`, `lto=fat`, but `strip=debuginfo`, retaining
+  symbol tables. Explicitly stripping those exact files gives default
+  44,239,768 and minimal 40,330,088 bytes. Make `strip="symbols"` explicit
+  in both executable package overrides and verify normal builds again.
+- Exact snapshot formatting, Clippy, workspace build and focused retry/color
+  checks pass. Local workspace socket tests are blocked by EPERM; hosted
+  correctness/performance remain pending. GitHub tree creation is blocked by
+  the session approval policy (`requires approval`, policy `never`).
