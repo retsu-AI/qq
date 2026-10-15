@@ -1139,6 +1139,14 @@ fn config_command(
                     "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
                     "max_output_tokens" => snapshot.provenance().max_output_tokens(),
+                    _ if field.starts_with("goals.") => field
+                        .strip_prefix("goals.")
+                        .and_then(|name| snapshot.provenance().goals().get(name)),
+                    _ if field.starts_with("policy.goals.") => {
+                        field.strip_prefix("policy.goals.").and_then(|name| {
+                            snapshot.provenance().goals().get(&format!("policy.{name}"))
+                        })
+                    }
                     _ => field
                         .strip_prefix("pack.")
                         .and_then(|id| snapshot.provenance().pack(id))
@@ -1230,6 +1238,15 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         snapshot.audit().mode().as_str(),
         snapshot.audit().max_revisions(),
         snapshot.audit().role().as_str()
+    );
+    println!(
+        "goals: {}",
+        serde_json::to_string(snapshot.goals()).expect("numeric goal defaults serialize")
+    );
+    println!(
+        "policy.goals: {}",
+        serde_json::to_string(snapshot.policy().goal_ceilings())
+            .expect("numeric goal ceilings serialize")
     );
     println!("jev_review: {}", snapshot.jev_review().as_str());
     println!("jev_routing: {}", snapshot.jev_routing());

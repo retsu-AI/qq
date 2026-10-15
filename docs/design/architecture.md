@@ -222,6 +222,11 @@ xtask/
   `ModelRequired`; `load_for_client` yields a `ClientSnapshot` whose model is
   optional, used only by TUI startup and the served model catalog so an
   interactive client can open and ask for a model instead of exiting.
+  Both snapshots include validated goal defaults and effective managed goal
+  ceilings. Ordinary goal fields merge individually under workspace trust;
+  administrator ceilings compose by minimum and survive an ordinary Clear.
+  Per-field provenance distinguishes defaults from the ceilings constraining
+  them. Configuration-owned goal values do not depend on core runtime types.
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details

@@ -25,7 +25,9 @@ set a value; `qq config sources` lists every file consulted in order.
 
 Later layers win. Maps (`providers`, `mcp`, `profiles`, `packs`) merge by
 key; an entry set to `Remove` deletes what an earlier layer declared.
-Sections `delegation` and `audit` replace as a whole.
+Sections `delegation` and `audit` replace as a whole. The `goals` section
+merges individual fields, including nested `per_run` fields; `goals: Clear`
+restores compiled defaults under managed ceilings.
 
 | Order | Layer | Path |
 | ---: | --- | --- |
@@ -48,7 +50,7 @@ and the data, managed, and organization paths, each marked `(exists)` or
 project files may not.
 
 Project layers that declare anything sensitive — `model`, `providers`,
-`mcp`, `packs`, `profiles`, `delegation`, `audit`, Jev settings,
+`mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`, Jev settings,
 `reasoning_effort`, or any policy grant — are loaded only after `qq trust`
 has accepted that exact file content. See
 [Permissions and trust](permissions.md#project-trust).
@@ -79,6 +81,7 @@ repository should not commit; this repository's `.gitignore` excludes
 | `packs` | map | discovered | agent packs by id; [below](#packs) |
 | `delegation` | section | empty | sub-agent roster and bounds; [below](#delegation) |
 | `audit` | section | `off` | final-answer audit; [below](#audit) |
+| `goals` | section | finite defaults | defaults and bounds for durable goals; [below](#goals) |
 | `policy` | section | see below | what runs without asking, and what may never run; [below](#policy) |
 
 ### Model routes
@@ -211,6 +214,7 @@ policy: (
 | `allow_custom_providers` | managed layers only | allow `Custom`/`LiteLlm` declarations; default `true` |
 | `allow_literal_secrets` | managed layers only | allow `Value(...)`; default `false` |
 | `deny_tools`, `deny_shell_prefixes`, `deny_hosts` | managed layers only | remove grants no matter who declared them |
+| `goals` | managed layers only | goal ceilings; fieldwise minimum across administrators, retained by `goals: Clear` |
 
 "Managed layers" are `managed.ron`, `managed.d/`, and MDM (rows 9 and 10
 above). Setting a `managed layers only` key anywhere else fails with
@@ -328,6 +332,40 @@ parent's. The deprecated `worker_model` counts as a `balanced` entry.
 Design: [`../design/architecture.md`](../design/architecture.md)
 (§ Concurrency And Multiple Agents and the `spawn_agent` description under
 § Structured Input And Steering).
+
+## `goals`
+
+Goal configuration is expressed in RON:
+
+```ron
+goals: (
+    default_deadline_seconds: 86400,
+    max_deadline_seconds: 604800,
+    default_max_runs: 200,
+    max_runs: 2000,
+    per_run: (max_model_turns: 256),
+    max_backoff_seconds: 1800,
+    check_timeout_seconds: 600,
+    approval_wait_seconds: 600,
+),
+```
+
+Durations and limits must be positive. Deadline duration is at most seven
+days, runs at most 2000, check timeout at most 3600 seconds, and backoff and
+approval wait at most 86400 seconds. Defaults are clamped to effective
+ceilings. `per_run` additionally accepts `max_duration_ms`, `max_tool_calls`,
+`max_total_tokens`, `max_cost_usd_nanos`, `max_input_tokens`,
+`max_output_tokens`, `max_tool_output_bytes`, `max_children` (at most 8),
+and `max_concurrent_children` (at most 3). Omitted run limits inherit;
+`goals: Clear` restores the finite compiled model-turn cap.
+
+Administrators use `policy.goals` with `max_deadline_seconds`, `max_runs`,
+`max_backoff_seconds`, `max_check_timeout_seconds`,
+`max_approval_wait_seconds`, and the same `per_run` limits. These fields
+combine by minimum, including per-run ceilings. An ordinary layer cannot
+declare them or clear them. `qq config show` prints effective defaults and
+ceilings; `qq config explain goals.default_max_runs` and
+`qq config explain policy.goals.max_runs` identify their declaring sources.
 
 ## `audit`
 
