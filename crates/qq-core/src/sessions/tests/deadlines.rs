@@ -712,8 +712,10 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let requests = Arc::new(AtomicUsize::new(0));
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = 2;
     let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        options,
         Arc::new(HeldDeadlineLoader {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
@@ -755,21 +757,41 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    let premature = tokio::time::timeout(Duration::from_millis(250), async {
-        loop {
-            let event = events.next().await.unwrap().unwrap();
-            if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
-                break;
-            }
-        }
-    }).await;
+    let terminal = tokio::time::timeout(Duration::from_millis(500), async {
+        collect_until(&mut events, finished_for(run_id)).await
+    })
+    .await;
+    if terminal.is_err() {
+        release.notify_one();
+        runtime.shutdown().await.unwrap();
+        panic!("duration terminal was not published while preparation remained held");
+    }
+    let mut observed = terminal.unwrap();
+    let expired_requests = requests.load(Ordering::SeqCst);
+    let next = queue_prompt(&runtime, session_id, "continue".to_owned()).await;
+    let overlap = tokio::time::timeout(Duration::from_millis(250), entered.notified()).await;
+    release.notify_waiters();
+    let resumed = if overlap.is_err() {
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await
+    } else {
+        Ok(())
+    };
     release.notify_one();
-    assert!(
-        premature.is_err(),
-        "loader ownership must outlive expiry until it exits"
-    );
-    let observed = collect_until(&mut events, finished_for(run_id)).await;
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_until(&mut events, finished_for(next)),
+    )
+    .await;
     runtime.shutdown().await.unwrap();
+    assert!(overlap.is_err(), "same-session preparation overlapped cleanup");
+    assert!(resumed.is_ok(), "queued preparation did not resume after drain");
+    assert_eq!(expired_requests, 0, "expired loader sent a request");
+    let recovered = recovered.expect("queued run did not finish after drain");
+    assert!(matches!(finished_outcome(&recovered, next), Some(RunOutcome::Completed)));
+    observed.extend(recovered);
+    assert_eq!(observed.iter().filter(|event| matches!(event.event,
+        SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id
+    )).count(), 1);
     let exhaustion = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -794,8 +816,8 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     );
     assert_eq!(
         requests.load(Ordering::SeqCst),
-        0,
-        "expired preparation must not send a model request"
+        1,
+        "only the recovered run may send a model request"
     );
 }
 
