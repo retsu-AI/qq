@@ -38,6 +38,7 @@ enum Input {
     HoldSlots,
     HoldPolicy,
     CheckState,
+    ProbeAdmission,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -268,6 +269,19 @@ async fn child(setup: Setup) {
                 Input::HoldPolicy => {
                     assert!(!hold_policy.swap(true,Ordering::AcqRel));
                     emit(Output::Ack(serde_json::Value::Null)).await;
+                }
+                Input::ProbeAdmission => {
+                    let permits = Arc::clone(&runtime.inner.permits).try_acquire_many_owned(runtime.inner.max_active_runs as u32).unwrap();
+                    runtime.command(CommandId::generate().unwrap(),SessionCommand::SubmitPrompt {
+                        session_id:session, input:vec![InputPart::text("probe-after-check-crash")], limits:RunLimits::default(), correlation:Correlation::default(), output:None,
+                    }).await.unwrap();
+                    let claim = runtime.inner.store.reserve_next_run_at_depth(0).await.unwrap();
+                    let escaped = claim.is_some();
+                    if let Some(claim) = claim {
+                        runtime.inner.store.finish_reserved_run(&claim,RunOutcome::Cancelled).await.unwrap();
+                    }
+                    drop(permits);
+                    emit(Output::Ack(serde_json::json!(escaped))).await;
                 }
                 Input::CheckState => {
                     let state = runtime.inner.store.call(super::super::store::Priority::AwaitControl, move |connection| {
@@ -1032,6 +1046,11 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                 Some(RunOutcome::Interrupted)
             );
             assert!(recovered.pending.is_empty());
+            assert_eq!(
+                recovered.ask(Input::ProbeAdmission).await,
+                serde_json::json!(false),
+                "a surviving interrupted check must keep workspace admission closed"
+            );
             recovered.ask(Input::Close).await;
             assert!(recovered.process.wait().await.unwrap().success());
             recovered = Driver::open(&setup).await;

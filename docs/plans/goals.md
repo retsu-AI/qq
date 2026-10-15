@@ -260,3 +260,20 @@ There is no separate G1 slice.
    bound goal runs, or should they get a separate smaller pool so they can't
    starve interactive work? The proposal is a separate pool of
    `max(1, max_active_runs / 4)`.
+
+### Interrupted-check workspace recovery (G3, decision15)
+
+A hard-killed host can leave its check process alive. Recovery must retain a
+workspace hold independently of the live goal until an operator explicitly
+acknowledges the uncertain check effects. Clearing or replacing a goal does not
+release that hold. Normal work, helpers and side questions stay excluded;
+control/read operations remain available. Acknowledgment names the exact
+workspace and interrupted run, is durable/idempotent and leaves a matching goal
+paused rather than starting work. Snapshots and events expose a bounded hold
+reference, including when the original goal is gone. Deletion cannot erase an
+unacknowledged hold. Protocol34/schema57 carry this extension; the descriptor
+and model prompt stay unchanged. Migration conservatively preserves uncertainty
+for historical interrupted checks. Real-process acceptance must prove the hold
+before and after reopen, stale acknowledgment refusal, explicit release only
+after the test-owned process exits, and resumed queued work without replaying
+the check.
