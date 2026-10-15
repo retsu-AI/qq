@@ -151,7 +151,6 @@ it. When the same correction happens twice, encode it
 | No new fixed sleeps in tests (per-site legacy baseline and decreasing ceiling) | `cargo xtask lint` `sleep-in-tests` |
 | `#[ignore]` carries a reason | `cargo xtask lint` `ignore-needs-reason` |
 | Every ADR has an index row | `cargo xtask lint` `adr-indexed` |
-
 | Canonical and compatibility skills match, including executable modes | `cargo xtask lint` `skill-copies` |
 | Guide documents every CLI flag and doctor check | `src/docs_truth.rs`, driven from `cli::tests` and `doctor::tests` |
 | Wire changes regenerate fixtures and bump `PROTOCOL_VERSION` | `crates/qq-protocol/tests/{wire,headless}_fixtures.rs` |

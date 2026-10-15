@@ -146,3 +146,12 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - verify-qq: isolated doctor has zero failures and matching binary version;
   scripted ask answer and provider request asserted; fake stopped safely.
   Evidence: target/qq-verify/af9-gate-integrity/evidence/. Full workspace not run.
+
+
+#### PR #317 Codex follow-through
+
+- Retain broken/directory-targeting symlinks during skill discovery; regression
+  failed before the fix and passed after. Keep the enforcer Markdown table intact.
+- Full CI-profile gate attempted: fmt/lint/workspace Clippy passed; tests
+  2467/2468 with the existing stopped-child-summary cleanup fixture failing.
+  Focused rerun passed in 9.3s; this does not erase the full-gate failure.

@@ -537,7 +537,7 @@ pub fn tracked_files(root: &Path) -> Result<Vec<String>, LintError> {
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).into_owned())
-        .filter(|path| root.join(path).is_file())
+        .filter(|path| root.join(path).is_file() || root.join(path).is_symlink())
         .collect())
 }
 
@@ -643,7 +643,8 @@ pub fn run(root: &Path) -> Result<usize, LintError> {
     let paths = tracked_files(root)?;
     let mut texts = Vec::with_capacity(paths.len());
     for path in &paths {
-        let wanted = path.ends_with(".rs") || path == "docs/adr/README.md";
+        let wanted = (path.ends_with(".rs") || path == "docs/adr/README.md")
+            && !root.join(path).is_symlink();
         let text = if wanted {
             match fs::read_to_string(root.join(path)) {
                 Ok(text) => Some(text),
@@ -754,9 +755,38 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn skill_discovery_retains_broken_and_directory_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for target in [root.join("missing"), root.to_path_buf()] {
+            for prefix in [".qq", ".agents"] {
+                let path = root.join(prefix).join("skills/example/run.sh");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if path.is_symlink() {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, path).unwrap();
+            }
+            let paths = super::tracked_files(root).unwrap();
+            assert_eq!(paths.len(), 2, "symlinks must reach validation: {target:?}");
+            assert_eq!(super::skill_copies(root, &paths).unwrap().len(), 1);
+        }
+    }
+
     #[test]
     fn compatibility_skills_require_presence_content_and_mode() {
         let temp = tempfile::tempdir().unwrap();
+
         let root = temp.path();
         let canonical = ".qq/skills/example/run.sh";
         let copy = ".agents/skills/example/run.sh";
