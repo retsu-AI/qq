@@ -222,7 +222,7 @@ the list.
   keeps fitting; `/rollback` undoes the newest compaction. Stale read-only
   tool results are pruned from the model's context automatically.
 
-## Session goal status
+## Session goals
 
 `/goal` opens the focused session's durable goal. It shows the objective,
 checklist, notes, run/token/cost budgets, UTC deadline, waits, verification state
@@ -240,6 +240,24 @@ check output; `Esc` or `/goal` returns to the transcript. Opening it does not
 start or resume work. An interrupted-check workspace hold stays visible even
 when the original goal is cleared or replaced. Resolve its uncertain effects
 before acknowledging it through the API.
+
+Use `/goal <objective>` to open the creation form, or `/goal edit` to edit the
+current goal. Tab/Shift-Tab or the up/down arrows move between objective,
+optional check command and budget preset. Left/right arrows change the preset:
+configured defaults, focused (up to one hour and 20 runs), or the workspace
+maximum. Editing starts with the existing deadline and limits; changing its
+preset updates deadline/run allowance while keeping its other limits.
+
+Enter submits the form. Replacing an existing goal, including editing an
+achieved one, first shows a confirmation identifying the previous objective;
+only `y` confirms. Enter does not confirm replacement. `n` returns to editing,
+and Esc cancels. PgUp/PgDn scroll long specifications. A check command does
+not grant execution consent. Editing a stopped goal does not resume it.
+
+The form captures the current goal revision. A changed goal must be reopened
+and reviewed. Submission errors retain the draft and refresh authoritative
+state; if the refresh fails, Enter retries the refresh before another explicit
+submission. No conflict silently retries against a newer revision.
 
 Use `/goal pause`, `/goal resume`, or `/goal clear` to control the observed
 goal revision. State changes appear after the server commits them. A conflict

@@ -633,6 +633,7 @@ async fn interactive(
         ),
     };
     let runtime::TuiModelState {
+        goals,
         configured_model,
         model,
         tui_model,
@@ -767,6 +768,7 @@ async fn interactive(
                     };
                     match factory.resolve_trust(&request, choice, &reviewed) {
                         Ok(granted) => Ok(qq_tui::TrustResolved {
+                            goals: tui_goal_defaults(&granted.state.goals),
                             trusted: granted.trusted,
                             model: granted.state.tui_model,
                             models: granted.state.models.into_iter().map(Into::into).collect(),
@@ -803,6 +805,7 @@ async fn interactive(
     let result = qq_tui::run(
         qq_tui::LazyPort::new(connect),
         qq_tui::TuiOptions {
+            goals: tui_goal_defaults(&goals),
             settings: tui,
             model: tui_model,
             models,
@@ -824,6 +827,28 @@ async fn interactive(
         eprint!("{}", cli::resume_hint(session_id));
     }
     Ok(())
+}
+
+fn tui_goal_defaults(goals: &config::GoalsConfig) -> qq_tui::GoalDefaults {
+    qq_tui::GoalDefaults {
+        duration_ms: goals.default_deadline_seconds * 1000,
+        max_duration_ms: goals.max_deadline_seconds * 1000,
+        max_runs: goals.max_runs,
+        default_runs: goals.default_max_runs,
+        check_timeout_ms: goals.check_timeout_seconds * 1000,
+        per_run: qq_protocol::RunLimits {
+            max_duration_ms: goals.per_run.max_duration_ms,
+            max_model_turns: goals.per_run.max_model_turns,
+            max_tool_calls: goals.per_run.max_tool_calls,
+            max_total_tokens: goals.per_run.max_total_tokens,
+            max_cost_usd_nanos: goals.per_run.max_cost_usd_nanos,
+            max_input_tokens: goals.per_run.max_input_tokens,
+            max_output_tokens: goals.per_run.max_output_tokens,
+            max_tool_output_bytes: goals.per_run.max_tool_output_bytes,
+            max_children: goals.per_run.max_children,
+            max_concurrent_children: goals.per_run.max_concurrent_children,
+        },
+    }
 }
 
 struct InteractiveEnvironment {
@@ -2903,6 +2928,48 @@ mod tests {
             )
             .palette,
             "ink is the shipped document, syntax derived"
+        );
+    }
+}
+
+#[cfg(test)]
+mod goal_form_tests {
+    #[test]
+    fn tui_goal_defaults_translate_effective_configuration_without_widening() {
+        let goals = crate::config::GoalsConfig {
+            default_deadline_seconds: 22,
+            max_deadline_seconds: 45,
+            default_max_runs: 7,
+            max_runs: 12,
+            check_timeout_seconds: 3,
+            per_run: crate::config::GoalRunLimits {
+                max_model_turns: Some(9),
+                max_duration_ms: Some(1000),
+                max_total_tokens: Some(800),
+                max_cost_usd_nanos: Some(100),
+                max_children: Some(2),
+                max_concurrent_children: Some(1),
+                ..crate::config::GoalRunLimits::default()
+            },
+            ..crate::config::GoalsConfig::default()
+        };
+        let defaults = super::tui_goal_defaults(&goals);
+        assert_eq!(defaults.duration_ms, 22_000);
+        assert_eq!(defaults.max_duration_ms, 45_000);
+        assert_eq!(defaults.default_runs, 7);
+        assert_eq!(defaults.max_runs, 12);
+        assert_eq!(defaults.check_timeout_ms, 3000);
+        assert_eq!(
+            defaults.per_run,
+            qq_protocol::RunLimits {
+                max_model_turns: Some(9),
+                max_duration_ms: Some(1000),
+                max_total_tokens: Some(800),
+                max_cost_usd_nanos: Some(100),
+                max_children: Some(2),
+                max_concurrent_children: Some(1),
+                ..qq_protocol::RunLimits::default()
+            }
         );
     }
 }

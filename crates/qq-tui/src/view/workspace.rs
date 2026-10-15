@@ -539,7 +539,7 @@ pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<L
             if session.is_some_and(|view| !view.is_warm()) {
                 "Loading goal status…"
             } else {
-                "No goal for this session."
+                "No goal for this session. Use /goal <objective> to open the creation form."
             },
             muted(),
         ));
@@ -568,7 +568,7 @@ pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<L
         .collect()
 }
 
-fn goal_timestamp(ms: u64) -> String {
+pub(super) fn goal_timestamp(ms: u64) -> String {
     match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000) {
         Ok(time) => format!(
             "{} {:02}:{:02}:{:02} UTC",

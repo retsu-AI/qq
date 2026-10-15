@@ -827,6 +827,7 @@ fn new_slash_command_creates_a_root_session_with_the_selected_model() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: model.clone(),
         models: Vec::new(),
@@ -864,6 +865,7 @@ fn slash_clear_is_a_client_alias_for_a_new_session() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model,
         models: Vec::new(),
@@ -1198,6 +1200,7 @@ fn context_meter_app() -> App {
         organization: None,
     };
     App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: selection.clone(),
         models: vec![ModelOption {
@@ -1520,6 +1523,7 @@ fn model_refresh_preserves_the_open_picker_selection_by_identity() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: selection.clone(),
         models: vec![ModelOption {
@@ -1603,6 +1607,7 @@ fn model_picker_applies_to_the_focused_session_and_ctrl_n_creates() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: ModelSelection::default(),
         models: vec![ModelOption {
@@ -1675,6 +1680,7 @@ fn model_picker_enter_without_a_focused_session_creates_one() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: ModelSelection::default(),
         models: vec![ModelOption {
@@ -1731,6 +1737,7 @@ fn model_picker_selection_becomes_the_default_for_new_sessions() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: initial,
         models: vec![ModelOption {
@@ -3429,6 +3436,7 @@ fn the_mouse_wheel_scrolls_the_transcript_from_anywhere_on_screen() {
 
 fn themed_app() -> App {
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: ModelSelection::default(),
         models: Vec::new(),
@@ -4002,6 +4010,7 @@ fn profile_chosen_without_a_focused_session_applies_to_the_next_create() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: selection.clone(),
         models: Vec::new(),
@@ -4198,6 +4207,7 @@ fn effort_chosen_without_a_focused_session_applies_to_the_next_create() {
         organization: None,
     };
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: selection.clone(),
         models: Vec::new(),
@@ -4277,6 +4287,7 @@ fn effort_picker_is_shaped_by_the_focused_models_advertised_ladder() {
 
     let rows_for = |models: Vec<ModelOption>, snap: &WorkspaceSnapshot| {
         let mut app = App::new(TuiOptions {
+            goals: Default::default(),
             settings: Settings::default(),
             model: selection.clone(),
             models,
@@ -4420,6 +4431,7 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
 #[test]
 fn approval_mode_chosen_without_a_focused_session_applies_to_the_next_create() {
     let mut app = App::new(TuiOptions {
+        goals: Default::default(),
         settings: Settings::default(),
         model: ModelSelection {
             model_is_fallback: false,
@@ -4918,6 +4930,7 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
         .apply_trust_resolved(
             TrustChoice::Persist,
             TrustResolved {
+                goals: Default::default(),
                 trusted: vec!["/home/me/repo/.qq/config.ron".to_owned()],
                 model: selection.clone(),
                 models: vec![ModelOption {
@@ -5810,7 +5823,7 @@ fn goal_form_refuses_changed_targets_and_escape_never_submits() {
         if changed {
             goal.revision += 1;
             app.apply_live_event(fixtures::envelope(
-                1,
+                2,
                 session,
                 SessionEvent::GoalUpdated { goal },
             ));
@@ -5829,4 +5842,114 @@ fn goal_form_refuses_changed_targets_and_escape_never_submits() {
         );
         assert!(app.overlay.is_none());
     }
+}
+
+#[test]
+fn goal_form_uses_configured_presets_and_rejects_oversize_paste_without_truncation() {
+    let mut app = App::new(TuiOptions {
+        goals: GoalDefaults {
+            duration_ms: 22_000,
+            max_duration_ms: 45_000,
+            default_runs: 7,
+            max_runs: 12,
+            check_timeout_ms: 3000,
+            per_run: qq_protocol::RunLimits {
+                max_model_turns: Some(9),
+                ..qq_protocol::RunLimits::default()
+            },
+        },
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.composer
+        .replace("/goal keep exact check bytes".to_owned());
+    app.submit_prompt();
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_terminal_event(Event::Paste("é".repeat(513)));
+    app.handle_terminal_event(Event::Paste("printf 'é'".to_owned()));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let before = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split()
+        .1;
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("set goal: {requests:?}")
+    };
+    let SessionCommand::SetGoal { check, budget, .. } = &request.command else {
+        panic!("set goal")
+    };
+    assert_eq!(check.as_ref().unwrap().command, "printf 'é'");
+    assert_eq!(check.as_ref().unwrap().timeout_ms, 3000);
+    assert_eq!(budget.max_goal_runs, 12);
+    assert_eq!(budget.per_run.max_model_turns, Some(9));
+    let now = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+    assert!(
+        i128::from(budget.deadline_ms) >= before + 45_000
+            && i128::from(budget.deadline_ms) <= now + 45_000
+    );
+}
+
+#[test]
+fn goal_form_failure_keeps_draft_refreshes_and_never_rebinds_a_changed_goal() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    initial.focused.as_mut().unwrap().goal = Some(goal.clone());
+    app.apply_snapshot(initial.clone());
+    app.composer.replace("/goal edit".to_owned());
+    app.submit_prompt();
+    app.handle_terminal_event(Event::Paste(" with my draft edit".to_owned()));
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split()
+        .1;
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("edit")
+    };
+    let effects = app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("goal changed")),
+    });
+    assert!(
+        matches!(effects.split().1.as_slice(), [ClientRequest::Snapshot(request)] if request.focused_session_id == Some(session))
+    );
+    let Some(Overlay::GoalForm(form)) = &app.overlay else {
+        panic!("draft retained")
+    };
+    assert!(form.fields[0].text.ends_with(" with my draft edit"));
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .split()
+            .1
+            .is_empty()
+    );
+    app.apply_client_update(ClientUpdate::SnapshotFailed(ClientFailure::new("offline")));
+    app.handle_terminal_event(Event::Paste(" still retained".to_owned()));
+    let requests = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split()
+        .1;
+    assert!(
+        matches!(requests.as_slice(), [ClientRequest::Snapshot(request)] if request.focused_session_id == Some(session)),
+        "Enter retries only the refresh"
+    );
+    let Some(Overlay::GoalForm(form)) = &app.overlay else {
+        panic!("retained form")
+    };
+    assert!(form.fields[0].text.ends_with(" still retained"));
+    goal.revision += 1;
+    initial.cursor.sequence += 1;
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_snapshot(initial);
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .split()
+            .1
+            .is_empty(),
+        "cannot silently retry on a fresh revision"
+    );
 }

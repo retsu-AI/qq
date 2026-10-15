@@ -3,10 +3,12 @@
 //! visible. The approval prompt is not an overlay: it is derived from session
 //! data (`App::pending_approval`) and modelled as a mode only for dispatch.
 //!
-//! Every overlay is a [`Picker`] over one item type plus whatever extra state
-//! that overlay needs. One key handler ([`Overlay::handle_key`]) moves the
+//! An overlay holds a typed [`Picker`] or the bounded goal specification form. One key handler ([`Overlay::handle_key`]) moves the
 //! cursor and edits the query for all of them; `Enter`, `Esc`, and the
 //! overlay-specific chords come back as a [`PickerOutcome`] for `App`.
+
+mod goal_form;
+pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{
@@ -230,6 +232,7 @@ pub(crate) const GOAL_CHECK_ROWS: [GoalCheckRow; 3] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
+    GoalForm(Box<GoalForm>),
     GoalCheck {
         target: GoalCheckTarget,
         picker: Picker<GoalCheckRow>,
@@ -272,6 +275,7 @@ pub(crate) enum Overlay {
 /// What currently owns keyboard input, from highest to lowest priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
+    GoalForm,
     GoalCheck,
     Models,
     Profiles,
@@ -344,6 +348,7 @@ impl Overlay {
     #[must_use]
     pub(crate) fn mode(&self) -> Mode {
         match self {
+            Self::GoalForm(_) => Mode::GoalForm,
             Self::GoalCheck { .. } => Mode::GoalCheck,
             Self::Models(_) => Mode::Models,
             Self::Profiles(_) => Mode::Profiles,
@@ -391,6 +396,7 @@ impl Overlay {
             }
         }
         match self {
+            Self::GoalForm(form) => form.handle_key(key),
             Self::GoalCheck {
                 picker, detail_row, ..
             } => match key.code {
@@ -420,6 +426,7 @@ impl Overlay {
     /// Paste into the query.
     pub(crate) fn push_query(&mut self, text: &str) -> bool {
         match self {
+            Self::GoalForm(form) => form.push_text(text),
             Self::GoalCheck { picker, .. } => picker.push_query(text),
             Self::Models(picker) => picker.push_query(text),
             Self::Profiles(picker) => picker.push_query(text),

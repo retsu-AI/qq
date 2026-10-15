@@ -22,8 +22,8 @@ mod view;
 mod viewport;
 
 pub use app::{
-    ModelOption, PendingTrustNotice, ProviderRemedy, TrustChoice, TrustFailure, TrustFuture,
-    TrustResolved, TrustResolver, TuiError, TuiOptions, run,
+    GoalDefaults, ModelOption, PendingTrustNotice, ProviderRemedy, TrustChoice, TrustFailure,
+    TrustFuture, TrustResolved, TrustResolver, TuiError, TuiOptions, run,
 };
 pub use commands::{CommandRow, command_rows, slash_names};
 pub use lazy_port::LazyPort;

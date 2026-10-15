@@ -1773,6 +1773,16 @@ check consent, progress, budgets, UTC times and bounded check diagnostics,
 including a workspace hold independent of the live goal. It opens at the top
 and preserves the visible position as diagnostics grow. Snapshot refreshes keep
 the view open, deletion closes it, and navigation submits no work.
+The goal creation/edit overlay captures the exact session, workspace and goal
+revision. Bounded cursor-aware objective/check editors and finite budget presets
+use root-translated configuration defaults, refreshed after workspace trust.
+An edit retains the existing budget until a preset is chosen; preset selection
+changes duration and run allowance while retaining other edit limits. Replacement
+identifies the previous objective and requires an explicit yes. A pending request
+owns its form by command ID; either its committed event or receipt closes it.
+Errors retain the draft and refresh state. Failed refreshes can be retried without
+a mutation, and changed identities are never silently rebound. Check consent
+remains a separate command, and stopped-goal edits do not resume work.
 Pause/resume/clear submit the observed goal identity and revision, with no
 optimistic state mutation or conflict retry. Check consent freezes the session,
 workspace, goal identity/revision and exact command in a scrollable panel.

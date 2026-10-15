@@ -345,7 +345,7 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     rule_with(left, right, width)
 }
 
-fn goal_duration(ms: u64) -> String {
+pub(super) fn goal_duration(ms: u64) -> String {
     if ms >= 3_600_000 {
         format!("{}h", ms / 3_600_000)
     } else if ms >= 60_000 {
@@ -406,7 +406,8 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
         Mode::Approval | Mode::Trust => {
             hints.push((Command::OpenHelp, "help"));
         }
-        Mode::GoalCheck
+        Mode::GoalForm
+        | Mode::GoalCheck
         | Mode::Models
         | Mode::Profiles
         | Mode::ApprovalModes

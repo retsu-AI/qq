@@ -249,6 +249,7 @@ impl FrameRenderer {
             let slot_width = slot.area.width;
             let rows = if index == app.focused_pane {
                 match mode {
+                    Mode::GoalForm => goal_form(app, slot_width, body_height),
                     Mode::GoalCheck => goal_check_picker(app, slot_width, body_height),
                     Mode::Models => model_picker(app, slot_width, body_height),
                     Mode::Profiles => profile_picker(app, slot_width, body_height),

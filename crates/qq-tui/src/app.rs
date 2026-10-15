@@ -51,8 +51,36 @@ const NOTICE_TICKS: u16 = 40;
 /// Animation ticks (125 ms) within which a second Esc cancels the active run.
 const ESC_CANCEL_TICKS: usize = 16;
 
+/// Configuration-neutral defaults and ceilings for the goal form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDefaults {
+    pub duration_ms: u64,
+    pub max_duration_ms: u64,
+    pub max_runs: u32,
+    pub default_runs: u32,
+    pub per_run: qq_protocol::RunLimits,
+    pub check_timeout_ms: u64,
+}
+
+impl Default for GoalDefaults {
+    fn default() -> Self {
+        Self {
+            duration_ms: 86_400_000,
+            max_duration_ms: 604_800_000,
+            max_runs: 2000,
+            default_runs: 200,
+            per_run: qq_protocol::RunLimits {
+                max_model_turns: Some(256),
+                ..qq_protocol::RunLimits::default()
+            },
+            check_timeout_ms: 600_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TuiOptions {
+    pub goals: GoalDefaults,
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
@@ -96,6 +124,7 @@ pub enum TrustChoice {
 /// the client skipped at startup because the configuration would not load.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustResolved {
+    pub goals: GoalDefaults,
     /// Paths now trusted, for the confirmation notice.
     pub trusted: Vec<String>,
     pub model: ModelSelection,
@@ -292,6 +321,9 @@ enum PendingIntent {
     GoalControl {
         session_id: SessionId,
     },
+    GoalSet {
+        session_id: SessionId,
+    },
     /// A side question in flight; `text` returns to the composer if the
     /// server refuses it.
     Side {
@@ -432,6 +464,7 @@ pub(crate) struct App {
     /// the frame path. Zero until the first event.
     pub(crate) now_ms: u64,
     pub(crate) goal_now_ms: u64,
+    pub(crate) goal_defaults: GoalDefaults,
     pub tool_detail: ToolDetail,
     /// Tool calls expanded individually (Enter on a selected row), on top of
     /// the global `tool_detail` toggle.
@@ -512,6 +545,7 @@ impl App {
             animation_tick: 0,
             now_ms: 0,
             goal_now_ms: 0,
+            goal_defaults: options.goals,
             tool_detail: ToolDetail::default(),
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
@@ -561,6 +595,7 @@ impl App {
     ) -> Effects {
         self.trust_resolving = false;
         self.pending_trust.clear();
+        self.goal_defaults = resolved.goals;
         self.unauthenticated_providers = resolved.unauthenticated_providers;
         // Through the catalog path so the sort, per-session context windows,
         // and an open picker are refreshed like a server catalog update.
@@ -684,6 +719,12 @@ impl App {
             }
             ClientUpdate::Event(event) => self.apply_live_event(event),
             ClientUpdate::CommandResult { command_id, result } => {
+                let failed_form = if result.is_err() {
+                    self.finish_goal_form(command_id, false)
+                } else {
+                    self.finish_goal_form(command_id, true);
+                    None
+                };
                 match result {
                     Ok(receipt) => {
                         let intent = self.pending.remove(&command_id);
@@ -862,9 +903,24 @@ impl App {
                     }
                     Err(error) => self.reject_pending(command_id, error),
                 }
-                Effects::redraw(Redraw::Scheduled)
+                let mut effects = Effects::redraw(Redraw::Scheduled);
+                if let (Some(session), Some(workspace)) = (failed_form, self.workspace_id) {
+                    effects.extend(Effects::send_now(ClientRequest::Snapshot(body_request(
+                        workspace, session,
+                    ))));
+                }
+                effects
             }
             ClientUpdate::SnapshotFailed(error) => {
+                if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                    && form.refresh == crate::input::GoalFormRefresh::Pending
+                {
+                    form.refresh = crate::input::GoalFormRefresh::Failed;
+                    form.error = Some(
+                        "Refresh failed. Enter retries the refresh; your draft is retained."
+                            .to_owned(),
+                    );
+                }
                 self.set_warning(error.message().to_owned());
                 Effects::redraw(Redraw::Scheduled)
             }
@@ -957,6 +1013,11 @@ impl App {
         }
         if let Some(focused) = snapshot.focused {
             let focused_id = focused.summary.id;
+            if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                && form.session == focused_id
+            {
+                form.refresh = crate::input::GoalFormRefresh::Ready;
+            }
             self.sessions
                 .install_session_snapshot(focused, &self.models, snapshot_sequence);
             // The body may have been fetched for a non-focused pane (the
@@ -1204,6 +1265,9 @@ impl App {
             effects.extend(self.reduce_event(&event));
         }
         if let Some(command_id) = event.caused_by {
+            if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
+                self.finish_goal_form(command_id, true);
+            }
             self.pending.remove(&command_id);
         }
         self.recent_events.push_back(event);
@@ -1338,7 +1402,8 @@ impl App {
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
-            Some(PendingIntent::GoalControl { session_id })
+            Some(PendingIntent::GoalSet { session_id })
+            | Some(PendingIntent::GoalControl { session_id })
             | Some(PendingIntent::Side { session_id, .. })
             | Some(PendingIntent::CancelSide { session_id })
             | Some(PendingIntent::Prompt { session_id, .. })
@@ -1421,7 +1486,8 @@ impl App {
             return self.execute(Command::Quit);
         }
         match self.mode() {
-            Mode::GoalCheck
+            Mode::GoalForm
+            | Mode::GoalCheck
             | Mode::Sessions
             | Mode::Models
             | Mode::Profiles
@@ -1919,6 +1985,11 @@ impl App {
             self.set_warning("secure randomness is unavailable".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
+        if matches!(&intent, PendingIntent::GoalSet { .. })
+            && let Some(Overlay::GoalForm(form)) = &mut self.overlay
+        {
+            form.sending = Some(command_id);
+        }
         self.pending.insert(command_id, intent);
         Effects::send_now(ClientRequest::Command(CommandRequest {
             command_id,
@@ -2064,13 +2135,8 @@ impl App {
                 "resume" => self.control_goal(qq_protocol::GoalControl::Resume),
                 "clear" => self.control_goal(qq_protocol::GoalControl::Clear),
                 "check" => self.open_goal_check(),
-                _ => {
-                    self.set_warning(
-                        "Use /goal, /goal pause, /goal resume, /goal clear, or /goal check."
-                            .to_owned(),
-                    );
-                    Effects::redraw(Redraw::Immediate)
-                }
+                "edit" => self.open_goal_form(None),
+                objective => self.open_goal_form(Some(objective.to_owned())),
             };
         }
         if matches!(name, "/btw" | "/ask" | "/btw-new") {
@@ -3099,6 +3165,7 @@ impl App {
                     text,
                 } if *candidate == session_id => Some(text.as_str()),
                 PendingIntent::Create
+                | PendingIntent::GoalSet { .. }
                 | PendingIntent::GoalControl { .. }
                 | PendingIntent::Prompt { .. }
                 | PendingIntent::Steer { .. }

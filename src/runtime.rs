@@ -133,6 +133,7 @@ pub struct ProviderRemedy {
 /// See [`RuntimeFactory::tui_model_state`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TuiModelState {
+    pub goals: qq_config::GoalsConfig,
     /// The configured route as a selection, or the default when none.
     pub configured_model: ModelSelection,
     /// `configured_model` when the catalog lists it, so bare `qq` can create
@@ -405,6 +406,7 @@ impl RuntimeFactory {
             None => ModelSelection::default(),
         };
         TuiModelState {
+            goals: snapshot.goals().clone(),
             configured_model,
             model,
             tui_model,

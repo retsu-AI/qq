@@ -594,6 +594,8 @@ pub const GOLDEN_SIZES: &[(u16, u16)] = &[(80, 24), (120, 40), (200, 60), (320, 
 /// the same server output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scene {
+    GoalForm,
+    GoalReplace,
     /// A durable goal waiting for renewed check consent, with progress and budgets.
     Goal,
     /// Explicit scoped consent for a frozen goal check command.
@@ -620,7 +622,9 @@ pub enum Scene {
 }
 
 impl Scene {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
+        Self::GoalForm,
+        Self::GoalReplace,
         Self::Goal,
         Self::GoalCheck,
         Self::MarkdownGallery,
@@ -637,6 +641,8 @@ impl Scene {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::GoalForm => "goal-form",
+            Self::GoalReplace => "goal-replace",
             Self::Goal => "goal",
             Self::GoalCheck => "goal-check",
             Self::MarkdownGallery => "markdown-gallery",
@@ -664,6 +670,34 @@ impl BenchHarness {
     pub fn scene_with_options(scene: Scene, size: (u16, u16), options: TuiOptions) -> Self {
         let mut harness = Self::with_options(size, 3, 0, options);
         match scene {
+            Scene::GoalForm | Scene::GoalReplace => {
+                if scene == Scene::GoalReplace {
+                    let mut goal = fixtures::goal_snapshot(session_id(0));
+                    goal.status = qq_protocol::GoalStatus::Achieved;
+                    harness.apply(0, SessionEvent::GoalUpdated { goal });
+                }
+                harness
+                    .app
+                    .composer
+                    .replace("/goal finish the migration and verify the workspace".to_owned());
+                harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )));
+                harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
+                    KeyCode::Tab,
+                    KeyModifiers::NONE,
+                )));
+                harness
+                    .app
+                    .handle_terminal_event(Event::Paste("cargo test --workspace".to_owned()));
+                if scene == Scene::GoalReplace {
+                    harness.app.handle_terminal_event(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )));
+                }
+            }
             Scene::Goal | Scene::GoalCheck => {
                 let mut goal = fixtures::goal_snapshot(session_id(0));
                 goal.status = qq_protocol::GoalStatus::Paused {

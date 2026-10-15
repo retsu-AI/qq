@@ -6196,3 +6196,35 @@ fn active_goal_keeps_countdown_updates_alive_without_a_running_session() {
         .status = qq_protocol::GoalStatus::Achieved;
     assert!(!app.has_activity());
 }
+
+#[test]
+fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
+    use crossterm::event::Event;
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    app.composer
+        .replace("/goal inspect the command before submitting".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    let exact = format!(
+        "{}\x1b[31m\nfinal-command-marker",
+        "printf 'é'; ".repeat(60)
+    );
+    app.handle_terminal_event(Event::Paste(exact.clone()));
+    for (width, height) in [(1, 1), (24, 8), (80, 20), (120, 36)] {
+        let rows = super::overlay::goal_form(&app, width, height);
+        assert_eq!(rows.len(), height);
+        assert!(rows.iter().all(|row| row.width() <= width));
+        assert!(frame_rows(&rows).iter().all(|line| !line.contains('\x1b')));
+    }
+    app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+    let rows = super::overlay::goal_form(&app, 80, 20);
+    assert!(frame_rows(&rows).join("").contains("final-command-marker"));
+    let Some(crate::input::Overlay::GoalForm(form)) = &app.overlay else {
+        panic!("form")
+    };
+    assert_eq!(form.fields[1].expanded(), exact);
+}

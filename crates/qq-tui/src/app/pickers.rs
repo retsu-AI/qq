@@ -25,6 +25,204 @@ use crate::{
 };
 
 impl App {
+    pub(super) fn open_goal_form(&mut self, objective: Option<String>) -> Effects {
+        let (Some(session), Some(workspace)) = (self.focused(), self.workspace_id) else {
+            self.set_warning("focus a connected session before setting its goal".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let Some(current) = self.sessions.get(&session) else {
+            return Effects::none();
+        };
+        if !current.is_warm() {
+            self.set_warning(
+                "goal status is loading; reopen the form after it refreshes".to_owned(),
+            );
+            return Effects::send_now(crate::ClientRequest::Snapshot(
+                qq_client::state::body_request(workspace, session),
+            ));
+        }
+        if self.pending.values().any(|intent| matches!(intent, PendingIntent::GoalSet { session_id } if *session_id == session)) {
+            self.set_warning("a goal submission is still pending".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let existing = current.goal.as_deref();
+        let reuse_check = objective.is_none();
+        if objective.is_none() && existing.is_none() {
+            self.set_warning("set a goal with /goal <objective>".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let replace = existing.is_some()
+            && (objective.is_some()
+                || existing.is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Achieved));
+        let editing = objective.is_none() && !replace;
+        let text = objective
+            .unwrap_or_else(|| existing.map_or_else(String::new, |goal| goal.objective.clone()));
+        if text.len() > 2048 {
+            self.set_warning("goal objectives are limited to 2048 bytes".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let budget = if editing {
+            existing
+                .expect("edit requires a current goal")
+                .budget
+                .clone()
+        } else {
+            qq_protocol::GoalBudget {
+                max_goal_runs: self.goal_defaults.default_runs,
+                deadline_ms: 0,
+                max_total_tokens: None,
+                max_cost_usd_nanos: None,
+                per_run: self.goal_defaults.per_run,
+            }
+        };
+        let check = if reuse_check {
+            existing.and_then(|goal| goal.check.as_ref())
+        } else {
+            None
+        };
+        let mut fields = [
+            crate::composer::Composer::default(),
+            crate::composer::Composer::default(),
+        ];
+        fields[0].replace(text);
+        fields[1].replace(check.map_or_else(String::new, |check| check.command.clone()));
+        let form = crate::input::GoalForm {
+            session,
+            workspace,
+            expected: existing.map(|goal| qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            }),
+            previous_objective: existing
+                .filter(|_| replace)
+                .map(|goal| goal.objective.clone()),
+            fields,
+            field: 0,
+            scroll: 0,
+            defaults: self.goal_defaults.clone(),
+            original_budget: budget,
+            check_timeout_ms: check.map_or(self.goal_defaults.check_timeout_ms, |check| {
+                check.timeout_ms
+            }),
+            preset: usize::from(!editing),
+            replace,
+            confirm: false,
+            sending: None,
+            refresh: crate::input::GoalFormRefresh::Ready,
+            error: None,
+        };
+        self.overlay = Some(Overlay::GoalForm(Box::new(form)));
+        self.composer.clear();
+        Effects::redraw(Redraw::Immediate)
+    }
+
+    fn accept_goal_form(&mut self) -> Effects {
+        let Some(Overlay::GoalForm(form)) = &self.overlay else {
+            return Effects::none();
+        };
+        if form.sending.is_some() || form.refresh == crate::input::GoalFormRefresh::Pending {
+            return Effects::none();
+        }
+        if form.refresh == crate::input::GoalFormRefresh::Failed {
+            let request = qq_client::state::body_request(form.workspace, form.session);
+            if let Some(Overlay::GoalForm(form)) = &mut self.overlay {
+                form.refresh = crate::input::GoalFormRefresh::Pending;
+            }
+            return Effects::send_now(crate::ClientRequest::Snapshot(request));
+        }
+        let current = self.sessions.get(&form.session);
+        let identity = current
+            .and_then(|session| session.goal.as_deref())
+            .map(|goal| qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            });
+        let valid = self.workspace_id == Some(form.workspace)
+            && current.is_some_and(|session| session.is_warm())
+            && identity == form.expected;
+        let objective = form.fields[0].expanded().trim().to_owned();
+        let check = form.fields[1].expanded();
+        let error = if !valid {
+            Some(
+                "The goal or workspace changed. Reopen /goal edit to review the current specification.",
+            )
+        } else if objective.is_empty() || objective.len() > 2048 {
+            Some("Enter an objective between 1 and 2048 bytes.")
+        } else if check.len() > 1024 || check.contains('\0') {
+            Some("The check command must contain at most 1024 bytes and no NUL.")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            let Some(Overlay::GoalForm(form)) = &mut self.overlay else {
+                return Effects::none();
+            };
+            form.error = Some(error.to_owned());
+            form.confirm = false;
+            return Effects::redraw(Redraw::Immediate);
+        }
+        if form.replace && !form.confirm {
+            let Some(Overlay::GoalForm(form)) = &mut self.overlay else {
+                return Effects::none();
+            };
+            form.confirm = true;
+            form.scroll = 0;
+            return Effects::redraw(Redraw::Immediate);
+        }
+        let now = time::OffsetDateTime::now_utc()
+            .unix_timestamp_nanos()
+            .div_euclid(1_000_000)
+            .clamp(0, i128::from(u64::MAX)) as u64;
+        let session = form.session;
+        let command = SessionCommand::SetGoal {
+            session_id: session,
+            objective,
+            check: if check.trim().is_empty() {
+                None
+            } else {
+                Some(qq_protocol::GoalCheck {
+                    command: check,
+                    timeout_ms: form.check_timeout_ms,
+                })
+            },
+            budget: Box::new(form.budget(now)),
+            expected: form.expected,
+            replace: form.replace,
+        };
+        self.send(
+            PendingIntent::GoalSet {
+                session_id: session,
+            },
+            command,
+        )
+    }
+
+    /// A receipt may follow its live event; only this form's exact request owns it.
+    pub(super) fn finish_goal_form(
+        &mut self,
+        command: qq_protocol::CommandId,
+        success: bool,
+    ) -> Option<qq_protocol::SessionId> {
+        let Some(Overlay::GoalForm(form)) = &mut self.overlay else {
+            return None;
+        };
+        if form.sending != Some(command) {
+            return None;
+        }
+        let session = form.session;
+        if success {
+            self.overlay = None;
+        } else {
+            form.sending = None;
+            form.refresh = crate::input::GoalFormRefresh::Pending;
+            form.confirm = false;
+            form.error = Some(
+                "Submission failed; draft retained. Refreshing the goal before another attempt."
+                    .to_owned(),
+            );
+        }
+        Some(session)
+    }
     pub(super) fn control_goal(&mut self, action: qq_protocol::GoalControl) -> Effects {
         let Some(session_id) = self.focused() else {
             self.set_warning("focus a session before controlling its goal".to_owned());
@@ -200,6 +398,7 @@ impl App {
                 self.overlay = None;
                 Effects::redraw(Redraw::Immediate)
             }
+            (PickerOutcome::Accept, Overlay::GoalForm(_)) => self.accept_goal_form(),
             (PickerOutcome::Accept, Overlay::GoalCheck { target, picker, .. }) => {
                 let Some(scope) = picker.current().map(|row| row.scope) else {
                     return Effects::none();
