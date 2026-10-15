@@ -193,3 +193,24 @@
   times out in the suite and takes 25.67s alone, near its unchanged 30s bound.
   Prepare deterministic/cheaper test fixtures; do not bypass the hook, increase
   timeouts, ignore cases or change production runtime behavior.
+
+## 2026-10-15 — deterministic, cheaper delegation fixture setup
+
+- Preserve both tests' compaction, exact-spend, receipt ordering, unknown-spend
+  and subsequent-usability assertions. Use 24 turns at two bytes/token instead
+  of 48 at four bytes/token, still crossing the same 16 KiB window.
+- Freeze the deadline until summary/hook/store readiness, then advance past the
+  existing five seconds. A bounded-channel real-time watchdog limits frozen
+  preparation to 30s; resume Tokio time before the existing drop-entry wait.
+  Replace the fixed readiness sleep with yield and lower sleep ceiling 77 → 76.
+- Focused full-workspace cases pass 2/2; stress passes 20/20 iterations (40 test
+  executions, 63.966s); minimal-core profile passes 2/2. A temporary missing-summary
+  mutation fails through the watchdog in 30.230s, then is restored. Independent
+  review approves the saved/restored version; no production runtime changes.
+- Historical `25dff5af` H0 artifact11952367323 (SHA256
+  `6e94f4b19d8172d2844616eb2ab742afb17e2ef74d060bc134b8b4ec6c662c31`)
+  passes sizes 44,849,176/40,778,584 and all 25 correctness checks per arm.
+  Replay median is +1.38% versus baseline (control −2.46% versus candidate),
+  replacing the prior 45–64% regression. Three A/B and two A/A tail checks
+  still fail; load medians are within 1%, with candidate tails returning near
+  baseline in control. Retain failures; current-head qualification is still open.
