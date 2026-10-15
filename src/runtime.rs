@@ -3872,19 +3872,33 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
             };
         }
     }
+    let provenance = typesafe_checkpoint_provenance(value);
     CheckpointVerdict {
         spend,
         outcome,
         confidence: Some(minimum_confidence),
         feedback: if findings.is_empty() {
-            "Jev criteria-2026-09-18.1: supplied evidence supports task_coverage, direct_evidence and consistency; this is not proof of correctness".to_owned()
+            format!(
+                "Jev criteria-2026-10-15.1: supplied evidence supports task_coverage, direct_evidence and consistency; this is not proof of correctness{provenance}"
+            )
         } else {
             format!(
-                "Jev criteria-2026-09-18.1: {}. Next: correct conflicting claims or gather direct evidence for these criterion IDs; omitted observations are not proof. Low-confidence choices count as insufficient evidence.",
+                "Jev criteria-2026-10-15.1: {}. Next: correct conflicting claims or gather direct evidence for these criterion IDs; omitted observations are not proof. Low-confidence choices count as insufficient evidence{provenance}.",
                 findings.join("; ")
             )
         },
     }
+}
+
+fn typesafe_checkpoint_provenance(value: &serde_json::Value) -> String {
+    let model = value["model"].as_str().unwrap_or("unknown");
+    let request_id = value["id"]
+        .as_str()
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 128 && id.chars().all(|character| !character.is_control())
+        })
+        .unwrap_or("unknown");
+    format!(" [provider_model={model}; provider_request_id={request_id}]")
 }
 
 #[derive(Debug, Error)]
@@ -9901,6 +9915,7 @@ mod tests {
     fn typesafe_checkpoint_requires_the_pinned_complete_distribution() {
         let mut valid = serde_json::json!({
             "model": "jev-1.13.0",
+            "id": "jev-checkpoint-42",
             "answers": { "support": {
                 "type": "choice", "choice": "supported", "confidence": 0.8,
                 "probabilities": {
@@ -9921,6 +9936,11 @@ mod tests {
         assert!(verdict.feedback.contains("direct_evidence"));
         assert_eq!(verdict.spend.usage.unwrap().input_tokens, 10);
         assert_eq!(verdict.spend.estimated_cost_usd_nanos, Some(420));
+        assert!(
+            verdict
+                .feedback
+                .contains("provider_model=jev-1.13.0; provider_request_id=jev-checkpoint-42")
+        );
         let mut conflicting = valid.clone();
         conflicting["answers"]["consistency"]["choice"] = serde_json::json!("contradicted");
         conflicting["answers"]["consistency"]["probabilities"] = serde_json::json!({

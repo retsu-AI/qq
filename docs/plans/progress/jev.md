@@ -97,3 +97,24 @@ its qualification procedure to § Qualification procedure.
   `git diff --check` is clean. The website build was not run because
   `website/node_modules` is incomplete (`html-escaper` missing after
   `nub install`).
+
+### 2026-10-15 — QQ protocol sync (ENG791)
+
+- Synced the shared Jev contract and conformance fixtures into QQ and routed
+  approval, checkpoint and advisory parsing through the shared production
+  boundary. The default is the exact pinned `jev-1.13.0`; `jev-1.14.0`,
+  `jev-latest` and `jev-preview` are accepted, with aliases retaining the
+  provider's returned version in evidence. Per-field nullable usage remains
+  unknown and is never priced; malformed, missing or negative values reject
+  the response. The explicit long-context header is sent only for
+  `JEV_LONG_CONTEXT=true`.
+- Successful approval receipts retain the returned Jev model and optional
+  response ID in additive `tool_approval_resolved` fields. Checkpoint and
+  passive advisory feedback now retain bounded `provider_model` and
+  `provider_request_id` provenance; an absent ID remains `unknown`.
+- Focused evidence on Rust 1.97.1: protocol wire golden, all 50
+  `qq-protocol` library tests, Jev approval parsing, and checkpoint parsing
+  passed. The repository QQ gate passed formatting, lint (76/76 sleep
+  entries), and clippy. The full nextest stage remains environment-limited by
+  SQLite `CannotOpen` fixtures and macOS `/var` versus `/private/var`
+  canonicalization; no provider authentication or live Jev request was used.
