@@ -1736,6 +1736,9 @@ The absolute goal deadline remains the upper bound and wins exhaustion.
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the
 old run's pending guard and keeps the goal active and its allowance unspent.
+A preempted check also retains its achievement evidence, pending audit and
+unconsumed consent. After the prompt settles, verification queues a fresh check
+instead of retaining the cancelled check's reservation.
 An ordinary edit likewise invalidates only unclaimed autonomous work. A recovered
 user prompt keeps its accepted task and frozen goal binding; pause, clear and
 replacement still cancel its paid obligations.

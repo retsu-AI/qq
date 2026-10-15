@@ -1415,6 +1415,10 @@ async fn goal_check_queued_prompt_preemption_preserves_audit_and_executes_one_re
         );
         let retained = preempted.goal.as_ref().unwrap();
         assert!(retained.audit_pending);
+        assert!(
+            retained.pending_run_id.is_none(),
+            "the cancelled check must release its own pending pointer"
+        );
         assert_eq!(retained.achievement_claim, goal.achievement_claim);
         assert_eq!(retained.check_authorization, goal.check_authorization);
         assert_eq!(retained.counters, goal.counters);

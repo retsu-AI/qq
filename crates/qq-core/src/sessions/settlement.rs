@@ -574,6 +574,21 @@ pub(super) fn finish_queued_run_with_outcome(
     let summary = load_session_summary(transaction, session_id)?;
     let context = EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now);
     let mut events = Vec::new();
+    if let Some(qq_protocol::RunOrigin::GoalCheck { goal_id, .. }) = &origin
+        && let Some(mut goal) = goals::load_live(transaction, session_id)?
+        && goal.goal_id == *goal_id
+        && goal.pending_run_id == Some(run_id)
+    {
+        goal.pending_run_id = None;
+        goals::save(transaction, &goal)?;
+        events.push(append_event(
+            transaction,
+            context,
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
+    }
     for goal in goals::finalize_spend(transaction, session_id, run_id)? {
         let goal_context = if goal.session_id == session_id {
             context
