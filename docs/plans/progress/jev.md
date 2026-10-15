@@ -112,9 +112,13 @@ its qualification procedure to § Qualification procedure.
   response ID in additive `tool_approval_resolved` fields. Checkpoint and
   passive advisory feedback now retain bounded `provider_model` and
   `provider_request_id` provenance; an absent ID remains `unknown`.
-- Focused evidence on Rust 1.97.1: protocol wire golden, all 50
-  `qq-protocol` library tests, Jev approval parsing, and checkpoint parsing
-  passed. The repository QQ gate passed formatting, lint (76/76 sleep
-  entries), and clippy. The full nextest stage remains environment-limited by
-  SQLite `CannotOpen` fixtures and macOS `/var` versus `/private/var`
-  canonicalization; no provider authentication or live Jev request was used.
+- Final evidence on Rust 1.97.1 with canonical `TMPDIR=/private/tmp`:
+  18 Jev-focused tests and all 57 protocol tests passed, as did the targeted
+  durable Jev approval fixture. The repository gate passed formatting,
+  lint (76/76 sleep entries), and Clippy. Full nextest: 2,058 passed,
+  six failed, and 12 skipped. The six failures are unchanged long-path
+  fixtures exceeding macOS path limits (`ENAMETOOLONG`); the full gate is
+  therefore not green. Canonical temporary paths resolved the earlier
+  SQLite/symlink failures. Tests unset the inherited `TYPESAFE_API_KEY`
+  for fixture isolation; no stored credential, provider authentication,
+  live Jev request or QQ installation was changed.
