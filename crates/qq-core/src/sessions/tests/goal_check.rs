@@ -1076,3 +1076,214 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     );
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before_spawn() {
+    const COMMAND: &str = "printf executed >> original-check";
+    struct HeldPolicy {
+        calls: AtomicUsize,
+        deny: bool,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl WorkspaceGrantAuthority for HeldPolicy {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("not an ordinary grant")
+        }
+        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+            assert_eq!(command, COMMAND);
+            let execution = self.calls.fetch_add(1, Ordering::SeqCst) == 1;
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            let deny = self.deny;
+            Box::pin(async move {
+                if execution {
+                    entered.notify_one();
+                    release.notified().await;
+                    if deny {
+                        return Err(GoalCheckPolicyError::ManagedDenied);
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+    for mode in ["managed", "edit", "replace", "clear"] {
+        let directory = TempDir::new().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.grant_authority = Some(Arc::new(HeldPolicy {
+            calls: AtomicUsize::new(0),
+            deny: mode == "managed",
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(Loader {
+                failure_tail: false,
+                loads: Arc::new(AtomicUsize::new(0)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("session")
+        };
+        let receipt = runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"old objective",
+            "check":{"command":COMMAND,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal")
+        };
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    action: qq_protocol::GoalControl::ApproveCheck {
+                        scope: qq_protocol::GoalCheckScope::Once,
+                        command: COMMAND.to_owned(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal: approved, .. } = receipt.outcome else {
+            panic!("approved goal")
+        };
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        let before = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        let check_id = before
+            .runs
+            .iter()
+            .find(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+            .unwrap()
+            .id;
+        if mode != "managed" {
+            let expected =
+                serde_json::json!({"goal_id":approved.goal_id,"revision":approved.revision});
+            let command = if mode == "clear" {
+                serde_json::json!({"type":"goal_control","session_id":session_id,"expected":expected,"action":{"type":"clear"}})
+            } else {
+                serde_json::json!({"type":"set_goal","session_id":session_id,"expected":expected,"replace":mode=="replace","objective":"new objective",
+                    "check":{"command":"printf forbidden >> replacement-check","timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})
+            };
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    serde_json::from_value(command).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let SessionEvent::RunFinished { run_id, .. } =
+                    events.next().await.unwrap().unwrap().event
+                    && run_id == check_id
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await.unwrap();
+        let after = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert!(
+            !directory.path().join("original-check").exists(),
+            "{mode}: stale/denied check executed"
+        );
+        assert!(!directory.path().join("replacement-check").exists());
+        assert_eq!(after.runs.len(), 2);
+        assert!(after.runs.iter().all(|run| run.outcome.is_some()));
+        assert!(
+            after
+                .messages
+                .iter()
+                .any(|message| message.run_id == check_id && !message.output.is_empty())
+        );
+        if mode == "clear" {
+            assert!(after.goal.is_none());
+        } else {
+            let goal = after.goal.unwrap();
+            assert_eq!(goal.counters.audits, 0);
+            assert_eq!(goal.counters.check_failures, 0);
+            assert!(goal.pending_run_id.is_none());
+            if mode == "managed" {
+                assert!(matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Configuration { .. }
+                        }
+                    }
+                ));
+                assert_eq!(
+                    goal.check_authorization,
+                    Some(qq_protocol::GoalCheckAuthorization::Once)
+                );
+                assert!(goal.audit_pending);
+            } else {
+                assert_eq!(goal.objective, "new objective");
+                assert_eq!(
+                    goal.check_authorization,
+                    Some(qq_protocol::GoalCheckAuthorization::Pending)
+                );
+                assert!(!goal.audit_pending);
+                assert!(goal.achievement_claim.is_none());
+                assert!(matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::CheckApproval
+                        }
+                    }
+                ));
+            }
+        }
+    }
+}
