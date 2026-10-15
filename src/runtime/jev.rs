@@ -10,13 +10,13 @@ pub(super) const LONG_CONTEXT_HEADER: &str = "TypeSafe-Danger-Zone-Long-Context"
 const INPUT_NANOS_PER_TOKEN: u64 = 42;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ModelRequest {
-    pub requested: String,
-    pub resolved: Option<String>,
+pub(crate) struct ModelRequest {
+    pub(crate) requested: String,
+    pub(crate) resolved: Option<String>,
 }
 
 impl ModelRequest {
-    pub(super) fn from_environment() -> Self {
+    pub(crate) fn from_environment() -> Self {
         let requested = std::env::var("JEV_MODEL")
             .ok()
             .filter(|model| accepted_model(model))
@@ -27,7 +27,7 @@ impl ModelRequest {
         }
     }
 
-    pub(super) fn matches_response(&self, response: Option<&str>) -> bool {
+    pub(crate) fn matches_response(&self, response: Option<&str>) -> bool {
         match (&self.requested[..], response) {
             ("jev-latest" | "jev-preview", Some(model)) => versioned_model(model).is_some(),
             (requested, Some(model)) => requested == model,
@@ -50,29 +50,56 @@ pub(super) fn versioned_model(model: &str) -> Option<String> {
     }
 }
 
-fn nullable_u64(value: &serde_json::Value) -> Option<u64> {
-    value.as_u64()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JevUsage {
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
 }
 
-pub(super) fn usage(value: &serde_json::Value) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input_tokens: nullable_u64(&value["usage"]["input_tokens"])?,
-        output_tokens: nullable_u64(&value["usage"]["output_tokens"])?,
-        ..TokenUsage::default()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JevUsageError;
+
+fn nullable_count(
+    usage: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<Option<u64>, JevUsageError> {
+    let value = usage.get(name).ok_or(JevUsageError)?;
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value.as_u64().map(Some).ok_or(JevUsageError)
+    }
+}
+
+pub(crate) fn usage(value: &serde_json::Value) -> Result<JevUsage, JevUsageError> {
+    let usage = value["usage"].as_object().ok_or(JevUsageError)?;
+    Ok(JevUsage {
+        input_tokens: nullable_count(usage, "input_tokens")?,
+        output_tokens: nullable_count(usage, "output_tokens")?,
     })
 }
 
-pub(super) fn spend(value: &serde_json::Value, model: &ModelRequest) -> CheckpointSpend {
-    let parsed_usage = usage(value);
-    let input_tokens = nullable_u64(&value["usage"]["input_tokens"]);
-    CheckpointSpend {
-        usage: parsed_usage,
+pub(crate) fn spend(
+    value: &serde_json::Value,
+    model: &ModelRequest,
+) -> Result<CheckpointSpend, JevUsageError> {
+    let parsed_usage = usage(value)?;
+    let input_tokens = parsed_usage.input_tokens;
+    Ok(CheckpointSpend {
+        usage: match (parsed_usage.input_tokens, parsed_usage.output_tokens) {
+            (Some(input_tokens), Some(output_tokens)) => Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                ..TokenUsage::default()
+            }),
+            _ => None,
+        },
         estimated_cost_usd_nanos: model
             .matches_response(value["model"].as_str())
             .then_some(input_tokens)
             .flatten()
             .and_then(|tokens| tokens.checked_mul(INPUT_NANOS_PER_TOKEN)),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -107,8 +134,11 @@ mod tests {
             requested: "jev-1.13.0".into(),
             resolved: Some("jev-1.13.0".into()),
         };
-        assert!(usage(&value).is_none());
-        assert_eq!(spend(&value, &model).estimated_cost_usd_nanos, Some(4_200));
+        assert_eq!(usage(&value).unwrap().output_tokens, None);
+        assert_eq!(
+            spend(&value, &model).unwrap().estimated_cost_usd_nanos,
+            Some(4_200)
+        );
     }
 
     #[test]
@@ -121,7 +151,10 @@ mod tests {
             requested: "jev-preview".into(),
             resolved: Some("jev-1.14.0".into()),
         };
-        assert_eq!(spend(&value, &model).estimated_cost_usd_nanos, None);
+        assert_eq!(
+            spend(&value, &model).unwrap().estimated_cost_usd_nanos,
+            None
+        );
     }
 
     #[test]

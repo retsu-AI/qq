@@ -4,7 +4,7 @@
 use super::*;
 use qq_core::DelegateIdentity;
 
-pub(super) const JEV_APPROVAL_IDENTITY: &str = "typesafe/jev-1.13.0/approval-2026-09-23.1";
+pub(super) const JEV_APPROVAL_IDENTITY: &str = "typesafe/jev/approval-2026-10-15.1";
 /// Jev's own clock, shorter than the model reviewer's 10 s: the request is
 /// one bounded question over a small preview, and a stuck call must not eat
 /// the human's wait that follows an escalation.
@@ -335,7 +335,15 @@ async fn ask_jev(
 /// probability, and both confidence and that probability clear
 /// `JEV_MIN_CONFIDENCE`. Anything else is an abstention, never an approval.
 fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Value) -> JevAnswer {
-    let spend = super::jev::spend(value, model);
+    let spend = match super::jev::spend(value, model) {
+        Ok(spend) => spend,
+        Err(_) => {
+            return JevAnswer {
+                decision: Err(JevAbstain::Malformed),
+                spend: qq_core::ReviewSpend::default(),
+            };
+        }
+    };
     let usage = spend.usage;
     let spend = qq_core::ReviewSpend {
         usage,
@@ -496,6 +504,39 @@ mod tests {
                 parse_jev_approval(&model(), &value).decision,
                 Err(JevAbstain::Malformed),
                 "{pointer}"
+            );
+        }
+        for (field, value) in [
+            ("input_tokens", serde_json::json!(-1)),
+            ("output_tokens", serde_json::json!("2")),
+        ] {
+            let mut malformed = response("approve", 0.9);
+            malformed["usage"][field] = value;
+            assert_eq!(
+                parse_jev_approval(&model(), &malformed).decision,
+                Err(JevAbstain::Malformed),
+                "{field}"
+            );
+        }
+        let mut missing_usage = response("approve", 0.9);
+        missing_usage["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_tokens");
+        assert_eq!(
+            parse_jev_approval(&model(), &missing_usage).decision,
+            Err(JevAbstain::Malformed)
+        );
+        for field in ["input_tokens", "output_tokens"] {
+            let mut nullable = response("approve", 0.9);
+            nullable["usage"][field] = serde_json::Value::Null;
+            assert_eq!(
+                parse_jev_approval(&model(), &nullable).decision,
+                Ok(ReviewDecision::Approve)
+            );
+            assert_eq!(
+                parse_jev_approval(&model(), &nullable).spend.cost_usd_nanos,
+                (field != "input_tokens").then_some(4200)
             );
         }
         let mut wrong_model = response("approve", 0.9);

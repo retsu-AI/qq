@@ -4,7 +4,7 @@ use super::*;
 use qq_core::{TaskRouter, TaskRoutingFuture};
 use qq_protocol::{RoutingDecision, RoutingOutcome};
 
-pub(super) const ROUTER_IDENTITY: &str = "typesafe/jev-1.13.0/routing-2026-09-18.1";
+pub(super) const ROUTER_IDENTITY: &str = "typesafe/jev/routing-2026-10-15.1";
 const MAX_CANDIDATES: usize = 32;
 
 #[derive(Clone, serde::Serialize)]
@@ -138,7 +138,15 @@ impl TypeSafeTaskRouter {
     }
 
     fn parse(&self, value: &serde_json::Value) -> RoutingDecision {
-        let spend = jev::spend(value, &self.model);
+        let spend = match jev::spend(value, &self.model) {
+            Ok(spend) => spend,
+            Err(_) => {
+                return self.fallback(
+                    "routing response failed the usage contract",
+                    Default::default(),
+                );
+            }
+        };
         let invalid = || self.fallback("routing response failed the pinned contract", spend);
         let answer = &value["answers"]["route"];
         if !self.model.matches_response(value["model"].as_str()) || answer["type"] != "choice" {
@@ -299,7 +307,7 @@ pub(super) async fn typesafe_evaluate(
 ) -> Result<serde_json::Value, TypeSafeRequestError> {
     let mut request = client.post(endpoint);
     if std::env::var("JEV_LONG_CONTEXT").ok().as_deref() == Some("1") {
-        request = request.header(jev::LONG_CONTEXT_HEADER, "1");
+        request = request.header(jev::LONG_CONTEXT_HEADER, "true");
     }
     let mut response = match request.json(body).send().await {
         Ok(response) if response.status().is_success() => response,
@@ -401,6 +409,28 @@ mod tests {
         let mut missing_usage = response();
         missing_usage.as_object_mut().unwrap().remove("usage");
         assert_eq!(router.parse(&missing_usage).usage, None);
+        for (field, value) in [
+            ("input_tokens", serde_json::json!(-1)),
+            ("output_tokens", serde_json::json!("2")),
+        ] {
+            let mut malformed = response();
+            malformed["usage"][field] = value;
+            assert_eq!(
+                router.parse(&malformed).outcome,
+                RoutingOutcome::Fallback,
+                "{field}"
+            );
+        }
+        for field in ["input_tokens", "output_tokens"] {
+            let mut nullable = response();
+            nullable["usage"][field] = serde_json::Value::Null;
+            let decision = router.parse(&nullable);
+            assert_eq!(decision.outcome, RoutingOutcome::Selected);
+            assert_eq!(
+                decision.estimated_cost_usd_nanos,
+                (field != "input_tokens").then_some(4200)
+            );
+        }
     }
 
     #[tokio::test]

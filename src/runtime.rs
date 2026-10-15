@@ -2540,10 +2540,10 @@ impl RuntimeLoader for RuntimeFactory {
                         qq_core::CheckpointSelection::Disabled => qq_config::JevReviewMode::Off,
                         qq_core::CheckpointSelection::ReviewerIdentity(identity) => {
                             match identity.as_str() {
-                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/final" => {
+                                "typesafe/jev/criteria-2026-10-15.1/final" => {
                                     qq_config::JevReviewMode::Final
                                 }
-                                "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce" => {
+                                "typesafe/jev/criteria-2026-10-15.1/enforce" => {
                                     qq_config::JevReviewMode::Enforce
                                 }
                                 _ => {
@@ -3687,10 +3687,8 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
 
     fn identity(&self) -> &'static str {
         match self.mode {
-            qq_config::JevReviewMode::Final => "typesafe/jev-1.13.0/criteria-2026-09-18.1/final",
-            qq_config::JevReviewMode::Enforce => {
-                "typesafe/jev-1.13.0/criteria-2026-09-18.1/enforce"
-            }
+            qq_config::JevReviewMode::Final => "typesafe/jev/criteria-2026-10-15.1/final",
+            qq_config::JevReviewMode::Enforce => "typesafe/jev/criteria-2026-10-15.1/enforce",
             qq_config::JevReviewMode::Off => unreachable!("disabled reviewers are not constructed"),
         }
     }
@@ -3745,7 +3743,7 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                     }
                 },
                 "questions": questions,
-                "model": "jev-1.13.0"
+                "model": crate::runtime::jev::ModelRequest::from_environment().requested
             });
             let value = match routing::typesafe_evaluate(&client, &endpoint, &body).await {
                 Ok(value) => value,
@@ -3778,19 +3776,10 @@ fn checkpoint_claim_and_instructions(tool_phase: bool) -> (&'static str, &'stati
 }
 
 fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
-    let usage = value["usage"]["input_tokens"]
-        .as_u64()
-        .zip(value["usage"]["output_tokens"].as_u64())
-        .map(|(input_tokens, output_tokens)| qq_protocol::TokenUsage {
-            input_tokens,
-            output_tokens,
-            ..qq_protocol::TokenUsage::default()
-        });
-    let spend = qq_protocol::CheckpointSpend {
-        usage,
-        estimated_cost_usd_nanos: usage
-            .filter(|_| value["model"].as_str() == Some("jev-1.13.0"))
-            .and_then(|usage| usage.input_tokens.checked_mul(42)),
+    let model = crate::runtime::jev::ModelRequest::from_environment();
+    let spend = match crate::runtime::jev::spend(value, &model) {
+        Ok(spend) => spend,
+        Err(_) => qq_protocol::CheckpointSpend::default(),
     };
     let unavailable = || CheckpointVerdict {
         spend,
@@ -3798,7 +3787,9 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
         confidence: None,
         feedback: "TypeSafe returned a checkpoint response outside the pinned contract".to_owned(),
     };
-    if value["model"].as_str() != Some("jev-1.13.0") || usage.is_none() {
+    if !model.matches_response(value["model"].as_str())
+        || crate::runtime::jev::spend(value, &model).is_err()
+    {
         return unavailable();
     }
     let mut outcome = CheckpointOutcome::Supported;
@@ -9941,11 +9932,24 @@ mod tests {
             parse_typesafe_checkpoint(&valid).outcome,
             CheckpointOutcome::Supported
         );
+        for field in ["input_tokens", "output_tokens"] {
+            let mut nullable = valid.clone();
+            nullable["usage"][field] = serde_json::Value::Null;
+            let nullable_verdict = parse_typesafe_checkpoint(&nullable);
+            assert_eq!(nullable_verdict.outcome, CheckpointOutcome::Supported);
+            assert_eq!(
+                nullable_verdict.spend.estimated_cost_usd_nanos,
+                (field != "input_tokens").then_some(420)
+            );
+        }
 
         for invalid in [
             serde_json::json!({"model":"other","answers":valid["answers"].clone()}),
             serde_json::json!({"model":"jev-1.13.0","answers":{"support":{"type":"choice","choice":"supported","confidence":1.0,"probabilities":{"supported":1.0}}}}),
             serde_json::json!({"model":"jev-1.13.0","answers":{"support":{"type":"choice","choice":"supported","confidence":1.2,"probabilities":{"supported":1.0,"partially_supported":0.0,"contradicted":0.0,"insufficient_evidence":0.0}}}}),
+            serde_json::json!({"model":"jev-1.13.0","usage":{"input_tokens":-1,"output_tokens":2},"answers":valid["answers"].clone()}),
+            serde_json::json!({"model":"jev-1.13.0","usage":{"input_tokens":"10","output_tokens":2},"answers":valid["answers"].clone()}),
+            serde_json::json!({"model":"jev-1.13.0","usage":{"output_tokens":2},"answers":valid["answers"].clone()}),
         ] {
             assert_eq!(
                 parse_typesafe_checkpoint(&invalid).outcome,
