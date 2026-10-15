@@ -342,11 +342,68 @@ pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize
         .collect()
 }
 
-pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
+pub(super) fn goal_status(status: &qq_protocol::GoalStatus) -> (String, Style) {
     use qq_protocol::{
-        GoalBlockedReason, GoalCheckAuthorization, GoalChecklistState, GoalExhaustion,
-        GoalNeedsUser, GoalPauseReason, GoalStatus,
+        GoalBlockedReason, GoalExhaustion, GoalNeedsUser, GoalPauseReason, GoalStatus,
     };
+    match status {
+        GoalStatus::Active => ("active".to_owned(), accent()),
+        GoalStatus::Achieved => ("achieved".to_owned(), success()),
+        GoalStatus::Paused { reason } => (
+            match reason {
+                GoalPauseReason::User => "paused by you".to_owned(),
+                GoalPauseReason::NeedsUser { cause } => match cause {
+                    GoalNeedsUser::CheckApproval => "check consent required".to_owned(),
+                    GoalNeedsUser::CheckInterrupted => {
+                        "check interrupted; uncertain effects need acknowledgment".to_owned()
+                    }
+                    GoalNeedsUser::Approval { tool_call_id } => {
+                        format!("tool approval required: {tool_call_id}")
+                    }
+                    GoalNeedsUser::Authentication { message } => {
+                        format!("authentication required: {message}")
+                    }
+                    GoalNeedsUser::Configuration { message } => {
+                        format!("configuration needs attention: {message}")
+                    }
+                    GoalNeedsUser::Credentials { message } => {
+                        format!("credentials required: {message}")
+                    }
+                },
+            },
+            warning(),
+        ),
+        GoalStatus::Blocked { reason } => (
+            match reason {
+                GoalBlockedReason::Model { reason } => format!("blocked: {reason}"),
+                GoalBlockedReason::NoProgress => "blocked: no progress".to_owned(),
+                GoalBlockedReason::RepeatedFailure => "blocked: repeated failures".to_owned(),
+                GoalBlockedReason::CheckFailing => "blocked: three failed checks".to_owned(),
+                GoalBlockedReason::AuditExhausted => {
+                    "blocked: verification allowance exhausted".to_owned()
+                }
+            },
+            failure(),
+        ),
+        GoalStatus::BudgetExhausted { reason } => (
+            format!(
+                "budget exhausted: {}",
+                match reason {
+                    GoalExhaustion::Runs => "run cap",
+                    GoalExhaustion::Tokens => "token cap",
+                    GoalExhaustion::Cost => "cost cap",
+                    GoalExhaustion::Deadline => "deadline",
+                    GoalExhaustion::TokensUnknown => "token usage unknown",
+                    GoalExhaustion::CostUnknown => "cost unknown",
+                }
+            ),
+            warning(),
+        ),
+    }
+}
+
+pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
+    use qq_protocol::{GoalCheckAuthorization, GoalChecklistState, GoalStatus};
     let mut rows = vec![
         section("GOAL", "Esc returns to the transcript"),
         Line::default(),
@@ -358,60 +415,7 @@ pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<L
     let session = app.sessions.get(&session_id);
     let goal = session.and_then(|view| view.goal.as_deref());
     if let Some(goal) = goal {
-        let (label, style) = match &goal.status {
-            GoalStatus::Active => ("active".to_owned(), accent()),
-            GoalStatus::Achieved => ("achieved".to_owned(), success()),
-            GoalStatus::Paused { reason } => (
-                match reason {
-                    GoalPauseReason::User => "paused by you".to_owned(),
-                    GoalPauseReason::NeedsUser { cause } => match cause {
-                        GoalNeedsUser::CheckApproval => "check consent required".to_owned(),
-                        GoalNeedsUser::CheckInterrupted => {
-                            "check interrupted; uncertain effects need acknowledgment".to_owned()
-                        }
-                        GoalNeedsUser::Approval { tool_call_id } => {
-                            format!("tool approval required: {tool_call_id}")
-                        }
-                        GoalNeedsUser::Authentication { message } => {
-                            format!("authentication required: {message}")
-                        }
-                        GoalNeedsUser::Configuration { message } => {
-                            format!("configuration needs attention: {message}")
-                        }
-                        GoalNeedsUser::Credentials { message } => {
-                            format!("credentials required: {message}")
-                        }
-                    },
-                },
-                warning(),
-            ),
-            GoalStatus::Blocked { reason } => (
-                match reason {
-                    GoalBlockedReason::Model { reason } => format!("blocked: {reason}"),
-                    GoalBlockedReason::NoProgress => "blocked: no progress".to_owned(),
-                    GoalBlockedReason::RepeatedFailure => "blocked: repeated failures".to_owned(),
-                    GoalBlockedReason::CheckFailing => "blocked: three failed checks".to_owned(),
-                    GoalBlockedReason::AuditExhausted => {
-                        "blocked: verification allowance exhausted".to_owned()
-                    }
-                },
-                failure(),
-            ),
-            GoalStatus::BudgetExhausted { reason } => (
-                format!(
-                    "budget exhausted: {}",
-                    match reason {
-                        GoalExhaustion::Runs => "run cap",
-                        GoalExhaustion::Tokens => "token cap",
-                        GoalExhaustion::Cost => "cost cap",
-                        GoalExhaustion::Deadline => "deadline",
-                        GoalExhaustion::TokensUnknown => "token usage unknown",
-                        GoalExhaustion::CostUnknown => "cost unknown",
-                    }
-                ),
-                warning(),
-            ),
-        };
+        let (label, style) = goal_status(&goal.status);
         rows.push(Line::styled(label, style.bold()));
         rows.push(Line::styled(&goal.objective, normal().bold()));
         rows.push(Line::default());

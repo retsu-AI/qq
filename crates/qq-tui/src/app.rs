@@ -431,6 +431,7 @@ pub(crate) struct App {
     /// so running rows show a live elapsed time without a system clock in
     /// the frame path. Zero until the first event.
     pub(crate) now_ms: u64,
+    pub(crate) goal_now_ms: u64,
     pub tool_detail: ToolDetail,
     /// Tool calls expanded individually (Enter on a selected row), on top of
     /// the global `tool_detail` toggle.
@@ -510,6 +511,7 @@ impl App {
             status_ticks_left: 0,
             animation_tick: 0,
             now_ms: 0,
+            goal_now_ms: 0,
             tool_detail: ToolDetail::default(),
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
@@ -3055,11 +3057,28 @@ impl App {
             .sessions
             .values()
             .any(|session| matches!(session.summary.status, qq_protocol::SessionStatus::Running));
-        self.expire_status() || active
+        self.expire_status()
+            || active
+            || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
+    }
+
+    fn has_active_goal(&self) -> bool {
+        self.focused()
+            .and_then(|id| self.sessions.get(&id))
+            .and_then(|session| session.goal.as_deref())
+            .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active)
+    }
+
+    pub(crate) fn refresh_goal_clock(&mut self) {
+        if self.has_active_goal() {
+            let ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+            self.goal_now_ms = ms.clamp(0, i128::from(u64::MAX)) as u64;
+        }
     }
 
     pub fn has_activity(&self) -> bool {
-        self.status.is_some()
+        self.has_active_goal()
+            || self.status.is_some()
             || self.sessions.values().any(|session| {
                 matches!(session.summary.status, qq_protocol::SessionStatus::Running)
             })

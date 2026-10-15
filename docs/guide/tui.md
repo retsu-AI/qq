@@ -230,6 +230,11 @@ and last check output. Unknown usage and cost remain labelled unknown. Check
 consent distinguishes one execution, repeated checks for this goal, and a used
 one-shot grant that needs renewed consent.
 
+The composer status line keeps the goal's run allowance, time left and next
+wake visible while active, and shows the reason when it stops. After a user
+pause, it shows cancellation draining until the pending run settles, then
+`/goal resume`.
+
 The view follows committed snapshots and live updates. Scroll to read long
 check output; `Esc` or `/goal` returns to the transcript. Opening it does not
 start or resume work. An interrupted-check workspace hold stays visible even

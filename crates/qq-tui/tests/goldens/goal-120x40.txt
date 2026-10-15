@@ -35,6 +35,6 @@ missing invoice                                                                 
                                                                                             │
                                                                                             │
                                                                                             │
-──────────────────────────────────────────────────────────────────────────────────────── ? help  ^K commands  ^O detail
+ goal · check consent required ───────────────────────────────────────────────────────── ? help  ^K commands  ^O detail
  › Ask QQ...
 

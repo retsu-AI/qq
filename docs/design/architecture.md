@@ -1778,7 +1778,12 @@ optimistic state mutation or conflict retry. Check consent freezes the session,
 workspace, goal identity/revision and exact command in a scrollable panel.
 Its default is denial; explicit one-shot or repeated-goal consent uses existing
 GoalControl commands. A changed target invalidates the panel, and ordinary tool
-approval settings cannot grant check authority.
+approval settings cannot grant check authority. The composer rule prioritizes
+goal state, with run/deadline/wake counters for active goals and exhaustive stop
+reasons otherwise. A user pause shows draining while its run remains pending,
+then the resume command. Idle active goals refresh the countdown once per second;
+the terminal loop supplies current wall time without changing event-based run
+timing or adding clock reads to goal-less frames.
 
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the

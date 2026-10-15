@@ -19,6 +19,6 @@ one start only; failure does not refund consent
   Allow repeated checks for this goal
 only this goal and its exact check command
  3 agents
-────────────────────────────────────────────────────────────────────────────────
+ goal · check consent required ─────────────────────────────────────────────────
  › Ask QQ...
 

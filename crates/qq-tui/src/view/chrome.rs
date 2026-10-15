@@ -168,6 +168,69 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         left.push(format!(" {guidance} "), accent().bold());
         return rule_with(left, Line::default(), width);
     }
+    if let Some(goal) = app
+        .focused()
+        .and_then(|id| app.sessions.get(&id))
+        .and_then(|session| session.goal.as_deref())
+    {
+        left.push(
+            if left.is_empty() {
+                " goal · "
+            } else {
+                "  goal · "
+            },
+            muted(),
+        );
+        match &goal.status {
+            qq_protocol::GoalStatus::Active => {
+                left.push(
+                    format!("run {}/{}", goal.counters.runs, goal.budget.max_goal_runs),
+                    accent(),
+                );
+                left.push(
+                    format!(
+                        " · {} left",
+                        goal_duration(goal.budget.deadline_ms.saturating_sub(app.goal_now_ms))
+                    ),
+                    muted(),
+                );
+                if goal.pending_run_id.is_none() {
+                    left.push(
+                        format!(
+                            " · next {}",
+                            goal_duration(goal.next_run_at_ms.saturating_sub(app.goal_now_ms))
+                        ),
+                        muted(),
+                    );
+                }
+            }
+            status => {
+                let (label, style) = super::workspace::goal_status(status);
+                left.push(
+                    label
+                        .chars()
+                        .filter_map(terminal_safe_character)
+                        .collect::<String>(),
+                    style,
+                );
+                if matches!(
+                    status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::User
+                    }
+                ) {
+                    left.push(
+                        if goal.pending_run_id.is_some() {
+                            " · cancellation draining"
+                        } else {
+                            " · /goal resume"
+                        },
+                        muted(),
+                    );
+                }
+            }
+        }
+    }
     if let Some(session) = app.focused().and_then(|id| app.sessions.get(&id))
         && session.summary.status == SessionStatus::Running
     {
@@ -280,6 +343,16 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         right.push(format!(" {label}"), muted());
     }
     rule_with(left, right, width)
+}
+
+fn goal_duration(ms: u64) -> String {
+    if ms >= 3_600_000 {
+        format!("{}h", ms / 3_600_000)
+    } else if ms >= 60_000 {
+        format!("{}m", ms / 60_000)
+    } else {
+        format!("{}s", ms / 1000)
+    }
 }
 
 /// A rule of `─` with `left` laid over its start and `right` over its end.
