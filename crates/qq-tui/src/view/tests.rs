@@ -6053,3 +6053,47 @@ fn goal_view_keeps_workspace_holds_visible_after_the_goal_is_cleared() {
     assert!(text.contains("No goal for this session"));
     assert!(text.contains("Workspace held"));
 }
+
+#[test]
+fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check.as_mut().unwrap().command = format!("printf '{}'", "x".repeat(800));
+    let exact = goal.check.as_ref().unwrap().command.clone();
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.composer.replace("/goal check".to_owned());
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let rows = super::overlay::goal_check_picker(&app, 80, 20);
+    let text = frame_rows(&rows).join("\n");
+    for label in [
+        "GOAL CHECK",
+        "Workspace:",
+        "printf",
+        "Deny",
+        "Allow once",
+        "Allow repeated checks for this goal",
+    ] {
+        assert!(text.contains(label), "missing {label}: {text}");
+    }
+    for _ in 0..10 {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+    }
+    let rows = super::overlay::goal_check_picker(&app, 80, 20);
+    assert!(rows.iter().all(|row| row.width() <= 80));
+    let Some(crate::input::Overlay::GoalCheck { target, .. }) = &app.overlay else {
+        panic!("goal check target")
+    };
+    assert_eq!(
+        target.command, exact,
+        "display scrolling cannot alter authority"
+    );
+}
