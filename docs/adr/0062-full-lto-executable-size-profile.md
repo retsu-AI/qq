@@ -1,56 +1,61 @@
-# ADR-0062 — Use full LTO and size optimization for release executables
+# ADR-0062 — Use full LTO and balanced release size optimization
 
 **Status:** Accepted
 **Date:** 2026-10-15
 **Deciders:** ENG-834 performance-gate repair
-**Supersedes:** [ADR-0010](0010-release-profile.md) in part (LTO and executable optimization)
+**Supersedes:** [ADR-0010](0010-release-profile.md) in part (LTO and package optimization)
 **Implements:** [Performance gate repairs](../plans/progress/performance-gates.md)
 
 ## Context
 
 The merged AB6 baseline exceeds ADR-0010's unchanged 48,000,000-byte default
-and 41,000,000-byte minimal ceilings. ADR-0010 rejected full LTO and size
-optimization because they were unmeasured and thin LTO was sufficient then.
-ENG-834 now measures feature-preserving compiler settings to recover those
-limits. Normal builds also showed executable package overrides retaining
-symbol tables unless symbol stripping was explicit in each override.
+and 41,000,000-byte minimal ceilings. Thin LTO is no longer sufficient.
+Full LTO with executable optimization `z` fits the ceilings but H0 repeats a
+45–64% replay median regression. The timed observer serializes event JSON;
+a focused same-output probe also finds slower headless JSON encoding at `z`.
+The less aggressive `s` setting avoids that diagnostic serialization cost,
+but needs additional package-specific savings to meet the minimal ceiling.
 
 ## Decision
 
 Use `lto = "fat"`, `codegen-units = 1` and `strip = "symbols"` in the release
-profile. Set `opt-level = "z"` and explicit `strip = "symbols"` only in the
-`qq` and `xtask` package overrides; dependencies retain release optimization
-level 3. The H0 driver uses the same executable optimization as `qq`, and the
-turn diagnostic records each arm's final optimization separately from Cargo's
-profile metadata. Retain every feature and dependency and ADR-0010's size
-ceilings and relative allowance.
+profile. Set `opt-level = "s"` for `qq`, `xtask`, `qq-auth` and `qq-config`;
+all other libraries, including runtime and provider code, retain level 3.
+Explicitly set symbol stripping in the executable package overrides because
+normal builds otherwise retained symbol tables despite the global setting.
+Retain all features, dependencies and ADR-0010's size ceilings and allowances.
+
+The H0 driver uses the same final optimization as `qq`. The turn diagnostic
+records each arm's effective final optimization separately from Cargo's
+pre-override profile metadata. Both H0 production arms use the same immutable
+fixture, and qualification logs expose build and workload phases.
 
 ## Consequences
 
-- Normal local release builds at `f05340b2` are 44,239,776 bytes (default) and
-  40,330,096 bytes (minimal), below both unchanged ceilings. These are local
-  artifact measurements, not hosted speed qualification.
-- Full LTO increases release linking cost. Size optimization may change
-  execution speed; dependency optimization remains unchanged, but this alone
-  cannot prove runtime performance. Stripping still needs separate symbols
-  for production crash diagnosis.
-- Merge requires hosted correctness, unchanged H0 performance gates and
-  same-binary controls. Failed latency or host-pressure gates are not waived.
+- Local minimal diagnostics fall from 41,053,296 bytes with root/auth `s` to
+  40,896,752 with config `s` as well, below 41 MB. Exact committed-source
+  default/minimal receipts and hosted speed qualification remain required.
+- Full LTO increases release linking cost. The unchanged speed and same-binary
+  control gates must pass before merge; a smaller binary alone is insufficient.
+  Stripped binaries still need separate symbols for production crash diagnosis.
+- Compile configuration is measured behavior. Failed or noisy tails are
+  retained and investigated, never waived by the profile choice.
 
 ## Alternatives considered
 
 | Alternative | Why not |
 | --- | --- |
 | Retain thin LTO | Merged baseline exceeds both artifact ceilings |
-| Widen the ceilings or remove features | Accepts existing growth or changes shipped capabilities |
-| Full LTO with final executable optimization level 2 | Minimal diagnostic remains above 41 MB |
-| Size-optimize all dependencies | Unnecessary additional change to hot-path optimization |
+| Widen ceilings or remove features | Accepts growth or changes shipped capabilities |
+| Use `z` for executable crates | Fits size but reproduces a serialization cost |
+| Use `s` only for executable/auth crates | Minimal diagnostic still exceeds 41 MB |
+| Size-optimize all dependencies | Unnecessary change to runtime/provider optimization |
 
 ## Evidence / references
 
-- Root `Cargo.toml` release profile and executable package overrides.
+- Root `Cargo.toml` release profile and package overrides.
 - [PR #315](https://github.com/retsu-AI/qq/pull/315), ENG-834.
-- [Repair ledger](../plans/progress/performance-gates.md): compiler experiments,
-  normal-build receipts and hosted qualification status.
-- [Performance recording](../runbooks/perf-recording.md): matched A/B and A/A
-  controls and artifact identity requirements.
+- [Repair ledger](../plans/progress/performance-gates.md): red H0 reports,
+  serialization diagnostics, artifact sizes and final qualification status.
+- [Performance recording](../runbooks/perf-recording.md): A/B and A/A controls,
+  source/binary identity and visible build/workload stages.

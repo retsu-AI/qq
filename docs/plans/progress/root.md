@@ -785,3 +785,12 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   run among nineteen six-send runs. Preserve the average metric and its budget;
   enforce the correctness bound independently on every sampled run. Both
   immutable production arms use the candidate's same repaired fixture source.
+
+### 2026-10-15 — ENG-834 speed-preserving profile and visible qualification
+
+- Root owns the `s` profile experiments for qq/xtask and auth/config libraries
+  after H0 and a focused JSON probe expose `z` serialization cost. Runtime and
+  provider packages retain level 3; dependencies/features and budgets stay fixed.
+- Root owns live CI log streaming and build/workload phase announcements in the
+  existing H0 recorder. Preserve all reports and failure exit codes; update the
+  unmerged ADR-0062 to the final measured choice before publishing.

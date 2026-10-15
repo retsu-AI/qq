@@ -115,3 +115,21 @@
 - Workspace build, Clippy, formatting and workflow lint pass; independent
   review approves. Local socket creation still returns EPERM, so full hosted tests
   remain required. Earlier H0 records do not prove the repaired per-run bound.
+
+## 2026-10-15 — H0 failures and serialization diagnosis
+
+- H0 `38683573275` completes all recordings in 31m; artifacts `11950341434`
+  retain unchanged-limit sizes 44,116,376/40,211,800 bytes and passing per-run
+  retry receipts. Five A/B and five A/A tail checks fail; no gate is waived.
+- Replay median repeats the earlier regression: baseline 2,301,568 ns, candidate
+  3,343,105 ns (+45%), control 3,357,095 ns. Other noisy tails remain open.
+- A same-output CPU probe built from the release protocol/JSON/SHA dependencies
+  alternates 3/s/z across 12 samples per case. `z` is +99% for event encoding
+  plus hashing and +208% for headless JSON encoding versus 3; `s` is faster in
+  this diagnostic. Probe source, binaries and samples stay in ignored artifacts.
+- Root/driver/auth `s` gives minimal 41,053,296 bytes (fails by 53,296); adding
+  config `s` gives 40,896,752 bytes (passes). All other libraries remain level 3.
+  These are local diagnostic sizes; exact committed-source validation follows.
+- CI streaming preserves complete logs while exposing compiler output, arm
+  durations, exit codes and workload stages outside sample timing. Fake-command
+  success/failure checks retain stdout/stderr, reports and stop-on-error behavior.

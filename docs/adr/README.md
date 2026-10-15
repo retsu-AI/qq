@@ -63,7 +63,7 @@ written.
 
 | 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed (action-bias AB1, ENG-1038) |
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed (action-bias AB2, ENG-1039) |
-| 0062 | [Use full LTO and size optimization for release executables](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
+| 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet
