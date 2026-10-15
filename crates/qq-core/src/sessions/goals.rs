@@ -1483,7 +1483,7 @@ pub(super) fn queue_due_goals(
         .replace("?3", &MAX_CHILD_DEPTH.to_string());
     let eligible=format!("g.live=1 AND json_extract(g.payload_json,'$.status.type')='active'
         AND json_extract(g.payload_json,'$.pending_run_id') IS NULL
-        AND json_extract(g.payload_json,'$.audit_pending')=0
+        AND (json_extract(g.payload_json,'$.audit_pending')=0 OR json_type(g.payload_json,'$.check')='object')
         AND s.active_run_id IS NULL AND s.preparing_run_id IS NULL AND s.queued_prompts=0
         AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=s.id AND r.status IN ('queued','running'))
         AND NOT EXISTS({drainage_cte} SELECT 1 FROM obligations JOIN runs r ON r.id=obligations.id
@@ -1520,6 +1520,16 @@ pub(super) fn queue_due_goals(
                 )?
                 .cursor,
             );
+            continue;
+        }
+        if goal.audit_pending {
+            cursors.extend(super::goal_check::queue(
+                &transaction,
+                store_id,
+                workspace,
+                &mut goal,
+                now,
+            )?);
             continue;
         }
         let run = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;

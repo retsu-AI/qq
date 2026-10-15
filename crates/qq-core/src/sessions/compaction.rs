@@ -244,6 +244,7 @@ pub(super) fn start_auto_compaction(
             goal: None,
             goal_initial_notice: None,
             goal_admission: None,
+            check_deadline: None,
             origin: Some(qq_protocol::RunOrigin::AutoCompaction {
                 owner_run_id: original.identity.run_id,
             }),

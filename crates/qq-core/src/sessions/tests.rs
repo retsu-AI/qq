@@ -2188,6 +2188,7 @@ fn denial_capacity_fixture(
         goal: None,
         goal_initial_notice: None,
         goal_admission: None,
+        check_deadline: None,
         origin: None,
         checkpoint: None,
         routing: None,

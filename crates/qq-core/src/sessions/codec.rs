@@ -13,6 +13,7 @@ pub(super) fn parse_run_kind(value: &str) -> Result<RunKind, SessionRuntimeError
     match value {
         "prompt" => Ok(RunKind::Prompt),
         "compaction" => Ok(RunKind::Compaction),
+        "goal_check" => Ok(RunKind::GoalCheck),
         _ => Err(SessionRuntimeError::CODEC),
     }
 }

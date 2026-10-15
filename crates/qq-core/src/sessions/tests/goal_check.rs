@@ -1,77 +1,117 @@
 use super::*;
 
+struct Loader {
+    failure_tail: bool,
+    loads: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+}
+struct Model {
+    failure_tail: bool,
+    calls: Arc<AtomicUsize>,
+    turns: AtomicUsize,
+}
+impl Provider for Model {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.failure_tail && call >= 2 {
+            assert!(
+                request_texts(&request)
+                    .iter()
+                    .any(|text| text.contains("exit 7")),
+                "failed check exit status must reach the next goal run"
+            );
+        }
+        let mut events = if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                    id: "claim".to_owned(), name: "update_goal".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                    id: "claim".to_owned(),
+                    json: r#"{"status":{"type":"achieved","evidence":"work is ready for independent verification"}}"#.to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::ToolCallCompleted { id: "claim".to_owned() }),
+            ]
+        } else {
+            vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                text: "check my work".to_owned(),
+            })]
+        };
+        events.push(Ok(qq_provider::ProviderEvent::Completed {
+            usage: Some(qq_provider::ProviderUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: None,
+            }),
+        }));
+        Box::pin(stream::iter(events))
+    }
+}
+impl RuntimeLoader for Loader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        let calls = self.calls.clone();
+        let failure_tail = self.failure_tail;
+        Box::pin(async move {
+            Ok(loaded_runtime(
+                Runtime::new(
+                    Model {
+                        failure_tail,
+                        calls,
+                        turns: AtomicUsize::new(0),
+                    },
+                    "test-model",
+                    256,
+                )
+                .unwrap(),
+                &request.workspace,
+                None,
+            ))
+        })
+    }
+}
+struct Authority(&'static str);
+impl WorkspaceGrantAuthority for Authority {
+    fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+        Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+    }
+    fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+        panic!("exact goal-check authority must not promote ordinary grants")
+    }
+    fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+        assert_eq!(command, self.0);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
 #[tokio::test]
 async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
-    struct Loader {
-        loads: Arc<AtomicUsize>,
-        calls: Arc<AtomicUsize>,
-    }
-    struct Model(Arc<AtomicUsize>);
-    impl Provider for Model {
-        fn stream(&self, _: ModelRequest) -> ProviderStream {
-            let mut events = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                vec![
-                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
-                        id: "claim".to_owned(), name: "update_goal".to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
-                        id: "claim".to_owned(),
-                        json: r#"{"status":{"type":"achieved","evidence":"work is ready for independent verification"}}"#.to_owned(),
-                    }),
-                    Ok(qq_provider::ProviderEvent::ToolCallCompleted { id: "claim".to_owned() }),
-                ]
-            } else {
-                vec![Ok(qq_provider::ProviderEvent::OutputTextDelta {
-                    text: "check my work".to_owned(),
-                })]
-            };
-            events.push(Ok(qq_provider::ProviderEvent::Completed {
-                usage: Some(qq_provider::ProviderUsage {
-                    input_tokens: 3,
-                    output_tokens: 2,
-                    cache_read_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    reasoning_tokens: None,
-                }),
-            }));
-            Box::pin(stream::iter(events))
-        }
-    }
-    impl RuntimeLoader for Loader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            self.loads.fetch_add(1, Ordering::SeqCst);
-            let calls = self.calls.clone();
-            Box::pin(async move {
-                Ok(loaded_runtime(
-                    Runtime::new(Model(calls), "test-model", 256).unwrap(),
-                    &request.workspace,
-                    None,
-                ))
-            })
-        }
-    }
-    struct Authority;
-    impl WorkspaceGrantAuthority for Authority {
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("exact goal-check authority must not promote ordinary grants")
-        }
-        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
-            assert_eq!(command, "printf checked >> goal-check-marker");
-            Box::pin(std::future::ready(Ok(())))
-        }
-    }
+    once_check(true).await;
+}
+
+#[tokio::test]
+async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue_loop() {
+    once_check(false).await;
+}
+
+async fn once_check(success: bool) {
+    let command = if success {
+        "printf checked >> goal-check-marker"
+    } else {
+        "printf checked >> goal-check-marker; exit 7"
+    };
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("sessions.sqlite3");
     let loads = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut options = SessionRuntimeOptions::new(database.clone());
-    options.grant_authority = Some(Arc::new(Authority));
+    options.grant_authority = Some(Arc::new(Authority(command)));
     let runtime = SessionRuntime::open(
         options,
         Arc::new(Loader {
+            failure_tail: !success,
             loads: loads.clone(),
             calls: calls.clone(),
         }),
@@ -88,7 +128,7 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
             CommandId::generate().unwrap(),
             serde_json::from_value(serde_json::json!({
                 "type":"set_goal", "session_id":session_id, "objective":"verify checked completion",
-                "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
+                "check":{"command":command,"timeout_ms":5000},
                 "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
             }))
             .unwrap(),
@@ -117,7 +157,7 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
                 },
                 action: qq_protocol::GoalControl::ApproveCheck {
                     scope: qq_protocol::GoalCheckScope::Once,
-                    command: "printf checked >> goal-check-marker".to_owned(),
+                    command: command.to_owned(),
                 },
             },
         )
@@ -132,15 +172,22 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
         )),
         "a model achievement proposal must remain active pending independent verification"
     );
-    assert_eq!(loads.load(Ordering::SeqCst), 1);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
     let achieved = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.next().await.unwrap().unwrap();
-            if let SessionEvent::GoalUpdated { goal } = event.event {
-                if matches!(goal.status, qq_protocol::GoalStatus::Achieved) {
-                    break goal;
-                }
+            if let SessionEvent::GoalUpdated { goal } = event.event
+                && ((success && goal.status == qq_protocol::GoalStatus::Achieved)
+                    || (!success
+                        && matches!(
+                            goal.status,
+                            qq_protocol::GoalStatus::Paused {
+                                reason: qq_protocol::GoalPauseReason::NeedsUser {
+                                    cause: qq_protocol::GoalNeedsUser::CheckApproval
+                                }
+                            }
+                        )))
+            {
+                break goal;
             }
         }
     })
@@ -155,15 +202,23 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
         Some(qq_protocol::GoalCheckAuthorization::Consumed)
     );
     assert_eq!(achieved.counters.audits, 1);
-    assert_eq!(achieved.counters.runs, 1, "checks are not model runs");
+    assert_eq!(
+        achieved.counters.runs,
+        if success { 1 } else { 2 },
+        "checks are not model runs"
+    );
+    assert_eq!(
+        achieved.counters.check_failures,
+        if success { 0 } else { 1 }
+    );
     assert_eq!(
         loads.load(Ordering::SeqCst),
-        1,
+        if success { 1 } else { 2 },
         "a check must not load a model"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
+        if success { 2 } else { 4 },
         "only the work run may call the model"
     );
     let snapshot = runtime
@@ -177,25 +232,27 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
         .unwrap()
         .focused
         .unwrap();
-    assert_eq!(snapshot.runs.len(), 2);
+    assert_eq!(snapshot.runs.len(), if success { 2 } else { 4 });
     assert_eq!(
         snapshot
             .runs
             .iter()
             .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
             .count(),
-        1
+        if success { 1 } else { 2 }
     );
-    assert!(
-        snapshot
-            .runs
-            .iter()
-            .all(|run| run.outcome == Some(RunOutcome::Completed))
-    );
+    assert!(snapshot.runs.iter().all(|run| if success {
+        run.outcome == Some(RunOutcome::Completed)
+    } else {
+        run.outcome.is_some()
+    }));
     runtime.shutdown().await.unwrap();
+    drop(events);
+    drop(runtime);
     let reopened = SessionRuntime::open(
         SessionRuntimeOptions::new(database),
         Arc::new(Loader {
+            failure_tail: !success,
             loads: loads.clone(),
             calls: calls.clone(),
         }),
@@ -215,6 +272,280 @@ async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
         .unwrap();
     assert_eq!(restored.goal, Some(achieved));
     assert_eq!(restored.runs, snapshot.runs);
-    assert_eq!(loads.load(Ordering::SeqCst), 1);
+    assert_eq!(loads.load(Ordering::SeqCst), if success { 1 } else { 2 });
     reopened.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_keeps_exit_status_and_only_a_four_kib_tail() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    let directory = TempDir::new().unwrap();
+    let result = run_process(
+        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        "i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf end; exit 7"
+            .to_owned(),
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        RunCancellation::new(),
+        Arc::new(crate::ProcessProducer::new("test")),
+        execution::RunResources::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(7) });
+    assert_eq!(result.tail.len(), 4096);
+    assert!(result.tail.ends_with("end"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_expired_or_cancelled_before_start_never_spawns() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    for cancel in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let cancellation = RunCancellation::new();
+        if cancel {
+            cancellation.cancel();
+        }
+        let result = run_process(
+            crate::workspace::Workspace::open(directory.path()).unwrap(),
+            "printf unexpected > marker".to_owned(),
+            if cancel {
+                tokio::time::Instant::now() + Duration::from_secs(5)
+            } else {
+                tokio::time::Instant::now()
+            },
+            cancellation,
+            Arc::new(crate::ProcessProducer::new("test")),
+            execution::RunResources::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.outcome,
+            if cancel {
+                ProcessOutcome::Cancelled
+            } else {
+                ProcessOutcome::TimedOut
+            }
+        );
+        assert!(!directory.path().join("marker").exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_cancellation_drains_its_process_group() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    let directory = TempDir::new().unwrap();
+    let cancellation = RunCancellation::new();
+    let task = tokio::spawn(run_process(
+        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        "sleep 60 & printf '%s' \"$!\" > descendant; wait".to_owned(),
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        cancellation.clone(),
+        Arc::new(crate::ProcessProducer::new("test")),
+        execution::RunResources::default(),
+    ));
+    let descendant = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(pid) = tokio::fs::read_to_string(directory.path().join("descendant")).await
+                && let Ok(pid) = pid.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    cancellation.cancel();
+    let result = task.await.unwrap().unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Cancelled);
+    #[cfg(target_os = "linux")]
+    {
+        // An orphan may await init's reap; it must no longer execute.
+        if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{descendant}/stat")).await {
+            assert_eq!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z');
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = descendant;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_kills_background_descendants_before_success() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    let directory = TempDir::new().unwrap();
+    let result = run_process(
+        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        "sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\" > descendant; exit 0".to_owned(),
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        RunCancellation::new(),
+        Arc::new(crate::ProcessProducer::new("test")),
+        execution::RunResources::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+    let pid = tokio::fs::read_to_string(directory.path().join("descendant"))
+        .await
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
+        assert_eq!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z');
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_timeout_and_binary_output_stay_bounded() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    let directory = TempDir::new().unwrap();
+    let result = run_process(
+        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        "i=0; while [ \"$i\" -lt 5000 ]; do printf '\\377'; i=$((i+1)); done; printf end; sleep 60"
+            .to_owned(),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        RunCancellation::new(),
+        Arc::new(crate::ProcessProducer::new("test")),
+        execution::RunResources::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+    assert!(result.tail.len() <= 4096);
+    assert!(result.tail.ends_with("end"));
+    assert!(result.tail.contains('\u{fffd}'));
+}
+
+#[tokio::test]
+async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
+    struct CoordinatedAuthority {
+        checks: AtomicUsize,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+    impl WorkspaceGrantAuthority for CoordinatedAuthority {
+        fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
+            Authority("printf checked >> goal-check-marker").seed_grants(path)
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("not an ordinary grant")
+        }
+        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+            assert_eq!(command, "printf checked >> goal-check-marker");
+            let call = self.checks.fetch_add(1, Ordering::SeqCst);
+            let barrier = self.barrier.clone();
+            Box::pin(async move {
+                if (2..4).contains(&call) {
+                    barrier.wait().await;
+                }
+                Ok(())
+            })
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.grant_authority = Some(Arc::new(CoordinatedAuthority {
+        checks: AtomicUsize::new(0),
+        barrier: Arc::new(tokio::sync::Barrier::new(2)),
+    }));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(Loader {
+            failure_tail: false,
+            loads: loads.clone(),
+            calls: calls.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let held = runtime
+        .inner
+        .permits
+        .clone()
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
+    let (workspace_id, resolved) = resolve_workspace(&runtime, directory.path()).await;
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: resolved,
+        })
+        .unwrap();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("missing session")
+        };
+        sessions.push(session_id);
+        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"independent checked work",
+            "check":{"command":"printf checked >> goal-check-marker","timeout_ms":5000},
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("missing goal")
+        };
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    action: qq_protocol::GoalControl::ApproveCheck {
+                        scope: qq_protocol::GoalCheckScope::Once,
+                        command: "printf checked >> goal-check-marker".to_owned(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+    }
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut achieved = std::collections::HashSet::new();
+        while achieved.len() < 2 {
+            let event = events.next().await.unwrap().unwrap();
+            if let SessionEvent::GoalUpdated { goal } = event.event
+                && goal.status == qq_protocol::GoalStatus::Achieved
+            {
+                achieved.insert(goal.goal_id);
+            }
+        }
+    })
+    .await
+    .expect("both prepared checks must acquire workspace exclusion in turn");
+    assert_eq!(
+        tokio::fs::read_to_string(directory.path().join("goal-check-marker"))
+            .await
+            .unwrap(),
+        "checkedchecked"
+    );
+    assert_eq!(loads.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    for session in sessions {
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(workspace_id, Some(session), 256, 256))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(
+            snapshot.goal.unwrap().status,
+            qq_protocol::GoalStatus::Achieved
+        );
+        assert_eq!(snapshot.runs.len(), 2);
+    }
+    runtime.shutdown().await.unwrap();
 }

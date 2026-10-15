@@ -58,6 +58,7 @@ mod deliveries;
 mod events;
 mod execution;
 mod feed;
+mod goal_check;
 mod goal_paid;
 mod goals;
 pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};

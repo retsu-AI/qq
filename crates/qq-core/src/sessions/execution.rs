@@ -152,6 +152,10 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 }
 
 impl RunResources {
+    pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
+        self.tools.enter()
+    }
+
     #[cfg(test)]
     pub(super) fn for_test_run(mut self, run_id: RunId) -> Self {
         self.run_id = Some(run_id);
@@ -957,6 +961,11 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    if claimed.identity.kind == RunKind::GoalCheck {
+        super::goal_check::execute(inner, claimed, cancellation, resources).await;
+        return;
+    }
+
     let execution_started = tokio::time::Instant::now();
     if let Some(admission) = claimed.goal_admission {
         let refusal = match admission {

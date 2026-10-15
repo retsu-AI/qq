@@ -7,7 +7,7 @@ use crate::sessions::{PersistenceFault, SessionRuntimeError};
 
 /// Current session store schema, stored as `metadata.schema_version`. Bump it
 /// with every migration step appended to `open_database`.
-pub const STORE_SCHEMA_VERSION: u16 = 55;
+pub const STORE_SCHEMA_VERSION: u16 = 56;
 
 /// Suffix of the sibling file whose advisory lock marks the store's owner.
 pub const OWNER_LOCK_SUFFIX: &str = ".lock";
@@ -383,7 +383,7 @@ pub(in crate::sessions) fn open_database(
             "10" | "11" | "12" | "13" | "14" | "15" | "16" | "17" | "18" | "19" | "20" | "21"
             | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30" | "31" | "32" | "33"
             | "34" | "35" | "36" | "37" | "38" | "39" | "40" | "41" | "42" | "43" | "44" | "45"
-            | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55",
+            | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55" | "56",
         ) => {}
         Some(_) => return Err(SessionRuntimeError::CONSTRAINT),
     }
@@ -434,6 +434,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -490,6 +491,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -545,6 +547,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -599,6 +602,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -653,6 +657,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -716,6 +721,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -770,6 +776,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -822,6 +829,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -873,6 +881,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -923,6 +932,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -970,6 +980,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1016,6 +1027,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1062,6 +1074,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1107,6 +1120,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1151,6 +1165,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1194,6 +1209,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1236,6 +1252,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1277,6 +1294,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1317,6 +1335,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1356,6 +1375,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1394,6 +1414,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1440,6 +1461,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1491,6 +1513,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1550,6 +1573,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1596,6 +1620,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1650,6 +1675,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1689,6 +1715,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         connection.execute(
@@ -1717,6 +1744,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         connection.execute(
@@ -1744,6 +1772,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         connection.execute(
@@ -1772,6 +1801,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1807,6 +1837,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1837,6 +1868,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1867,6 +1899,7 @@ pub(in crate::sessions) fn open_database(
                 | "53"
                 | "54"
                 | "55"
+                | "56"
         )
     ) {
         let transaction = connection.transaction()?;
@@ -1904,7 +1937,20 @@ pub(in crate::sessions) fn open_database(
     // the main transcript; at most one runs per session.
     if !matches!(
         schema_version.as_deref(),
-        Some("44" | "45" | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some(
+            "44" | "45"
+                | "46"
+                | "47"
+                | "48"
+                | "49"
+                | "50"
+                | "51"
+                | "52"
+                | "53"
+                | "54"
+                | "55"
+                | "56"
+        )
     ) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(
@@ -1946,7 +1992,7 @@ pub(in crate::sessions) fn open_database(
     let has_tool_calls = has_table(&connection, "tool_calls")?;
     if !matches!(
         schema_version.as_deref(),
-        Some("45" | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some("45" | "46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         if has_tool_calls && !has_column(&transaction, "tool_calls", "approval_delegated")? {
@@ -1971,7 +2017,7 @@ pub(in crate::sessions) fn open_database(
     // receipt. Add the bounded owner lookup after main's schema-45 migration.
     if !matches!(
         schema_version.as_deref(),
-        Some("46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some("46" | "47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(
@@ -1991,7 +2037,7 @@ pub(in crate::sessions) fn open_database(
     // Historical calls remain NULL and cannot qualify execution effects.
     if !matches!(
         schema_version.as_deref(),
-        Some("47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some("47" | "48" | "49" | "50" | "51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         if has_tool_calls && !has_column(&transaction, "tool_calls", "execution_context_json")? {
@@ -2013,7 +2059,7 @@ pub(in crate::sessions) fn open_database(
     // Published experimental schema 48 belongs to the later root-stall slice.
     if !matches!(
         schema_version.as_deref(),
-        Some("49" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some("49" | "50" | "51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "model_turns", "tool_results_projection_json")? {
@@ -2047,7 +2093,7 @@ pub(in crate::sessions) fn open_database(
     // it; this reader retains its codec and adds projection storage first.
     if !matches!(
         schema_version.as_deref(),
-        Some("48" | "50" | "51" | "52" | "53" | "54" | "55")
+        Some("48" | "50" | "51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -2059,7 +2105,7 @@ pub(in crate::sessions) fn open_database(
     // 51: durable session goals retain history and fence client generations.
     if !matches!(
         schema_version.as_deref(),
-        Some("51" | "52" | "53" | "54" | "55")
+        Some("51" | "52" | "53" | "54" | "55" | "56")
     ) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(
@@ -2104,7 +2150,10 @@ pub(in crate::sessions) fn open_database(
     }
     validate_goal_schema(&connection)?;
     // 52: exact request and helper-work evidence.
-    if !matches!(schema_version.as_deref(), Some("52" | "53" | "54" | "55")) {
+    if !matches!(
+        schema_version.as_deref(),
+        Some("52" | "53" | "54" | "55" | "56")
+    ) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "goal_request_pending")? {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN goal_request_pending INTEGER NOT NULL DEFAULT 0 CHECK(goal_request_pending IN (0,1));")?;
@@ -2124,7 +2173,7 @@ pub(in crate::sessions) fn open_database(
     }
     validate_goal_request_schema(&connection)?;
     // 53: immutable initial delegated paid-owner anchors.
-    if !matches!(schema_version.as_deref(), Some("53" | "54" | "55")) {
+    if !matches!(schema_version.as_deref(), Some("53" | "54" | "55" | "56")) {
         let transaction = connection.transaction()?;
         if !has_column(&transaction, "runs", "goal_paid_owner_run_id")? {
             transaction.execute_batch(
@@ -2141,7 +2190,7 @@ pub(in crate::sessions) fn open_database(
     }
     validate_goal_paid_owner_schema(&connection)?;
     // 54: recover work evidence omitted by the nullable schema52 migration.
-    if !matches!(schema_version.as_deref(), Some("54" | "55")) {
+    if !matches!(schema_version.as_deref(), Some("54" | "55" | "56")) {
         let transaction = connection.transaction()?;
         restore_unfinished_model_work(&transaction)?;
         transaction.execute(
@@ -2152,7 +2201,7 @@ pub(in crate::sessions) fn open_database(
     }
 
     // 55: preserve legacy admissions that have no completed model-turn row.
-    if schema_version.as_deref() != Some("55") {
+    if !matches!(schema_version.as_deref(), Some("55" | "56")) {
         let transaction = connection.transaction()?;
         restore_unfinished_goal_dispatch(&transaction)?;
         transaction.execute(
@@ -2160,6 +2209,14 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
         transaction.commit()?;
+    }
+
+    // 56: GoalCheck is a persisted run kind. Older readers cannot recover it.
+    if schema_version.as_deref() != Some("56") {
+        connection.execute(
+            "UPDATE metadata SET value='56' WHERE key='schema_version'",
+            [],
+        )?;
     }
 
     debug_assert_eq!(

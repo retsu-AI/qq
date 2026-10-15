@@ -7,11 +7,13 @@ use super::*;
 /// What a run row exists for. Prompt runs answer a user message and their
 /// output joins the transcript; compaction runs are internal — their request
 /// and streamed output never become session messages, and their product is a
-/// summary row.
+/// summary row. Goal checks verify an exact authorized command without a
+/// model or transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RunKind {
     Prompt,
     Compaction,
+    GoalCheck,
 }
 
 /// A zero limit is a caller mistake, not "no work": rejecting it keeps every
@@ -70,6 +72,9 @@ pub(super) struct ClaimedRun {
     pub(super) goal: Option<Arc<qq_protocol::GoalSnapshot>>,
     pub(super) goal_initial_notice: Option<Arc<str>>,
     pub(super) goal_admission: Option<goals::GoalAdmission>,
+    /// Shared acquisition/process deadline captured at reservation, before
+    /// the executor task can wait for its first poll.
+    pub(super) check_deadline: Option<(u64, tokio::time::Instant)>,
     pub(super) origin: Option<qq_protocol::RunOrigin>,
     pub(super) workspace: String,
     /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
@@ -172,6 +177,7 @@ impl ClaimedRun {
             goal: None,
             goal_initial_notice: None,
             goal_admission: None,
+            check_deadline: self.check_deadline,
             origin: self.origin,
             workspace: String::new(),
             user_initiated: self.user_initiated,
@@ -496,6 +502,8 @@ pub(super) fn reserve_next_run_recoverable(
              LEFT JOIN session_goals g ON g.session_id = s.id AND g.live = 1
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
+               AND NOT EXISTS(SELECT 1 FROM runs check_run JOIN sessions check_session ON check_session.id=check_run.session_id
+                   WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND check_run.status='running')
                AND s.depth = ?1
                AND (r.kind!='prompt' OR g.goal_id IS NULL
                     OR json_extract(g.payload_json,'$.status.type')!='active'
@@ -657,7 +665,9 @@ pub(super) fn reserve_next_run_recoverable(
             {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
-            if goal.status == qq_protocol::GoalStatus::Active && kind == "prompt" {
+            if goal.status == qq_protocol::GoalStatus::Active
+                && matches!(kind.as_str(), "prompt" | "goal_check")
+            {
                 Some(Arc::new(goal))
             } else {
                 None
@@ -667,6 +677,7 @@ pub(super) fn reserve_next_run_recoverable(
     };
 
     let goal_initial_notice = match (&goal, goal_initial_notice, goal_frozen) {
+        (Some(_), None, true) if kind == "goal_check" => None,
         (None, None, _) => None,
         (Some(_), Some(notice), true) => Some(Arc::<str>::from(notice)),
         (Some(goal), None, false) if crate::tools::goal::fits_notice(goal) => Some(
@@ -740,6 +751,7 @@ pub(super) fn reserve_next_run_recoverable(
     }
     let mut unresolved_tool_projection = None;
     let (messages, message_effects) = match kind {
+        RunKind::GoalCheck => (Vec::new(), Vec::new()),
         RunKind::Prompt => {
             let user_ordinal: u64 = transaction.query_row(
                 "SELECT ordinal FROM messages WHERE id = ?1",
@@ -854,6 +866,7 @@ pub(super) fn reserve_next_run_recoverable(
     }
     let mut goal_admission = goal
         .as_deref()
+        .filter(|_| kind != RunKind::GoalCheck)
         .map(|goal| {
             goals::admit_run(
                 &transaction,
@@ -875,7 +888,7 @@ pub(super) fn reserve_next_run_recoverable(
             admission_at_ms,
         )?);
     }
-    if goal.is_some() {
+    if goal.is_some() && kind != RunKind::GoalCheck {
         // Control commands must see preparing ownership before loading can wait.
         goals::freeze_goal_claim(
             &transaction,
@@ -891,6 +904,22 @@ pub(super) fn reserve_next_run_recoverable(
             goal_initial_notice.as_deref(),
         )?;
     }
+    let check_deadline = if kind == RunKind::GoalCheck {
+        goal.as_ref().and_then(|goal| {
+            goal.check.as_ref().map(|check| {
+                let deadline_ms = admission_at_ms
+                    .saturating_add(check.timeout_ms)
+                    .min(goal.budget.deadline_ms);
+                (
+                    deadline_ms,
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(deadline_ms.saturating_sub(admission_at_ms)),
+                )
+            })
+        })
+    } else {
+        None
+    };
     transaction.commit()?;
     Ok(Some(ClaimedRun {
         goal_spend_owner,
@@ -898,6 +927,7 @@ pub(super) fn reserve_next_run_recoverable(
         goal,
         goal_initial_notice,
         goal_admission,
+        check_deadline,
         identity: RunIdentity {
             workspace_id,
             session_id,

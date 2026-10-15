@@ -1848,6 +1848,27 @@ runs; a second opener is refused as `StoreBusy` without touching the database
 is executing. The store belongs on a local filesystem, which SQLite's WAL
 mode already requires.
 
+Authorized goal checks use a distinct persisted `goal_check` run kind (store
+schema56) and bypass model loading. Reservation fixes one acquisition/process
+deadline, bounded by the goal deadline. Waiting checks hold their own session
+reservation but do not exclude each other or the descendants needed by active
+work. The start transaction waits for active/preparing model work and running
+side questions, consumes exact Once authority, charges one audit, and marks the
+check Running. That durable row excludes new main/helper reservations and side
+questions in the workspace until confirmed process teardown and terminal commit.
+
+The Unix check supervisor reuses minimal-environment/cwd preparation and process
+groups. It observes leader exit without reaping, terminates the group while the
+leader still pins its id, then reaps; this also stops background descendants that
+closed their output pipes. Bounded blocking permits cover preparation and exit
+observation. Cancellation and the shared deadline drain the process group. A
+resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
+rather than publishing completion. Results retain an exit/timeout diagnostic and
+UTF-8 output suffix within4KiB. Goal changes and terminal settlement share one
+transaction and require the live active audit revision. Recovery pauses a
+started check as CheckInterrupted without refunding Once authority; an unstarted
+check remains queued. Native process supervision outside Unix is unavailable.
+
 ## Workspaces And Tools
 
 The server executes tools on the machine where it runs. In local `qq` mode,
