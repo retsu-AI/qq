@@ -278,3 +278,121 @@ async fn goal_paid_admission_rechecks_caller_deadline_after_store_queue_wait() {
     }
     keep_clock.abort();
 }
+
+#[tokio::test]
+async fn goal_paid_admission_reserves_worst_cache_and_tier_cost_before_dispatch_proof() {
+    for (remaining, expected) in [(100, Some(3)), (70, None), (69, None)] {
+        let (_directory, store, claim) = super::goals::model_goal_claim(true).await;
+        let pricing = ModelPricing {
+            input_usd_nanos_per_token: 1,
+            output_usd_nanos_per_token: 2,
+            cache_read_usd_nanos_per_token: Some(3),
+            cache_write_usd_nanos_per_token: Some(4),
+            context_tier: Some(qq_protocol::ModelPricingTier {
+                above_input_tokens: 1000,
+                input_usd_nanos_per_token: 5,
+                output_usd_nanos_per_token: 9,
+                cache_read_usd_nanos_per_token: Some(6),
+                cache_write_usd_nanos_per_token: Some(7),
+            }),
+            provenance: "deterministic worst-rate bound".to_owned(),
+        };
+        let paid =
+            crate::sessions::goal_paid::GoalPaidInput::new(&store, &claim, Some(&pricing)).unwrap();
+        let caller = crate::runtime::ChildBudget {
+            limits: RunLimits {
+                max_cost_usd_nanos: Some(remaining),
+                ..RunLimits::default()
+            },
+            deadline: None,
+        };
+        let preview = paid.preview_request(100, 10, caller).await.unwrap();
+        let proposed = if let Some(cap) = expected {
+            assert!(
+                matches!(preview,crate::sessions::goal_paid::PaidRequestAdmission::Reprepare {max_output_tokens} if max_output_tokens==cap)
+            );
+            cap
+        } else {
+            assert!(
+                matches!(preview,crate::sessions::goal_paid::PaidRequestAdmission::Exhausted(exhaustion)
+                if exhaustion.limit==qq_protocol::BudgetLimitKind::Cost)
+            );
+            100
+        };
+        let admitted = paid.admit_request(proposed, 10, caller).await.unwrap();
+        assert_eq!(
+            matches!(
+                admitted,
+                crate::sessions::goal_paid::PaidRequestAdmission::Allowed { .. }
+            ),
+            expected.is_some()
+        );
+        let run = claim.identity.run_id;
+        let pending = store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT goal_request_pending FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending, expected.is_some());
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_paid_admission_refuses_unknown_spend_before_pending_proof() {
+    for tokens_unknown in [false, true] {
+        let (_directory, store, claim) = super::goals::model_goal_claim(true).await;
+        let session = claim.identity.session_id;
+        store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                if tokens_unknown {
+                    goal.budget.max_total_tokens = Some(100);
+                    goal.counters.usage = None;
+                } else {
+                    goal.budget.max_cost_usd_nanos = Some(100);
+                    goal.counters.estimated_cost_usd_nanos = None;
+                }
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        let paid = crate::sessions::goal_paid::GoalPaidInput::new(&store, &claim, None).unwrap();
+        let expected = if tokens_unknown {
+            qq_protocol::BudgetLimitKind::TokensUnknown
+        } else {
+            qq_protocol::BudgetLimitKind::CostUnknown
+        };
+        for result in [
+            paid.preview_request(100, 1, crate::runtime::ChildBudget::default())
+                .await
+                .unwrap(),
+            paid.admit_request(100, 1, crate::runtime::ChildBudget::default())
+                .await
+                .unwrap(),
+        ] {
+            assert!(
+                matches!(result,crate::sessions::goal_paid::PaidRequestAdmission::Exhausted(exhaustion)
+                if exhaustion.limit==expected)
+            );
+        }
+        let run = claim.identity.run_id;
+        let pending = store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT goal_request_pending FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!pending);
+        store.close().await.unwrap();
+    }
+}
