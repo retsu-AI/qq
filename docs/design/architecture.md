@@ -1767,6 +1767,13 @@ A persisted model wait is a lower bound on every active automatic retry,
 including provider backoff, ordinary failures, no-progress and per-run exhaustion.
 The absolute goal deadline remains the upper bound and wins exhaustion.
 
+The TUI's `/goal` opens a session-following, scrollable status view over the
+shared client reducer's goal snapshot. It renders lifecycle reasons, scoped
+check consent, progress, budgets, UTC times and bounded check diagnostics,
+including a workspace hold independent of the live goal. It opens at the top
+and preserves the visible position as diagnostics grow. Snapshot refreshes keep
+the view open, deletion closes it, and navigation submits no work.
+
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the
 old run's pending guard and keeps the goal active and its allowance unspent.

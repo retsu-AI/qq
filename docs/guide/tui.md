@@ -222,6 +222,20 @@ the list.
   keeps fitting; `/rollback` undoes the newest compaction. Stale read-only
   tool results are pruned from the model's context automatically.
 
+## Session goal status
+
+`/goal` opens the focused session's durable goal. It shows the objective,
+checklist, notes, run/token/cost budgets, UTC deadline, waits, verification state
+and last check output. Unknown usage and cost remain labelled unknown. Check
+consent distinguishes one execution, repeated checks for this goal, and a used
+one-shot grant that needs renewed consent.
+
+The view follows committed snapshots and live updates. Scroll to read long
+check output; `Esc` or `/goal` returns to the transcript. Opening it does not
+start or resume work. An interrupted-check workspace hold stays visible even
+when the original goal is cleared or replaced. Resolve its uncertain effects
+before acknowledging it through the API.
+
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
@@ -274,6 +288,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
+| view session goal and progress | `/goal` |  |
 | ask or view side questions | `/btw`, `/ask` |  |
 | ask in a new side thread | `/btw-new` |  |
 | cancel only the side question | `/btw-cancel` |  |

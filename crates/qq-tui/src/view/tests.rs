@@ -5841,6 +5841,80 @@ fn goal_view_names_states_reasons_consent_and_unknown_budgets() {
             "cost unknown",
         ),
         (GoalStatus::Achieved, "achieved"),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Approval {
+                        tool_call_id: qq_protocol::ToolCallId::from_bytes([3; 16]),
+                    },
+                },
+            },
+            "tool approval required",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Configuration {
+                        message: "fix configuration".to_owned(),
+                    },
+                },
+            },
+            "fix configuration",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Credentials {
+                        message: "refresh credentials".to_owned(),
+                    },
+                },
+            },
+            "refresh credentials",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::Model {
+                    reason: "dependency is unavailable".to_owned(),
+                },
+            },
+            "dependency is unavailable",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::NoProgress,
+            },
+            "no progress",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::RepeatedFailure,
+            },
+            "repeated failures",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Runs,
+            },
+            "run cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Tokens,
+            },
+            "token cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Cost,
+            },
+            "cost cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Deadline,
+            },
+            "deadline",
+        ),
     ] {
         let mut app = App::new(TuiOptions::default());
         let mut snapshot = fixtures::workspace_snapshot();
@@ -5919,4 +5993,63 @@ fn goal_view_wraps_untrusted_text_and_preserves_failure_tail_and_independent_hol
         assert!(text.contains("Workspace held"));
         assert!(!text.contains(['\u{1b}', '\u{202e}']));
     }
+}
+
+#[test]
+fn goal_view_reports_audit_method_without_claiming_unperformed_verification() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check = None;
+    goal.check_authorization = None;
+    goal.audit_pending = false;
+    goal.audit_revision = None;
+    goal.check_output = None;
+    goal.wait = Some(qq_protocol::GoalWait {
+        until_ms: 1_700_000_000_000,
+        reason: "external dependency".to_owned(),
+    });
+    goal.counters.usage = Some(qq_protocol::TokenUsage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_input_tokens: 3,
+        cache_write_input_tokens: 4,
+        reasoning_tokens: Some(1),
+    });
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    assert!(text.contains("Verification method: independent model audit"));
+    assert!(!text.contains("Completion verified"));
+    assert!(text.contains("Tokens: 10 / 1000"));
+    assert!(text.contains("external dependency"));
+    assert!(text.contains("2023-11-14 22:13:20 UTC"));
+}
+
+#[test]
+fn goal_view_keeps_workspace_holds_visible_after_the_goal_is_cleared() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let goal = fixtures::goal_snapshot(session);
+    let goal_id = goal.goal_id;
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    snapshot.check_interruption = Some(qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x72; 16]),
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        session,
+        SessionEvent::GoalCleared {
+            session_id: session,
+            goal_id,
+            revision: 8,
+        },
+    )));
+    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    assert!(text.contains("No goal for this session"));
+    assert!(text.contains("Workspace held"));
 }

@@ -958,7 +958,8 @@ impl App {
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
             // A side view over this session keeps showing side questions.
-            let side_view = self.view() == View::SideQuestions(focused_id);
+            let side_view =
+                matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == focused_id);
             if !side_view
                 && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
             {
@@ -1119,7 +1120,8 @@ impl App {
                     self.acknowledged_side_questions.remove(&session_id);
                     // The reducer only refocuses a shown transcript; a side
                     // view over the deleted session gives way here.
-                    if self.view() == View::SideQuestions(session_id) {
+                    if matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == session_id)
+                    {
                         effects.extend(self.leave_workspace_view());
                     }
                     for call in tool_call_ids {
@@ -1462,7 +1464,7 @@ impl App {
                 // A workspace view returns to the session it replaced.
                 if matches!(
                     self.view(),
-                    View::Attention | View::Changes | View::SideQuestions(_)
+                    View::Attention | View::Changes | View::SideQuestions(_) | View::Goal(_)
                 ) {
                     return self.leave_workspace_view();
                 }
@@ -1743,6 +1745,27 @@ impl App {
     /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
+            Command::ShowGoal => match self.focused().or(self.view_return) {
+                Some(session_id) => {
+                    let mut effects = self.show_workspace_view(View::Goal(session_id));
+                    if self
+                        .sessions
+                        .get(&session_id)
+                        .is_some_and(|view| !view.is_warm())
+                        && let Some(workspace_id) = self.workspace_id
+                    {
+                        effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                            workspace_id,
+                            session_id,
+                        ))));
+                    }
+                    effects
+                }
+                None => {
+                    self.set_warning("create a session before viewing its goal".to_owned());
+                    Effects::redraw(Redraw::Immediate)
+                }
+            },
             Command::ShowSideQuestions => match self.focused().or(self.view_return) {
                 Some(session_id) => self.show_workspace_view(View::SideQuestions(session_id)),
                 None => {
@@ -2028,6 +2051,10 @@ impl App {
         let (name, question) = prompt
             .split_once(char::is_whitespace)
             .unwrap_or((&prompt, ""));
+        if name == "/goal" && !question.trim().is_empty() {
+            self.set_warning("Use /goal to view goal status.".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
         if matches!(name, "/btw" | "/ask" | "/btw-new") {
             let Some(session_id) = self.focused().or(self.view_return) else {
                 self.set_warning("create a session before asking a side question".to_owned());

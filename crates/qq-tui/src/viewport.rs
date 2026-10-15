@@ -26,6 +26,8 @@ pub(crate) enum View {
     /// One session's side questions. Carries its source session so every
     /// focus-dependent command keeps acting on that session.
     SideQuestions(SessionId),
+    /// Durable objective and progress of one session.
+    Goal(SessionId),
     /// Every file edited by any agent, grouped by path.
     Changes,
 }
@@ -41,7 +43,7 @@ impl View {
     pub(crate) const fn session(self) -> Option<SessionId> {
         match self {
             Self::Transcript(session) => session,
-            Self::SideQuestions(session) => Some(session),
+            Self::SideQuestions(session) | Self::Goal(session) => Some(session),
             Self::Attention | Self::Changes => None,
         }
     }
@@ -51,7 +53,7 @@ impl View {
     pub(crate) const fn transcript(self) -> Option<SessionId> {
         match self {
             Self::Transcript(session) => session,
-            Self::SideQuestions(_) | Self::Attention | Self::Changes => None,
+            Self::SideQuestions(_) | Self::Goal(_) | Self::Attention | Self::Changes => None,
         }
     }
 }
@@ -81,8 +83,8 @@ pub(crate) struct Viewport {
 }
 
 impl Viewport {
-    /// Reconcile with the body laid out this frame. A change of view returns
-    /// to the live tail; otherwise a scrolled viewport keeps its top row
+    /// Reconcile with the body laid out this frame. Goal views open at the
+    /// top; other views open at the live tail. A scrolled viewport keeps its top row
     /// stable as rows are appended, unless the body asked to preserve the
     /// tail anchor because a live message settled in place.
     pub(crate) fn update(
@@ -97,11 +99,18 @@ impl Viewport {
                 context: Some(context),
                 body_rows,
                 height,
-                offset: 0,
+                offset: if matches!(context, View::Goal(_)) {
+                    body_rows.saturating_sub(height)
+                } else {
+                    0
+                },
             };
             return;
         }
-        if self.offset > 0 && self.height > 0 && !preserve_tail_anchor {
+        if (self.offset > 0 || matches!(context, View::Goal(_)))
+            && self.height > 0
+            && !preserve_tail_anchor
+        {
             let top = self
                 .body_rows
                 .saturating_sub(self.offset)
@@ -184,5 +193,18 @@ mod tests {
             View::Transcript(Some(session(4))).transcript(),
             Some(session(4))
         );
+    }
+
+    #[test]
+    fn goal_viewport_opens_at_the_top_and_keeps_status_visible_when_diagnostics_grow() {
+        let mut viewport = Viewport::default();
+        let view = View::Goal(SessionId::from_bytes([0x61; 16]));
+        viewport.update(view, 10, 20, false);
+        assert_eq!(viewport.offset(), 0);
+        viewport.update(view, 70, 20, false);
+        assert_eq!(viewport.offset(), 50);
+        viewport.scroll(-10);
+        viewport.update(view, 100, 20, false);
+        assert_eq!(viewport.offset(), 70);
     }
 }

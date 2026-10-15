@@ -209,6 +209,12 @@ pub(super) fn inspector_pane(
     match pane.view {
         View::Attention => rows = attention_body(app, inner),
         View::Changes => rows = changes_body(app, inner),
+        View::Goal(_) => {
+            rows.push(Line::styled(
+                "Goal progress scrolls in the main pane. Esc returns to the transcript.",
+                muted(),
+            ));
+        }
         View::SideQuestions(_) => {
             rows.push(Line::styled(
                 "Side answers scroll in the main pane.",
@@ -334,4 +340,239 @@ pub(super) fn side_questions_body(app: &App, session_id: SessionId, width: usize
     rows.into_iter()
         .flat_map(|row| wrap_line(row, width.max(1)))
         .collect()
+}
+
+pub(super) fn goal_body(app: &App, session_id: SessionId, width: usize) -> Vec<Line> {
+    use qq_protocol::{
+        GoalBlockedReason, GoalCheckAuthorization, GoalChecklistState, GoalExhaustion,
+        GoalNeedsUser, GoalPauseReason, GoalStatus,
+    };
+    let mut rows = vec![
+        section("GOAL", "Esc returns to the transcript"),
+        Line::default(),
+    ];
+    if let Some(hold) = app.check_interruption {
+        rows.push(Line::styled(format!("Workspace held by interrupted check {}. Resolve its effects and acknowledge it before continuing.", hold.run_id), warning()));
+        rows.push(Line::default());
+    }
+    let session = app.sessions.get(&session_id);
+    let goal = session.and_then(|view| view.goal.as_deref());
+    if let Some(goal) = goal {
+        let (label, style) = match &goal.status {
+            GoalStatus::Active => ("active".to_owned(), accent()),
+            GoalStatus::Achieved => ("achieved".to_owned(), success()),
+            GoalStatus::Paused { reason } => (
+                match reason {
+                    GoalPauseReason::User => "paused by you".to_owned(),
+                    GoalPauseReason::NeedsUser { cause } => match cause {
+                        GoalNeedsUser::CheckApproval => "check consent required".to_owned(),
+                        GoalNeedsUser::CheckInterrupted => {
+                            "check interrupted; uncertain effects need acknowledgment".to_owned()
+                        }
+                        GoalNeedsUser::Approval { tool_call_id } => {
+                            format!("tool approval required: {tool_call_id}")
+                        }
+                        GoalNeedsUser::Authentication { message } => {
+                            format!("authentication required: {message}")
+                        }
+                        GoalNeedsUser::Configuration { message } => {
+                            format!("configuration needs attention: {message}")
+                        }
+                        GoalNeedsUser::Credentials { message } => {
+                            format!("credentials required: {message}")
+                        }
+                    },
+                },
+                warning(),
+            ),
+            GoalStatus::Blocked { reason } => (
+                match reason {
+                    GoalBlockedReason::Model { reason } => format!("blocked: {reason}"),
+                    GoalBlockedReason::NoProgress => "blocked: no progress".to_owned(),
+                    GoalBlockedReason::RepeatedFailure => "blocked: repeated failures".to_owned(),
+                    GoalBlockedReason::CheckFailing => "blocked: three failed checks".to_owned(),
+                    GoalBlockedReason::AuditExhausted => {
+                        "blocked: verification allowance exhausted".to_owned()
+                    }
+                },
+                failure(),
+            ),
+            GoalStatus::BudgetExhausted { reason } => (
+                format!(
+                    "budget exhausted: {}",
+                    match reason {
+                        GoalExhaustion::Runs => "run cap",
+                        GoalExhaustion::Tokens => "token cap",
+                        GoalExhaustion::Cost => "cost cap",
+                        GoalExhaustion::Deadline => "deadline",
+                        GoalExhaustion::TokensUnknown => "token usage unknown",
+                        GoalExhaustion::CostUnknown => "cost unknown",
+                    }
+                ),
+                warning(),
+            ),
+        };
+        rows.push(Line::styled(label, style.bold()));
+        rows.push(Line::styled(&goal.objective, normal().bold()));
+        rows.push(Line::default());
+        rows.push(Line::styled(
+            format!(
+                "Runs: {} / {}",
+                goal.counters.runs, goal.budget.max_goal_runs
+            ),
+            muted(),
+        ));
+        let tokens = goal.counters.usage.and_then(|usage| {
+            usage
+                .input_tokens
+                .checked_add(usage.cache_read_input_tokens)?
+                .checked_add(usage.cache_write_input_tokens)?
+                .checked_add(usage.output_tokens)
+        });
+        rows.push(Line::styled(
+            format!(
+                "Tokens: {} / {}",
+                tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                goal.budget
+                    .max_total_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "no cap".to_owned())
+            ),
+            muted(),
+        ));
+        rows.push(Line::styled(
+            format!(
+                "Cost: {} / {}",
+                goal.counters
+                    .estimated_cost_usd_nanos
+                    .map(format_cost)
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                goal.budget
+                    .max_cost_usd_nanos
+                    .map(format_cost)
+                    .unwrap_or_else(|| "no cap".to_owned())
+            ),
+            muted(),
+        ));
+        rows.push(Line::styled(
+            format!("Deadline: {}", goal_timestamp(goal.budget.deadline_ms)),
+            muted(),
+        ));
+        rows.push(Line::styled(
+            format!(
+                "Audits: {} · failed checks: {}",
+                goal.counters.audits, goal.counters.check_failures
+            ),
+            muted(),
+        ));
+        if let Some(wait) = &goal.wait {
+            rows.push(Line::styled(
+                format!(
+                    "Requested wait until {}: {}",
+                    goal_timestamp(wait.until_ms),
+                    wait.reason
+                ),
+                info(),
+            ));
+        }
+        if goal.status == GoalStatus::Active {
+            rows.push(Line::styled(
+                format!("Next wake: {}", goal_timestamp(goal.next_run_at_ms)),
+                muted(),
+            ));
+        }
+        if goal.audit_pending {
+            rows.push(Line::styled(
+                "Completion claim awaiting independent verification",
+                warning(),
+            ));
+        }
+        if let Some(check) = &goal.check {
+            rows.push(Line::default());
+            rows.push(Line::styled(format!("Check: {}", check.command), normal()));
+            rows.push(Line::styled(
+                format!("Check timeout: {}", format_duration_ms(check.timeout_ms)),
+                muted(),
+            ));
+            rows.push(Line::styled(
+                match goal.check_authorization {
+                    Some(GoalCheckAuthorization::Pending) | None => "check consent required",
+                    Some(GoalCheckAuthorization::Once) => "one check only",
+                    Some(GoalCheckAuthorization::Consumed) => "used; new consent required",
+                    Some(GoalCheckAuthorization::ForGoal) => "repeated checks for this goal",
+                },
+                warning(),
+            ));
+        } else {
+            rows.push(Line::styled(
+                "Verification method: independent model audit",
+                muted(),
+            ));
+        }
+        for item in &goal.checklist {
+            let (marker, style) = match item.state {
+                GoalChecklistState::Pending => ("·", muted()),
+                GoalChecklistState::InProgress => ("→", accent()),
+                GoalChecklistState::Done => ("✓", success()),
+                GoalChecklistState::Dropped => ("×", muted()),
+            };
+            rows.push(Line::styled(format!("{marker} {}", item.text), style));
+        }
+        if !goal.notes.is_empty() {
+            rows.push(Line::default());
+            rows.push(Line::styled("Notes", muted().bold()));
+            rows.push(Line::styled(&goal.notes, normal()));
+        }
+        if let Some(output) = &goal.check_output {
+            rows.push(Line::default());
+            rows.push(Line::styled("Last check", muted().bold()));
+            rows.push(Line::styled(output, normal()));
+        }
+    } else {
+        rows.push(Line::styled(
+            if session.is_some_and(|view| !view.is_warm()) {
+                "Loading goal status…"
+            } else {
+                "No goal for this session."
+            },
+            muted(),
+        ));
+    }
+    rows.into_iter()
+        .flat_map(|row| {
+            let mut lines = vec![Line::default()];
+            // Goal fields include shell output and model text. Sanitize before
+            // layout while retaining explicit line breaks and span styles.
+            for span in row.spans {
+                for (index, text) in span.text.split('\n').enumerate() {
+                    if index > 0 {
+                        lines.push(Line::default());
+                    }
+                    let safe: String = text.chars().filter_map(terminal_safe_character).collect();
+                    if let Some(line) = lines.last_mut() {
+                        line.push(safe, span.style);
+                    }
+                }
+            }
+            lines
+                .into_iter()
+                .flat_map(|line| wrap_line(line, width.max(1)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn goal_timestamp(ms: u64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000) {
+        Ok(time) => format!(
+            "{} {:02}:{:02}:{:02} UTC",
+            time.date(),
+            time.hour(),
+            time.minute(),
+            time.second()
+        ),
+        Err(_) => "invalid timestamp".to_owned(),
+    }
 }

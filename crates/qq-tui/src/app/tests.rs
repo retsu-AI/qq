@@ -5471,3 +5471,16 @@ fn goal_status_slash_command_never_submits_a_prompt_or_silently_executes_argumen
     assert!(app.submit_prompt().split().1.is_empty());
     assert_eq!(app.composer.text, "/goal pause");
 }
+
+#[test]
+fn goal_view_fetches_a_cold_body_without_submitting_work() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let session = app.focused().unwrap();
+    app.sessions.get_mut(&session).unwrap().messages = None;
+    let requests = app.execute(Command::ShowGoal).split().1;
+    assert!(
+        matches!(requests.as_slice(), [ClientRequest::Snapshot(request)] if request.focused_session_id==Some(session))
+    );
+    assert_eq!(app.view(), View::Goal(session));
+}
