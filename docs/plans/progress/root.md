@@ -795,3 +795,14 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - Root owns live CI log streaming and build/workload phase announcements in the
   existing H0 recorder. Preserve all reports and failure exit codes; update the
   unmerged ADR-0062 to the final measured choice before publishing.
+
+### 2026-10-15 — ENG-834 pre-push fixture blocker
+
+- Reserve the two compaction delegation fixtures in
+  `crates/qq-core/src/sessions/tests/delegation.rs` and the sleep ceiling in
+  `xtask/src/lint.rs`. Pre-push exposes a five-second deadline racing 48 real
+  shell turns before summary admission; the related spend fixture takes 25.67s
+  in isolation against its existing 30s liveness bound.
+- Keep runtime/retry behavior and all timeouts/assertions unchanged. Use the
+  established paused-clock setup pattern, fewer real shell turns with measured
+  dense token usage, and retain actual-compaction/spend/order assertions.

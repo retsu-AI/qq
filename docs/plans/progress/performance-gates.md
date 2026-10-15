@@ -181,3 +181,15 @@
 - Current-head full checks and hosted qualification still required. Previous
   `2f7c5af2` hosted verification passes all seven gates plus smoke 6/6; its
   recordings do not qualify this stricter assertion.
+
+## 2026-10-15 — pre-push rejects inherited delegation timing fixtures
+
+- The enabled hook refuses publication of local `63c8fb62`: existing
+  `stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup` fails
+  after 41.488s waiting for summary admission (pre-push report retained). Its
+  inherited five-second deadline starts before 48 shell turns and can expire
+  before the event under load. Independent diagnosis confirms this race.
+- The related `child_compaction_spend_reduces_the_next_child_allowance` also
+  times out in the suite and takes 25.67s alone, near its unchanged 30s bound.
+  Prepare deterministic/cheaper test fixtures; do not bypass the hook, increase
+  timeouts, ignore cases or change production runtime behavior.
