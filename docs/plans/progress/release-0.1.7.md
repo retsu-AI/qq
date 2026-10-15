@@ -3,13 +3,13 @@
 Plan: [`../release-0.1.7.md`](../release-0.1.7.md).
 Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
 
-| Slice | Goal | Status | Notes |
-| --- | --- | --- | --- |
-| R017-prep | Reconcile docs and review candidate readiness before bump | In review | [#316](https://github.com/retsu-AI/qq/pull/316); main reviewed at `3b763ea1`; no bump, tag or publication |
-| R017-perf | Release size/performance repair and qualification | In progress | ENG-834, #315; hosted H0/size recording pending; not accepted |
-| R017-bump | Separate `chore/0.1.7` bump PR | Blocked (preparation and pre-bump gates pending) | `cargo xtask release 0.1.7` only after handoff |
-| R017-publish | Tag merged main and verify assets/install routes | Planned | Separate release authorization; never tag this branch |
-| R017-docs | Move guide pins after assets publish | Planned | `cargo xtask release --docs`; not before publication |
+| Slice | Goal | Status | Branch / PR | Notes |
+| --- | --- | --- | --- | --- |
+| R017-prep | Reconcile docs and review candidate readiness before bump | In review | `docs/eng-1054-0.1.7-pre-release`, [#316](https://github.com/retsu-AI/qq/pull/316) | Rebased onto `0b4f29e3`; no bump, tag or publication |
+| R017-perf | Release size/performance repair and qualification | Blocked (quiet-host H0 qualification) | ENG-834, #315 (merged `21332992`) | Repair merged; size passes, H0 A/B and A/A failed; acceptance remains open |
+| R017-bump | Separate `chore/0.1.7` bump PR | Blocked (preparation and pre-bump gates pending) | `chore/0.1.7` (planned; no PR) | `cargo xtask release 0.1.7` only after handoff |
+| R017-publish | Tag merged main and verify assets/install routes | Planned | — (merged main; no PR yet) | Separate release authorization; never tag this branch |
+| R017-docs | Move guide pins after assets publish | Planned | — (follow-up PR not opened) | `cargo xtask release --docs`; not before publication |
 
 ## Entries
 
@@ -69,3 +69,20 @@ Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
   remain attached to their headers and preceding entries.
 - No release-scope or qualification change. Verify table continuity and the
   affected documentation gate before replying to the two review threads.
+
+
+### 2026-10-15 — additional Codex finding and main rebase
+
+- Added the workflow-required Branch / PR column; moved preparation ownership
+  out of Notes and identified planned handoff branches without inventing PRs.
+- Rebased onto `0b4f29e3`, resolving six documentation conflicts while retaining
+  both append-only histories, ADR-0062 and #317's feedback-gate repairs.
+- #315 merged as `21332992`; recorded size/correctness passes are not H0
+  acceptance. Its audited A/B and A/A failures still require a quiet host.
+- No runtime, version, contract, changelog or guide-pin changes. Final affected
+  gate and table-continuity checks required before publishing the rebased head.
+
+- Rebase gate first exposed main’s stale legacy-sleep inventory after #315/#317.
+  Removed the deleted sleep entry and updated three line locations; no sleep
+  added, no test changed, ceiling remains 76. Final affected gate passes
+  fmt/lint/Clippy/tests (28.5s); table structure and diff checks follow.

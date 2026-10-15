@@ -3,7 +3,7 @@
 ## Status and scope
 
 Preparation only; tracked by [ENG-1054](https://linear.app/retsu-ai/issue/ENG-1054).
-Reviewed main: `3b763ea17699a9d7650b99750c0220ab7206aa5d` on 2026-10-15.
+Reviewed main: `0b4f29e3` on 2026-10-15 (rebased after #315/#317 merged).
 This is not a published prerelease, a version bump, or permission to tag.
 The manifest, lockfile, generated changelog and guide install pins remain at
 v0.1.6 until their respective release steps.
@@ -23,20 +23,17 @@ budgets in `benchmarks/perf/budgets-v1.json`.
 | Tool safety/usability | #281/#283/#285: exact-match freshness, shell classification and built-in hints | T13 paid ablations and post-landing observation remain open |
 | Action bias | #301–#305: verified process context, prompt/read window, authority-aware tools, root stall notice | Named performance and AB6 outcome targets remain unqualified |
 | Qualification tooling | #297 recorder; #306 execution-context/export/recount tooling (`9868038c`) | Instrumentation is not proof of a successful historical or seven-day cohort |
-| Developer feedback | #282 affected/full checks, lint, nextest, smoke and skills; #311 cancellation test audit | Remaining AF6 modules and operator merge-queue activation are not complete |
+| Developer feedback | #282 affected/full checks, lint, nextest, smoke and skills; #311 cancellation test audit; #317 feedback-gate integrity | Remaining AF6 modules and operator merge-queue activation are not complete |
 | Client status | #289 herdr reporting | Not a desktop or remote-client release |
 
 ## Pre-bump gates
 
-- [ ] Resolve #315's release-profile and performance-gate repair (ENG-834).
-  At reviewed head `25dff5af`, the author records default 44,969,760 bytes and
-  minimal 40,896,752 bytes. Hosted correctness and controlled turn overhead
-  pass, but the controlled H0/size job is still running. The PR subsequently
-  integrated main as `2f7c5af2`; fresh hosted checks/review and performance
-  receipts are required for that head, not inherited from `25dff5af`.
-  Earlier H0 recordings
-  failed candidate and same-binary control latency gates. Do not call this
-  qualified, merge it prematurely, or increase budgets to force a pass.
+- [x] Merge #315's release-profile and performance-gate repair (ENG-834),
+  merged as `21332992`. Final source `3dc36557` records default 44,849,176
+  bytes and minimal 40,778,584 bytes, within unchanged ceilings. Correctness
+  passes, but audited H0 reports have 18 A/B and 20 A/A failures with host
+  pressure above the documented threshold. Merge does not waive qualification;
+  unchanged H0 on an exclusive quiet host remains required.
 - [ ] Attach accepted final-head performance/size receipts, including A/B and
   same-binary A/A controls and host-pressure checks, to the owning ledgers.
   Recheck after any runtime or release-profile merge; inherited receipts do
@@ -62,7 +59,7 @@ Paid runs still need ENG-809 authorization, credentials and a spend cap.
 
 | PR | Disposition for this preparation |
 | --- | --- |
-| #315 | Release blocker pending accepted H0/size and performance evidence; not merged |
+| #315 | Merged as `21332992`; size/correctness pass, but accepted H0 performance evidence remains a release gate |
 | #308 → #309 | G0/AC4 and G2 checkpoints in review, not merged; full goal acceptance remains incomplete. Excluded from the reviewed scope, not silently treated as shipped |
 | #313 → #314 | Supervised server/login foundation and desktop client are unmerged; optional separate scope, not a prerequisite for this CLI release |
 | #293 | Preparation-deadline candidate is a draft on a compatibility branch. Current-main reproduction and focused port/review required before inclusion |
