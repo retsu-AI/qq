@@ -155,7 +155,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0062. Reserve here before opening a PR that adds an ADR.
+Next free number: 0063. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
@@ -770,3 +770,10 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - Existing size failures are tracked by ENG-834. ADR-0040 already specifies
   six sends per exhausted turn; repair the stale 1.05-send external budget.
   Retain failures and controls. Ledger: `performance-gates.md`.
+
+### 2026-10-15 — ENG-834 release-profile decision reservation
+
+- Reserve ADR-0062 for the full-LTO executable-size profile, superseding
+  ADR-0010's thin-LTO choice while retaining its 48/41 MB ceilings. Root owns
+  the new ADR, ADR index/status and retry measurement inventory reconciliation
+  in PR #315. Hosted speed/correctness qualification remains required.

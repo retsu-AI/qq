@@ -134,7 +134,7 @@ regression allowance remains zero. A seventh send fails the contract.
 | State/replay | snapshot, runtime cursor replay, authenticated HTTP/SSE reconnect replay | Public runtime and `qq-client` APIs through a known terminal cursor |
 | Tools | `read_file` and one-shot `shell` two-turn runs | Durable prompt through tool dispatch and final completion |
 | Cancellation | cancel call through committed terminal event | Hanging deterministic provider, bounded by the runtime timeout |
-| Retry amplification | provider stream entries per logical turn (`provider_retry_amplification_milli`) | Every fake-provider stream fails before its first event; the provider is the single retry owner, so the runtime must add no sends (gate below 1.05) |
+| Retry amplification | provider stream entries per logical turn (`provider_retry_amplification_milli`) | Every fake-provider stream fails before its first event; ADR-0040 permits the run's five turn retries after the initial entry (6,000 milli entries), with a 6,300-milli absolute ceiling and zero relative regression allowance; provider-internal send retries remain provider-owned |
 | Subscriber fan-out | delta to the slowest of 1, 8, and 32 live subscribers; command ack under each | Committed events reach subscribers from a per-workspace broadcast of the store's own encoding; no store read per event once attached |
 | Busy-workspace ack | `SetSessionModel` acknowledgement with an active run and 500+ committed events | The published summary reads `runs.activity` instead of scanning the event log |
 | Stream scaling | 64 KiB, 512 KiB, 1 MiB and 1 MiB/512 KiB ratio | 1 KiB fake-provider deltas through durable completion |

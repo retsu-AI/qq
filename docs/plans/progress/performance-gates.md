@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch/PR | Evidence |
 | --- | --- | --- | --- | --- |
-| ENG-834 | Repair inherited size/retry failures and qualify unchanged speed limits | In progress | `fix/eng-834-performance-gates` | User authorizes follow-up after #306 merged; ceilings remain 48/41 MB |
+| ENG-834 | Repair inherited size/retry failures and qualify unchanged speed limits | In review | [#315](https://github.com/retsu-AI/qq/pull/315) | User authorizes follow-up after #306 merged; ceilings remain 48/41 MB |
 
 ## 2026-10-14 — baseline and ownership
 
@@ -81,3 +81,21 @@
   checks pass. Local workspace socket tests are blocked by EPERM; hosted
   correctness/performance remain pending. GitHub tree creation is blocked by
   the session approval policy (`requires approval`, policy `never`).
+
+## 2026-10-15 — publication and Codex review
+
+- Normal builds at `f05340b2`: default 44,239,776 bytes; minimal 40,330,096
+  bytes, both within unchanged ceilings. Workspace fmt/Clippy/build and focused
+  retry/context/export/render checks pass. Source and full receipts are in
+  the AB6 worktree's `target/qq-perf/eng834-2026-10-14/`. Normal git push
+  succeeds; nondraft PR #315 is open and conflict-free.
+- Codex's ADR and retry-inventory findings apply: add ADR-0062, mark ADR-0010
+  superseded in part, update the index and reconcile the inventory. The
+  profile-validation finding does not reproduce on pinned Cargo 1.97.1:
+  `cargo rustc --release --message-format=json -v -- -C opt-level=z` reports
+  artifact profile 3 while the final rustc override is z. CI run 38681591675
+  likewise passes both benchmark builds/profile checks and starts recording.
+  Retain the common Cargo-profile check and per-arm final-opt receipts.
+- Hosted fmt/Clippy/workspace tests, wasm and Windows pass at `f05340b2`. H0
+  job 116247138155 and turn job 116247138237 are still running; runtime
+  qualification and final-head checks remain open.

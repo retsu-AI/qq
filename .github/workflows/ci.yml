@@ -206,6 +206,8 @@ jobs:
           if len(artifacts) != 1:
               raise SystemExit('expected one optimized benchmark artifact')
           artifact = artifacts[0]
+          # Cargo reports the bench profile before trailing rustc overrides.
+          # The effective final opt-level is retained separately for each arm.
           profile = artifact['profile']
           if profile['opt_level'] != '3' or profile['debug_assertions']:
               raise SystemExit('benchmark is not the optimized profile')

@@ -1,6 +1,6 @@
 # ADR-0010 — Ship a stripped, thin-LTO release profile and tighten size budgets
 
-**Status:** Accepted
+**Status:** Superseded in part by [ADR-0062](0062-full-lto-executable-size-profile.md) (LTO and executable optimization; size ceilings retained)
 **Date:** 2026-09-07
 **Deciders:** speed-first plan Phase 5a
 **Implements:** [`architecture.md` § Performance Discipline](../design/architecture.md#performance-discipline)
