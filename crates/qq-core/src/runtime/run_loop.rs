@@ -2511,8 +2511,9 @@ impl RunState {
                         // verdict redirects the run while a correction attempt
                         // remains; once both are spent the run completes with
                         // the verdict on record rather than failing.
-                        if !verdict.outcome.allows_progress()
-                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                        if reviewer
+                            .repair_policy()
+                            .requests_correction(verdict.outcome)
                             && run.checkpoint_context.as_mut().expect("enabled review context").repair()
                         {
                             window.irreducible_message_bytes = window.irreducible_message_bytes
@@ -3334,7 +3335,15 @@ impl RunState {
                                     confidence: verdict.confidence,
                                     feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
                                 });
-                                let marker = if verdict.outcome.allows_progress() { "GREEN" } else { "RED" };
+                                let marker = match verdict.outcome {
+                                    runtime::CheckpointOutcome::Supported => "GREEN",
+                                    runtime::CheckpointOutcome::InsufficientEvidence => {
+                                        "NEEDS EVIDENCE"
+                                    }
+                                    runtime::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+                                    runtime::CheckpointOutcome::PartiallySupported
+                                    | runtime::CheckpointOutcome::Contradicted => "RED",
+                                };
                                 retained.model_text.push_str(&format!(
                                     "\n\n[JEV {marker} {}: {}]",
                                     verdict.outcome.label(),
@@ -3347,8 +3356,9 @@ impl RunState {
                                 // An unavailable reviewer leaves its marker on the
                                 // retained result and the run continues; only a RED
                                 // verdict asks for correction.
-                                if !verdict.outcome.allows_progress()
-                                    && verdict.outcome != runtime::CheckpointOutcome::Unavailable
+                                if reviewer
+                                    .repair_policy()
+                                    .requests_correction(verdict.outcome)
                                 {
                                     correction.push(format!("{}: {}", call.name, verdict.feedback));
                                 }

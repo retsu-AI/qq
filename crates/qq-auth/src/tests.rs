@@ -1084,6 +1084,65 @@ fn endpoint_binding_is_normalized_and_enforced() {
 }
 
 #[test]
+fn stored_resolution_cache_reuses_codex_reads_until_the_epoch_changes() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let first = stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh-1");
+    store
+        .set_with_metadata(
+            "openai-codex/work",
+            &first,
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    let reference = SecretRef::Stored("openai-codex/work".to_owned());
+
+    assert_eq!(
+        store
+            .resolve_with_endpoint(&reference, Some("https://chatgpt.com"))
+            .unwrap()
+            .expose_secret_bytes(),
+        first.as_slice()
+    );
+    assert_eq!(
+        store
+            .resolve_with_endpoint(&reference, Some("https://chatgpt.com"))
+            .unwrap()
+            .expose_secret_bytes(),
+        first.as_slice()
+    );
+    assert_eq!(keyring.read_count("openai-codex/work"), 1);
+
+    // A separate store clone/process observes the durable index epoch and
+    // cannot reuse the old cached secret.
+    let other = CredentialStore::with_backend(store.paths().clone(), keyring.clone());
+    let second = stored_codex_credential(jwt(serde_json::json!({"exp": expires_at})), "refresh-2");
+    other
+        .set_with_metadata(
+            "openai-codex/work",
+            &second,
+            false,
+            Some("openai-codex"),
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_with_endpoint(&reference, Some("https://chatgpt.com"))
+            .unwrap()
+            .expose_secret_bytes(),
+        second.as_slice()
+    );
+    assert_eq!(keyring.read_count("openai-codex/work"), 2);
+}
+
+#[test]
 fn list_status_and_remove_use_index_metadata() {
     let (store, keyring, _directory) = test_store();
     store

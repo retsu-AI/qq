@@ -1472,7 +1472,7 @@ impl TrustState {
     pub(super) fn save(&mut self, paths: &ConfigPaths) -> Result<(), ConfigError> {
         self.records
             .sort_by(|left, right| (&left.path, &left.digest).cmp(&(&right.path, &right.digest)));
-        ensure_data_directory(&paths.data_dir)?;
+        ensure_data_directory_for_paths(paths)?;
         let content = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(
             |error| ConfigError::StateSerialization {
                 message: error.to_string(),
@@ -1496,6 +1496,22 @@ fn is_sha256_digest(value: &str) -> bool {
 }
 
 pub(super) fn ensure_data_directory(path: &Path) -> Result<(), ConfigError> {
+    ensure_data_directory_with_policy(path, false)
+}
+
+pub(super) fn ensure_data_directory_for_paths(paths: &ConfigPaths) -> Result<(), ConfigError> {
+    ensure_data_directory_with_policy(paths.data_dir(), paths.reject_data_dir_symlink_ancestors())
+}
+
+fn ensure_data_directory_with_policy(
+    path: &Path,
+    reject_symlink_ancestors: bool,
+) -> Result<(), ConfigError> {
+    if reject_symlink_ancestors {
+        // Check the complete path before recursive creation. This catches a
+        // symlinked existing parent even when the requested leaf is absent.
+        reject_symlink_components(path)?;
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -1558,7 +1574,7 @@ pub(super) struct TrustStateLock(File);
 
 impl TrustStateLock {
     pub(super) fn acquire(paths: &ConfigPaths) -> Result<Self, ConfigError> {
-        ensure_data_directory(&paths.data_dir)?;
+        ensure_data_directory_for_paths(paths)?;
         let path = paths.trust_lock_file();
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
@@ -1734,6 +1750,47 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigError>
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_data_root_rejects_symlinked_ancestor_before_recursive_creation() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let linked = root.path().join("linked");
+        let requested = linked.join("missing").join("data");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+
+        let paths = ConfigPaths::new(
+            root.path().join("global"),
+            requested.clone(),
+            root.path().join("managed"),
+        )
+        .with_data_dir(requested.clone());
+        let error = ensure_data_directory_for_paths(&paths).unwrap_err();
+
+        assert!(matches!(error, ConfigError::SymlinkSource { path } if path == linked));
+        assert!(!real.join("missing").exists());
+        assert!(!requested.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_data_root_policy_keeps_existing_recursive_behavior() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let linked = root.path().join("linked");
+        let requested = linked.join("missing").join("data");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+
+        ensure_data_directory(&requested).unwrap();
+        assert!(real.join("missing").join("data").is_dir());
+    }
 
     #[cfg(unix)]
     #[test]

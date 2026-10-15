@@ -376,6 +376,7 @@ pub struct ConfigPaths {
     data_dir: PathBuf,
     managed_dir: PathBuf,
     enforce_managed_ownership: bool,
+    reject_data_dir_symlink_ancestors: bool,
 }
 
 impl ConfigPaths {
@@ -390,6 +391,7 @@ impl ConfigPaths {
             data_dir: data_dir.into(),
             managed_dir: managed_dir.into(),
             enforce_managed_ownership: false,
+            reject_data_dir_symlink_ancestors: false,
         }
     }
 
@@ -401,6 +403,20 @@ impl ConfigPaths {
 
     pub fn system() -> Result<Self, ConfigError> {
         loader::system_paths()
+    }
+
+    /// Returns these paths with only the durable user data root replaced.
+    /// Global configuration, managed policy, and their ownership enforcement
+    /// remain unchanged.
+    #[must_use]
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = data_dir.into();
+        self.reject_data_dir_symlink_ancestors = true;
+        self
+    }
+
+    pub(crate) fn reject_data_dir_symlink_ancestors(&self) -> bool {
+        self.reject_data_dir_symlink_ancestors
     }
 
     #[must_use]
@@ -472,6 +488,15 @@ impl ConfigLoader {
         Ok(Self::new(ConfigPaths::system()?))
     }
 
+    /// Returns this loader with only the durable user data root replaced.
+    /// Global configuration and managed policy continue to come from the
+    /// system paths.
+    #[must_use]
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.paths = self.paths.with_data_dir(data_dir);
+        self
+    }
+
     #[must_use]
     pub const fn paths(&self) -> &ConfigPaths {
         &self.paths
@@ -537,7 +562,7 @@ impl ConfigLoader {
 
     /// Resolves the durable session database owned by the configured user data directory.
     pub fn session_database_path(&self) -> Result<PathBuf, ConfigError> {
-        loader::ensure_data_directory(self.paths.data_dir())?;
+        loader::ensure_data_directory_for_paths(&self.paths)?;
         Ok(self.paths.data_dir().join("sessions.sqlite3"))
     }
 

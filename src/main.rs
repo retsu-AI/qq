@@ -59,6 +59,9 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
             run_blocking_command(move || auth_command(command)).await?
         }
         Some(cli::Command::Jev {
+            command: cli::JevCommand::Rank(args),
+        }) => runtime::rank::run(args).await?,
+        Some(cli::Command::Jev {
             command: cli::JevCommand::Observe(args),
         }) => advisory::run(args).await?,
         Some(cli::Command::Jev {
@@ -77,7 +80,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(cli::Command::Org { command }) => organization_command(command)?,
-        Some(cli::Command::Trust) => trust_command(&overrides)?,
+        Some(cli::Command::Trust(args)) => trust_command(args, &overrides)?,
         Some(cli::Command::Doctor(args)) => {
             return doctor_command(args, &overrides).await;
         }
@@ -321,7 +324,21 @@ async fn prepare_headless(
         }
     };
 
-    let factory = runtime::RuntimeFactory::system().map_err(|error| invalid(error.to_string()))?;
+    let config = config::ConfigLoader::system().map_err(|error| invalid(error.to_string()))?;
+    let config = match args.data_dir.as_ref() {
+        Some(data_dir) => config.with_data_dir(data_dir.clone()),
+        None => config,
+    };
+    // Validate and create the selected durable root before constructing the
+    // runtime or compiling a provider plan. This reuses the existing private
+    // directory and symlink checks without changing the default root.
+    config
+        .session_database_path()
+        .map_err(|error| invalid(error.to_string()))?;
+    let credentials =
+        auth::CredentialStore::system().map_err(|error| invalid(error.to_string()))?;
+    let factory = runtime::RuntimeFactory::new(config, credentials)
+        .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
@@ -557,6 +574,16 @@ async fn interactive(
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
+    if let Some(diagnostics) =
+        qq_core::diagnostics::DiagnosticSink::for_runtime(server_paths.directory())
+    {
+        diagnostics.install_global();
+        qq_core::diagnostics::record_global(
+            qq_core::diagnostics::DiagnosticEvent::InteractiveStarted,
+            None,
+        );
+    }
+    let mut diagnostics_exit = qq_core::diagnostics::InteractiveExitGuard::new();
     let config_factory = factory.clone();
     // Read once, here: neither `qq-config` nor `qq-tui` consults the
     // environment, they take the answer as a value.
@@ -647,9 +674,19 @@ async fn interactive(
                 .await
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
             {
-                server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
+                server::ReserveOutcome::Existing(connection) => {
+                    qq_core::diagnostics::record_global(
+                        qq_core::diagnostics::DiagnosticEvent::ServerOwnership,
+                        Some(qq_core::diagnostics::DiagnosticReason::Attached),
+                    );
+                    (connection, initial(false))
+                }
                 server::ReserveOutcome::Reserved(reservation) => {
                     owns_server.store(true, std::sync::atomic::Ordering::Release);
+                    qq_core::diagnostics::record_global(
+                        qq_core::diagnostics::DiagnosticEvent::ServerOwnership,
+                        Some(qq_core::diagnostics::DiagnosticReason::Owned),
+                    );
                     let handler = Arc::new(
                         runtime::RuntimeHandler::open_with(factory.clone(), approval_timeout)
                             .await
@@ -700,11 +737,12 @@ async fn interactive(
     let trust: qq_tui::TrustResolver = {
         let factory = factory.clone();
         let request = environment_request.clone();
+        let owns_server_for_trust = Arc::clone(&owns_server);
         let reviewed = Arc::new(std::sync::Mutex::new(reviewed_trust));
         Box::new(move |choice| {
             let factory = factory.clone();
             let request = request.clone();
-            let owns_server = Arc::clone(&owns_server);
+            let owns_server = Arc::clone(&owns_server_for_trust);
             let reviewed = Arc::clone(&reviewed);
             Box::pin(async move {
                 if !owns_server.load(std::sync::atomic::Ordering::Acquire) {
@@ -777,13 +815,35 @@ async fn interactive(
     .await;
 
     if let Ok(embedded) = embedded_rx.try_recv() {
-        embedded.shutdown().await?;
+        qq_core::diagnostics::record_global(
+            qq_core::diagnostics::DiagnosticEvent::ServerShutdown,
+            Some(qq_core::diagnostics::DiagnosticReason::OwnerExit),
+        );
+        match embedded.shutdown().await {
+            Ok(()) => qq_core::diagnostics::record_global(
+                qq_core::diagnostics::DiagnosticEvent::ServerShutdown,
+                Some(qq_core::diagnostics::DiagnosticReason::ShutdownCompleted),
+            ),
+            Err(error) => {
+                qq_core::diagnostics::record_global(
+                    qq_core::diagnostics::DiagnosticEvent::ServerShutdown,
+                    Some(qq_core::diagnostics::DiagnosticReason::ShutdownFailed),
+                );
+                return Err(error.into());
+            }
+        }
+    } else if owns_server.load(std::sync::atomic::Ordering::Acquire) {
+        qq_core::diagnostics::record_global(
+            qq_core::diagnostics::DiagnosticEvent::ServerShutdown,
+            Some(qq_core::diagnostics::DiagnosticReason::OwnerHandleMissing),
+        );
     }
     // The terminal is already restored; this lands on the normal screen.
     let focused = result?;
     if let Some(session_id) = focused {
         eprint!("{}", cli::resume_hint(session_id));
     }
+    diagnostics_exit.completed();
     Ok(())
 }
 
@@ -1531,8 +1591,12 @@ const fn approval_delegate_configured(
     reviewer_model || jev
 }
 
-fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
+fn trust_command(args: cli::TrustArgs, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     let loader = config::ConfigLoader::system()?;
+    let loader = match args.data_dir {
+        Some(data_dir) => loader.with_data_dir(data_dir),
+        None => loader,
+    };
     let pending = loader.grant_pending_trust(&overrides.load_request()?)?;
     if pending.is_empty() {
         println!("no project configuration requires trust");

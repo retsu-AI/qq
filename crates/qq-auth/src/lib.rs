@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     env,
     ffi::OsString,
     fmt,
@@ -52,6 +52,12 @@ const WINDOWS_PROTECTED_MAGIC: &[u8] = b"QQDPAPI\x01";
 const REQUEST_CREDENTIAL_CONCURRENCY: usize = 4;
 const REQUEST_CREDENTIAL_CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_CREDENTIAL_LOAD_TIMEOUT: Duration = Duration::from_secs(65);
+/// Successful stored resolutions are reused briefly to avoid repeated OS
+/// keyring reads during one application refresh. The durable credential epoch
+/// remains the primary invalidation boundary; this TTL bounds changes made
+/// directly in an external keychain that QQ's index cannot observe.
+const STORED_RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_STORED_RESOLUTION_CACHE_ENTRIES: usize = 64;
 
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -324,6 +330,20 @@ pub struct CredentialStore {
     xai_client: Arc<dyn xai::XaiTokenClient>,
     xai_refresh: Arc<Mutex<()>>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
+    stored_resolution_cache: Arc<Mutex<StoredResolutionCache>>,
+}
+
+#[derive(Default)]
+struct StoredResolutionCache {
+    entries: VecDeque<StoredResolutionCacheEntry>,
+}
+
+struct StoredResolutionCacheEntry {
+    name: String,
+    endpoint: Option<String>,
+    epoch: CredentialEpoch,
+    expires_at: std::time::Instant,
+    secret: Secret,
 }
 
 impl CredentialStore {
@@ -364,11 +384,33 @@ impl CredentialStore {
                 validate_credential_name(name)?;
                 let _lock = self.lock_state_shared()?;
                 let index = self.load_index()?;
-                self.resolve_stored_from_index(&index, name, expected_endpoint)
+                let epoch = CredentialEpoch::new(index.revision);
+                self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
             }
             SecretRef::Value(value) => Ok(Secret::from_secret_bytes(
                 value.expose_secret().as_bytes().to_vec(),
             )),
+        }
+    }
+
+    /// Resolves a stored reference without the successful-read memo. OAuth
+    /// refresh paths use this after their own expiry deadline or refresh lock
+    /// says the durable value must be checked again.
+    pub(crate) fn resolve_with_endpoint_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<Secret, AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                self.resolve_stored_from_index(&index, name, expected_endpoint)
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                self.resolve_with_endpoint(reference, expected_endpoint)
+            }
         }
     }
 
@@ -389,11 +431,32 @@ impl CredentialStore {
                 let _lock = self.lock_state_shared()?;
                 let index = self.load_index()?;
                 let epoch = CredentialEpoch::new(index.revision);
-                let secret = self.resolve_stored_from_index(&index, name, expected_endpoint)?;
+                let secret = self.resolve_stored_cached(&index, name, expected_endpoint, epoch)?;
                 Ok((secret, epoch))
             }
             SecretRef::Env(_) | SecretRef::Value(_) => {
                 let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                Ok((secret, self.epoch()?))
+            }
+        }
+    }
+
+    pub(crate) fn resolve_with_epoch_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<(Secret, CredentialEpoch), AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                let epoch = CredentialEpoch::new(index.revision);
+                let secret = self.resolve_stored_from_index(&index, name, expected_endpoint)?;
+                Ok((secret, epoch))
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                let secret = self.resolve_with_endpoint_uncached(reference, expected_endpoint)?;
                 Ok((secret, self.epoch()?))
             }
         }
@@ -685,6 +748,7 @@ impl CredentialStore {
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
+            stored_resolution_cache: Arc::new(Mutex::new(StoredResolutionCache::default())),
         }
     }
 
@@ -801,11 +865,62 @@ impl CredentialStore {
         validate_credential_name(name)?;
         let _lock = self.lock_state_shared()?;
         let index = self.load_index()?;
-        if index.find(name).is_none() {
+        let Some(_) = index.find(name) else {
             return Ok(None);
-        }
-        self.resolve_stored_from_index(&index, name, expected_endpoint)
+        };
+        let epoch = CredentialEpoch::new(index.revision);
+        self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
             .map(Some)
+    }
+
+    fn resolve_stored_cached(
+        &self,
+        index: &IndexState,
+        name: &str,
+        expected_endpoint: Option<&str>,
+        epoch: CredentialEpoch,
+    ) -> Result<Secret, AuthError> {
+        let record = index
+            .find(name)
+            .ok_or_else(|| AuthError::StoredCredentialNotRegistered {
+                name: name.to_owned(),
+            })?;
+        // Validate the current index metadata before consulting the cache. An
+        // endpoint mismatch must never be hidden by a prior successful read.
+        enforce_endpoint_binding(record, expected_endpoint)?;
+        let endpoint = expected_endpoint.map(str::to_owned);
+        let now = std::time::Instant::now();
+        if let Ok(mut cache) = self.stored_resolution_cache.lock() {
+            cache.entries.retain(|entry| entry.expires_at > now);
+            if let Some(position) = cache.entries.iter().position(|entry| {
+                entry.name == name && entry.endpoint == endpoint && entry.epoch == epoch
+            }) {
+                let entry = cache
+                    .entries
+                    .remove(position)
+                    .expect("cache position exists");
+                let secret = entry.secret.clone();
+                cache.entries.push_back(entry);
+                return Ok(secret);
+            }
+        }
+
+        // Failures are intentionally not cached. In particular, a denied or
+        // temporarily unavailable keyring read must remain observable.
+        let secret = self.resolve_stored_from_index(index, name, expected_endpoint)?;
+        if let Ok(mut cache) = self.stored_resolution_cache.lock() {
+            cache.entries.push_back(StoredResolutionCacheEntry {
+                name: name.to_owned(),
+                endpoint,
+                epoch,
+                expires_at: now + STORED_RESOLUTION_CACHE_TTL,
+                secret: secret.clone(),
+            });
+            while cache.entries.len() > MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                cache.entries.pop_front();
+            }
+        }
+        Ok(secret)
     }
 
     fn resolve_stored_from_index(

@@ -637,6 +637,12 @@ impl App {
     pub fn apply_client_update(&mut self, update: ClientUpdate) -> Effects {
         match update {
             ClientUpdate::Connection(connection) => {
+                if matches!(connection, ConnectionState::Offline) {
+                    qq_core::diagnostics::record_global(
+                        qq_core::diagnostics::DiagnosticEvent::ConnectionState,
+                        Some(qq_core::diagnostics::DiagnosticReason::Offline),
+                    );
+                }
                 self.connection = connection;
                 Effects::redraw(Redraw::Scheduled)
             }
@@ -1228,6 +1234,15 @@ impl App {
     }
 
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
+        let reason = if error.message().contains("not a valid command name") {
+            qq_core::diagnostics::DiagnosticReason::InvalidSlashCommand
+        } else {
+            qq_core::diagnostics::DiagnosticReason::CommandError
+        };
+        qq_core::diagnostics::record_global(
+            qq_core::diagnostics::DiagnosticEvent::ClientCommandFailure,
+            Some(reason),
+        );
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
             Some(PendingIntent::Side { session_id, .. })

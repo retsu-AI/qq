@@ -281,7 +281,7 @@ impl TaskRouter for TypeSafeTaskRouter {
 }
 
 #[derive(Debug, Error)]
-pub(super) enum TypeSafeRequestError {
+pub(crate) enum TypeSafeRequestError {
     #[error("TypeSafe returned HTTP {0}")]
     Http(reqwest::StatusCode),
     #[error("TypeSafe request timed out")]
@@ -296,7 +296,7 @@ pub(super) enum TypeSafeRequestError {
     InvalidJson,
 }
 
-pub(super) async fn typesafe_evaluate(
+pub(crate) async fn typesafe_evaluate(
     client: &reqwest::Client,
     endpoint: &str,
     body: &serde_json::Value,

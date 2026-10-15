@@ -85,7 +85,7 @@ struct WorkspaceGrantLock(File);
 impl WorkspaceGrantLock {
     fn acquire(config_loader: &ConfigLoader, workspace_dir: &Path) -> Result<Self, ConfigError> {
         let data_dir = config_loader.paths().data_dir();
-        loader::ensure_data_directory(data_dir)?;
+        loader::ensure_data_directory_for_paths(config_loader.paths())?;
         let canonical = fs::canonicalize(workspace_dir).map_err(|error| ConfigError::Io {
             path: workspace_dir.to_owned(),
             error,

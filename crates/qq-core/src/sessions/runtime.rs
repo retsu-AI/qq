@@ -1401,6 +1401,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
         .map_or(invocation, |(name, _)| name);
     let bounded = |name: &str| -> String { name.chars().take(64).collect() };
     if !crate::workspace::valid_slash_name(name) {
+        crate::diagnostics::record_global(
+            crate::diagnostics::DiagnosticEvent::CommandRejected,
+            Some(crate::diagnostics::DiagnosticReason::InvalidSlashCommand),
+        );
         return Err(SlashCommandError::InvalidName {
             name: bounded(name),
         });
@@ -1409,6 +1413,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
         .iter()
         .any(|reserved| reserved.strip_prefix('/') == Some(name))
     {
+        crate::diagnostics::record_global(
+            crate::diagnostics::DiagnosticEvent::CommandRejected,
+            Some(crate::diagnostics::DiagnosticReason::ReservedClientCommand),
+        );
         return Err(SlashCommandError::Reserved {
             name: name.to_owned(),
         });

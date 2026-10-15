@@ -24,6 +24,24 @@ Runs one task to completion in the current directory (or `--workspace
 PATH`) through a durable session. Progress goes to stderr, the final answer
 to stdout.
 
+Use `--data-dir PATH` to isolate durable session, trust, and organization
+enrollment/cache data from another QQ process. The global configuration,
+managed policy, and OS-keyring credentials remain on their system paths. The
+selected directory must be a private real directory; missing directories are
+created with private permissions. The default data directory and its ownership
+lock are unchanged, and QQ does not migrate credentials, trust, or enrollment
+data automatically.
+
+```sh
+qq run --data-dir /private/tmp/qq-dogfood --approval read-only "Run the bounded task"
+```
+
+Use the same root when accepting reviewed project configuration:
+
+```sh
+qq trust --data-dir /private/tmp/qq-dogfood
+```
+
 ### Approval without a human
 
 | `--approval` | Meaning |

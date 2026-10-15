@@ -39,6 +39,7 @@ mod approval;
 mod cancellation;
 pub mod catalog;
 pub mod context_source;
+pub mod diagnostics;
 pub mod hosts;
 mod input;
 pub mod mentions;
@@ -83,10 +84,10 @@ pub use hosts::{
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, AuditMode, AuditPolicy, AuditRequest, AuditVerdict, AuditedAction,
     BASE_ENV, BuiltinPreference, CheckpointFuture, CheckpointOutcome, CheckpointPhase,
-    CheckpointRequest, CheckpointReviewer, CheckpointVerdict, MAX_AUDIT_ACTION_BYTES,
-    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
-    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
-    MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
+    CheckpointRepairPolicy, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
+    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
+    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
+    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ShellPolicy, valid_env_name,
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
@@ -4625,6 +4626,64 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::OutputTextDelta { text } if text == "answer 2"
+        )));
+    }
+
+    #[tokio::test]
+    async fn advisory_final_evidence_gap_records_once_without_a_correction_turn() {
+        struct AnswerProvider(Arc<AtomicUsize>);
+        impl Provider for AnswerProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: format!("answer {attempt}"),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct AdvisoryReviewer(Arc<AtomicUsize>);
+        impl CheckpointReviewer for AdvisoryReviewer {
+            fn repair_policy(&self) -> runtime::CheckpointRepairPolicy {
+                runtime::CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
+            }
+
+            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
+                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(CheckpointVerdict {
+                    outcome: CheckpointOutcome::InsufficientEvidence,
+                    confidence: Some(0.4),
+                    feedback: "C1: no direct evidence".into(),
+                    spend: qq_protocol::CheckpointSpend::default(),
+                }))
+            }
+        }
+        let reviews = Arc::new(AtomicUsize::new(0));
+        let answers = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(AnswerProvider(Arc::clone(&answers)), "test", 256)
+            .unwrap()
+            .with_checkpoint_reviewer(Arc::new(AdvisoryReviewer(Arc::clone(&reviews))));
+        let directory = tempfile::tempdir().unwrap();
+        let events = runtime
+            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(reviews.load(Ordering::SeqCst), 1);
+        assert_eq!(answers.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            events.last(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::CheckpointReviewed {
+                outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                ..
+            }
         )));
     }
 

@@ -44,6 +44,13 @@ pub async fn render(
                 spend,
                 ..
             } => {
+                let outcome = match outcome {
+                    qq_protocol::CheckpointOutcome::Supported => "GREEN",
+                    qq_protocol::CheckpointOutcome::InsufficientEvidence => "NEEDS EVIDENCE",
+                    qq_protocol::CheckpointOutcome::Unavailable => "UNAVAILABLE",
+                    qq_protocol::CheckpointOutcome::PartiallySupported
+                    | qq_protocol::CheckpointOutcome::Contradicted => "RED",
+                };
                 let cost = match spend {
                     Some(spend) => spend.estimated_cost_usd_nanos.map_or_else(
                         || "unknown".to_owned(),
@@ -53,7 +60,7 @@ pub async fn render(
                 };
                 writeln!(
                     notices,
-                    "[jev] {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
+                    "[jev] {outcome} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
                 )?;
                 notices.flush()?;
             }
@@ -237,7 +244,46 @@ mod tests {
 
         assert_eq!(output, b"answer\n");
         let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] Supported ToolResult tool:call-1"));
+        assert!(notices.contains("[jev] GREEN ToolResult tool:call-1"));
         assert!(notices.contains("evidence is usable"));
+    }
+
+    #[tokio::test]
+    async fn names_evidence_gaps_and_unavailable_reviews_without_red_banner() {
+        let events = stream::iter([
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:1".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
+                confidence_basis_points: None,
+                feedback: "missing direct evidence".to_owned(),
+            },
+            RunEvent::CheckpointReviewed {
+                spend: None,
+                correlation: "final:2".to_owned(),
+                phase: qq_protocol::CheckpointPhase::FinalCandidate,
+                tool_call_id: None,
+                outcome: qq_protocol::CheckpointOutcome::Unavailable,
+                confidence_basis_points: None,
+                feedback: "review timed out".to_owned(),
+            },
+            RunEvent::OutputTextDelta {
+                text: "answer".to_owned(),
+            },
+            RunEvent::Completed,
+        ]);
+        let mut output = Vec::new();
+        let mut notices = Vec::new();
+
+        render(events, &mut output, &mut notices, OutputMode::Raw)
+            .await
+            .unwrap();
+
+        let notices = String::from_utf8(notices).unwrap();
+        assert!(notices.contains("[jev] NEEDS EVIDENCE FinalCandidate final:1"));
+        assert!(notices.contains("[jev] UNAVAILABLE FinalCandidate final:2"));
+        assert!(!notices.contains("[jev] RED"));
     }
 }

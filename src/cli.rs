@@ -123,7 +123,7 @@ pub enum Command {
     },
 
     /// Trust the sensitive operations in current project configuration.
-    Trust,
+    Trust(TrustArgs),
 
     /// Check that QQ is ready to run here: configuration, model, credentials,
     /// server, workspace. Exit status 0 when nothing fails, 1 otherwise.
@@ -156,6 +156,15 @@ pub struct DoctorArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct TrustArgs {
+    /// Durable session and trust data directory. Global configuration,
+    /// managed policy, and OS-keyring credentials remain on their system
+    /// paths. Defaults to the system data directory.
+    #[arg(long, value_name = "PATH")]
+    pub data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct InitArgs {
     /// Write `.qq/config.ron` in the current directory instead of the global
     /// file. A project file that sets `model` is loaded after `qq trust`.
@@ -175,6 +184,12 @@ pub struct InitArgs {
 pub struct RunArgs {
     /// Task prompt for the agent.
     pub prompt: String,
+
+    /// Durable session and trust data directory. Global configuration,
+    /// managed policy, and OS-keyring credentials remain on their system
+    /// paths. Defaults to the system data directory.
+    #[arg(long, value_name = "PATH")]
+    pub data_dir: Option<PathBuf>,
 
     /// Workspace directory. Defaults to the current directory.
     #[arg(long, value_name = "PATH")]
@@ -369,6 +384,8 @@ pub enum AuthCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum JevCommand {
+    /// Compare two to four completed candidate results with bounded pairwise JEV choices.
+    Rank(JevRankArgs),
     /// Assess future completed runs without gating or changing their outcomes.
     Observe(JevObserveArgs),
     /// Prompt for and securely store the TypeSafe API key.
@@ -377,6 +394,36 @@ pub enum JevCommand {
         #[arg(long)]
         allow_file: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct JevRankArgs {
+    /// Version-1 candidate evidence JSON.
+    #[arg(long)]
+    pub input: PathBuf,
+    /// New user-only JSON receipt path; an existing path is refused.
+    #[arg(long)]
+    pub receipts: PathBuf,
+    /// Maximum pairwise requests (one pair consumes two orientations).
+    #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u8).range(1..=12))]
+    pub max_requests: u8,
+    /// Credential source for this opt-in advisory invocation. The default
+    /// preserves QQ's protected system keyring precedence; environment is an
+    /// explicit user-controlled QA escape hatch and never changes ordinary QQ auth.
+    #[arg(long, value_enum, default_value_t = JevCredentialSource::Keyring)]
+    pub credential_source: JevCredentialSource,
+    /// Explicit total advisory budget in USD. Zero performs no requests.
+    #[arg(long)]
+    pub max_cost_usd: f64,
+    /// Whole-invocation deadline in seconds.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u16).range(1..=300))]
+    pub deadline_seconds: u16,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum JevCredentialSource {
+    Keyring,
+    Environment,
 }
 
 #[derive(Debug, Args)]
@@ -627,6 +674,8 @@ mod tests {
             "fix the failing test",
             "--workspace",
             "/tmp/task",
+            "--data-dir",
+            "/tmp/qq-data",
             "--approval",
             "auto",
             "--timeout-seconds",
@@ -654,6 +703,7 @@ mod tests {
         };
         assert_eq!(args.prompt, "fix the failing test");
         assert_eq!(args.workspace.as_deref(), Some(Path::new("/tmp/task")));
+        assert_eq!(args.data_dir.as_deref(), Some(Path::new("/tmp/qq-data")));
         assert_eq!(args.approval, RunApproval::Auto);
         assert_eq!(args.timeout_seconds, Some(900));
         assert_eq!(args.max_turns, Some(40));
@@ -700,6 +750,7 @@ mod tests {
             panic!("expected a run command");
         };
         assert_eq!(args.workspace, None);
+        assert_eq!(args.data_dir, None);
         assert_eq!(args.approval, RunApproval::ReadOnly);
         assert_eq!(args.timeout_seconds, None);
         assert_eq!(args.max_turns, None);

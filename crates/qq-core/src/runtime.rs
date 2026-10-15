@@ -25,8 +25,8 @@ pub(crate) use checkpoint::{
     CheckpointContext, assess_checkpoint, bounded_checkpoint_text, checkpoint_text_fits,
 };
 pub use checkpoint::{
-    CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer,
-    CheckpointVerdict,
+    CheckpointFuture, CheckpointOutcome, CheckpointPhase, CheckpointRepairPolicy,
+    CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
 };
 #[cfg(test)]
 pub(crate) use checkpoint::{MAX_CHECKPOINT_REVIEWS_PER_RUN, MAX_CHECKPOINT_TEXT_BYTES};

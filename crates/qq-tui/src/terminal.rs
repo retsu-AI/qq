@@ -45,18 +45,31 @@ pub async fn run<P>(
 where
     P: ClientPort,
 {
+    qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiStarted, None);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     tokio::select! {
         biased;
-        result = &mut shutdown => return result.map(|()| None).map_err(TuiError::from),
+        result = &mut shutdown => {
+            qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::ShutdownBeforeTerminal));
+            return result.map(|()| None).map_err(TuiError::from)
+        },
         _ = tokio::task::yield_now() => {}
     }
 
-    let terminal = TerminalGuard::enter()?;
+    let terminal = match TerminalGuard::enter() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            qq_core::diagnostics::record_global(
+                qq_core::diagnostics::DiagnosticEvent::TuiExit,
+                Some(qq_core::diagnostics::DiagnosticReason::TerminalSetupError),
+            );
+            return Err(TuiError::Terminal(error));
+        }
+    };
     let events = EventStream::new();
     let output = tokio::io::stdout();
-    let app = run_loop(
+    let app = match run_loop(
         client,
         app,
         events,
@@ -68,7 +81,17 @@ where
             trust,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(app) => app,
+        Err(error) => {
+            qq_core::diagnostics::record_global(
+                qq_core::diagnostics::DiagnosticEvent::TuiExit,
+                Some(qq_core::diagnostics::DiagnosticReason::TerminalLoopError),
+            );
+            return Err(error);
+        }
+    };
     drop(terminal);
     Ok(app.focused())
 }
@@ -198,6 +221,11 @@ where
         let effects = tokio::select! {
             biased;
             result = &mut shutdown => {
+                if result.is_ok() {
+                    qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::Signal));
+                } else {
+                    qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::SignalError));
+                }
                 result?;
                 break;
             }
@@ -209,12 +237,19 @@ where
                         }
                         app.handle_terminal_event(event)
                     }
-                    Some(Err(error)) => return Err(TuiError::Terminal(error)),
-                    None => break,
+                    Some(Err(error)) => {
+                        qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::TerminalError));
+                        return Err(TuiError::Terminal(error));
+                    }
+                    None => {
+                        qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::TerminalClosed));
+                        break;
+                    }
                 }
             }
             update = client.recv() => {
                 let Some(update) = update else {
+                    qq_core::diagnostics::record_global(qq_core::diagnostics::DiagnosticEvent::TuiExit, Some(qq_core::diagnostics::DiagnosticReason::ClientStreamClosed));
                     return Err(TuiError::ClientStopped(last_client_failure.take()));
                 };
                 if let ClientUpdate::SnapshotFailed(failure) = &update {
@@ -326,6 +361,10 @@ where
             }
         }
         if quit {
+            qq_core::diagnostics::record_global(
+                qq_core::diagnostics::DiagnosticEvent::TuiExit,
+                Some(qq_core::diagnostics::DiagnosticReason::ExplicitQuit),
+            );
             break;
         }
     }

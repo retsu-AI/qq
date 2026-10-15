@@ -489,7 +489,7 @@ impl CredentialStore {
         if metadata.kind.as_deref() != Some("xai-oauth") {
             return Err(XaiAuthError::StoredCredentialInvalid.into());
         }
-        let secret = self.resolve_with_endpoint(
+        let secret = self.resolve_with_endpoint_uncached(
             &SecretRef::Stored(name.to_owned()),
             Some(XAI_CREDENTIAL_ENDPOINT),
         )?;

@@ -2202,7 +2202,8 @@ pub enum SessionEvent {
     /// A mandatory JEV checkpoint settled after a tool result or against the
     /// root final candidate. Persisted before publication and correlated to
     /// the reviewed boundary. `supported` permits progress; every other
-    /// outcome is fail-closed.
+    /// Whether another outcome spends a corrective turn is selected by the
+    /// reviewer policy; the typed outcome remains durable evidence either way.
     RoutingStarted {
         run_id: RunId,
     },

@@ -763,3 +763,74 @@ async fn a_trust_answer_for_changed_files_redraws_the_prompt_with_the_new_conten
         ["MCP evil → evil".to_owned()]
     );
 }
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn lifecycle_records_reach_the_real_sink() {
+    use qq_core::diagnostics::{DiagnosticSink, flush_global};
+    use std::{fs, os::unix::fs::PermissionsExt};
+    const CHILD: &str = "QQ_TUI_LIFECYCLE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal::tests::lifecycle_records_reach_the_real_sink",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    DiagnosticSink::for_runtime(dir.path())
+        .unwrap()
+        .install_global();
+
+    let mut normal = Harness::new(64);
+    let task = normal.spawn(App::new(TuiOptions::default()));
+    normal.update(ClientUpdate::Connection(ConnectionState::Live));
+    normal.settle().await;
+    normal.quit();
+    assert!(task.await.unwrap().is_ok());
+
+    let mut disconnected = Harness::new(64);
+    let task = disconnected.spawn(App::new(TuiOptions::default()));
+    drop(std::mem::replace(
+        &mut disconnected.updates,
+        mpsc::unbounded_channel().0,
+    ));
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(TuiError::ClientStopped(_))
+    ));
+
+    let mut terminal_failure = Harness::new(64);
+    let task = terminal_failure.spawn(App::new(TuiOptions::default()));
+    terminal_failure
+        .events
+        .send(Err(io::Error::other(
+            "PRIVATE_TERMINAL_ERROR_MUST_NOT_BE_LOGGED",
+        )))
+        .unwrap();
+    assert!(matches!(task.await.unwrap(), Err(TuiError::Terminal(_))));
+    assert!(flush_global());
+    let log = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    for reason in ["explicit_quit", "client_stream_closed", "terminal_error"] {
+        assert!(
+            log.contains(reason),
+            "missing lifecycle reason {reason}: {log}"
+        );
+    }
+    assert!(!log.contains("PRIVATE_TERMINAL_ERROR_MUST_NOT_BE_LOGGED"));
+}

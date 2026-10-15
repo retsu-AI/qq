@@ -18,8 +18,8 @@ use super::{
     ConfigError, ConfigPaths, MAX_CONFIG_BYTES, OrganizationEnrollment, SourceIdentity, SourceKind,
     document::Document,
     loader::{
-        Probes, atomic_write, discover_file, ensure_data_directory, read_candidate,
-        reject_symlink_components,
+        Probes, atomic_write, discover_file, ensure_data_directory,
+        ensure_data_directory_for_paths, read_candidate, reject_symlink_components,
     },
 };
 
@@ -107,7 +107,7 @@ impl OrganizationState {
     fn save(&mut self, paths: &ConfigPaths) -> Result<(), ConfigError> {
         self.enrollments
             .sort_by(|left, right| left.name.cmp(&right.name));
-        ensure_data_directory(paths.data_dir())?;
+        ensure_data_directory_for_paths(paths)?;
         let content = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(
             |error| ConfigError::StateSerialization {
                 message: error.to_string(),
@@ -471,7 +471,7 @@ fn write_cached_manifest(
     cache_key: &str,
     content: &[u8],
 ) -> Result<(), ConfigError> {
-    ensure_data_directory(paths.data_dir())?;
+    ensure_data_directory_for_paths(paths)?;
     ensure_data_directory(&paths.organizations_cache_dir())?;
     atomic_write(&cache_path(paths, cache_key), content)
 }
@@ -487,7 +487,7 @@ struct OrganizationStateLock(File);
 
 impl OrganizationStateLock {
     fn acquire(paths: &ConfigPaths) -> Result<Self, ConfigError> {
-        ensure_data_directory(paths.data_dir())?;
+        ensure_data_directory_for_paths(paths)?;
         let path = paths.organizations_lock_file();
         reject_symlink_components(&path)?;
         let mut options = OpenOptions::new();
