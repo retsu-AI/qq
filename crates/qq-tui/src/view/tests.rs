@@ -5775,3 +5775,148 @@ fn side_view_keeps_small_nonzero_costs_visible() {
     assert!(text.contains("cost $0.000012"), "{text}");
     assert!(text.contains("cost $1.234567"), "{text}");
 }
+
+#[test]
+fn goal_view_names_states_reasons_consent_and_unknown_budgets() {
+    use qq_protocol::{
+        GoalBlockedReason, GoalCheckAuthorization, GoalExhaustion, GoalNeedsUser, GoalPauseReason,
+        GoalStatus,
+    };
+    for (status, label) in [
+        (GoalStatus::Active, "active"),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::User,
+            },
+            "paused by you",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::CheckApproval,
+                },
+            },
+            "check consent required",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::CheckInterrupted,
+                },
+            },
+            "check interrupted",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Authentication {
+                        message: "login again".to_owned(),
+                    },
+                },
+            },
+            "login again",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::CheckFailing,
+            },
+            "three failed checks",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::AuditExhausted,
+            },
+            "verification allowance exhausted",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::TokensUnknown,
+            },
+            "token usage unknown",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::CostUnknown,
+            },
+            "cost unknown",
+        ),
+        (GoalStatus::Achieved, "achieved"),
+    ] {
+        let mut app = App::new(TuiOptions::default());
+        let mut snapshot = fixtures::workspace_snapshot();
+        let session = snapshot.focused.as_ref().unwrap().summary.id;
+        let mut goal = fixtures::goal_snapshot(session);
+        goal.status = status;
+        goal.counters.usage = None;
+        goal.counters.estimated_cost_usd_nanos = None;
+        snapshot.focused.as_mut().unwrap().goal = Some(goal);
+        app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+        let rows = super::workspace::goal_body(&app, session, 80);
+        let text = frame_rows(&rows).join("\n");
+        for expected in [
+            label,
+            "Finish the billing migration",
+            "verify invoices",
+            "Backfill verified",
+            "Tokens: unknown / 1000",
+            "Cost: unknown / $1",
+            "UTC",
+            "missing invoice",
+            "check consent required",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+    }
+    for (authorization, label) in [
+        (GoalCheckAuthorization::Once, "one check only"),
+        (
+            GoalCheckAuthorization::ForGoal,
+            "repeated checks for this goal",
+        ),
+        (
+            GoalCheckAuthorization::Consumed,
+            "used; new consent required",
+        ),
+    ] {
+        let mut app = App::new(TuiOptions::default());
+        app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+        let session = app.focused().unwrap();
+        let mut goal = fixtures::goal_snapshot(session);
+        goal.check_authorization = Some(authorization);
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            session,
+            SessionEvent::GoalUpdated { goal },
+        )));
+        assert!(
+            frame_rows(&super::workspace::goal_body(&app, session, 80))
+                .join("\n")
+                .contains(label)
+        );
+    }
+}
+
+#[test]
+fn goal_view_wraps_untrusted_text_and_preserves_failure_tail_and_independent_hold() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.notes = "界 ".repeat(80);
+    goal.check_output = Some(format!("exit 7\n{}preserved-check-tail", "x".repeat(3000)));
+    goal.objective.push_str("\u{1b}\u{202e}");
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    snapshot.check_interruption = Some(qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x72; 16]),
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    for width in [8, 20, 80] {
+        let rows = super::workspace::goal_body(&app, session, width);
+        assert!(rows.iter().all(|row| row.width() <= width));
+        let text = frame_rows(&rows).join("");
+        assert!(text.contains("preserved-check-tail"));
+        assert!(text.contains("Workspace held"));
+        assert!(!text.contains(['\u{1b}', '\u{202e}']));
+    }
+}

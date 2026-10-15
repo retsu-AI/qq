@@ -260,3 +260,16 @@ pub fn steering_capabilities() -> ServerCapabilities {
         max_pending_per_run: 4,
     })
 }
+
+/// Bounded durable goal data shared by navigation and renderer tests.
+pub fn goal_snapshot(session: SessionId) -> Box<qq_protocol::GoalSnapshot> {
+    Box::new(serde_json::from_value(serde_json::json!({
+        "session_id":session,"goal_id":qq_protocol::GoalId::from_bytes([0x61;16]),"revision":7,
+        "objective":"Finish the billing migration", "check":{"command":"cargo test -p billing","timeout_ms":5000},
+        "check_authorization":"pending","budget":{"max_goal_runs":10,"deadline_ms":1_800_000_000_000_u64,"max_total_tokens":1000,"max_cost_usd_nanos":1_000_000_000_u64},
+        "checklist":[{"id":1,"text":"verify invoices","state":"done"},{"id":2,"text":"ship migration","state":"in_progress"}],
+        "notes":"Backfill verified", "status":{"type":"active"},"counters":qq_protocol::GoalCounters::default(),
+        "next_run_at_ms":1_700_000_000_000_u64,"wait":null,"audit_pending":true,"audit_revision":7,
+        "pending_run_id":null,"check_output":"exit 7\nmissing invoice"
+    })).unwrap())
+}

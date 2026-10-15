@@ -5417,3 +5417,57 @@ fn check_interruption_snapshot_and_live_replay_preserve_the_current_workspace_ho
     ));
     assert!(app.check_interruption.is_none());
 }
+
+#[test]
+fn goal_view_preserves_session_drafts_and_live_state_across_refresh_and_delete() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    initial.focused.as_mut().unwrap().goal = Some(fixtures::goal_snapshot(session));
+    app.apply_snapshot(initial.clone());
+    app.composer.replace("unfinished draft".to_owned());
+    assert!(app.execute(Command::ShowGoal).split().1.is_empty());
+    assert_eq!(app.view(), View::Goal(session));
+    assert_eq!(app.focused(), Some(session));
+    assert_eq!(app.composer.text, "unfinished draft");
+    let mut updated = fixtures::goal_snapshot(session);
+    updated.notes = "new committed progress".to_owned();
+    app.apply_live_event(fixtures::envelope(
+        2,
+        session,
+        SessionEvent::GoalUpdated {
+            goal: updated.clone(),
+        },
+    ));
+    app.apply_snapshot(initial);
+    assert_eq!(
+        app.view(),
+        View::Goal(session),
+        "a body refresh cannot close the panel"
+    );
+    assert_eq!(app.sessions[&session].goal, Some(updated));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view(), View::Transcript(Some(session)));
+    app.execute(Command::ShowGoal);
+    app.apply_live_event(fixtures::envelope(
+        3,
+        session,
+        SessionEvent::SessionDeleted {
+            session_id: session,
+        },
+    ));
+    assert_eq!(app.view(), View::Transcript(None));
+}
+
+#[test]
+fn goal_status_slash_command_never_submits_a_prompt_or_silently_executes_arguments() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let session = app.focused().unwrap();
+    app.composer.replace("/goal".to_owned());
+    assert!(app.submit_prompt().split().1.is_empty());
+    assert_eq!(app.view(), View::Goal(session));
+    app.composer.replace("/goal pause".to_owned());
+    assert!(app.submit_prompt().split().1.is_empty());
+    assert_eq!(app.composer.text, "/goal pause");
+}
