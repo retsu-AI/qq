@@ -1,9 +1,17 @@
 name: CI
 
+# Pull requests get the affected-only gate (`cargo xtask check`): the
+# packages a change can reach, plus smoke. The merge queue and `main` run
+# the full gate (`cargo xtask check --full`) and every platform job. Make
+# `checks`, `client-wasm`, and `windows-teardown` required for the merge
+# queue in branch protection.
 on:
   push:
     branches: [main]
   pull_request:
+
+    types: [opened, synchronize, reopened, labeled]
+  merge_group:
   workflow_dispatch:
     inputs:
       perf_baseline_sha:
@@ -17,20 +25,28 @@ on:
         default: ''
         type: string
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   checks:
-    name: fmt, clippy, tests
+    name: fmt, lint, clippy, tests, smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The affected-package selection diffs against the merge-base.
+          fetch-depth: 0
       # rustup resolves the pinned toolchain and components from
       # rust-toolchain.toml on first cargo invocation.
       - uses: Swatinem/rust-cache@v2
-      - name: Formatting
-        run: cargo fmt --all --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
@@ -39,13 +55,33 @@ jobs:
           python3 .github/scripts/test-turn-fixture.py
       - name: install.sh against a local fixture release
         run: bash tests/install_sh.sh
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Tests
-        run: cargo test --workspace
+      - name: Affected gate (pull request)
+        if: github.event_name == 'pull_request'
+        run: cargo xtask check --profile ci --base "origin/${{ github.base_ref }}"
+      - name: Full gate (merge queue, main, manual)
+        if: github.event_name != 'pull_request'
+        run: cargo xtask check --profile ci --full
+      - name: Smoke the real binary
+        run: cargo xtask smoke
+      - name: Evidence
+        if: always()
+        # check deletes the previous report at start, so a present report is
+        # this run's; --evidence also refuses one for another commit.
+        run: cargo xtask check --evidence >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: qq-check-${{ github.run_id }}
+          path: |
+            target/qq-check/
+            target/nextest/ci/junit.xml
+            target/qq-smoke/
+          retention-days: 7
       - name: Public core embedding lifecycle
+        if: github.event_name != 'pull_request'
         run: cargo run --locked -p qq-core --example embed
       - name: Minimal core profile
+        if: github.event_name != 'pull_request'
         run: |
           cargo test --locked -p qq-core --no-default-features
           cargo clippy --locked -p qq-core --no-default-features --all-targets -- -D warnings
@@ -56,6 +92,7 @@ jobs:
 
   client-wasm:
     name: qq-client on wasm32
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,6 +109,7 @@ jobs:
 
   windows-teardown:
     name: native Windows shell teardown
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:

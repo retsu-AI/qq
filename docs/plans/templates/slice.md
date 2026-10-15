@@ -39,15 +39,15 @@ body. Keep it terse; link rather than repeat.
       durable.
 - [ ] No `mod.rs`; children declared from a sibling file.
 - [ ] Design docs amended; ADR written if `docs/adr/README.md` § When applies.
-- [ ] Workspace gates green; minimal provider profile when `qq-provider`
-      changed; relevant benches rerun.
+- [ ] `cargo xtask check` green on the final head (`--evidence` pasted);
+      `cargo xtask smoke` for user-visible changes; relevant benches rerun.
 
 ## Ledger receipt (≤ 15 lines)
 
 ```text
 #### <ID> receipt — YYYY-MM-DD
 Commit(s): <sha> …
-Tests: <n added>; workspace <passed>/<ignored>; <named regression tests>.
+Tests: <n added>; `cargo xtask check` scope <packages|full> passed; <named regression tests>.
 Gates: <metric> <before> → <after> (<budget>); A/A control <result>.
 Deviations: <none | what and why>.
 Docs: <files>.
@@ -66,10 +66,9 @@ Evidence: target/qq-perf/<slice>-<date>/ (untracked).
 - …
 
 ### How verified
-- `cargo test --workspace` (<passed>/<ignored>)
-- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p qq-provider --no-default-features --features test-support` (if provider changed)
-- <acceptance tests/commands by name>
+<paste `cargo xtask check --evidence`>
+- `cargo xtask smoke` (<scenarios>) for user-visible changes
+- <acceptance tests/commands by name; failing-then-passing output for fixes>
 
 ### Measurements
 | Gate | Before | After | Budget |

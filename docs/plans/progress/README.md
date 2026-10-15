@@ -22,6 +22,7 @@ ledger is deleted with it; the receipts stay in Git history.
 | [`supervised-delegation.md`](./supervised-delegation.md) | agent on the delegation plan | D6b paired evaluation and default decisions |
 | [`terminal-bench.md`](./terminal-bench.md) | agent on the Terminal-Bench plan | R6–R8 and the Terminal-Bench evaluation program |
 | [`speed-first.md`](./speed-first.md) | agent on the speed-first plan | H and HC slices; two open quiet-host recordings; Phases 7–9 when gated |
+| [`agent-feedback.md`](./agent-feedback.md) | agent on the agent-feedback plan | AF0–AF10: baseline, build speed, nextest, `xtask check`/`smoke`/`lint`, CI split, skills, test audit, tracing, skill eval |
 | [`root.md`](./root.md) | lead | Shared-file changes, dependency and toolchain bumps, ADR number allocation, cross-plan requests, harness-comparison findings (F-rows) |
 | [`decisions-needed.md`](./decisions-needed.md) | anyone appends; lead resolves | Open questions with the conservative default taken |
 | [`g-phase-5b.md`](./g-phase-5b.md), [`g-phase-6.md`](./g-phase-6.md) | lead | Phase gate runs on `main` with exact SHA, commands, counts, and what was not tested (`g-<phase>.md`) |

@@ -37,6 +37,7 @@ Each plan's ledger has the same name under [`progress/`](./progress/).
 | [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T20 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
 | [`token-efficiency.md`](./token-efficiency.md) | More verified work per token: task-tree economics, tools, selective discovery, evidence reuse and context experiments. TE0 and TE1.1 shipped; the rest of TE1 and TE2–TE8 planned |
 | [`guide-expansion.md`](./guide-expansion.md) | The user guide's missing pages, each guarded by docs-truth. GE0 and GE10 shipped; GE1–GE9 planned |
+| [`agent-feedback.md`](./agent-feedback.md) | Fast, legible feedback for agents: `cargo xtask check` (affected-only), `smoke`, `lint`; nextest; CI affected-on-PR, full-in-merge-queue; `qq-mode` skills. AF0–AF4, AF7, AF8, AF9 (first rules) in review; AF5 tracing, AF6 test audit, AF10 skill eval planned |
 | [`tui-redesign.md`](./tui-redesign.md) | Responsive layout and a legible transcript. U0–U7, U9 and L1–L3 shipped; open: L4 split transcripts, U8 chrome |
 | [`jev.md`](./jev.md) | The only Jev plan. JV0, JV1's activation fix and JV2 shipped; JV3–JV13 (precision, context, hold lifecycle, receipts, shadow and pilot, UX, speed, qualification) planned. Proposed |
 | [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop and mobile clients over many headless servers. W1, W2, S1 and S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |

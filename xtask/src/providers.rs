@@ -216,6 +216,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Task {
+    /// Fast affected-only gate: fmt, lint, clippy, and nextest on the
+    /// packages your change can affect. `--full` is the merge gate.
+    Check(crate::check::CheckArgs),
+    /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules → enforcers).
+    Lint,
+    /// Drive the real `qq` binary end to end against a loopback fake provider.
+    Smoke(crate::smoke::SmokeArgs),
     /// Export and recount fixed action-bias observation cohorts without model calls.
     ActionBias(crate::action_bias::ActionBiasArgs),
     /// Run provider validation tasks.
@@ -434,6 +441,14 @@ enum XtaskError {
     Release(#[from] crate::release::ReleaseError),
     #[error(transparent)]
     Homebrew(#[from] crate::homebrew::HomebrewError),
+    #[error(transparent)]
+    Check(#[from] crate::check::CheckError),
+    #[error("check or lint task stopped unexpectedly")]
+    CheckTask(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Lint(#[from] crate::lint::LintError),
+    #[error(transparent)]
+    Smoke(#[from] crate::smoke::SmokeError),
     #[error("choose one or more --provider values or --all, but not both")]
     InvalidSelection,
     #[error("live provider checks require {LIVE_OPT_IN}=1")]
@@ -464,6 +479,16 @@ pub async fn run() -> ExitCode {
 
 async fn try_run(cli: Cli) -> Result<(), XtaskError> {
     match cli.command {
+        Task::Check(args) => tokio::task::spawn_blocking(move || crate::check::run(args))
+            .await
+            .map_err(XtaskError::CheckTask)?
+            .map_err(Into::into),
+        Task::Lint => tokio::task::spawn_blocking(|| crate::lint::run(&crate::smoke::root()))
+            .await
+            .map_err(XtaskError::CheckTask)?
+            .map(|_| ())
+            .map_err(Into::into),
+        Task::Smoke(args) => crate::smoke::run(args).await.map_err(Into::into),
         Task::ActionBias(args) => {
             tokio::task::spawn_blocking(move || crate::action_bias::run(args))
                 .await
