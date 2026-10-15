@@ -4,6 +4,11 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::sessions) static TEST_EPOCH: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU64>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(super) fn parse_run_kind(value: &str) -> Result<RunKind, SessionRuntimeError> {
     match value {
         "prompt" => Ok(RunKind::Prompt),
@@ -347,6 +352,15 @@ pub(super) fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
 }
 
 pub(super) fn now_ms() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_EPOCH.with(|epoch| {
+        epoch
+            .borrow()
+            .as_ref()
+            .map(|epoch| epoch.load(std::sync::atomic::Ordering::Acquire))
+    }) {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -76,9 +76,13 @@ pub(super) fn start(
     let (shutdown, shutdown_rx) = bounded(1);
     let (ready_tx, ready) = oneshot::channel();
     let (closed_tx, closed) = watch::channel(false);
+    #[cfg(test)]
+    let epoch = crate::sessions::codec::TEST_EPOCH.with(|epoch| epoch.borrow().clone());
     let worker = thread::Builder::new()
         .name("qq-session-store".to_owned())
         .spawn(move || {
+            #[cfg(test)]
+            crate::sessions::codec::TEST_EPOCH.with(|slot| slot.replace(epoch));
             // Ownership precedes the database open, and therefore precedes
             // the recovery sweep the runtime runs next: a second process
             // never mutates a store another process is serving.
