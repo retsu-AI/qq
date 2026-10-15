@@ -21,6 +21,7 @@ mod goal_admission;
 mod goal_check;
 mod goal_driver_soak;
 mod goal_final_slot;
+mod goal_model_audit;
 mod goal_paid_limits;
 mod goal_review;
 mod goal_upgrade;
