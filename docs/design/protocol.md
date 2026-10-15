@@ -63,6 +63,12 @@ below. Historical descriptor JSON remains historical evidence.
 PROTOCOL_VERSION = 34
 ```
 
+Store schema58 adds private goal policy and specification-time fields, without
+a wire, descriptor or prompt change. New specifications persist their workspace
+ceilings and fixed deadline anchor atomically. Legacy admission time stays
+explicitly unknown; a lower duration ceiling then requires a specification edit.
+Older binaries refuse schema58. These fields are not model-writable goal data.
+
 Version 34 adds `acknowledge_check_interruption` at
 `POST /v1/workspaces/check-interruptions/acknowledge`, its receipt and the
 `check_interruption_changed` event. `WorkspaceSnapshot.check_interruption`

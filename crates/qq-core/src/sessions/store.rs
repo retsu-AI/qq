@@ -702,6 +702,30 @@ impl Store {
             .await
     }
 
+    /// Goal command replay must not wait on configuration resolution.
+    pub(super) async fn command_is_recorded(
+        &self,
+        command_id: CommandId,
+        command: &SessionCommand,
+    ) -> Result<bool, SessionRuntimeError> {
+        let expected = serde_json::to_string(command)?;
+        self.call(Priority::Control, move |connection| {
+            let stored: Option<String> = connection
+                .query_row(
+                    "SELECT request_json FROM commands WHERE id=?1",
+                    [command_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match stored {
+                Some(stored) if stored == expected => Ok(true),
+                Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
+                None => Ok(false),
+            }
+        })
+        .await
+    }
+
     pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,

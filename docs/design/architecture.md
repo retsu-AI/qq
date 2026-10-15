@@ -227,6 +227,15 @@ xtask/
   administrator ceilings compose by minimum and survive an ordinary Clear.
   Per-field provenance distinguishes defaults from the ceilings constraining
   them. Configuration-owned goal values do not depend on core runtime types.
+  Root translates workspace goal bounds into core-owned GoalPolicy values
+  through the existing grant authority seam, sharing its bounded configuration
+  loading pool. SetGoal and activating controls validate current settings after
+  journal replay. Goal commands probe immutable journal identity before external
+  policy resolution, so a committed replay cannot wait on a hung resolver.
+  Fresh resolution has a ten-second bound and stops with runtime shutdown.
+  Private goal policy and specification time persist atomically in schema58;
+  neutral controls retain the original deadline anchor. Legacy time remains
+  unknown rather than inventing an admission date.
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details

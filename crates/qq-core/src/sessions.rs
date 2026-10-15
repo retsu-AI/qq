@@ -60,6 +60,8 @@ mod execution;
 mod feed;
 mod goal_check;
 mod goal_paid;
+mod goal_policy;
+pub use goal_policy::{GoalPolicy, GoalPolicyError, GoalPolicyFuture};
 mod goals;
 pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
 pub(crate) use goals::GoalRunInput;

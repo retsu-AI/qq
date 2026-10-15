@@ -164,6 +164,10 @@ async fn emit(output: Output) {
 
 struct CheckAuthority(Arc<std::sync::atomic::AtomicBool>);
 impl WorkspaceGrantAuthority for CheckAuthority {
+    fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+        Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+    }
+
     fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
         Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
     }

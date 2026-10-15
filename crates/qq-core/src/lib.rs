@@ -93,18 +93,18 @@ pub use runtime::{
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
-    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalValidationError, GrantPromotionFuture,
-    GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
-    MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
-    MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
-    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
-    PersistenceFault, PublishedEvent, PublishedEventStream, RecentAction, ReviewDecision,
-    ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection,
-    RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage,
-    RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SideAnswer, SideQueryLimits, SlashCommandError,
-    SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
+    GoalValidationError, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
+    MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER,
+    MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS,
+    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
+    MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
+    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
+    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
+    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
+    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).

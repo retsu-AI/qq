@@ -25,6 +25,7 @@ pub(super) struct CommandAdmission {
     pub(super) seed: WorkspaceGrantSeed,
     pub(super) goal_work_present: bool,
     pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
+    pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
 }
 
 pub(super) struct CreatedChildRun {
@@ -452,6 +453,10 @@ pub(super) fn execute_command(
                 expected,
                 replace,
                 now,
+                match &admission.goal_policy {
+                    Some(result) => result.clone()?,
+                    None => GoalPolicy::default(),
+                },
             )?;
             if let Some(previous) = previous {
                 cascade_cancels.extend(cancel_goal_work(
@@ -541,6 +546,7 @@ pub(super) fn execute_command(
                         qq_protocol::GoalControl::Pause,
                         now,
                         None,
+                        None,
                     )?;
                     append_event(
                         &transaction,
@@ -594,6 +600,7 @@ pub(super) fn execute_command(
                 action,
                 now,
                 admission.goal_check_policy.as_ref(),
+                admission.goal_policy.as_ref(),
             )?;
             if clear || goal.status != qq_protocol::GoalStatus::Active {
                 cascade_cancels.extend(cancel_goal_work(
@@ -1252,6 +1259,7 @@ pub(super) fn execute_command(
                     },
                     qq_protocol::GoalControl::Pause,
                     now,
+                    None,
                     None,
                 )?;
                 cascade_cancels.extend(cancel_goal_work(

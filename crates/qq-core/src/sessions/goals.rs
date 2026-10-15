@@ -326,6 +326,7 @@ pub(super) fn set(
     expected: Option<GoalIdentity>,
     replace: bool,
     now: u64,
+    policy: GoalPolicy,
 ) -> Result<GoalSnapshot, SessionRuntimeError> {
     session_workspace(connection, session)?;
     let current = load_live(connection, session)?;
@@ -370,6 +371,12 @@ pub(super) fn set(
         specification.budget.per_run.max_model_turns =
             Some(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS);
     }
+    let policy = policy.validate()?;
+    policy.validate_specification(
+        &specification.budget,
+        specification.check.as_ref(),
+        Some(now),
+    )?;
     let check_changed = current
         .as_ref()
         .is_none_or(|goal| goal.check != specification.check);
@@ -431,6 +438,7 @@ pub(super) fn set(
         }
     }
     save(connection, &goal)?;
+    goal_policy::save(connection, goal.goal_id, policy, Some(now))?;
     Ok(goal)
 }
 
@@ -441,6 +449,7 @@ pub(super) fn control(
     action: GoalControl,
     now: u64,
     check_policy: Option<&Result<(), GoalCheckPolicyError>>,
+    policy: Option<&Result<GoalPolicy, GoalPolicyError>>,
 ) -> Result<(GoalSnapshot, bool), SessionRuntimeError> {
     session_workspace(connection, session)?;
     let mut goal = load_live(connection, session)?.ok_or(SessionRuntimeError::GoalNotFound)?;
@@ -456,6 +465,18 @@ pub(super) fn control(
     let clear = action == GoalControl::Clear;
     if goal.status == GoalStatus::Achieved && !clear {
         return Err(SessionRuntimeError::GoalImmutable);
+    }
+    if matches!(
+        action,
+        GoalControl::Resume | GoalControl::ApproveCheck { .. }
+    ) {
+        let policy = match policy {
+            Some(result) => result.clone()?.validate()?,
+            None => GoalPolicy::default(),
+        };
+        let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+        policy.validate_specification(&goal.budget, goal.check.as_ref(), at)?;
+        goal_policy::save(connection, goal.goal_id, policy, at)?;
     }
     match action {
         GoalControl::Clear => {}

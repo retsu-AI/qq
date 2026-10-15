@@ -82,6 +82,10 @@ impl RuntimeLoader for Loader {
 }
 struct Authority(&'static str);
 impl WorkspaceGrantAuthority for Authority {
+    fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+        Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+    }
+
     fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
         Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
     }
@@ -489,6 +493,10 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
         barrier: Arc<tokio::sync::Barrier>,
     }
     impl WorkspaceGrantAuthority for CoordinatedAuthority {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+
         fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
             Authority("printf checked >> goal-check-marker").seed_grants(path)
         }
@@ -618,6 +626,10 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
         release: Arc<tokio::sync::Notify>,
     }
     impl WorkspaceGrantAuthority for HeldAuthority {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+
         fn seed_grants(&self, path: &Path) -> GrantSeedFuture {
             Authority("printf checked >> goal-check-marker").seed_grants(path)
         }
@@ -1193,6 +1205,10 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         release: Arc<tokio::sync::Notify>,
     }
     impl WorkspaceGrantAuthority for HeldPolicy {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
             Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
         }

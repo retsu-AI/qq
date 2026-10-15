@@ -441,6 +441,11 @@ pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
     /// session creation must not depend on a loadable configuration.
     fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture;
 
+    /// Resolve current goal settings. Failure must reject new activation.
+    fn goal_policy(&self, _workspace: &Path) -> GoalPolicyFuture {
+        Box::pin(std::future::ready(Err(GoalPolicyError::Unavailable)))
+    }
+
     /// Durably promotes one approval grant into the workspace configuration.
     /// Failures are data ([`WorkspaceGrantOutcome::Failed`]), never errors:
     /// a promotion must not fail the approval that requested it.
@@ -978,39 +983,70 @@ impl SessionRuntime {
             }
             _ => WorkspaceGrantSeed::default(),
         };
-        let goal_check_policy = match (&command, &self.inner.grant_authority) {
-            (
-                SessionCommand::GoalControl {
-                    session_id,
-                    action: qq_protocol::GoalControl::ApproveCheck { command, .. },
-                    ..
-                },
-                Some(authority),
-            ) => {
-                let session = *session_id;
-                let path = self
-                    .inner
-                    .store
-                    .call(store::Priority::Control, move |connection| {
-                        Ok(connection.query_row(
-                        "SELECT w.path FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
-                         WHERE s.id = ?1",
-                        [session.to_string()], |row| row.get::<_, String>(0),
-                    )?)
-                    })
-                    .await;
-                // Carry failures past journal lookup: committed approvals
-                // replay even when current policy or the workspace is gone.
-                Some(match path {
-                    Ok(path) => {
-                        authority
-                            .validate_goal_check(Path::new(&path), command)
-                            .await
-                    }
-                    Err(_) => Err(GoalCheckPolicyError::Unavailable),
-                })
-            }
+        let goal_session = match &command {
+            SessionCommand::SetGoal { session_id, .. }
+            | SessionCommand::GoalControl {
+                session_id,
+                action:
+                    qq_protocol::GoalControl::Resume | qq_protocol::GoalControl::ApproveCheck { .. },
+                ..
+            } => Some(*session_id),
             _ => None,
+        };
+        let replayed_goal = goal_session.is_some()
+            && self.inner.grant_authority.is_some()
+            && self
+                .inner
+                .store
+                .command_is_recorded(command_id, &command)
+                .await?;
+        let goal_session = if replayed_goal { None } else { goal_session };
+        let goal_path = if let Some(session) = goal_session
+            && self.inner.grant_authority.is_some()
+        {
+            Some(self.inner.store.call(store::Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",
+                    [session.to_string()], |row| row.get::<_, String>(0),
+                )?)
+            }).await)
+        } else {
+            None
+        };
+        // Carry failures through journal lookup so committed commands replay.
+        let goal_policy = goal_session.map(|_| &goal_path);
+        let goal_policy = match goal_policy {
+            Some(Some(Ok(path))) => Some(self.inner.resolve_goal_policy(Path::new(path)).await),
+            Some(Some(Err(_))) => Some(Err(GoalPolicyError::Unavailable)),
+            Some(None) => Some(Ok(GoalPolicy::default())),
+            None => None,
+        };
+        let goal_check_policy = if replayed_goal {
+            None
+        } else {
+            match (&command, &self.inner.grant_authority) {
+                (
+                    SessionCommand::GoalControl {
+                        action: qq_protocol::GoalControl::ApproveCheck { command, .. },
+                        ..
+                    },
+                    Some(authority),
+                ) => Some(match &goal_path {
+                    Some(Ok(path)) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            authority.validate_goal_check(Path::new(path), command),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(GoalCheckPolicyError::Unavailable),
+                        }
+                    }
+                    _ => Err(GoalCheckPolicyError::Unavailable),
+                }),
+                _ => None,
+            }
         };
         let lifecycle = self.inner.lifecycle.read().await;
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
@@ -1026,6 +1062,7 @@ impl SessionRuntime {
                     goal_work_present: false,
                     seed,
                     goal_check_policy,
+                    goal_policy,
                 },
                 Some(self.inner.grant_promotions.clone()),
             )
@@ -1348,6 +1385,28 @@ impl SessionRuntime {
 }
 
 impl SessionRuntimeInner {
+    pub(super) async fn resolve_goal_policy(
+        &self,
+        workspace: &Path,
+    ) -> Result<GoalPolicy, GoalPolicyError> {
+        let policy = match &self.grant_authority {
+            Some(authority) => {
+                let mut shutdown = self.shutdown.subscribe();
+                let mut failed = self.failed.subscribe();
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait_for(|stopped| *stopped) => Err(GoalPolicyError::Unavailable),
+                    _ = failed.wait_for(|stopped| *stopped) => Err(GoalPolicyError::Unavailable),
+                    result = tokio::time::timeout(Duration::from_secs(10), authority.goal_policy(workspace)) => {
+                        result.unwrap_or(Err(GoalPolicyError::Unavailable))
+                    }
+                }
+            }
+            None => Ok(GoalPolicy::default()),
+        };
+        policy.and_then(GoalPolicy::validate)
+    }
+
     /// Wakes in-process waiters on a workspace after a run settled. Client
     /// delivery is the feed's job (published by the store worker after
     /// commit); this watch exists only so a parent awaiting a child in
@@ -1524,6 +1583,8 @@ pub enum SessionRuntimeError {
     GoalCheckForbidden,
     #[error(transparent)]
     GoalCheckPolicy(#[from] GoalCheckPolicyError),
+    #[error(transparent)]
+    GoalPolicy(#[from] GoalPolicyError),
     #[error("goal budget or deadline has been spent")]
     GoalBudgetSpent,
     #[error("invalid goal: {0}")]

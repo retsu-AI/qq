@@ -1343,6 +1343,10 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         checks: AtomicUsize,
     }
     impl WorkspaceGrantAuthority for Authority {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
             Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
         }
@@ -8864,6 +8868,7 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
     struct Authority {
         limits: StdMutex<HashMap<PathBuf, GoalPolicy>>,
         unavailable: AtomicBool,
+        pending: AtomicBool,
     }
     impl WorkspaceGrantAuthority for Authority {
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
@@ -8873,6 +8878,9 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
             panic!("goal policy cannot promote tool authority")
         }
         fn goal_policy(&self, workspace: &Path) -> GoalPolicyFuture {
+            if self.pending.load(Ordering::SeqCst) {
+                return Box::pin(std::future::pending());
+            }
             let result = if self.unavailable.load(Ordering::SeqCst) {
                 Err(GoalPolicyError::Unavailable)
             } else {
@@ -8886,58 +8894,275 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
     std::fs::create_dir(&other).unwrap();
     let authority = Arc::new(Authority {
         limits: StdMutex::new(HashMap::from([
-            (directory.path().to_owned(), GoalPolicy { max_goal_runs: 20, ..GoalPolicy::default() }),
-            (other.clone(), GoalPolicy { max_goal_runs: 100, ..GoalPolicy::default() }),
+            (
+                directory.path().to_owned(),
+                GoalPolicy {
+                    max_goal_runs: 20,
+                    ..GoalPolicy::default()
+                },
+            ),
+            (
+                other.clone(),
+                GoalPolicy {
+                    max_goal_runs: 100,
+                    ..GoalPolicy::default()
+                },
+            ),
         ])),
         unavailable: AtomicBool::new(false),
+        pending: AtomicBool::new(false),
     });
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.grant_authority = Some(authority.clone());
-    let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader)).await.unwrap();
-    let _held = Arc::clone(&runtime.inner.permits).acquire_many_owned(
-        runtime.inner.permits.available_permits() as u32
-    ).await.unwrap();
+    let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
+        .await
+        .unwrap();
+    let _held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
     for (path, ceiling) in [(directory.path(), 20_u32), (other.as_path(), 100)] {
         let (workspace, _) = resolve_workspace(&runtime, path).await;
         let created = create_session(&runtime, workspace, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else { panic!("session") };
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
         let deadline = now_ms() + 60_000;
-        let set = |runs| serde_json::from_value::<SessionCommand>(serde_json::json!({
-            "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
-            "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
-        })).unwrap();
+        let set = |runs| {
+            serde_json::from_value::<SessionCommand>(serde_json::json!({
+                "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
+                "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
+            }))
+            .unwrap()
+        };
         assert!(matches!(
-            runtime.command(CommandId::generate().unwrap(), set(ceiling + 1)).await,
-            Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Budget))
+            runtime
+                .command(CommandId::generate().unwrap(), set(ceiling + 1))
+                .await,
+            Err(SessionRuntimeError::InvalidGoal(
+                GoalValidationError::Budget
+            ))
         ));
         let command = CommandId::generate().unwrap();
         let accepted = runtime.command(command, set(ceiling)).await.unwrap();
-        let CommandOutcome::GoalUpdated { goal, .. } = &accepted.outcome else { panic!("goal") };
-        let identity = qq_protocol::GoalIdentity { goal_id: goal.goal_id, revision: goal.revision };
+        let CommandOutcome::GoalUpdated { goal, .. } = &accepted.outcome else {
+            panic!("goal")
+        };
+        let identity = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
         authority.unavailable.store(true, Ordering::SeqCst);
-        assert_eq!(runtime.command(command, set(ceiling)).await.unwrap(), accepted);
+        authority.pending.store(true, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                runtime.command(command, set(ceiling))
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            accepted
+        );
+        authority.pending.store(false, Ordering::SeqCst);
         assert!(matches!(
-            runtime.command(CommandId::generate().unwrap(), set(ceiling)).await,
-            Err(SessionRuntimeError::GoalPolicy(GoalPolicyError::Unavailable))
+            runtime
+                .command(CommandId::generate().unwrap(), set(ceiling))
+                .await,
+            Err(SessionRuntimeError::GoalPolicy(
+                GoalPolicyError::Unavailable
+            ))
         ));
-        let paused = runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
-            session_id, expected: identity, action: qq_protocol::GoalControl::Pause
-        }).await.unwrap();
-        let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else { panic!("paused") };
-        let expected = qq_protocol::GoalIdentity { goal_id: goal.goal_id, revision: goal.revision };
+        let paused = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: identity,
+                    action: qq_protocol::GoalControl::Pause,
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else {
+            panic!("paused")
+        };
+        let expected = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
         authority.unavailable.store(false, Ordering::SeqCst);
-        authority.limits.lock().unwrap().get_mut(path).unwrap().max_goal_runs = ceiling - 1;
+        authority
+            .limits
+            .lock()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .max_goal_runs = ceiling - 1;
         assert!(matches!(
-            runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
-                session_id, expected, action: qq_protocol::GoalControl::Resume
-            }).await,
-            Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Budget))
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::GoalControl {
+                        session_id,
+                        expected,
+                        action: qq_protocol::GoalControl::Resume
+                    }
+                )
+                .await,
+            Err(SessionRuntimeError::InvalidGoal(
+                GoalValidationError::Budget
+            ))
         ));
         authority.unavailable.store(true, Ordering::SeqCst);
-        runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
-            session_id, expected, action: qq_protocol::GoalControl::Clear
-        }).await.unwrap();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected,
+                    action: qq_protocol::GoalControl::Clear,
+                },
+            )
+            .await
+            .unwrap();
         authority.unavailable.store(false, Ordering::SeqCst);
     }
+    drop(_held);
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_policy_migration_retains_legacy_unknown_and_rolls_back_bad_shapes() {
+    let (directory, store, claim) = model_goal_claim(true).await;
+    let goal = claim.goal.as_ref().unwrap().clone();
+    store.close().await.unwrap();
+    drop(store);
+    let path = directory.path().join("sessions.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
+        ALTER TABLE session_goals DROP COLUMN policy_json;
+        UPDATE metadata SET value='57' WHERE key='schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        crate::sessions::goals::load_live(&connection, goal.session_id)
+            .unwrap()
+            .unwrap(),
+        *goal
+    );
+    let (policy, at) = goal_policy::load(&connection, goal.goal_id).unwrap();
+    assert_eq!(policy, GoalPolicy::default());
+    assert_eq!(at, None);
+    policy
+        .validate_specification(&goal.budget, goal.check.as_ref(), at)
+        .unwrap();
+    assert!(matches!(
+        GoalPolicy {
+            max_duration_ms: 86_400_000,
+            ..policy
+        }
+        .validate_specification(&goal.budget, goal.check.as_ref(), at),
+        Err(SessionRuntimeError::InvalidGoal(
+            GoalValidationError::Budget
+        ))
+    ));
+    drop(connection);
+    for previous in [57, STORE_SCHEMA_VERSION] {
+        for definition in ["INTEGER", "TEXT"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.sqlite3");
+            let (connection, _) = open_database(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
+                ALTER TABLE session_goals DROP COLUMN policy_json;
+                ALTER TABLE session_goals ADD COLUMN policy_json {definition};
+                UPDATE metadata SET value='{previous}' WHERE key='schema_version';"
+                ))
+                .unwrap();
+            drop(connection);
+            assert!(matches!(
+                open_database(&path),
+                Err(SessionRuntimeError::CONSTRAINT)
+            ));
+            let connection = Connection::open(&path).unwrap();
+            let version: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, previous.to_string());
+            let columns: u32 = connection.query_row(
+                "SELECT count(*) FROM pragma_table_info('session_goals') WHERE name='specification_at_ms'",
+                [], |row| row.get(0)
+            ).unwrap();
+            assert_eq!(
+                columns, 0,
+                "a failed migration must roll back the new anchor column"
+            );
+        }
+    }
+}
+
+#[test]
+fn goal_policy_checks_each_budget_dimension_against_its_fixed_anchor() {
+    let budget = qq_protocol::GoalBudget {
+        max_goal_runs: 5,
+        deadline_ms: 5000,
+        max_total_tokens: None,
+        max_cost_usd_nanos: None,
+        per_run: RunLimits {
+            max_model_turns: Some(4),
+            ..RunLimits::default()
+        },
+    };
+    let check = qq_protocol::GoalCheck {
+        command: "true".to_owned(),
+        timeout_ms: 100,
+    };
+    let policy = GoalPolicy {
+        max_duration_ms: 4000,
+        max_goal_runs: 5,
+        max_check_timeout_ms: 100,
+        per_run: RunLimits {
+            max_model_turns: Some(4),
+            ..RunLimits::default()
+        },
+        ..GoalPolicy::default()
+    };
+    policy
+        .validate_specification(&budget, Some(&check), Some(1000))
+        .unwrap();
+    assert!(matches!(
+        policy.validate_specification(&budget, Some(&check), Some(999)),
+        Err(SessionRuntimeError::InvalidGoal(
+            GoalValidationError::Budget
+        ))
+    ));
+    let mut changed = budget.clone();
+    changed.per_run.max_model_turns = Some(5);
+    assert!(matches!(
+        policy.validate_specification(&changed, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidRunLimits)
+    ));
+    changed.per_run.max_model_turns = None;
+    assert!(matches!(
+        policy.validate_specification(&changed, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidRunLimits)
+    ));
+    let check = qq_protocol::GoalCheck {
+        timeout_ms: 101,
+        ..check
+    };
+    assert!(matches!(
+        policy.validate_specification(&budget, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Check))
+    ));
 }
