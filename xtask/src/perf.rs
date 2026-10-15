@@ -5435,16 +5435,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_amplification_rejects_one_extra_send_among_twenty_runs() {
+    fn retry_amplification_requires_exact_recovery_in_every_run() {
         let expected = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
         let mut entries = vec![expected; 20];
         let (metric, check) = retry_amplification_result(&entries).unwrap();
         assert_eq!(metric.summary.p95, expected * 1_000);
         assert!(check.passed, "{}", check.detail);
 
-        entries[19] += 1;
-        let (metric, check) = retry_amplification_result(&entries).unwrap();
-        assert_eq!(metric.summary.p95, expected * 1_000 + 50);
+        for observed in [expected - 1, expected + 1] {
+            entries[19] = observed;
+            let (metric, check) = retry_amplification_result(&entries).unwrap();
+            assert_eq!(metric.summary.p95, (expected * 19 + observed) * 50);
+            assert!(!check.passed, "{}", check.detail);
+        }
+        let (_, check) = retry_amplification_result(&vec![expected - 1; 20]).unwrap();
         assert!(!check.passed, "{}", check.detail);
         assert!(retry_amplification_result(&[]).is_err());
     }
