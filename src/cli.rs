@@ -1020,3 +1020,97 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod goal_cli_tests {
+    use super::*;
+    const SESSION: &str = "019df100-0000-7000-8000-000000000001";
+
+    #[test]
+    fn goal_cli_accepts_server_operations_without_an_ordinary_run_prompt() {
+        for operation in [
+            vec![
+                "set",
+                "finish migration",
+                "--goal-deadline",
+                "24h",
+                "--goal-max-runs",
+                "20",
+            ],
+            vec!["show"],
+            vec!["pause"],
+            vec!["resume"],
+            vec!["clear"],
+            vec![
+                "approve-check",
+                "once",
+                "--command",
+                "cargo test --workspace",
+            ],
+            vec![
+                "approve-check",
+                "for-goal",
+                "--command",
+                "cargo test --workspace",
+            ],
+        ] {
+            let mut argv = vec!["qq", "goal"];
+            argv.extend(operation);
+            argv.extend(["--session", SESSION, "--workspace", "/tmp/work", "--json"]);
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn goal_cli_requires_a_session_explicit_check_scope_and_unambiguous_edits() {
+        for operation in [
+            vec!["show"],
+            vec!["set", "objective"],
+            vec![
+                "approve-check",
+                "--session",
+                SESSION,
+                "--command",
+                "cargo test",
+            ],
+            vec!["approve-check", "once", "--session", SESSION],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--check",
+                "cargo test",
+                "--clear-check",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-deadline",
+                "0h",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-deadline",
+                "8d",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-max-runs",
+                "0",
+            ],
+        ] {
+            let mut argv = vec!["qq", "goal"];
+            argv.extend(operation);
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+    }
+}
