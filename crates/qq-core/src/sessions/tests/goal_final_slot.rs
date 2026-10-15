@@ -260,6 +260,14 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                 final_turns,
                 "final slot must honor its caller cap: {scenario}, prompt_final={prompt_final}"
             );
+            if scenario != "tighten" {
+                assert!(
+                    request_texts(&requests[9][0])
+                        .iter()
+                        .any(|text| text.contains("final budgeted run")),
+                    "the final slot is announced before its first request"
+                );
+            }
             let handoff = &requests[9][usize::from(scenario != "one_turn")];
             assert_eq!(handoff.tool_choice(), qq_provider::ToolChoice::None);
             assert!(
@@ -284,6 +292,24 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
         let reopened = SessionRuntime::open(SessionRuntimeOptions::new(database), loader)
             .await
             .unwrap();
+        let replayed = reopened
+            .snapshot(SnapshotRequest::new(
+                workspace_id,
+                Some(session_id),
+                256,
+                256,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert!(
+            replayed
+                .messages
+                .iter()
+                .any(|message| message.run_id == final_run
+                    && message.output == "durable final-slot handoff")
+        );
         let restored = reopened
             .inner
             .store
