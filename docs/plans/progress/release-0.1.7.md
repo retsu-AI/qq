@@ -105,3 +105,13 @@ Owner: ENG-1054; release handoff on `chore/0.1.7`.
 - Bump-tree full gate passed: 2,471/2,471 workspace tests, 14 explicit skips;
   doctests, minimal-provider Clippy and 211/211 tests pass (309.6s).
   Real-binary smoke 6/6 passes; `git diff --check` passes.
+
+
+### 2026-10-15 — bump preamble review correction
+
+- Codex correctly identified preparation-only text left above the bump status.
+  Updated the preamble to identify #318, its merged preparation base and the
+  v0.1.7 manifest/lockfile/changelog changes. Tag/publication remain pending;
+  guide pins stay at published v0.1.6 until new assets exist.
+- This is manually maintained plan text, not release-generator output.
+  Documentation gate and diff checks run before committing; user owns push.

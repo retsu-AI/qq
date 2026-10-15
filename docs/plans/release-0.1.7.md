@@ -2,11 +2,13 @@
 
 ## Status and scope
 
-Preparation only; tracked by [ENG-1054](https://linear.app/retsu-ai/issue/ENG-1054).
-Reviewed main: `0b4f29e3` on 2026-10-15 (rebased after #315/#317 merged).
-This is not a published prerelease, a version bump, or permission to tag.
-The manifest, lockfile, generated changelog and guide install pins remain at
-v0.1.6 until their respective release steps.
+Bump handoff for [PR #318](https://github.com/retsu-AI/qq/pull/318), tracked by
+[ENG-1054](https://linear.app/retsu-ai/issue/ENG-1054).
+Base main: `9df32a5b` on 2026-10-15, including preparation PR #316.
+This bump updates the manifest and lockfile to v0.1.7 and adds the v0.1.7
+changelog section. It is not yet tagged or published; tag only the clean,
+merged main result after review and passing checks. Guide install pins remain
+at published v0.1.6 until v0.1.7 assets are available.
 
 **Bump authorized; not tagged.** Preparation merged as `9df32a5b` and main CI
 passes. ENG-834 is closed by explicit maintainer acceptance of #315's known
