@@ -20,6 +20,7 @@ mod cli;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
+mod goals;
 mod headless;
 mod init;
 mod mcp;
@@ -61,6 +62,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
         Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Goal { command }) => goals::run(command, &overrides).await?,
         Some(cli::Command::Serve {
             bind,
             allow_origins,
@@ -836,18 +838,22 @@ fn tui_goal_defaults(goals: &config::GoalsConfig) -> qq_tui::GoalDefaults {
         max_runs: goals.max_runs,
         default_runs: goals.default_max_runs,
         check_timeout_ms: goals.check_timeout_seconds * 1000,
-        per_run: qq_protocol::RunLimits {
-            max_duration_ms: goals.per_run.max_duration_ms,
-            max_model_turns: goals.per_run.max_model_turns,
-            max_tool_calls: goals.per_run.max_tool_calls,
-            max_total_tokens: goals.per_run.max_total_tokens,
-            max_cost_usd_nanos: goals.per_run.max_cost_usd_nanos,
-            max_input_tokens: goals.per_run.max_input_tokens,
-            max_output_tokens: goals.per_run.max_output_tokens,
-            max_tool_output_bytes: goals.per_run.max_tool_output_bytes,
-            max_children: goals.per_run.max_children,
-            max_concurrent_children: goals.per_run.max_concurrent_children,
-        },
+        per_run: goal_run_limits(goals.per_run),
+    }
+}
+
+fn goal_run_limits(limits: config::GoalRunLimits) -> qq_protocol::RunLimits {
+    qq_protocol::RunLimits {
+        max_duration_ms: limits.max_duration_ms,
+        max_model_turns: limits.max_model_turns,
+        max_tool_calls: limits.max_tool_calls,
+        max_total_tokens: limits.max_total_tokens,
+        max_cost_usd_nanos: limits.max_cost_usd_nanos,
+        max_input_tokens: limits.max_input_tokens,
+        max_output_tokens: limits.max_output_tokens,
+        max_tool_output_bytes: limits.max_tool_output_bytes,
+        max_children: limits.max_children,
+        max_concurrent_children: limits.max_concurrent_children,
     }
 }
 

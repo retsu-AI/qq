@@ -69,6 +69,29 @@ or budget · 4 harness failure · 5 needs input · 130 interrupted.
 The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 [Headless](headless.md#qq-serve--a-persistent-server).
 
+## `qq goal …`
+
+Manage a session goal through an already running `qq serve`. Every operation
+requires `--session ID`; `--workspace PATH` selects its workspace (default:
+current directory). Results are JSON, pretty printed by default; `--json`
+prints compact JSON. Errors exit 1; invalid arguments exit 2.
+
+| Subcommand | Behavior |
+| --- | --- |
+| `set OBJECTIVE` | Create or edit a goal; preserve unspecified check and budget fields when editing |
+| `show` | Print the current goal snapshot, or `null` when absent |
+| `pause`, `resume`, `clear` | Apply the named control to the observed goal revision |
+| `approve-check once\|for-goal --command COMMAND` | Authorize the exact reviewed check separately from ordinary tool approvals |
+
+`set` accepts `--replace` for an explicit replacement, `--check COMMAND` or
+`--clear-check`, `--goal-deadline DURATION` (positive integer plus `s`, `m`,
+`h`, or `d`, at most seven days), `--goal-max-runs N` (1–2000), and
+`--max-cost-usd AMOUNT` (positive decimal, up to nine fractional digits).
+Workspace defaults initialize new and replacement goals; current managed
+limits remain authoritative. An achieved goal requires `--replace`.
+Concurrent changes cause a revision conflict; inspect `show` before retrying.
+A successful control exits 0 even when the resulting goal is paused.
+
 ## `qq config …`
 
 | Subcommand | Prints |

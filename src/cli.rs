@@ -89,6 +89,12 @@ pub enum Command {
     /// client could answer), 130 interrupted by Ctrl-C.
     Run(RunArgs),
 
+    /// Inspect or control a session goal on an already running qq serve.
+    Goal {
+        #[command(subcommand)]
+        command: GoalCommand,
+    },
+
     /// Run the user-scoped QQ server in the foreground.
     Serve {
         /// Loopback address to bind. Port 0 selects an available port.
@@ -278,6 +284,153 @@ pub struct RunArgs {
     /// Also write the JSONL trial records to this file.
     #[arg(long, value_name = "PATH")]
     pub trace: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalTarget {
+    #[arg(long, value_name = "ID")]
+    pub session: qq_protocol::SessionId,
+    /// Session workspace; defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+    /// Print compact JSON; otherwise JSON is pretty-printed.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GoalCommand {
+    /// Set a new goal, or edit an existing one without resuming it.
+    Set(GoalSetArgs),
+    /// Print the current goal, or null when none is set.
+    Show(GoalTarget),
+    /// Pause the current goal and cancel its owned work.
+    Pause(GoalTarget),
+    /// Resume after configuration, budget and cancellation checks.
+    Resume(GoalTarget),
+    /// Clear the current goal and cancel its owned work.
+    Clear(GoalTarget),
+    /// Explicitly authorize this exact check once or repeatedly for this goal.
+    ApproveCheck(GoalApproveArgs),
+}
+
+impl GoalCommand {
+    pub fn target(&self) -> &GoalTarget {
+        match self {
+            Self::Set(args) => &args.target,
+            Self::Show(target)
+            | Self::Pause(target)
+            | Self::Resume(target)
+            | Self::Clear(target) => target,
+            Self::ApproveCheck(args) => &args.target,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct GoalSetArgs {
+    #[command(flatten)]
+    pub target: GoalTarget,
+    /// Objective (up to 2048 bytes). Existing goals are edited unless --replace.
+    pub objective: String,
+    /// Replace the goal, resetting progress and requiring fresh check consent.
+    #[arg(long)]
+    pub replace: bool,
+    /// New exact check command; omitted retains the check when editing.
+    #[arg(long, value_name = "COMMAND", conflicts_with = "clear_check")]
+    pub check: Option<String>,
+    /// Remove an existing completion check when editing.
+    #[arg(long)]
+    pub clear_check: bool,
+    /// Duration from this submission: positive integer followed by s, m, h or d.
+    #[arg(long, value_name = "DURATION", value_parser = parse_goal_duration)]
+    pub goal_deadline: Option<std::time::Duration>,
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=2000))]
+    pub goal_max_runs: Option<u32>,
+    /// Total goal cost ceiling in dollars (up to nine decimal places).
+    #[arg(long = "max-cost-usd", value_name = "USD", value_parser = parse_goal_cost)]
+    pub max_cost_usd_nanos: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalApproveArgs {
+    #[command(flatten)]
+    pub target: GoalTarget,
+    #[arg(value_enum)]
+    pub scope: GoalCheckApproval,
+    /// Exact command reviewed by the operator; must match the current check.
+    #[arg(long, value_name = "COMMAND")]
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GoalCheckApproval {
+    Once,
+    ForGoal,
+}
+
+impl From<GoalCheckApproval> for qq_protocol::GoalCheckScope {
+    fn from(scope: GoalCheckApproval) -> Self {
+        match scope {
+            GoalCheckApproval::Once => Self::Once,
+            GoalCheckApproval::ForGoal => Self::ForGoal,
+        }
+    }
+}
+
+pub fn parse_goal_duration(value: &str) -> Result<std::time::Duration, String> {
+    let (number, multiplier) = match value.as_bytes().last().copied() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 3600),
+        Some(b'd') => (&value[..value.len() - 1], 86400),
+        _ => {
+            return Err(
+                "use a positive integer followed by s, m, h or d (for example 24h)".to_owned(),
+            );
+        }
+    };
+    let seconds = number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier));
+    match seconds {
+        Some(seconds @ 1..=604800) => Ok(std::time::Duration::from_secs(seconds)),
+        _ => Err("goal duration must be positive and at most seven days".to_owned()),
+    }
+}
+
+pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
+    let invalid = || {
+        "cost must be a positive decimal dollar amount with at most nine fractional digits"
+            .to_owned()
+    };
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if value.len() > 30
+        || whole.is_empty() && fraction.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return Err(invalid());
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().map_err(|_| invalid())?
+    };
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u64>().map_err(|_| invalid())? * 10_u64.pow(9 - fraction.len() as u32)
+    };
+    match whole
+        .checked_mul(1_000_000_000)
+        .and_then(|whole| whole.checked_add(fraction))
+    {
+        Some(cost) if cost > 0 => Ok(cost),
+        _ => Err(invalid()),
+    }
 }
 
 /// Headless approval policies. Deliberately excludes interactive `ask`:
@@ -1024,7 +1177,7 @@ mod tests {
 #[cfg(test)]
 mod goal_cli_tests {
     use super::*;
-    const SESSION: &str = "019df100-0000-7000-8000-000000000001";
+    const SESSION: &str = "019df100000070008000000000000001";
 
     #[test]
     fn goal_cli_accepts_server_operations_without_an_ordinary_run_prompt() {

@@ -320,6 +320,22 @@ machine. It is **not** a hosted API: no tenancy, no per-caller authorization,
 no non-loopback bind without an explicit application authentication design.
 See `protocol.md`.
 
+### `qq goal`
+
+Server goal scripting discovers the existing local authenticated server and
+uses `SessionClient` to resolve the workspace, inspect the focused session,
+and submit one revision-fenced command. It never opens the session store or
+starts a server. Only goal creation/editing loads model-less workspace defaults;
+the server validates current policy. Controls preserve the observed goal ID
+and revision, and check authorization requires the exact raw command plus an
+explicit once/for-goal scope. Conflicts are returned without automatic retry.
+
+`show` emits the existing `GoalSnapshot` JSON or `null`; mutations emit the
+existing `CommandReceipt`. Both end with a newline, with pretty formatting
+unless `--json` selects compact JSON. These are single responses, separate
+from `qq run` JSONL records. Success exits 0 (including a paused goal), runtime
+errors exit 1, and argument errors exit 2. There is no wire/schema addition.
+
 ## What The Supervisor Owns
 
 These are not gaps. They are deliberately outside QQ and should stay there.

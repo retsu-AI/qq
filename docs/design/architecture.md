@@ -98,6 +98,7 @@ src/
   cli.rs         argument parsing and command dispatch
   runtime.rs     configuration-to-runtime composition (runtime/approval.rs, runtime/routing.rs)
   headless.rs    `qq run` durable non-interactive execution
+  goals.rs       `qq goal` authenticated server client; no store ownership
   catalog.rs     authenticated model discovery
   advisory.rs    `qq jev observe` post-commit observer
   doctor.rs      `qq doctor`

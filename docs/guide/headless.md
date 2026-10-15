@@ -159,6 +159,25 @@ The wire protocol is HTTP + SSE with resumable event cursors; see
 [`../design/protocol.md`](../design/protocol.md). The server binds only to
 loopback; there is no remote client or remote authentication yet.
 
+## Managing server goals from scripts
+
+Start `qq serve`, then use the session ID from the TUI or server API:
+
+```sh
+qq goal set "Finish the migration" --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --goal-deadline 24h --goal-max-runs 20
+qq goal show --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --json
+qq goal approve-check once --command 'cargo test' --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012
+qq goal pause --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012
+```
+
+Review the check before authorizing it. `once` grants one execution;
+`for-goal` grants reuse for that goal's current check. Editing a goal preserves
+unspecified budget and check fields. `--replace` starts a replacement with
+workspace defaults. `resume` and `clear` are also available. These commands
+use authenticated local server discovery and leave store ownership with the
+server. They return the goal snapshot (`show`) or command receipt (mutations),
+without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal-).
+
 ## In CI
 
 ```yaml
