@@ -15,6 +15,7 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 | AF7 | CI affected/full split | In review | same | merge queue setting is the operator's |
 | AF8 | AGENTS.md and skills | In review | same | |
 | AF9 | `cargo xtask lint` | In review (first rules) | same | mistake mining next |
+| AF9.1 | Feedback gate integrity | In progress | `fix/eng-1028-af9-gate-integrity` | four review gaps from #282; regressions and real-binary verification |
 | AF10 | Skill eval | Planned | | |
 
 #### 2026-10-11 session
@@ -127,3 +128,21 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
 - Focused xtask suite passed 113 tests before added regressions; latest lint 11/11
   and smoke 4/4 passed. Formatting applied. Full CI-profile run was interrupted;
   no full-gate success claimed. User requested immediate push; remote CI pending.
+
+
+#### AF9.1 gate integrity follow-up
+
+- #282 merged as 192c9879; #311 merged as 3b763ea1. AF1–AF4, AF7/AF8,
+  initial AF9 and AF6.1 are shipped; merge-queue operator setup remains open.
+- Owned paths: xtask check/lint, legacy sleep baseline, rule table and plan ledger.
+- Reproduced --full/--evidence acceptance and missing ADR-index false passes;
+  both regression tests failed before the fixes and now pass.
+- Added skill-copy presence/content/Unix-mode validation and a 77-entry legacy
+  sleep multiset keyed by path, line, function context and code. Line movement
+  requires explicitly reviewing/updating the baseline, rather than granting a new site.
+- Focused lint tests 13/13; affected CI-profile gate passes (118 xtask tests).
+  Independent review caught/fixed symlink copies, untracked executable-mode
+  evidence hashing and ambiguous sleep keys; added regressions for each.
+- verify-qq: isolated doctor has zero failures and matching binary version;
+  scripted ask answer and provider request asserted; fake stopped safely.
+  Evidence: target/qq-verify/af9-gate-integrity/evidence/. Full workspace not run.

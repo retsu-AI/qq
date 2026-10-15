@@ -148,9 +148,11 @@ it. When the same correction happens twice, encode it
 | No `mod.rs` files | `cargo xtask lint` `no-mod-rs` |
 | `#![forbid(unsafe_code)]` in every crate root | `cargo xtask lint` `forbid-unsafe` |
 | No unbounded channels in production code | `cargo xtask lint` `unbounded-channel` |
-| No new fixed sleeps in tests (ceiling only moves down) | `cargo xtask lint` `sleep-in-tests` |
+| No new fixed sleeps in tests (per-site legacy baseline and decreasing ceiling) | `cargo xtask lint` `sleep-in-tests` |
 | `#[ignore]` carries a reason | `cargo xtask lint` `ignore-needs-reason` |
 | Every ADR has an index row | `cargo xtask lint` `adr-indexed` |
+
+| Canonical and compatibility skills match, including executable modes | `cargo xtask lint` `skill-copies` |
 | Guide documents every CLI flag and doctor check | `src/docs_truth.rs`, driven from `cli::tests` and `doctor::tests` |
 | Wire changes regenerate fixtures and bump `PROTOCOL_VERSION` | `crates/qq-protocol/tests/{wire,headless}_fixtures.rs` |
 | The binary works end to end (ask, run, tools, 401, resume, serve) | `cargo xtask smoke` |

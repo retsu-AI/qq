@@ -45,7 +45,7 @@ pub struct CheckArgs {
     #[arg(long)]
     dry_run: bool,
     /// Print the last run's report as a Markdown block for a PR body.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["full", "packages", "base", "dry_run", "profile", "no_clippy"])]
     evidence: bool,
     /// nextest profile (`default`, `quick`, `ci`).
     #[arg(long, default_value = "default")]
@@ -835,6 +835,15 @@ fn git_head(root: &Path) -> Result<(String, bool, String), CheckError> {
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
         let path = root.join(name);
+
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| CheckError::Read(path.clone(), error))?;
+        digest.update([u8::from(metadata.is_symlink())]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            digest.update((metadata.permissions().mode() & 0o111).to_le_bytes());
+        }
         if path.is_symlink() {
             let bytes = fs::read_link(&path)
                 .map(|target| target.as_os_str().as_encoded_bytes().to_vec())
@@ -1122,6 +1131,28 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn evidence_rejects_execution_options() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            check: super::CheckArgs,
+        }
+        for options in [
+            vec!["--full"],
+            vec!["--crate", "xtask"],
+            vec!["--base", "HEAD"],
+            vec!["--dry-run"],
+            vec!["--profile", "ci"],
+            vec!["--no-clippy"],
+        ] {
+            let mut args = vec!["xtask", "--evidence"];
+            args.extend(options);
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["xtask", "--evidence"]).is_ok());
+    }
+    #[test]
     fn snapshot_detects_staged_unstaged_and_untracked_edits() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1158,6 +1189,14 @@ mod tests {
         assert_ne!(unstaged.2, staged.2);
         std::fs::write(root.join("new"), "one").unwrap();
         let new = super::git_head(root).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("new"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert_ne!(new.2, super::git_head(root).unwrap().2);
+        }
         std::fs::write(root.join("new"), "two").unwrap();
         assert_ne!(new.2, super::git_head(root).unwrap().2);
         std::fs::remove_file(root.join("new")).unwrap();
