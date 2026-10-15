@@ -322,7 +322,7 @@ See `protocol.md`.
 
 ### Foreground goal record contract
 
-Protocol35 reserves two additional records for foreground goal hosting:
+Protocol35 defines two additional records for foreground goal hosting:
 `goal_run` contains `workspace_id`, owning `session_id`, immutable `goal`
 identity/revision and the authoritative settled `run` snapshot. It covers each
 direct goal prompt, model audit and completion check; helper, compaction and
@@ -335,8 +335,19 @@ including needs-user pauses. Final goal exits are achieved0, paused6,
 blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only
 achievement exits0. Interruption first requests a durable pause; if cleanup
 fails the invocation reports harness failure. New records do not change the
-ordinary prompt trial/event/outcome contract. The record vocabulary alone
-does not constitute a foreground CLI implementation or its qualification.
+ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
+requires an existing session and resumes its specification. Separate
+`--goal-check-approval` plus the exact reviewed `--check` authorizes checks.
+The client does not resubmit prompts to implement the loop. It shares session
+preparation and unattended tool approval with ordinary headless execution.
+
+`PauseForInput` carries one exact held ask-user call. Core requires a matching
+live goal revision, an awaiting-approval ask-user call and active paid-family
+ownership; the normal goal-control transaction records NeedsUser::Approval
+and cancels the family. Foreign workspace holds are ignored by this client.
+Core's run_snapshot API fences a single run by workspace/session independently
+of transcript pagination; goal_owns_run checks the exact live goal's unsettled
+sponsorship before approvals. No database handle enters the adapter.
 
 ### `qq goal`
 

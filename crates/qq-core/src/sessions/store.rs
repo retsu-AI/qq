@@ -952,6 +952,51 @@ impl Store {
         .await
     }
 
+    pub(super) async fn goal_owns_run(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+        run_id: RunId,
+    ) -> Result<bool, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            let current = goals::load_live(connection, session_id)?
+                .ok_or(SessionRuntimeError::GoalNotFound)?;
+            if current.goal_id != expected.goal_id || current.revision != expected.revision {
+                return Err(SessionRuntimeError::GoalConflict {
+                    current: Some(qq_protocol::GoalIdentity {
+                        goal_id: current.goal_id,
+                        revision: current.revision,
+                    }),
+                });
+            }
+            Ok(
+                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
+                    .iter()
+                    .any(|work| work.run == run_id && !work.cancelled),
+            )
+        })
+        .await
+    }
+
+    pub(super) async fn run_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<qq_protocol::RunSnapshot, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            if session_workspace(connection, session_id)? != workspace_id {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            let run = claim::load_run(connection, run_id)?;
+            if run.session_id != session_id {
+                return Err(SessionRuntimeError::RunNotFound);
+            }
+            Ok(run)
+        })
+        .await
+    }
+
     #[cfg(test)]
     pub(super) async fn events_after(
         &self,

@@ -189,7 +189,7 @@ fn prepare_command(
     })
 }
 
-fn prepare_set(
+pub(crate) fn prepare_set(
     args: &GoalSetArgs,
     current: Option<&GoalSnapshot>,
     defaults: &qq_config::GoalsConfig,

@@ -75,7 +75,10 @@ snapshot; `goal` carries the final goal snapshot and invocation status/exit.
 Paid descendants stay in event records, rather than inflating the count of
 direct goal runs. Ordinary prompt records retain their shapes. Older readers
 must upgrade before accepting these new tags; schema58, descriptor and prompt
-versions are unchanged.
+versions are unchanged. Goal controls add `pause_for_input` with the exact
+held ask-user call ID; a stale revision, settled/non-question call or foreign
+paid family is refused. Successful stops persist NeedsUser::Approval and
+cancel sponsored work atomically through existing goal-control admission.
 
 Version 34 adds `acknowledge_check_interruption` at
 `POST /v1/workspaces/check-interruptions/acknowledge`, its receipt and the

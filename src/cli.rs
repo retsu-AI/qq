@@ -87,7 +87,7 @@ pub enum Command {
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
     /// persistence failure, 5 needs input (the model asked a question no
     /// client could answer), 130 interrupted by Ctrl-C.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
 
     /// Inspect or control a session goal on an already running qq serve.
     Goal {
@@ -188,8 +188,39 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Task prompt for the agent.
-    pub prompt: String,
+    /// Task prompt for an ordinary run.
+    #[arg(required_unless_present = "goal", conflicts_with = "goal")]
+    pub prompt: Option<String>,
+
+    /// Run an objective to a goal state; omit OBJECTIVE with --session to resume.
+    #[arg(long, num_args = 0..=1, value_name = "OBJECTIVE",
+        conflicts_with_all = ["steer_stdin", "output_schema"])]
+    pub goal: Option<Option<String>>,
+
+    /// Optional goal completion check; separate consent is required.
+    #[arg(
+        long,
+        requires = "goal",
+        conflicts_with = "prompt",
+        value_name = "COMMAND"
+    )]
+    pub check: Option<String>,
+
+    /// Authorize only this goal's exact check, independently of tool approvals.
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_enum)]
+    pub goal_check_approval: Option<GoalCheckApproval>,
+
+    /// Relative goal deadline, such as 24h (at most seven days).
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_parser = parse_goal_duration)]
+    pub goal_deadline: Option<std::time::Duration>,
+
+    /// Maximum direct goal runs (1–2000).
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_parser = clap::value_parser!(u32).range(1..=2000))]
+    pub goal_max_runs: Option<u32>,
+
+    /// Replace an existing goal explicitly, using workspace defaults.
+    #[arg(long, requires = "goal", conflicts_with = "prompt")]
+    pub replace: bool,
 
     /// Workspace directory. Defaults to the current directory.
     #[arg(long, value_name = "PATH")]
@@ -256,7 +287,7 @@ pub struct RunArgs {
     /// when the selected model has no pricing, so the limit is never
     /// silently unenforced.
     #[arg(long, value_name = "VALUE")]
-    pub max_cost_usd: Option<f64>,
+    pub max_cost_usd: Option<String>,
 
     /// Require the final answer to be one JSON document satisfying the JSON
     /// Schema at PATH (at most 64 KiB, 32 levels, 4096 values; no `$ref`).
@@ -853,12 +884,12 @@ mod tests {
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected a run command");
         };
-        assert_eq!(args.prompt, "fix the failing test");
+        assert_eq!(args.prompt.as_deref(), Some("fix the failing test"));
         assert_eq!(args.workspace.as_deref(), Some(Path::new("/tmp/task")));
         assert_eq!(args.approval, RunApproval::Auto);
         assert_eq!(args.timeout_seconds, Some(900));
         assert_eq!(args.max_turns, Some(40));
-        assert_eq!(args.max_cost_usd, Some(2.5));
+        assert_eq!(args.max_cost_usd.as_deref(), Some("2.5"));
         assert_eq!(args.format, RunFormat::Jsonl);
         assert_eq!(args.trace.as_deref(), Some(Path::new("/tmp/trace.jsonl")));
         assert_eq!(
@@ -1312,7 +1343,7 @@ mod foreground_goal_cli_tests {
                 "out.json",
             ],
         ] {
-            assert!(Cli::try_parse_from(args).is_err());
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
         }
     }
 }

@@ -61,7 +61,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-        Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Run(args)) => return Ok(headless_run(*args, &overrides).await),
         Some(cli::Command::Goal { command }) => goals::run(command, &overrides).await?,
         Some(cli::Command::Serve {
             bind,
@@ -195,7 +195,7 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
     let steer_stdin = args.steer_stdin;
     match prepare_headless(args, overrides).await {
-        Ok((sessions, options)) => {
+        Ok((sessions, options, goal)) => {
             let interrupt = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
@@ -219,19 +219,33 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             let mut stdout = io::stdout().lock();
             let mut stderr = io::stderr().lock();
-            let status = headless::run(
-                &sessions,
-                options,
-                interrupt,
-                steering,
-                &mut stdout,
-                &mut stderr,
-            )
-            .await;
+            let code = match goal {
+                Some(goal) => {
+                    headless::run_goal(
+                        &sessions,
+                        options,
+                        goal,
+                        interrupt,
+                        &mut stdout,
+                        &mut stderr,
+                    )
+                    .await
+                }
+                None => headless::run(
+                    &sessions,
+                    options,
+                    interrupt,
+                    steering,
+                    &mut stdout,
+                    &mut stderr,
+                )
+                .await
+                .code(),
+            };
             drop(stdout);
             drop(stderr);
             match sessions.close().await {
-                Ok(()) => headless::exit_code(status),
+                Ok(()) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("error: could not close the session runtime: {error}");
                     headless::exit_code(headless::HeadlessStatus::HarnessFailure)
@@ -252,9 +266,54 @@ type HeadlessSetupError = (headless::HeadlessStatus, String);
 async fn prepare_headless(
     args: cli::RunArgs,
     overrides: &CliOverrides,
-) -> Result<(qq_core::SessionRuntime, headless::HeadlessOptions), HeadlessSetupError> {
+) -> Result<
+    (
+        qq_core::SessionRuntime,
+        headless::HeadlessOptions,
+        Option<headless::GoalInvocation>,
+    ),
+    HeadlessSetupError,
+> {
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
     let harness = |message: String| (headless::HeadlessStatus::HarnessFailure, message);
+
+    if args.goal == Some(None) && args.session.is_none() {
+        return Err(invalid("bare --goal requires --session ID".to_owned()));
+    }
+    if args.goal == Some(None)
+        && (args.replace
+            || args.goal_deadline.is_some()
+            || args.goal_max_runs.is_some()
+            || args.max_cost_usd.is_some()
+            || args.timeout_seconds.is_some()
+            || args.max_turns.is_some())
+    {
+        return Err(invalid(
+            "goal budget/replacement changes require an objective; use --goal OBJECTIVE".to_owned(),
+        ));
+    }
+
+    if let Some(Some(objective)) = &args.goal
+        && (objective.trim().is_empty() || objective.len() > 2048)
+    {
+        return Err(invalid(
+            "goal objective must contain 1 to 2048 bytes".to_owned(),
+        ));
+    }
+    if args
+        .check
+        .as_ref()
+        .is_some_and(|check| check.trim().is_empty() || check.len() > 1024 || check.contains('\0'))
+    {
+        return Err(invalid(
+            "goal check must contain 1 to 1024 bytes and no NUL".to_owned(),
+        ));
+    }
+    if args.goal_check_approval.is_some() && args.check.is_none() {
+        return Err(invalid(
+            "--goal-check-approval requires --check with the exact reviewed command".to_owned(),
+        ));
+    }
 
     // Pure argument validation runs before any filesystem or configuration
     // work so a malformed label never costs a config load.
@@ -277,15 +336,21 @@ async fn prepare_headless(
         ))
     })?;
 
-    let max_cost_usd_nanos = match args.max_cost_usd {
+    let max_cost_usd_nanos = match args.max_cost_usd.as_deref() {
         None => None,
-        // The value is validated finite and positive; the saturating cast
-        // cannot lose a sign or wrap.
-        Some(value) if value.is_finite() && value > 0.0 => Some((value * 1e9).round() as u64),
+        Some(value) if args.goal.is_some() => Some(cli::parse_goal_cost(value).map_err(invalid)?),
         Some(value) => {
-            return Err(invalid(format!(
-                "--max-cost-usd must be a positive dollar amount, got {value}"
-            )));
+            let parsed = value.parse::<f64>().map_err(|_| {
+                invalid(format!(
+                    "--max-cost-usd must be a positive dollar amount, got {value}"
+                ))
+            })?;
+            if !parsed.is_finite() || parsed <= 0.0 {
+                return Err(invalid(format!(
+                    "--max-cost-usd must be a positive dollar amount, got {value}"
+                )));
+            }
+            Some((parsed * 1e9).round() as u64)
         }
     };
 
@@ -412,8 +477,17 @@ async fn prepare_headless(
         overrides_jev_approval,
         overrides_approval_delegate,
     );
+    let goal = args.goal.map(|objective| headless::GoalInvocation {
+        objective,
+        check: args.check,
+        check_approval: args.goal_check_approval.map(Into::into),
+        deadline: args.goal_deadline,
+        max_runs: args.goal_max_runs,
+        replace: args.replace,
+        defaults: snapshot.goals().clone(),
+    });
     let options = headless::HeadlessOptions {
-        prompt: args.prompt,
+        prompt: args.prompt.unwrap_or_default(),
         workspace,
         session: args.session,
         model,
@@ -448,7 +522,7 @@ async fn prepare_headless(
             .map(|arm| arm.trim().to_owned())
             .filter(|arm| !arm.is_empty()),
     };
-    Ok((handler.sessions().clone(), options))
+    Ok((handler.sessions().clone(), options, goal))
 }
 
 fn reject_read_approvals_for_existing_server(
@@ -2644,7 +2718,7 @@ mod tests {
         let Some(cli::Command::Run(args)) = parsed.command else {
             panic!("expected a run command");
         };
-        args
+        *args
     }
 
     /// The output schema is read and compiled before any configuration or

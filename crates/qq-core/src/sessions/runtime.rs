@@ -1171,6 +1171,39 @@ impl SessionRuntime {
         self.inner.store.snapshot(request).await
     }
 
+    /// Whether an unsettled run is sponsored by this exact live goal.
+    pub async fn goal_owns_run(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+        run_id: RunId,
+    ) -> Result<bool, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .goal_owns_run(session_id, expected, run_id)
+            .await
+    }
+
+    /// Reads an exact durable run, independently of transcript pagination.
+    /// Workspace and session fences prevent accidentally reading another lane.
+    pub async fn run_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<qq_protocol::RunSnapshot, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .run_snapshot(workspace_id, session_id, run_id)
+            .await
+    }
+
     /// Committed events after `request.after`, as parsed envelopes.
     pub fn subscribe(
         &self,
@@ -1584,6 +1617,8 @@ pub enum SessionRuntimeError {
     GoalCancellationPending,
     #[error("the interrupted check does not match an unacknowledged workspace hold")]
     CheckInterruptionMismatch,
+    #[error("the named question is not pending in this goal's active paid family")]
+    GoalInputNotPending,
     #[error("goal check authorization is required")]
     GoalCheckApprovalRequired,
     #[error("goal has no check to authorize")]

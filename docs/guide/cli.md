@@ -60,9 +60,23 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 | `--output-schema PATH`, `--output-repair-turns N` | none; `2` |
 | `--format text\|jsonl` | `text` |
 | `--trace PATH` | none |
+| `--goal [OBJECTIVE]`, `--replace` | ordinary prompt; explicit goal replacement only |
+| `--check COMMAND`, `--goal-check-approval once\|for-goal` | no goal check or consent |
+| `--goal-deadline DURATION`, `--goal-max-runs N` | workspace goal defaults |
 
 Exit codes: 0 completed · 1 task failed · 2 invalid configuration · 3 timeout
 or budget · 4 harness failure · 5 needs input · 130 interrupted.
+
+`--goal OBJECTIVE` runs the goal driver instead of submitting an ordinary
+prompt. Bare `--goal --session ID` resumes the stored goal. Goal exits are
+0 achieved, 6 paused, 7 blocked, 8 goal budget exhausted, 130 interrupted;
+setup/harness errors retain 2/4. Check consent requires both the exact
+`--check COMMAND` and `--goal-check-approval` scope. `--approval` and
+`--allow-shell` cannot grant check consent. `--replace` requires an objective.
+Goal flags conflict with an ordinary prompt; goal mode also rejects
+`--steer-stdin` and `--output-schema`. With an objective, timeout/turn flags
+set per-run limits, while `--max-cost-usd` caps total goal spending. Budget
+changes on bare resume require supplying an objective explicitly.
 
 ## `qq serve [--bind ADDR] [--allow-origin ORIGIN]…`
 

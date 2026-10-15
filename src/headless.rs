@@ -106,6 +106,17 @@ pub struct HeadlessOptions {
     pub arm: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GoalInvocation {
+    pub objective: Option<String>,
+    pub check: Option<String>,
+    pub check_approval: Option<qq_protocol::GoalCheckScope>,
+    pub deadline: Option<Duration>,
+    pub max_runs: Option<u32>,
+    pub replace: bool,
+    pub defaults: qq_config::GoalsConfig,
+}
+
 /// The session approval mode a headless policy submits with.
 const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
     match approval {
@@ -193,6 +204,20 @@ impl Failure {
             message: message.into(),
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionIntent {
+    Prompt,
+    Goal,
+}
+
+struct SessionHandle {
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    subscribe_after: qq_protocol::EventCursor,
+    wait_for_delegate: bool,
+    child_waits_for_delegate: bool,
 }
 
 #[derive(Clone)]
@@ -295,6 +320,301 @@ impl RunEnd {
             final_output: None,
             answer: String::new(),
             denied_calls: 0,
+        }
+    }
+}
+
+/// Hosts the core goal driver until its goal leaves Active. No prompt is
+/// resubmitted by this adapter; scheduling and spending remain runtime-owned.
+pub async fn run_goal(
+    sessions: &SessionRuntime,
+    options: HeadlessOptions,
+    request: GoalInvocation,
+    interrupt: impl Future<Output = ()>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let mut cleanup = None;
+    let result: Result<u8, Failure> = async {
+        let mut sink = RecordSink::open(&options)
+            .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?;
+        let handle = prepare_session(sessions, &options, SessionIntent::Goal).await?;
+        let snapshot = sessions.snapshot(SnapshotRequest::new(
+            handle.workspace_id, Some(handle.session_id), 1, 1,
+        )).await.map_err(|error| Failure::harness(error.to_string()))?;
+        let current = snapshot.focused.and_then(|session| session.goal);
+        let creating = request.objective.is_some();
+        let mut goal = if let Some(objective) = request.objective {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| Failure::invalid(error.to_string()))?;
+            let args = crate::cli::GoalSetArgs {
+                target: crate::cli::GoalTarget { session: handle.session_id,
+                    workspace: None, json: true },
+                objective, replace: request.replace, check: request.check.clone(), clear_check: false,
+                goal_deadline: request.deadline, goal_max_runs: request.max_runs,
+                max_cost_usd_nanos: options.max_cost_usd_nanos,
+            };
+            let mut command = crate::goals::prepare_set(&args, current.as_deref(),
+                &request.defaults, u64::try_from(now.as_millis())
+                    .map_err(|_| Failure::invalid("system clock exceeds supported range"))?)
+                .map_err(|error| Failure::invalid(error.to_string()))?;
+            if let SessionCommand::SetGoal { budget, .. } = &mut command {
+                if let Some(timeout) = options.timeout {
+                    budget.per_run.max_duration_ms = Some(u64::try_from(timeout.as_millis())
+                        .map_err(|_| Failure::invalid("per-run timeout is too large"))?);
+                }
+                if let Some(turns) = options.max_turns { budget.per_run.max_model_turns = Some(turns); }
+            }
+            goal_receipt(send(sessions, command).await?)?
+        } else {
+            current.ok_or_else(|| Failure::invalid("session has no stored goal"))?
+        };
+        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
+        let guard = cleanup.as_mut().unwrap();
+        if let Some(scope) = request.check_approval {
+            let check = goal.check.as_ref().ok_or_else(|| Failure::invalid("goal has no check"))?;
+            if request.check.as_deref() != Some(check.command.as_str()) {
+                return Err(Failure::invalid("check consent requires --check with the exact stored command"));
+            }
+            goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                session_id: handle.session_id, expected: goal_identity(&goal),
+                action: qq_protocol::GoalControl::ApproveCheck { scope, command: check.command.clone() },
+            }).await?)?;
+            guard.expected = goal_identity(&goal);
+            guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
+                .then(|| (sessions.clone(), goal.session_id));
+        } else if !creating && request.check.is_some() {
+            return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
+        }
+        // Missing consent is a durable result, not an unreachable human wait.
+        let needs_check = matches!(goal.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::CheckApproval | qq_protocol::GoalNeedsUser::CheckInterrupted,
+            },
+        });
+        if !needs_check && matches!(goal.status,
+            qq_protocol::GoalStatus::Paused { .. } | qq_protocol::GoalStatus::Blocked { .. }) {
+            goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                session_id: handle.session_id, expected: goal_identity(&goal),
+                action: qq_protocol::GoalControl::Resume,
+            }).await?)?;
+            guard.expected = goal_identity(&goal);
+            guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
+                .then(|| (sessions.clone(), goal.session_id));
+        }
+        if goal.status != qq_protocol::GoalStatus::Active {
+            guard.disarm();
+            return finish_goal(&mut sink, stdout, &options, handle.workspace_id, goal, None);
+        }
+        let expected = goal_identity(&goal);
+        let mut events = sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after: handle.subscribe_after,
+        }).map_err(|error| Failure::harness(error.to_string()))?;
+        let mut interrupt = pin!(interrupt);
+        let mut final_goal: Option<(Box<qq_protocol::GoalSnapshot>, u64)> = None;
+        loop {
+            tokio::select! {
+                biased;
+                () = interrupt.as_mut() => {
+                    goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                        session_id: handle.session_id, expected,
+                        action: qq_protocol::GoalControl::Pause,
+                    }).await?)?;
+                    guard.disarm();
+                    return finish_goal(&mut sink, stdout, &options, handle.workspace_id,
+                        goal, Some(qq_protocol::HeadlessGoalStatus::Interrupted));
+                }
+                event = events.next() => {
+                    let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
+                        .map_err(|error| Failure::harness(error.to_string()))?;
+                    sink.record(stdout, HeadlessRecordRef::Event { envelope: &envelope })
+                        .map_err(|error| Failure::harness(error.to_string()))?;
+                    match &envelope.event {
+                        SessionEvent::GoalUpdated { goal: updated }
+                            if updated.session_id == handle.session_id
+                            && goal_identity(updated) == expected => {
+                            if updated.status != qq_protocol::GoalStatus::Active {
+                                let boundary = sessions.snapshot(SnapshotRequest::new(
+                                    handle.workspace_id, Some(handle.session_id), 1, 1,
+                                )).await.map_err(|error| Failure::harness(error.to_string()))?;
+                                final_goal = Some((updated.clone(), boundary.cursor.sequence));
+                            }
+                        }
+                        SessionEvent::RunFinished { origin: Some(origin), run_id, .. }
+                            if envelope.session_id == handle.session_id && matches!(origin,
+                                qq_protocol::RunOrigin::Goal { goal_id, revision }
+                                | qq_protocol::RunOrigin::GoalCheck { goal_id, revision }
+                                if *goal_id == expected.goal_id && *revision == expected.revision) => {
+                            let run = sessions.run_snapshot(handle.workspace_id,
+                                handle.session_id, *run_id).await
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                            let record = qq_protocol::HeadlessGoalRun {
+                                workspace_id: handle.workspace_id, session_id: handle.session_id,
+                                goal: expected, run: Box::new(run),
+                            };
+                            sink.record(stdout, HeadlessRecordRef::GoalRun(&record))
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                        }
+                        SessionEvent::ToolApprovalRequested { .. }
+                            if match envelope.run_id {
+                                Some(run) => !sessions.goal_owns_run(handle.session_id, expected, run).await
+                                    .map_err(|error| Failure::harness(error.to_string()))?,
+                                None => true,
+                            } => {}
+                        SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
+                            // The core validates held-question ownership before stopping.
+                            let id = CommandId::generate()
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                            let receipt = match sessions.command(id, SessionCommand::GoalControl {
+                                session_id: handle.session_id, expected,
+                                action: qq_protocol::GoalControl::PauseForInput { tool_call_id: tool_call.id },
+                            }).await {
+                                Ok(receipt) => receipt,
+                                Err(SessionRuntimeError::GoalInputNotPending) => continue,
+                                Err(error) => return Err(Failure::harness(error.to_string())),
+                            };
+                            goal = goal_receipt(receipt)?;
+                            guard.disarm();
+                            return finish_goal(&mut sink, stdout, &options, handle.workspace_id, goal, None);
+                        }
+                        SessionEvent::ToolApprovalRequested { .. } => {
+                            unattended_approval(sessions, &options, &handle, &envelope, stderr).await;
+                        }
+                        SessionEvent::TextAppended { text, .. }
+                            if options.format == HeadlessFormat::Text
+                                && envelope.session_id == handle.session_id => {
+                            stderr.write_all(text.as_bytes()).and_then(|()| stderr.flush())
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                        }
+                        _ => {}
+                    }
+                    if final_goal.as_ref().is_some_and(|(_, through)| envelope.cursor.sequence >= *through) {
+                        let (goal, _) = final_goal.take().unwrap();
+                        guard.disarm();
+                        return finish_goal(&mut sink, stdout, &options, handle.workspace_id, goal, None);
+                    }
+                }
+            }
+        }
+    }.await;
+    match result {
+        Ok(code) => code,
+        Err(failure) => {
+            let _ = writeln!(stderr, "error: {}", failure.message);
+            if let Some(guard) = &mut cleanup
+                && let Err(error) = guard.settle().await
+            {
+                let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
+                return HeadlessStatus::HarnessFailure.code();
+            }
+            failure.status.code()
+        }
+    }
+}
+
+fn goal_identity(goal: &qq_protocol::GoalSnapshot) -> qq_protocol::GoalIdentity {
+    qq_protocol::GoalIdentity {
+        goal_id: goal.goal_id,
+        revision: goal.revision,
+    }
+}
+
+fn goal_receipt(receipt: CommandReceipt) -> Result<Box<qq_protocol::GoalSnapshot>, Failure> {
+    match receipt.outcome {
+        CommandOutcome::GoalUpdated { goal, .. } => Ok(goal),
+        _ => Err(Failure::harness(
+            "goal command returned an unexpected receipt",
+        )),
+    }
+}
+
+fn finish_goal(
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    options: &HeadlessOptions,
+    workspace_id: WorkspaceId,
+    goal: Box<qq_protocol::GoalSnapshot>,
+    forced: Option<qq_protocol::HeadlessGoalStatus>,
+) -> Result<u8, Failure> {
+    let status = forced
+        .or_else(|| qq_protocol::HeadlessGoalStatus::from_goal(&goal.status))
+        .ok_or_else(|| Failure::harness("cannot finish an active goal"))?;
+    let record = qq_protocol::HeadlessGoalOutcome {
+        workspace_id,
+        goal,
+        status,
+        exit_code: status.code(),
+    };
+    sink.record(stdout, HeadlessRecordRef::Goal(&record))
+        .and_then(|()| sink.finish())
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    if options.format == HeadlessFormat::Text {
+        writeln!(
+            stdout,
+            "goal {}: {:?}",
+            record.goal.goal_id, record.goal.status
+        )
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    }
+    Ok(status.code())
+}
+
+struct AcceptedGoalGuard {
+    cleanup: Option<(SessionRuntime, SessionId)>,
+    expected: qq_protocol::GoalIdentity,
+}
+impl AcceptedGoalGuard {
+    fn new(sessions: SessionRuntime, goal: &qq_protocol::GoalSnapshot) -> Self {
+        Self {
+            cleanup: (goal.status == qq_protocol::GoalStatus::Active)
+                .then_some((sessions, goal.session_id)),
+            expected: goal_identity(goal),
+        }
+    }
+    async fn settle(&mut self) -> Result<(), Failure> {
+        if let Some((sessions, session_id)) = &self.cleanup {
+            send(
+                sessions,
+                SessionCommand::GoalControl {
+                    session_id: *session_id,
+                    expected: self.expected,
+                    action: qq_protocol::GoalControl::Pause,
+                },
+            )
+            .await?;
+            self.disarm();
+        }
+        Ok(())
+    }
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+impl Drop for AcceptedGoalGuard {
+    fn drop(&mut self) {
+        if let Some((sessions, session_id)) = self.cleanup.take() {
+            let expected = self.expected;
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                report_detached_cleanup_failure("accepted goal cleanup requires a Tokio runtime");
+                return;
+            };
+            drop(runtime.spawn(async move {
+                if let Err(error) = send(
+                    &sessions,
+                    SessionCommand::GoalControl {
+                        session_id,
+                        expected,
+                        action: qq_protocol::GoalControl::Pause,
+                    },
+                )
+                .await
+                {
+                    report_detached_cleanup_failure(&format!(
+                        "accepted goal cleanup failed: {}",
+                        error.message
+                    ));
+                }
+            }));
         }
     }
 }
@@ -509,6 +829,65 @@ async fn submit(
     options: &HeadlessOptions,
     input: Vec<qq_protocol::InputPart>,
 ) -> Result<RunHandle, Failure> {
+    let SessionHandle {
+        workspace_id,
+        session_id,
+        subscribe_after,
+        wait_for_delegate,
+        child_waits_for_delegate,
+    } = prepare_session(sessions, options, SessionIntent::Prompt).await?;
+    // Budgets are core-owned: the runtime enforces them and settles the run
+    // with a typed outcome, so this adapter only relays and renders.
+    let queued = send(
+        sessions,
+        SessionCommand::SubmitPrompt {
+            session_id,
+            input,
+            limits: RunLimits {
+                max_duration_ms: options
+                    .timeout
+                    .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+                max_model_turns: options.max_turns,
+                max_tool_calls: None,
+                max_total_tokens: None,
+                max_cost_usd_nanos: options.max_cost_usd_nanos,
+                max_input_tokens: None,
+                max_output_tokens: None,
+                max_tool_output_bytes: None,
+                max_children: None,
+                max_concurrent_children: None,
+            },
+            correlation: options.correlation.clone(),
+            output: options.output.clone(),
+        },
+    )
+    .await?;
+    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+        return Err(Failure::harness(
+            "prompt submission returned an unexpected outcome",
+        ));
+    };
+
+    Ok(RunHandle {
+        workspace_id,
+        session_id,
+        run_id,
+        // Subscribing from the cursor just before submission replays the
+        // queued prompt and everything after it, so no event is lost to the
+        // gap between submission and subscription. For a resumed session that
+        // is the snapshot cursor (or the last settings write), not the
+        // session's history.
+        subscribe_after,
+        wait_for_delegate,
+        child_waits_for_delegate,
+    })
+}
+
+async fn prepare_session(
+    sessions: &SessionRuntime,
+    options: &HeadlessOptions,
+    intent: SessionIntent,
+) -> Result<SessionHandle, Failure> {
     let workspace = options.workspace.display().to_string();
     let resolved = send(
         sessions,
@@ -546,9 +925,9 @@ async fn submit(
         Some(session_id) => {
             // Store ownership was taken when the runtime opened and its
             // recovery sweep has already run, so what the snapshot shows is
-            // the session's settled state. Everything below is a rejection
-            // or a session-level setting; no run exists until the prompt
-            // is admitted.
+            // the recovered state. Ordinary prompts require an idle root;
+            // a stored active goal may already be running its driver. Session
+            // settings apply to the next claim without rewriting running work.
             let snapshot = match sessions
                 .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
                 .await
@@ -574,6 +953,10 @@ async fn submit(
                     "workspace snapshot omitted the focused session",
                 ));
             };
+            let active_goal = focused
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active);
             let summary = focused.summary;
             if summary.parent_id.is_some() {
                 return Err(Failure::invalid(format!(
@@ -581,9 +964,10 @@ async fn submit(
                      resume its root session instead"
                 )));
             }
-            if summary.status != qq_protocol::SessionStatus::Idle
+            if (summary.status != qq_protocol::SessionStatus::Idle
                 || summary.active_run_id.is_some()
-                || summary.queued_prompts > 0
+                || summary.queued_prompts > 0)
+                && !(intent == SessionIntent::Goal && active_goal)
             {
                 return Err(Failure::invalid(format!(
                     "session {session_id} is {}; it must be idle with no queued prompts",
@@ -629,7 +1013,15 @@ async fn submit(
                 .await?;
                 after = receipt.committed_through;
             }
-            (session_id, after, summary.approval_delegate)
+            (
+                session_id,
+                if intent == SessionIntent::Goal {
+                    snapshot.cursor
+                } else {
+                    after
+                },
+                summary.approval_delegate,
+            )
         }
     };
     // Whether a held call waits for a delegate: one exists and the effective
@@ -644,47 +1036,9 @@ async fn submit(
     let child_waits_for_delegate = options.reviewer_configured
         && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Supervised);
 
-    // Budgets are core-owned: the runtime enforces them and settles the run
-    // with a typed outcome, so this adapter only relays and renders.
-    let queued = send(
-        sessions,
-        SessionCommand::SubmitPrompt {
-            session_id,
-            input,
-            limits: RunLimits {
-                max_duration_ms: options
-                    .timeout
-                    .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
-                max_model_turns: options.max_turns,
-                max_tool_calls: None,
-                max_total_tokens: None,
-                max_cost_usd_nanos: options.max_cost_usd_nanos,
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_tool_output_bytes: None,
-                max_children: None,
-                max_concurrent_children: None,
-            },
-            correlation: options.correlation.clone(),
-            output: options.output.clone(),
-        },
-    )
-    .await?;
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        return Err(Failure::harness(
-            "prompt submission returned an unexpected outcome",
-        ));
-    };
-
-    Ok(RunHandle {
+    Ok(SessionHandle {
         workspace_id,
         session_id,
-        run_id,
-        // Subscribing from the cursor just before submission replays the
-        // queued prompt and everything after it, so no event is lost to the
-        // gap between submission and subscription. For a resumed session that
-        // is the snapshot cursor (or the last settings write), not the
-        // session's history.
         subscribe_after,
         wait_for_delegate,
         child_waits_for_delegate,
@@ -970,7 +1324,7 @@ async fn stream_run(
                             shutdown_at = Some(Instant::now() + SHUTDOWN_GRACE);
                         }
                     }
-                    SessionEvent::ToolApprovalRequested { tool_call, shell, question, fetch, .. } => {
+                    SessionEvent::ToolApprovalRequested { tool_call, question, .. } => {
                         // A child session's question has no answerer either;
                         // declining lets the child proceed on its judgement.
                         if question.is_some() {
@@ -986,77 +1340,11 @@ async fn stream_run(
                             }
                             continue;
                         }
-                        // The headless invocation is the approval client.
-                        // An explicit allowlist answers first, as a session
-                        // grant so the same tool or prefix is not held again.
-                        // Otherwise full approves everything unattended; auto
-                        // denies whatever the policy escalated (dangerous
-                        // shell) so the run never stalls waiting for a human —
-                        // but when a reviewer model is configured the deny is
-                        // deferred briefly, giving the reviewer its window.
-                        // The reviewer settles the call itself on approve or
-                        // deny; the deferred deny is the unattended answer to
-                        // an escalation. A late deny is harmless: resolution is
-                        // idempotent, so a reviewer resolution that landed
-                        // first stands.
-                        // A child session's held calls belong to a supervised
-                        // write child: the reviewer adjudicates them, and the
-                        // headless root only supplies the unattended fallback
-                        // (a deferred deny), never a blanket approve. The
-                        // allowlist still applies: the human declared it.
-                        let granted = allowlisted_grant(
-                            options,
-                            &tool_call.name,
-                            shell.as_deref(),
-                            fetch.as_deref(),
-                        );
-                        let approval = if ours {
-                            options.approval
-                        } else {
-                            HeadlessApproval::Auto
-                        };
-                        let decision = match (granted, approval) {
-                            (Some(grant), _) => {
-                                if text {
-                                    let _ = writeln!(
-                                        stderr,
-                                        "[tool] {} approved for the session by allowlist",
-                                        tool_call.name
-                                    );
-                                }
-                                Some(ApprovalDecision::ApproveForSession { grant })
-                            }
-                            (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
-                            (None, HeadlessApproval::Auto)
-                                if (ours && handle.wait_for_delegate)
-                                    || (!ours && handle.child_waits_for_delegate) =>
-                            {
-                                if let Some(run_id) = envelope.run_id {
-                                    let sessions = sessions.clone();
-                                    let tool_call_id = tool_call.id;
-                                    tokio::spawn(async move {
-                                        tokio::time::sleep(REVIEWER_DENY_GRACE).await;
-                                        let _ = send(
-                                            &sessions,
-                                            SessionCommand::RespondToolApproval {
-                                                run_id,
-                                                tool_call_id,
-                                                decision: ApprovalDecision::Deny,
-                                            },
-                                        )
-                                        .await;
-                                    });
-                                }
-                                None
-                            }
-                            (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => {
-                                Some(ApprovalDecision::Deny)
-                            }
-                        };
-                        if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
-                            respond_approval(sessions, run_id, tool_call.id, decision, stderr)
-                                .await;
-                        }
+                        unattended_approval(sessions, options, &SessionHandle {
+                            workspace_id: handle.workspace_id, session_id: handle.session_id,
+                            subscribe_after: handle.subscribe_after, wait_for_delegate: handle.wait_for_delegate,
+                            child_waits_for_delegate: handle.child_waits_for_delegate,
+                        }, &envelope, stderr).await;
                     }
                     SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, .. }
                         if *run_id == handle.run_id => {
@@ -1336,6 +1624,89 @@ fn allowlisted_grant(
 fn recordable_grant(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty() && value.len() <= qq_core::MAX_GRANT_BYTES
+}
+
+async fn unattended_approval(
+    sessions: &SessionRuntime,
+    options: &HeadlessOptions,
+    handle: &SessionHandle,
+    envelope: &SessionEventEnvelope,
+    stderr: &mut impl Write,
+) {
+    let SessionEvent::ToolApprovalRequested {
+        tool_call,
+        shell,
+        fetch,
+        ..
+    } = &envelope.event
+    else {
+        return;
+    };
+    let text = options.format == HeadlessFormat::Text;
+    // The headless invocation is the approval client.
+    // An explicit allowlist answers first, as a session
+    // grant so the same tool or prefix is not held again.
+    // Otherwise full approves everything unattended; auto
+    // denies whatever the policy escalated (dangerous
+    // shell) so the run never stalls waiting for a human —
+    // but when a reviewer model is configured the deny is
+    // deferred briefly, giving the reviewer its window.
+    // The reviewer settles the call itself on approve or
+    // deny; the deferred deny is the unattended answer to
+    // an escalation. A late deny is harmless: resolution is
+    // idempotent, so a reviewer resolution that landed
+    // first stands.
+    // A child session's held calls belong to a supervised
+    // write child: the reviewer adjudicates them, and the
+    // headless root only supplies the unattended fallback
+    // (a deferred deny), never a blanket approve. The
+    // allowlist still applies: the human declared it.
+    let granted = allowlisted_grant(options, &tool_call.name, shell.as_deref(), fetch.as_deref());
+    let approval = if envelope.session_id == handle.session_id {
+        options.approval
+    } else {
+        HeadlessApproval::Auto
+    };
+    let decision = match (granted, approval) {
+        (Some(grant), _) => {
+            if text {
+                let _ = writeln!(
+                    stderr,
+                    "[tool] {} approved for the session by allowlist",
+                    tool_call.name
+                );
+            }
+            Some(ApprovalDecision::ApproveForSession { grant })
+        }
+        (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
+        (None, HeadlessApproval::Auto)
+            if (envelope.session_id == handle.session_id && handle.wait_for_delegate)
+                || (envelope.session_id != handle.session_id
+                    && handle.child_waits_for_delegate) =>
+        {
+            if let Some(run_id) = envelope.run_id {
+                let sessions = sessions.clone();
+                let tool_call_id = tool_call.id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(REVIEWER_DENY_GRACE).await;
+                    let _ = send(
+                        &sessions,
+                        SessionCommand::RespondToolApproval {
+                            run_id,
+                            tool_call_id,
+                            decision: ApprovalDecision::Deny,
+                        },
+                    )
+                    .await;
+                });
+            }
+            None
+        }
+        (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => Some(ApprovalDecision::Deny),
+    };
+    if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
+        respond_approval(sessions, run_id, tool_call.id, decision, stderr).await;
+    }
 }
 
 async fn respond_approval(
@@ -2196,6 +2567,31 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record, qq_protocol::HeadlessRecord::GoalRun(_)))
         );
+        let mut options = options(&fixture.workspace);
+        options.session = Some(final_goal.goal.session_id);
+        let mut resume = goal_request();
+        resume.objective = None;
+        resume.max_runs = None;
+        let mut resumed = Vec::new();
+        assert_eq!(
+            run_goal(
+                &fixture.sessions,
+                options,
+                resume,
+                std::future::pending(),
+                &mut resumed,
+                &mut stderr
+            )
+            .await,
+            6
+        );
+        let final_resumed: qq_protocol::HeadlessRecord =
+            serde_json::from_str(String::from_utf8(resumed).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert!(
+            matches!(final_resumed, qq_protocol::HeadlessRecord::Goal(record)
+            if record.goal == final_goal.goal)
+        );
         fixture.sessions.close().await.unwrap();
     }
 
@@ -2239,6 +2635,264 @@ mod tests {
         assert!(
             matches!(records.last(), Some(qq_protocol::HeadlessRecord::Goal(outcome))
             if outcome.exit_code == 8 && outcome.goal.counters.runs == 1)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_unanswered_question_retains_needs_user_reason() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 6, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let Some(qq_protocol::HeadlessRecord::Goal(final_goal)) = records.last() else {
+            panic!("final goal record")
+        };
+        assert!(
+            matches!(
+                final_goal.goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Approval { .. },
+                    },
+                }
+            ),
+            "{:?}",
+            final_goal.goal.status
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_input_controls_and_run_reads_are_identity_fenced() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let options = options(&fixture.workspace);
+        let owner = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let other = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: owner.workspace_id,
+                after: other.subscribe_after,
+            })
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let receipt = send(
+            &fixture.sessions,
+            SessionCommand::SetGoal {
+                session_id: owner.session_id,
+                objective: "held goal".into(),
+                check: None,
+                budget: Box::new(qq_protocol::GoalBudget {
+                    max_goal_runs: 2,
+                    deadline_ms: now + 60000,
+                    max_total_tokens: None,
+                    max_cost_usd_nanos: None,
+                    per_run: RunLimits::default(),
+                }),
+                expected: None,
+                replace: false,
+            },
+        )
+        .await
+        .unwrap();
+        let goal = goal_receipt(receipt).unwrap();
+        let expected = goal_identity(&goal);
+        send(
+            &fixture.sessions,
+            SessionCommand::SubmitPrompt {
+                session_id: other.session_id,
+                input: vec![InputPart::text("foreign question")],
+                limits: RunLimits::default(),
+                correlation: Default::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (own_call, foreign_call) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut own = None;
+            let mut foreign = None;
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::ToolApprovalRequested {
+                    tool_call,
+                    question: Some(_),
+                    ..
+                } = event.event
+                {
+                    if event.session_id == owner.session_id {
+                        own = Some(tool_call);
+                    } else if event.session_id == other.session_id {
+                        foreign = Some(tool_call);
+                    }
+                }
+                if let (Some(own), Some(foreign)) = (&own, &foreign) {
+                    break (own.clone(), foreign.clone());
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            fixture
+                .sessions
+                .goal_owns_run(owner.session_id, expected, own_call.run_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !fixture
+                .sessions
+                .goal_owns_run(owner.session_id, expected, foreign_call.run_id)
+                .await
+                .unwrap()
+        );
+        let control = |expected, call| SessionCommand::GoalControl {
+            session_id: owner.session_id,
+            expected,
+            action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call },
+        };
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(expected, qq_protocol::ToolCallId::from_bytes([0x99; 16]))
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(expected, foreign_call.id)
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(
+                        qq_protocol::GoalIdentity {
+                            revision: expected.revision + 1,
+                            ..expected
+                        },
+                        own_call.id
+                    )
+                )
+                .await,
+            Err(SessionRuntimeError::GoalConflict { .. })
+        ));
+        let run = fixture
+            .sessions
+            .run_snapshot(owner.workspace_id, owner.session_id, own_call.run_id)
+            .await
+            .unwrap();
+        assert_eq!(run.id, own_call.run_id);
+        assert!(matches!(
+            fixture
+                .sessions
+                .run_snapshot(
+                    WorkspaceId::from_bytes([0x90; 16]),
+                    owner.session_id,
+                    own_call.run_id
+                )
+                .await,
+            Err(SessionRuntimeError::SessionNotFound)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .run_snapshot(owner.workspace_id, other.session_id, own_call.run_id)
+                .await,
+            Err(SessionRuntimeError::RunNotFound)
+        ));
+        let id = CommandId::generate().unwrap();
+        let command = control(expected, own_call.id);
+        let receipt = fixture.sessions.command(id, command.clone()).await.unwrap();
+        assert_eq!(
+            fixture.sessions.command(id, command).await.unwrap(),
+            receipt
+        );
+        let stopped = goal_receipt(receipt).unwrap();
+        assert!(matches!(stopped.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id },
+            },
+        } if tool_call_id == own_call.id));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(goal_identity(&stopped), own_call.id)
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_interrupt_pauses_and_returns_distinct_exit() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            options(&fixture.workspace),
+            goal_request(),
+            std::future::ready(()),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+        let final_record: qq_protocol::HeadlessRecord =
+            serde_json::from_str(String::from_utf8(stdout).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert!(
+            matches!(final_record, qq_protocol::HeadlessRecord::Goal(record)
+            if record.exit_code == 130 && record.goal.status == qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::User,
+            })
         );
         fixture.sessions.close().await.unwrap();
     }

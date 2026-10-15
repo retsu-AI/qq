@@ -89,6 +89,13 @@ descriptions; the binary re-exports the first two, and runtime/model loading
 and headless outcome driving live in the root package. Core does not depend on
 harness or application configuration.
 
+Foreground goal hosting shares session preparation and unattended tool approval
+with ordinary headless runs. It observes the core goal driver, rather than
+submitting a parallel prompt loop. Exact-run snapshots and live paid-family
+ownership checks stay behind SessionRuntime; stopping an unanswered question is
+a revision-fenced core goal control that persists the needs-user reason before
+cancelling sponsored work. Server goal scripting remains a SessionClient path.
+
 The workspace is:
 
 ```text

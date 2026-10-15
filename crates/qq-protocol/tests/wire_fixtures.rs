@@ -1459,6 +1459,22 @@ fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
 
 #[test]
 fn current_goal_commands_receipts_and_origins_match_goldens() {
+    check(
+        "command_goal_pause_for_input",
+        &CommandRequest {
+            command_id: CommandId::from_bytes([0x69; 16]),
+            command: SessionCommand::GoalControl {
+                session_id: SessionId::from_bytes([3; 16]),
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: qq_protocol::GoalId::from_bytes([0x61; 16]),
+                    revision: 3,
+                },
+                action: qq_protocol::GoalControl::PauseForInput {
+                    tool_call_id: ToolCallId::from_bytes([0x70; 16]),
+                },
+            },
+        },
+    );
     let workspace_id = WorkspaceId::from_bytes([1; 16]);
     let interrupted = qq_protocol::CheckInterruption {
         session_id: SessionId::from_bytes([3; 16]),

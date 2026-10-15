@@ -486,6 +486,29 @@ pub(super) fn control(
                 reason: GoalPauseReason::User,
             }
         }
+        GoalControl::PauseForInput { tool_call_id } => {
+            let call = connection.query_row(
+                "SELECT run_id,state='awaiting_approval' AND name='ask_user' FROM tool_calls WHERE id=?1",
+                [tool_call_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            ).optional()?;
+            let Some((run, held_question)) = call else {
+                return Err(SessionRuntimeError::GoalInputNotPending);
+            };
+            let run = parse_id(&run)?;
+            if goal.status != GoalStatus::Active
+                || !held_question
+                || !paid_obligations(connection, session, Some(goal.goal_id))?
+                    .iter()
+                    .any(|work| work.run == run && !work.cancelled)
+            {
+                return Err(SessionRuntimeError::GoalInputNotPending);
+            }
+            goal.status = GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Approval { tool_call_id },
+                },
+            };
+        }
         GoalControl::Resume => {
             if paid_obligations(connection, session, None)?
                 .iter()

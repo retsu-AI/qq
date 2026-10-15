@@ -26,6 +26,33 @@ Runs one task to completion in the current directory (or `--workspace
 PATH`) through a durable session. Progress goes to stderr, the final answer
 to stdout.
 
+### Foreground goals
+
+```sh
+qq run --goal "Finish the migration" --check 'cargo test' --format jsonl
+qq run --goal --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --goal-check-approval once --format jsonl
+```
+
+Without separate check consent the first command returns a paused goal (exit6)
+without running the model or check. Review the check before authorizing it.
+`once` permits one check; `for-goal` permits reuse for the current goal check.
+An ordinary shell allowlist never authorizes a goal check.
+
+`--goal-deadline 24h`, `--goal-max-runs 20` and `--max-cost-usd 5` bound the
+goal; workspace defaults apply when omitted. Timeout and turn flags constrain
+each run. With a new objective, unspecified limits/check fields survive an
+edit; `--replace` explicitly starts a replacement. Bare `--goal --session ID`
+continues the stored specification. It leaves a missing-consent pause intact.
+
+The foreground client uses the same durable runtime driver as the server.
+It stops on a non-active state, including an unanswered question, without
+inventing an answer. Goal exits are achieved0, paused6, blocked7, exhausted8,
+interrupted130; setup and harness failures retain2/4. JSONL includes workspace
+events, `goal_run` records for settled direct runs, then a final `goal` snapshot
+with the state/reason and exit code. Helpers remain event records. A paused
+goal persists for subsequent resume. Goal mode has no steering pipe or typed
+answer schema; those flags apply to ordinary prompt runs.
+
 ### Approval without a human
 
 | `--approval` | Meaning |
