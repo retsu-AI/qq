@@ -64,9 +64,11 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 Exit codes: 0 completed · 1 task failed · 2 invalid configuration · 3 timeout
 or budget · 4 harness failure · 5 needs input · 130 interrupted.
 
-## `qq serve [--bind ADDR] [--allow-origin ORIGIN]…`
+## `qq serve [--bind ADDR] [--allow-origin ORIGIN]… [--exit-on-stdin-close]`
 
 The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
+`--exit-on-stdin-close` also stops the server when standard input closes, so
+a supervising process (the desktop app) holding the pipe bounds its lifetime.
 [Headless](headless.md#qq-serve--a-persistent-server).
 
 ## `qq config …`

@@ -190,6 +190,12 @@ pub enum AuthError {
     #[error("invalid credential name: {reason}")]
     InvalidCredentialName { reason: &'static str },
 
+    #[error(
+        "{provider:?} is not a built-in provider; login accepts {}",
+        LOGIN_PROVIDERS.join(", ")
+    )]
+    UnknownLoginProvider { provider: String },
+
     #[error("environment variable `{variable}` is not set")]
     EnvironmentMissing { variable: String },
 
@@ -1344,6 +1350,54 @@ impl MissingCredentialRemedies {
             _ => return qq_provider::RequestCredentialError::missing(),
         };
         qq_provider::RequestCredentialError::missing_with_remedy(remedy)
+    }
+}
+
+/// Built-in providers a credential can be stored for by provider ID alone:
+/// `qq auth login` and the desktop app's sign-in both accept exactly these.
+pub const LOGIN_PROVIDERS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openai-codex"];
+
+/// The endpoint a built-in provider's stored credential is bound to, so the
+/// secret is never sent anywhere else. `None` for names outside
+/// [`LOGIN_PROVIDERS`].
+#[must_use]
+pub fn built_in_endpoint(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openai" => Some("https://api.openai.com"),
+        "openai-codex" => Some("https://chatgpt.com"),
+        "anthropic" => Some("https://api.anthropic.com"),
+        "google" => Some("https://generativelanguage.googleapis.com"),
+        "xai" => Some("https://api.x.ai"),
+        _ => None,
+    }
+}
+
+impl CredentialStore {
+    /// Store a built-in provider's API key as `PROVIDER/PROFILE`, bound to
+    /// the provider's endpoint. OAuth-only providers (`openai-codex`) use
+    /// [`CodexLogin`] instead.
+    pub fn login_with_api_key(
+        &self,
+        provider: &str,
+        profile: &str,
+        secret: impl AsRef<[u8]>,
+        allow_file_fallback: bool,
+    ) -> Result<CredentialBackend, AuthError> {
+        let endpoint = match built_in_endpoint(provider) {
+            Some(endpoint) if provider != "openai-codex" => endpoint,
+            _ => {
+                return Err(AuthError::UnknownLoginProvider {
+                    provider: provider.to_owned(),
+                });
+            }
+        };
+        self.set_with_metadata(
+            &format!("{provider}/{profile}"),
+            secret,
+            allow_file_fallback,
+            Some(provider),
+            Some(endpoint),
+        )
     }
 }
 

@@ -10,9 +10,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use qq_auth::LOGIN_PROVIDERS;
 use qq_config as config;
 
-use crate::{LOGIN_PROVIDERS, cli};
+use crate::cli;
 
 /// Built-in providers offered by the chooser, in `qq auth login` order:
 /// name, an example model from the shipped catalog, and the API-key
