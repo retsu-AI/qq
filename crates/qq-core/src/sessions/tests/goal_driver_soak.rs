@@ -1308,57 +1308,7 @@ async fn goal_check_queued_prompt_preemption_preserves_audit_and_executes_one_re
             checked: true,
         };
         let mut driver = Driver::open(&setup).await;
-        let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
-            "type":"set_goal","session_id":driver.session,"objective":"verify after user redirection",
-            "check":{"command":CRASH_CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":setup.epoch+60_000}
-        })).unwrap()))).await).unwrap();
-        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
-            panic!("goal")
-        };
-        driver
-            .ask(Input::Command(Box::new(SessionCommand::GoalControl {
-                session_id: driver.session,
-                expected: qq_protocol::GoalIdentity {
-                    goal_id: goal.goal_id,
-                    revision: goal.revision,
-                },
-                action: qq_protocol::GoalControl::ApproveCheck {
-                    scope: qq_protocol::GoalCheckScope::Once,
-                    command: CRASH_CHECK.to_owned(),
-                },
-            })))
-            .await;
-        let (work, _) = driver.request().await;
-        driver
-            .ask(Input::Reply(Reply::Update {
-                step: 1,
-                wait: false,
-                remove: None,
-                achieved: true,
-            }))
-            .await;
-        assert_eq!(driver.request().await.0, work);
-        driver.ask(Input::HoldSlots).await;
-        driver.ask(Input::Reply(Reply::Text)).await;
-        assert_eq!(driver.finished(work).await, RunOutcome::Completed);
-        let before =
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let snapshot = driver.snapshot().await;
-                    if snapshot.runs.iter().any(|run| {
-                        matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. }))
-                    }) {
-                        break snapshot;
-                    }
-                    let output = driver.read().await;
-                    driver.keep(output);
-                }
-            })
-            .await
-            .unwrap();
-        let state: (String, bool) =
-            serde_json::from_value(driver.ask(Input::CheckState).await).unwrap();
-        assert!(!state.1, "preemption targets an unreserved check");
+        let before = queue_held_check(&mut driver, setup.epoch).await;
         let goal = before.goal.as_ref().unwrap();
         assert!(goal.audit_pending && goal.achievement_claim.is_some());
         assert_eq!(
@@ -1492,6 +1442,256 @@ async fn goal_check_queued_prompt_preemption_preserves_audit_and_executes_one_re
                 .unwrap(),
             "invoked"
         );
+        driver.ask(Input::Close).await;
+        assert!(driver.process.wait().await.unwrap().success());
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn queue_held_check(driver: &mut Driver, epoch: u64) -> qq_protocol::SessionSnapshot {
+    let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":driver.session,"objective":"verify after user redirection",
+            "check":{"command":CRASH_CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":epoch+60_000}
+        })).unwrap()))).await).unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("goal")
+    };
+    driver
+        .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+            session_id: driver.session,
+            expected: qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            },
+            action: qq_protocol::GoalControl::ApproveCheck {
+                scope: qq_protocol::GoalCheckScope::Once,
+                command: CRASH_CHECK.to_owned(),
+            },
+        })))
+        .await;
+    let (work, _) = driver.request().await;
+    driver
+        .ask(Input::Reply(Reply::Update {
+            step: 1,
+            wait: false,
+            remove: None,
+            achieved: true,
+        }))
+        .await;
+    assert_eq!(driver.request().await.0, work);
+    driver.ask(Input::HoldSlots).await;
+    driver.ask(Input::Reply(Reply::Text)).await;
+    assert_eq!(driver.finished(work).await, RunOutcome::Completed);
+    let before = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = driver.snapshot().await;
+            if snapshot
+                .runs
+                .iter()
+                .any(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+            {
+                break snapshot;
+            }
+            let output = driver.read().await;
+            driver.keep(output);
+        }
+    })
+    .await
+    .unwrap();
+    let state: (String, bool) =
+        serde_json::from_value(driver.ask(Input::CheckState).await).unwrap();
+    assert!(!state.1, "fixture holds an unreserved check");
+    before
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn goal_check_paused_controls_retag_valid_audits_and_specification_edits_invalidate_them() {
+    for mode in ["neutral", "approval", "edit"] {
+        let directory = TempDir::new().unwrap();
+        let ready = signal_pipe(directory.path(), "check-ready");
+        let release = signal_pipe(directory.path(), "check-release");
+        let setup = Setup {
+            directory: directory.path().to_path_buf(),
+            epoch: now_ms(),
+            session: None,
+            checked: true,
+        };
+        let mut driver = Driver::open(&setup).await;
+        let before = queue_held_check(&mut driver, setup.epoch).await;
+        let original = before.goal.as_ref().unwrap();
+        let receipt: qq_protocol::CommandReceipt = serde_json::from_value(
+            driver
+                .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+                    session_id: driver.session,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: original.goal_id,
+                        revision: original.revision,
+                    },
+                    action: if mode == "approval" {
+                        qq_protocol::GoalControl::DenyCheck
+                    } else {
+                        qq_protocol::GoalControl::Pause
+                    },
+                })))
+                .await,
+        )
+        .unwrap();
+        let CommandOutcome::GoalUpdated { goal: paused, .. } = receipt.outcome else {
+            panic!("paused goal")
+        };
+        assert!(paused.audit_pending);
+        assert_eq!(paused.audit_revision, Some(paused.revision));
+        assert_eq!(paused.achievement_claim, original.achievement_claim);
+        let paused_snapshot = driver.snapshot().await;
+        assert!(
+            paused_snapshot
+                .goal
+                .as_ref()
+                .unwrap()
+                .pending_run_id
+                .is_none()
+        );
+        assert_eq!(
+            paused_snapshot
+                .runs
+                .iter()
+                .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+                .count(),
+            1
+        );
+        assert!(
+            paused_snapshot
+                .runs
+                .iter()
+                .filter(|run| matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { .. })))
+                .all(|run| run.outcome == Some(RunOutcome::Cancelled))
+        );
+        let mut current = paused;
+        if mode == "edit" {
+            let receipt: qq_protocol::CommandReceipt = serde_json::from_value(driver.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":driver.session,"objective":"new specification requires fresh work",
+                "expected":{"goal_id":current.goal_id,"revision":current.revision},
+                "check":{"command":CRASH_CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":setup.epoch+60_000}
+            })).unwrap()))).await).unwrap();
+            let CommandOutcome::GoalUpdated { goal: edited, .. } = receipt.outcome else {
+                panic!("edited goal")
+            };
+            assert!(
+                !edited.audit_pending
+                    && edited.audit_revision.is_none()
+                    && edited.achievement_claim.is_none()
+            );
+            assert_eq!(
+                edited.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::User
+                }
+            );
+            assert_eq!(
+                edited.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Once)
+            );
+            current = edited;
+        }
+        let receipt: qq_protocol::CommandReceipt = serde_json::from_value(
+            driver
+                .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+                    session_id: driver.session,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: current.goal_id,
+                        revision: current.revision,
+                    },
+                    action: if mode == "approval" {
+                        qq_protocol::GoalControl::ApproveCheck {
+                            scope: qq_protocol::GoalCheckScope::Once,
+                            command: CRASH_CHECK.to_owned(),
+                        }
+                    } else {
+                        qq_protocol::GoalControl::Resume
+                    },
+                })))
+                .await,
+        )
+        .unwrap();
+        let CommandOutcome::GoalUpdated { goal: active, .. } = receipt.outcome else {
+            panic!("active goal")
+        };
+        assert_eq!(active.status, qq_protocol::GoalStatus::Active);
+        assert_eq!(active.audit_pending, mode != "edit");
+        if mode != "edit" {
+            assert_eq!(active.audit_revision, Some(active.revision));
+            assert_eq!(active.achievement_claim, original.achievement_claim);
+        }
+        driver.ask(Input::ReleaseSlots).await;
+        if mode == "edit" {
+            let (fresh, texts) = driver.request().await;
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text.contains("new specification requires fresh work"))
+            );
+            let snapshot = driver.snapshot().await;
+            assert!(snapshot.runs.iter().any(|run| run.id==fresh && matches!(run.origin, Some(qq_protocol::RunOrigin::Goal { revision, .. }) if revision==active.revision)));
+            let goal = snapshot.goal.unwrap();
+            assert!(!goal.audit_pending && goal.achievement_claim.is_none());
+            assert_eq!(goal.counters.audits, 0);
+            assert_eq!(
+                snapshot
+                    .runs
+                    .iter()
+                    .filter(|run| matches!(
+                        run.origin,
+                        Some(qq_protocol::RunOrigin::GoalCheck { .. })
+                    ))
+                    .count(),
+                1
+            );
+            assert!(
+                !tokio::fs::try_exists(directory.path().join("check-invocations"))
+                    .await
+                    .unwrap()
+            );
+        } else {
+            check_ready(&ready).await;
+            let process = observe_check(directory.path()).await;
+            let snapshot = driver.snapshot().await;
+            let check = snapshot.runs.iter().find(|run|run.status==qq_protocol::RunStatus::Running && matches!(run.origin, Some(qq_protocol::RunOrigin::GoalCheck { revision, .. }) if revision==active.revision)).unwrap().id;
+            assert_eq!(snapshot.goal.as_ref().unwrap().counters.audits, 1);
+            assert_eq!(
+                rustix::io::write(release.get_ref(), b"release\n").unwrap(),
+                8
+            );
+            let mut exited = tokio::time::timeout(Duration::from_secs(10), process.0.readable())
+                .await
+                .unwrap()
+                .unwrap();
+            exited.retain_ready();
+            assert_eq!(driver.finished(check).await, RunOutcome::Completed);
+            let snapshot = driver.snapshot().await;
+            let goal = snapshot.goal.unwrap();
+            assert_eq!(goal.status, qq_protocol::GoalStatus::Achieved);
+            assert_eq!(goal.counters.audits, 1);
+            assert_eq!(goal.counters.runs, 1);
+            assert_eq!(
+                snapshot
+                    .runs
+                    .iter()
+                    .filter(|run| matches!(
+                        run.origin,
+                        Some(qq_protocol::RunOrigin::GoalCheck { .. })
+                    ))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(directory.path().join("check-invocations"))
+                    .await
+                    .unwrap(),
+                "invoked"
+            );
+            assert!(driver.pending.is_empty());
+        }
         driver.ask(Input::Close).await;
         assert!(driver.process.wait().await.unwrap().success());
     }

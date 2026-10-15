@@ -802,7 +802,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
 #[tokio::test]
 async fn goal_check_historical_result_survives_edit_replace_and_clear() {
     const COMMAND: &str = "printf '%05000d' 0; printf historical-check-result; exit 7";
-    for mutation in ["edit", "replace", "clear"] {
+    for mutation in ["edit", "replace", "clear", "pause"] {
         let directory = TempDir::new().unwrap();
         let database = directory.path().join("sessions.sqlite3");
         let loader = Arc::new(Loader {
@@ -883,8 +883,8 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             .unwrap()
             .id;
         let expected = serde_json::json!({"goal_id":goal.goal_id,"revision":goal.revision});
-        let command = if mutation == "clear" {
-            serde_json::json!({"type":"goal_control","session_id":session_id,"expected":expected,"action":{"type":"clear"}})
+        let command = if matches!(mutation, "clear" | "pause") {
+            serde_json::json!({"type":"goal_control","session_id":session_id,"expected":expected,"action":{"type":mutation}})
         } else {
             serde_json::json!({"type":"set_goal","session_id":session_id,"objective":"new objective","expected":expected,"replace":mutation=="replace",
                 "check":{"command":"printf replacement","timeout_ms":5000},
@@ -909,6 +909,36 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
             .focused
             .unwrap()
             .goal;
+        if mutation == "pause" {
+            let paused = changed.as_ref().unwrap();
+            assert_eq!(
+                paused.pending_run_id,
+                Some(check),
+                "pause retains draining ownership"
+            );
+            assert!(paused.audit_pending && paused.achievement_claim.is_some());
+            assert_eq!(paused.audit_revision, Some(paused.revision));
+            assert_eq!(
+                paused.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Consumed)
+            );
+            assert!(matches!(
+                runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::GoalControl {
+                            session_id,
+                            expected: qq_protocol::GoalIdentity {
+                                goal_id: paused.goal_id,
+                                revision: paused.revision
+                            },
+                            action: qq_protocol::GoalControl::Resume,
+                        }
+                    )
+                    .await,
+                Err(SessionRuntimeError::GoalCancellationPending)
+            ));
+        }
         if let Some(goal) = &mut changed {
             assert!(goal.pending_run_id.is_none() || goal.pending_run_id == Some(check));
             // Settlement may release only its own draining reservation.
@@ -929,6 +959,30 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         })
         .await
         .unwrap();
+        if mutation == "pause" {
+            let paused = changed.as_ref().unwrap();
+            assert!(
+                matches!(
+                    runtime
+                        .command(
+                            CommandId::generate().unwrap(),
+                            SessionCommand::GoalControl {
+                                session_id,
+                                expected: qq_protocol::GoalIdentity {
+                                    goal_id: paused.goal_id,
+                                    revision: paused.revision
+                                },
+                                action: qq_protocol::GoalControl::Resume,
+                            }
+                        )
+                        .await,
+                    Err(SessionRuntimeError::GoalCheckApprovalRequired)
+                ),
+                "draining a check cannot refund consumed Once consent"
+            );
+            assert_eq!(paused.counters.audits, 1);
+            assert_eq!(paused.counters.check_failures, 0);
+        }
         runtime.shutdown().await.unwrap();
         let finished = runtime
             .snapshot(SnapshotRequest::new(

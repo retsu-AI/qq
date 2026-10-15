@@ -74,7 +74,7 @@ impl Provider for Model {
                 let text = if self.scenario == "invalid" {
                     "not a JSON verdict".to_owned()
                 } else {
-                    serde_json::json!({"achieved":matches!(self.scenario,"confirm"|"stale"|"deadline"|"empty_evidence"|"oversized_evidence"),
+                    serde_json::json!({"achieved":matches!(self.scenario,"confirm"|"stale"|"paused_edit"|"deadline"|"empty_evidence"|"oversized_evidence"),
                         "evidence":match self.scenario {"empty_evidence"=>" ".to_owned(),"oversized_evidence"=>"x".repeat(513),_=>"independently reviewed the persisted work and claim".to_owned()}}).to_string()
                 };
                 vec![Ok(qq_provider::ProviderEvent::OutputTextDelta { text })]
@@ -276,7 +276,7 @@ async fn exercise(scenario: &'static str) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
-    for scenario in ["deadline", "stale"] {
+    for scenario in ["deadline", "stale", "paused_edit"] {
         let start = now_ms();
         let epoch = super::goal_driver_soak::Epoch::new(start);
         let directory = TempDir::new().unwrap();
@@ -343,21 +343,68 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
             .await
             .unwrap();
         assert_eq!(requests.lock().unwrap().len(), 3);
+        let mut edited_identity = None;
         if scenario == "deadline" {
             epoch.advance(start + 600_001);
         } else {
-            runtime
+            let mut identity = qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            };
+            if scenario == "paused_edit" {
+                let receipt = runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::GoalControl {
+                            session_id,
+                            expected: identity,
+                            action: qq_protocol::GoalControl::Pause,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let CommandOutcome::GoalUpdated { goal: paused, .. } = receipt.outcome else {
+                    panic!("paused goal")
+                };
+                assert!(paused.audit_pending && paused.achievement_claim.is_some());
+                assert_eq!(paused.audit_revision, Some(paused.revision));
+                identity.revision = paused.revision;
+            }
+            let receipt = runtime
                 .command(
                     CommandId::generate().unwrap(),
                     serde_json::from_value(serde_json::json!({
                         "type":"set_goal","session_id":session_id,"objective":"edited objective",
-                        "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                        "expected":identity,
                         "budget":{"max_goal_runs":100,"deadline_ms":start+600_000}
                     }))
                     .unwrap(),
                 )
                 .await
                 .unwrap();
+            if scenario == "paused_edit" {
+                let CommandOutcome::GoalUpdated { goal: edited, .. } = receipt.outcome else {
+                    panic!("edited goal")
+                };
+                assert!(
+                    !edited.audit_pending
+                        && edited.audit_revision.is_none()
+                        && edited.achievement_claim.is_none()
+                );
+                assert_eq!(
+                    edited.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::User
+                    }
+                );
+                let identity = qq_protocol::GoalIdentity {
+                    goal_id: edited.goal_id,
+                    revision: edited.revision,
+                };
+                edited_identity = Some(identity);
+                // Cancellation may already have drained the provider; resumption
+                // after the observed terminal event below is the stable boundary.
+            }
         }
         gate.release.add_permits(1);
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -372,6 +419,28 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
         })
         .await
         .unwrap();
+        if let Some(expected) = edited_identity {
+            let receipt = runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::GoalControl {
+                        session_id,
+                        expected,
+                        action: qq_protocol::GoalControl::Resume,
+                    },
+                )
+                .await
+                .unwrap();
+            let CommandOutcome::GoalUpdated { goal: resumed, .. } = receipt.outcome else {
+                panic!("resumed goal")
+            };
+            assert!(
+                !resumed.audit_pending
+                    && resumed.audit_revision.is_none()
+                    && resumed.achievement_claim.is_none()
+            );
+            assert_eq!(resumed.status, qq_protocol::GoalStatus::Active);
+        }
         runtime.shutdown().await.unwrap();
         let focused = runtime
             .snapshot(SnapshotRequest::new(
@@ -392,7 +461,10 @@ async fn goal_model_audit_late_and_stale_confirmation_cannot_achieve() {
             ));
         } else {
             assert_eq!(actual.objective, "edited objective");
-            assert_eq!(actual.revision, goal.revision + 1);
+            assert_eq!(
+                actual.revision,
+                goal.revision + if scenario == "paused_edit" { 3 } else { 1 }
+            );
             assert_eq!(actual.status, qq_protocol::GoalStatus::Active);
             assert!(!actual.audit_pending);
         }
