@@ -7647,7 +7647,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
 
 #[tokio::test]
 async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() {
-    struct Router(Arc<AtomicUsize>, bool, Arc<tokio::sync::Notify>);
+    struct Router(Arc<AtomicUsize>, bool);
     impl TaskRouter for Router {
         fn identity(&self) -> &'static str {
             "fixture/goal-expiry"
@@ -7656,7 +7656,6 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             "fixture/goal-expiry"
         }
         fn max_cost_usd_nanos(&self) -> Option<u64> {
-            self.2.notify_one();
             if self.1 { None } else { Some(37) }
         }
         fn route(&self, _: String) -> TaskRoutingFuture {
@@ -7688,7 +7687,6 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         routing: Arc<AtomicUsize>,
         main: Arc<AtomicUsize>,
         unknown_cost: bool,
-        admitting: Arc<tokio::sync::Notify>,
     }
     impl RuntimeLoader for Loader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
@@ -7697,14 +7695,13 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             let routing = Arc::clone(&self.routing);
             let main = Arc::clone(&self.main);
             let unknown_cost = self.unknown_cost;
-            let admitting = Arc::clone(&self.admitting);
             Box::pin(async move {
                 entered.notify_one();
                 release.notified().await;
                 Ok(loaded_runtime(
                     Runtime::new(Model(main), "test-model", 256)
                         .unwrap()
-                        .with_task_router(Arc::new(Router(routing, unknown_cost, admitting))),
+                        .with_task_router(Arc::new(Router(routing, unknown_cost))),
                     &request.workspace,
                     None,
                 ))
@@ -7716,7 +7713,6 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             let directory = TempDir::new().unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
-            let admitting = Arc::new(tokio::sync::Notify::new());
             let routing = Arc::new(AtomicUsize::new(0));
             let main = Arc::new(AtomicUsize::new(0));
             let runtime = SessionRuntime::open(
@@ -7727,7 +7723,6 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                     routing: Arc::clone(&routing),
                     main: Arc::clone(&main),
                     unknown_cost: condition == "unknown_cost",
-                    admitting: Arc::clone(&admitting),
                 }),
             )
             .await
@@ -7821,34 +7816,15 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                 .await
                 .unwrap();
             if condition == "per_run_duration" && user_prompt {
-                let store = runtime.inner.store.clone();
-                let held_writer = Arc::new(tokio::sync::Notify::new());
-                let writer_entered = Arc::clone(&held_writer);
-                let (unblock, blocked) = std::sync::mpsc::channel();
-                let holding = tokio::spawn(async move {
-                    store
-                        .call(Priority::Control, move |_| {
-                            writer_entered.notify_one();
-                            blocked
-                                .recv_timeout(Duration::from_secs(3))
-                                .expect("bounded admission hold");
-                            Ok(())
-                        })
-                        .await
-                });
-                tokio::time::timeout(Duration::from_secs(3), held_writer.notified())
-                    .await
-                    .unwrap();
+                let (admitting, unblock) = execution::hold_routing_admission(run);
                 release.notify_one();
-                // The router's declared-cost query proves loading has finished
-                // and paid admission is waiting behind the held store worker.
-                tokio::time::timeout(Duration::from_secs(3), admitting.notified())
+                tokio::time::timeout(Duration::from_secs(3), admitting)
                     .await
+                    .unwrap()
                     .unwrap();
                 // lint: allow(sleep) Store worker checks real elapsed time outside Tokio's virtual clock.
                 tokio::time::sleep(Duration::from_millis(1005)).await;
                 unblock.send(()).unwrap();
-                holding.await.unwrap().unwrap();
             } else {
                 if condition == "per_run_duration" {
                     // lint: allow(sleep) Refreshed goal duration is checked on the real store worker clock.

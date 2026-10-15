@@ -60,6 +60,48 @@ async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
     }
 }
 
+#[cfg(test)]
+struct RoutingAdmissionHook {
+    run_id: RunId,
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static ROUTING_ADMISSION_HOOKS: Mutex<Vec<RoutingAdmissionHook>> = Mutex::new(Vec::new());
+
+/// Holds after policy refresh and cost declaration, before durable paid admission.
+#[cfg(test)]
+pub(super) fn hold_routing_admission(
+    run_id: RunId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered, entered_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    ROUTING_ADMISSION_HOOKS
+        .lock()
+        .unwrap()
+        .push(RoutingAdmissionHook {
+            run_id,
+            entered,
+            release: release_rx,
+        });
+    (entered_rx, release)
+}
+#[cfg(test)]
+async fn pause_before_routing_admission(run_id: RunId) {
+    let hook = {
+        let mut hooks = ROUTING_ADMISSION_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.run_id == run_id)
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        // A dropped test receiver/sender releases its fixture without blocking cleanup.
+        let _ = hook.entered.send(());
+        let _ = hook.release.await;
+    }
+}
+
 impl ToolGate for CompactionRunGate {
     fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
         Box::pin(std::future::ready(GateDecision::Deny {
@@ -709,13 +751,12 @@ async fn route_run(
         if *cancellation.borrow() {
             return Err(RunOutcome::Cancelled);
         }
+        let routing_cost = router.max_cost_usd_nanos();
+        #[cfg(test)]
+        pause_before_routing_admission(claimed.identity.run_id).await;
         match inner
             .store
-            .record_routing_started(
-                claimed,
-                !oversized && !task.is_empty(),
-                router.max_cost_usd_nanos(),
-            )
+            .record_routing_started(claimed, !oversized && !task.is_empty(), routing_cost)
             .await
         {
             Ok(Ok(Some(event))) => {
