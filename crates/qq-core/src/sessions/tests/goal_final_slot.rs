@@ -277,6 +277,19 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
             );
         }
         let connection = Connection::open(&database).unwrap();
+        let limits_json: String = connection
+            .query_row(
+                "SELECT limits_json FROM runs WHERE id=?1",
+                [final_run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let limits: RunLimits = serde_json::from_str(&limits_json).unwrap();
+        assert_eq!(
+            limits.max_model_turns,
+            Some(if scenario == "one_turn" { 1 } else { 3 }),
+            "the final slot inherits the finite goal cap without widening a stricter prompt: {scenario}, user_prompt={prompt_final}"
+        );
         let turns: u32 = connection
             .query_row(
                 "SELECT COUNT(*) FROM model_turns WHERE run_id=?1",
