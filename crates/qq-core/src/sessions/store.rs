@@ -952,6 +952,32 @@ impl Store {
         .await
     }
 
+    pub(super) async fn goal_pending_runs(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            let current = goals::load_live(connection, session_id)?
+                .ok_or(SessionRuntimeError::GoalNotFound)?;
+            if current.goal_id != expected.goal_id || current.revision != expected.revision {
+                return Err(SessionRuntimeError::GoalConflict {
+                    current: Some(qq_protocol::GoalIdentity {
+                        goal_id: current.goal_id,
+                        revision: current.revision,
+                    }),
+                });
+            }
+            Ok(
+                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
+                    .into_iter()
+                    .map(|work| work.run)
+                    .collect(),
+            )
+        })
+        .await
+    }
+
     pub(super) async fn goal_owns_run(
         &self,
         session_id: SessionId,

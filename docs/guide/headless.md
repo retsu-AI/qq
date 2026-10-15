@@ -49,8 +49,11 @@ It stops on a non-active state, including an unanswered question, without
 inventing an answer. Goal exits are achieved0, paused6, blocked7, exhausted8,
 interrupted130; setup and harness failures retain2/4. JSONL includes workspace
 events, `goal_run` records for settled direct runs, then a final `goal` snapshot
-with the state/reason and exit code. Helpers remain event records. A paused
-goal persists for subsequent resume. Goal mode has no steering pipe or typed
+with the state/reason and exit code. A stopped goal drains its remaining work
+before that final record, bounded by the shutdown grace period; unrelated runs
+stay running. Helpers remain event records. Refused verification attempts also
+have run records; the audit counter and check result distinguish them from
+executed checks. A paused goal persists for subsequent resume. Goal mode has no steering pipe or typed
 answer schema; those flags apply to ordinary prompt runs.
 
 ### Approval without a human

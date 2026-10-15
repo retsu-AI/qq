@@ -333,8 +333,12 @@ paid descendant runs remain event records. The final `goal` record contains
 A goal invocation continues while active and ends on any other state,
 including needs-user pauses. Final goal exits are achieved0, paused6,
 blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only
-achievement exits0. Interruption first requests a durable pause; if cleanup
-fails the invocation reports harness failure. New records do not change the
+achievement exits0. Interruption first requests a durable pause. On every stopped state, the
+adapter cancels and drains that exact goal's unsettled paid family under one
+30-second cleanup bound, including late admitted descendants. It replays the
+committed terminal prefix so settled direct-run records precede the final
+snapshot with its final counters. It leaves unrelated runs and the shared
+runtime open. If cleanup fails the invocation reports harness failure. New records do not change the
 ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
 requires an existing session and resumes its specification. Separate
 `--goal-check-approval` plus the exact reviewed `--check` authorizes checks.
@@ -347,7 +351,10 @@ ownership; the normal goal-control transaction records NeedsUser::Approval
 and cancels the family. Foreign workspace holds are ignored by this client.
 Core's run_snapshot API fences a single run by workspace/session independently
 of transcript pagination; goal_owns_run checks the exact live goal's unsettled
-sponsorship before approvals. No database handle enters the adapter.
+sponsorship before approvals. goal_pending_runs lists that same paid family,
+including already cancelled work that must drain. Both ownership reads reject
+stale goal identity/revision. Once terminal draining begins, replayed approval
+requests are evidence only; they are not answered against a superseded revision. No database handle enters the adapter.
 
 ### `qq goal`
 

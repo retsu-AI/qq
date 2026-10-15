@@ -1171,6 +1171,22 @@ impl SessionRuntime {
         self.inner.store.snapshot(request).await
     }
 
+    /// Unsettled runs sponsored by this exact live goal, including cancellations
+    /// that still need to drain. Historical roots retain paid-child ownership.
+    pub async fn goal_pending_runs(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .goal_pending_runs(session_id, expected)
+            .await
+    }
+
     /// Whether an unsettled run is sponsored by this exact live goal.
     pub async fn goal_owns_run(
         &self,

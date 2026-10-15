@@ -204,3 +204,61 @@ fn retained_goal_records_still_decode() {
         }
     }
 }
+
+#[test]
+fn headless_goal_final_records_preserve_explicit_check_authority() {
+    for (name, authorization, status, audits) in [
+        (
+            "goal_check_pending",
+            qq_protocol::GoalCheckAuthorization::Pending,
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                },
+            },
+            0,
+        ),
+        (
+            "goal_check_consumed",
+            qq_protocol::GoalCheckAuthorization::Consumed,
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                },
+            },
+            1,
+        ),
+        (
+            "goal_check_for_goal",
+            qq_protocol::GoalCheckAuthorization::ForGoal,
+            GoalStatus::Achieved,
+            2,
+        ),
+    ] {
+        let mut goal = goal(status);
+        goal.check = Some(qq_protocol::GoalCheck {
+            command: "cargo test".into(),
+            timeout_ms: 1000,
+        });
+        goal.check_authorization = Some(authorization);
+        goal.counters.audits = audits;
+        let status = HeadlessGoalStatus::from_goal(&goal.status).unwrap();
+        let record = HeadlessGoalOutcome {
+            workspace_id: WorkspaceId::from_bytes([4; 16]),
+            goal: Box::new(goal),
+            status,
+            exit_code: status.code(),
+        };
+        let owned = HeadlessRecord::Goal(Box::new(record.clone()));
+        let encoded = serde_json::to_string(&owned).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::to_string(&HeadlessRecordRef::Goal(&record)).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<HeadlessRecord>(&encoded).unwrap(),
+            owned
+        );
+        golden(name, &encoded);
+    }
+}
