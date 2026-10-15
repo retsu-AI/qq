@@ -1879,6 +1879,13 @@ process clock; ordinary timeout counts as a failed check, while the goal
 deadline takes exhaustion precedence. Native process supervision outside Unix
 is unavailable.
 
+Hard-killing QQ can leave a running check shell alive because process guards
+cannot run. Startup recovery pauses the matching goal without repeating its
+check; it does not identify or stop that orphan. The recovered workspace
+exclusion follows durable run state, rather than observing surviving OS
+processes. Resuming an interrupted check acknowledges uncertain effects as
+specified by ADR-0049.
+
 A no-check achievement claim queues a separate Goal-origin prompt run with a
 persisted zero-repair output contract. Its single primary turn has no tools,
 children, or nested audit hook; the first turn verifies rather than reserving a

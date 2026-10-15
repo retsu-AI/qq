@@ -811,7 +811,7 @@ async fn multi_day(checked: bool) {
 }
 
 #[cfg(target_os = "linux")]
-struct CheckProcess(tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>);
+pub(super) struct CheckProcess(pub(super) tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>);
 
 #[cfg(target_os = "linux")]
 impl Drop for CheckProcess {
@@ -829,6 +829,11 @@ async fn observe_check(directory: &Path) -> CheckProcess {
         .unwrap()
         .parse()
         .unwrap();
+    observe_pid(pid)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn observe_pid(pid: u32) -> CheckProcess {
     let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
     CheckProcess(
         tokio::io::unix::AsyncFd::new(
@@ -839,7 +844,7 @@ async fn observe_check(directory: &Path) -> CheckProcess {
 }
 
 #[cfg(target_os = "linux")]
-async fn check_ready(pipe: &tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>) {
+pub(super) async fn check_ready(pipe: &tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let mut ready = pipe.readable().await.unwrap();
@@ -861,28 +866,34 @@ async fn check_ready(pipe: &tokio::io::unix::AsyncFd<rustix::fd::OwnedFd>) {
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn signal_pipe(
+    directory: &Path,
+    name: &str,
+) -> tokio::io::unix::AsyncFd<rustix::fd::OwnedFd> {
+    let path = directory.join(name);
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &path,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let fd = rustix::fs::open(
+        &path,
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    tokio::io::unix::AsyncFd::new(fd).unwrap()
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "current_thread")]
 async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_started_checks() {
     for phase in ["queued", "reserved", "running"] {
         let directory = TempDir::new().unwrap();
         let mut pipes = Vec::new();
         for name in ["check-ready", "check-release"] {
-            let path = directory.path().join(name);
-            rustix::fs::mkfifoat(
-                rustix::fs::CWD,
-                &path,
-                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-            )
-            .unwrap();
-            let fd = rustix::fs::open(
-                &path,
-                rustix::fs::OFlags::RDWR
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .unwrap();
-            pipes.push(tokio::io::unix::AsyncFd::new(fd).unwrap());
+            pipes.push(signal_pipe(directory.path(), name));
         }
         let setup_epoch = now_ms();
         let mut setup = Setup {

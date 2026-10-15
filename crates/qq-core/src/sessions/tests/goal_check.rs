@@ -381,7 +381,7 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
     let _ = descendant;
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[tokio::test]
 async fn goal_check_process_kills_background_descendants_before_success() {
     use super::super::goal_check::{ProcessOutcome, run_process};
@@ -406,6 +406,58 @@ async fn goal_check_process_kills_background_descendants_before_success() {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = pid;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn goal_check_process_kills_background_descendants_before_success() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    use super::goal_driver_soak::{check_ready, observe_pid, signal_pipe};
+    let directory = TempDir::new().unwrap();
+    let ready = signal_pipe(directory.path(), "descendant-ready");
+    let leader_release = signal_pipe(directory.path(), "leader-release");
+    let descendant_release = signal_pipe(directory.path(), "descendant-release");
+    let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+    let task = tokio::spawn(run_process(
+        workspace,
+        "(read -r signal < descendant-release; printf forbidden > descendant-wrote) >/dev/null 2>&1 & printf '%s' \"$!\" > descendant-pid; printf r > descendant-ready; read -r signal < leader-release; exit 0".to_owned(),
+        tokio::time::Instant::now()+Duration::from_secs(5),
+        RunCancellation::new(),Arc::new(crate::ProcessProducer::new("test")),execution::RunResources::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), check_ready(&ready))
+        .await
+        .unwrap();
+    let pid: u32 = tokio::fs::read_to_string(directory.path().join("descendant-pid"))
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+    let descendant = observe_pid(pid);
+    assert_eq!(
+        rustix::io::write(leader_release.get_ref(), b"release\n").unwrap(),
+        8
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+    assert_eq!(
+        rustix::io::write(descendant_release.get_ref(), b"release\n").unwrap(),
+        8
+    );
+    let mut exited = tokio::time::timeout(Duration::from_secs(5), descendant.0.readable())
+        .await
+        .unwrap()
+        .unwrap();
+    exited.retain_ready();
+    assert!(
+        !tokio::fs::try_exists(directory.path().join("descendant-wrote"))
+            .await
+            .unwrap(),
+        "descendant executed after supervisor completion"
+    );
 }
 
 #[cfg(unix)]
