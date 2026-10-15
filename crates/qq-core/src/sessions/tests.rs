@@ -18,6 +18,7 @@ mod delegation;
 mod execution_context;
 mod feeds;
 mod goal_admission;
+mod goal_check;
 mod goal_driver_soak;
 mod goal_final_slot;
 mod goal_paid_limits;
