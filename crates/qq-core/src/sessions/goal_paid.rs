@@ -12,6 +12,39 @@ pub(crate) struct GoalPaidInput {
     pricing: Option<Arc<qq_protocol::ModelPricing>>,
 }
 
+#[cfg(test)]
+struct SummaryAdmissionHook {
+    session: SessionId,
+    skip: usize,
+    entered: tokio::sync::oneshot::Sender<RunId>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static SUMMARY_ADMISSION_HOOKS: std::sync::Mutex<Vec<SummaryAdmissionHook>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn hold_summary_admission_ack(
+    session: SessionId,
+    skip: usize,
+) -> (
+    tokio::sync::oneshot::Receiver<RunId>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    SUMMARY_ADMISSION_HOOKS
+        .lock()
+        .unwrap()
+        .push(SummaryAdmissionHook {
+            session,
+            skip,
+            entered,
+            release: release_rx,
+        });
+    (entered_rx, release)
+}
+
 pub(crate) enum PaidRequestAdmission {
     Allowed { cursor: Option<EventCursor> },
     Reprepare { max_output_tokens: u32 },
@@ -110,7 +143,7 @@ impl GoalPaidInput {
         let store_id = self.store.store_id();
         let pricing = self.pricing.clone();
         let clock = caller.deadline.map(|_| tokio::runtime::Handle::current());
-        self.store.call_write(Priority::AwaitControl, move |connection| {
+        let result=self.store.call_write(Priority::AwaitControl, move |connection| {
             let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
             let transaction = store::begin_unit(connection)?;
             if let Some(expected_owner) = expected_owner {
@@ -144,7 +177,33 @@ impl GoalPaidInput {
             } else { None };
             transaction.commit()?;
             Ok(PaidRequestAdmission::Allowed { cursor })
-        }).await
+        }).await;
+        #[cfg(test)]
+        if identity.kind == RunKind::Compaction
+            && matches!(result, Ok(PaidRequestAdmission::Allowed { .. }))
+        {
+            let hook = {
+                let mut hooks = SUMMARY_ADMISSION_HOOKS.lock().unwrap();
+                match hooks
+                    .iter()
+                    .position(|hook| hook.session == identity.session_id)
+                {
+                    Some(index) if hooks[index].skip > 0 => {
+                        hooks[index].skip -= 1;
+                        None
+                    }
+                    Some(index) => Some(hooks.remove(index)),
+                    None => None,
+                }
+            };
+            if let Some(hook) = hook
+                && hook.entered.send(identity.run_id).is_ok()
+            {
+                // Dropping the fixture release is a normal test teardown.
+                let _ = hook.release.await;
+            }
+        }
+        result
     }
 }
 
@@ -319,8 +378,7 @@ fn output_allowance(
         if remaining == 0 || input_cost > remaining {
             return Err(BudgetLimitKind::Cost);
         }
-        if output_rate > 0 {
-            let output = (remaining - input_cost) / output_rate;
+        if let Some(output) = (remaining - input_cost).checked_div(output_rate) {
             if output == 0 {
                 return Err(BudgetLimitKind::Cost);
             }

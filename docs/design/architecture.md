@@ -1644,7 +1644,14 @@ Terminal counters and distinct unsettled direct run/helper aggregates are
 counted once. Resolved pricing is carried separately
 from the internal compactor's meter. A summary previews its owner and binds its
 committed helper identity before paid admission. The input grants no goal tools
-or mutation authority. Goal-less requests retain the ordinary activity path.
+or mutation authority. In-run summaries use their committed helper identity at
+each RequestStarting boundary. A private goal-only cap bridge admits the current
+caller/goal allowance before constructing the provider request, including
+continuations and rejected-call retries. Input is estimated from current message
+bytes and cached system/tool measurements. Refusal returns settled durable accounting: known-zero no-send work,
+measured prefixes, or unknown spending when admission committed before its
+acknowledgement was interrupted. Goal-less requests retain the ordinary
+activity path and allocate no bridge.
 
 Goal-bound provider requests record a pending marker in the existing activity
 transaction before dispatch. Their turn transaction records whether the

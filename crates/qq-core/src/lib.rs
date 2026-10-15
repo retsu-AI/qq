@@ -1170,6 +1170,7 @@ impl Runtime {
         system: Arc<str>,
         tools: Arc<[ToolSpec]>,
         max_output_tokens: u32,
+        paid_output_cap: Option<Arc<std::sync::atomic::AtomicU32>>,
     ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
     {
         stream! {
@@ -1181,11 +1182,19 @@ impl Runtime {
         // One turn of calls is answered with rejections so the model can
         // still write the summary; a second fails the step.
         let mut rejected_call_turn = false;
+        let static_bytes = paid_output_cap.as_ref().map(|_| {
+            (system.len() as u64).saturating_add(runtime::tool_schema_measurement(&tools).bytes)
+        });
         loop {
+            let input_tokens = static_bytes.map(|static_bytes|
+                static_bytes.saturating_add(measure_messages(&messages)).div_ceil(4));
+            yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
+            let request_cap = paid_output_cap.as_ref().map_or(max_output_tokens, |cap|
+                cap.load(std::sync::atomic::Ordering::Acquire).min(max_output_tokens));
             // The run's own system prompt and tools, so this request shares
             // the run's provider cache (ADR-0056 § 5). Calls are never run.
             let request =
-                ModelRequest::new(Arc::clone(&self.model), messages.clone(), max_output_tokens)
+                ModelRequest::new(Arc::clone(&self.model), messages.clone(), request_cap)
                     .with_system(Arc::clone(&system));
             let request = if tools.is_empty() {
                 request
@@ -1196,7 +1205,6 @@ impl Runtime {
                 Some(effort) => request.with_reasoning_effort(effort),
                 None => request,
             };
-            yield Ok(runtime::SummarizeStep::RequestStarting);
             let mut events = self.provider.stream(request);
             let mut text = String::new();
             let mut reasoning_seen = false;
@@ -2563,6 +2571,7 @@ mod tests {
             Arc::from("system"),
             tools,
             256,
+            None,
         );
         tokio::pin!(steps);
         let mut result = Err("summarizer ended without a summary".to_owned());

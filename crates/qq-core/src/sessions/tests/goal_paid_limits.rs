@@ -396,3 +396,216 @@ async fn goal_paid_admission_refuses_unknown_spend_before_pending_proof() {
         store.close().await.unwrap();
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertainty() {
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "measured prefix".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Incomplete {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 11,
+                        output_tokens: 3,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]))
+        }
+    }
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    for mode in ["deadline", "cancel", "zero"] {
+        let cancel = mode == "cancel";
+        let zero = mode == "zero";
+        let directory = TempDir::new().unwrap();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated {
+            session_id: session,
+        } = created.outcome
+        else {
+            panic!("session")
+        };
+        let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session,"objective":"preserve admitted uncertainty",
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":1_000_000}
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal")
+        };
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: session,
+                    input: vec![InputPart::text("work")],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let claim = runtime
+            .inner
+            .store
+            .reserve_next_run(false)
+            .await
+            .unwrap()
+            .unwrap();
+        runtime
+            .inner
+            .store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loaded = loaded_runtime(
+            Runtime::new(Model(Arc::clone(&calls)), "test-model", 16_000).unwrap(),
+            directory.path().to_str().unwrap(),
+            Some(ModelPricing {
+                input_usd_nanos_per_token: 1,
+                output_usd_nanos_per_token: 1,
+                cache_read_usd_nanos_per_token: Some(1),
+                cache_write_usd_nanos_per_token: Some(1),
+                context_tier: None,
+                provenance: "deterministic admitted-prefix fixture".to_owned(),
+            }),
+        );
+        let compactor = crate::sessions::in_run_compaction::SessionInRunCompactor::new(
+            Arc::clone(&runtime.inner),
+            &claim,
+            &loaded,
+        );
+        let hook =
+            (!zero).then(|| crate::sessions::goal_paid::hold_summary_admission_ack(session, 1));
+        let compact = crate::runtime::InRunCompactor::compact(
+            &compactor,
+            crate::runtime::InRunCompactionRequest {
+                transcript: vec![Message::user("work")],
+                turn_cutoff: 1,
+                system: Arc::from(""),
+                tools: Arc::from([]),
+                retained_bytes: 0,
+                goal_notice: None,
+                budget: crate::runtime::ChildBudget {
+                    limits: RunLimits {
+                        max_output_tokens: Some(if zero { 0 } else { 1000 }),
+                        ..RunLimits::default()
+                    },
+                    deadline: Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+                },
+            },
+        );
+        let compact = tokio::spawn(compact);
+        let helper = if let Some((entered, release)) = hook {
+            let helper = entered.await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if cancel {
+                runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::CancelRun { run_id: helper },
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            let result = compact.await.unwrap();
+            if cancel {
+                assert!(matches!(
+                    result,
+                    Err(crate::runtime::InRunCompactionError::Unavailable(_))
+                ));
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::runtime::InRunCompactionError::BudgetExhausted {
+                            kind: qq_protocol::BudgetLimitKind::Duration,
+                            usage: None,
+                            estimated_cost_usd_nanos: None
+                        })
+                    ),
+                    "a committed pending request must poison the returned measured prefix"
+                );
+            }
+            assert!(
+                release.send(()).is_err(),
+                "the interrupted admission acknowledgement was abandoned"
+            );
+            helper
+        } else {
+            assert!(
+                matches!(compact.await.unwrap(),Err(crate::runtime::InRunCompactionError::BudgetExhausted {
+                kind:qq_protocol::BudgetLimitKind::OutputTokens,usage:Some(usage),estimated_cost_usd_nanos:Some(0)
+            }) if usage==TokenUsage::default()),
+                "a request refused before admission returns durable known-zero accounting"
+            );
+            let owner = claim.identity.run_id;
+            runtime.inner.store.call(Priority::Control,move |connection| {
+                let id:String=connection.query_row("SELECT id FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|row.get(0))?;
+                parse_id(&id)
+            }).await.unwrap()
+        };
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(!zero),
+            "no unadmitted provider request"
+        );
+        runtime.inner.store.call(Priority::Control,move |connection| {
+            let (pending,usage,cost,terminal):(bool,Option<String>,Option<u64>,bool)=connection.query_row(
+                "SELECT goal_request_pending,usage_json,estimated_cost_usd_nanos,outcome_json IS NOT NULL FROM runs WHERE id=?1",
+                [helper.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+            assert!(terminal);assert_eq!(pending,!zero);
+            assert_eq!(usage.as_deref().map(serde_json::from_str::<TokenUsage>).transpose().unwrap(),zero.then_some(TokenUsage::default()));
+            assert_eq!(cost,zero.then_some(0));
+            if !zero {
+                let prefix:String=connection.query_row("SELECT assistant_content_json FROM model_turns WHERE run_id=?1 AND turn_ordinal=1",[helper.to_string()],|row|row.get(0))?;
+                assert!(prefix.contains("measured prefix"));
+            }
+            Ok(())
+        }).await.unwrap();
+        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"goal_control","session_id":session,"expected":{"goal_id":goal.goal_id,"revision":goal.revision},"action":{"type":"pause"}
+        })).unwrap()).await.unwrap();
+        runtime
+            .inner
+            .store
+            .finish_run(
+                &claim,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        drop(held);
+        runtime.shutdown().await.unwrap();
+    }
+    keep_clock.abort();
+}
