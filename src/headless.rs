@@ -2141,6 +2141,108 @@ mod tests {
         }
     }
 
+    fn goal_request() -> GoalInvocation {
+        GoalInvocation {
+            objective: Some("finish the task".to_owned()),
+            check: None,
+            check_approval: None,
+            deadline: None,
+            max_runs: Some(1),
+            replace: false,
+            defaults: qq_config::GoalsConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_without_check_consent_returns_paused_without_model_work() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut request = goal_request();
+        request.check = Some("printf checked".to_owned());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 6, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let Some(qq_protocol::HeadlessRecord::Goal(final_goal)) = records.last() else {
+            panic!("final goal record")
+        };
+        assert_eq!(final_goal.goal.counters.runs, 0);
+        assert_eq!(
+            final_goal.goal.status,
+            qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                },
+            }
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, qq_protocol::HeadlessRecord::GoalRun(_)))
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_runs_existing_driver_until_budget_and_emits_each_direct_run() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 8, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let runs: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                qq_protocol::HeadlessRecord::GoalRun(run) => Some(run),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(
+            runs[0].run.origin,
+            Some(qq_protocol::RunOrigin::Goal { .. })
+        ));
+        assert!(runs[0].run.outcome.is_some());
+        assert!(
+            matches!(records.last(), Some(qq_protocol::HeadlessRecord::Goal(outcome))
+            if outcome.exit_code == 8 && outcome.goal.counters.runs == 1)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
     async fn run_to_end(
         fixture: &Fixture,
         options: HeadlessOptions,

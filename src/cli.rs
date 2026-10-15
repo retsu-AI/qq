@@ -1267,3 +1267,52 @@ mod goal_cli_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod foreground_goal_cli_tests {
+    use super::*;
+    #[test]
+    fn foreground_goal_cli_accepts_objectives_and_bare_stored_goal_resume() {
+        for args in [
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "finish",
+                "--check",
+                "cargo test",
+                "--goal-check-approval",
+                "once",
+                "--goal-deadline",
+                "24h",
+                "--goal-max-runs",
+                "20",
+            ],
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "--session",
+                "019df100000070008000000000000001",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["qq", "run"],
+            vec!["qq", "run", "prompt", "--goal", "finish"],
+            vec!["qq", "run", "prompt", "--check", "cargo test"],
+            vec!["qq", "run", "--goal", "finish", "--steer-stdin"],
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "finish",
+                "--output-schema",
+                "out.json",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+}
