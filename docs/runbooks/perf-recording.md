@@ -33,8 +33,10 @@ version: 4.
 
 ## Focused fixtures
 
-The ENG-834 hosted repair job compares merged main `9868038c` against the PR
-candidate using the same H0 fixture and toolchain in both arms. Both immutable
+The ENG-834 hosted repair job compares merged main `3b763ea1` against the PR
+candidate using the same H0 fixture and toolchain in both arms. The turn
+diagnostic retains common fixture `9868038c` independently of production commits.
+Both immutable
 production checkouts overlay only `xtask/src/perf.rs` from the immutable PR
 head before recording. The artifact retains `fixture-receipt.json` with the
 fixture commit, production commits, original hashes and equal effective hashes;

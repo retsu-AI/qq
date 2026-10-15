@@ -160,3 +160,10 @@
   resolved. These pre-integration receipts do not qualify the merged head.
 - Re-run the current-main gates and hosted qualification before merge. Local
   loopback bind remains EPERM; socket-dependent gates require hosted evidence.
+- Independent review approves integration; correct the runbook's production
+  baseline to `3b763ea1`, retaining turn fixture `9868038c` explicitly.
+- First integrated `check --full` passes fmt/lint, then fails Clippy when the
+  shared target directory disappears during the build (ENOENT fingerprint writes).
+  Re-run in the private clone's target. Prior shared binary/log receipts were
+  removed too; recover available hosted ZIPs/probe data from `/tmp`. Earlier size
+  observations remain historical; merged-head measurements are still required.
