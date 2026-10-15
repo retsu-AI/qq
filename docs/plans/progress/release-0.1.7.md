@@ -1,13 +1,13 @@
 # Ledger — v0.1.7 release preparation
 
 Plan: [`../release-0.1.7.md`](../release-0.1.7.md).
-Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
+Owner: ENG-1054; release handoff on `chore/0.1.7`.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| R017-prep | Reconcile docs and review candidate readiness before bump | In review | `docs/eng-1054-0.1.7-pre-release`, [#316](https://github.com/retsu-AI/qq/pull/316) | Rebased onto `0b4f29e3`; no bump, tag or publication |
-| R017-perf | Release size/performance repair and qualification | Blocked (quiet-host H0 qualification) | ENG-834, #315 (merged `21332992`) | Repair merged; size passes, H0 A/B and A/A failed; acceptance remains open |
-| R017-bump | Separate `chore/0.1.7` bump PR | Blocked (preparation and pre-bump gates pending) | `chore/0.1.7` (planned; no PR) | `cargo xtask release 0.1.7` only after handoff |
+| R017-prep | Reconcile docs and review candidate readiness before bump | Shipped (`9df32a5b`) | [#316](https://github.com/retsu-AI/qq/pull/316) | Main CI passes |
+| R017-perf | Release size/performance repair and qualification | Shipped (repair `21332992`; known qualification gap accepted by maintainer) | ENG-834, #315 | ENG-834 closed by explicit maintainer decision; H0 remains failed/unqualified, not a passing result |
+| R017-bump | Separate `chore/0.1.7` bump PR | In progress | `chore/0.1.7` | Generated bump and upgrade notes; verification before push |
 | R017-publish | Tag merged main and verify assets/install routes | Planned | — (merged main; no PR yet) | Separate release authorization; never tag this branch |
 | R017-docs | Move guide pins after assets publish | Planned | — (follow-up PR not opened) | `cargo xtask release --docs`; not before publication |
 
@@ -86,3 +86,32 @@ Owner: ENG-1054, `docs/eng-1054-0.1.7-pre-release`.
   Removed the deleted sleep entry and updated three line locations; no sleep
   added, no test changed, ceiling remains 76. Final affected gate passes
   fmt/lint/Clippy/tests (28.5s); table structure and diff checks follow.
+
+
+### 2026-10-15 — v0.1.7 bump handoff
+
+- User requests release commands after #316 merged and main CI passed.
+  Fetched main `9df32a5b`; hosted correctness/smoke, Windows, WASM, size-report
+  and website checks pass; controlled performance jobs skipped.
+- Live ENG-834 closure records explicit maintainer acceptance of #315's known
+  qualification gap. H0 A/B and A/A failures remain evidence, not a pass;
+  budgets and future release policy are unchanged.
+- Created `chore/0.1.7`; ran `cargo xtask release 0.1.7 --no-commit` and added
+  the complete Upgrading block. Constants verified: protocol32, capabilities1,
+  descriptor15, schema50. No unmerged feature scope added.
+- Final full check and smoke required before push. Tag only the merged clean
+  main result; guide pins stay at v0.1.6 until assets are published.
+
+- Bump-tree full gate passed: 2,471/2,471 workspace tests, 14 explicit skips;
+  doctests, minimal-provider Clippy and 211/211 tests pass (309.6s).
+  Real-binary smoke 6/6 passes; `git diff --check` passes.
+
+
+### 2026-10-15 — bump preamble review correction
+
+- Codex correctly identified preparation-only text left above the bump status.
+  Updated the preamble to identify #318, its merged preparation base and the
+  v0.1.7 manifest/lockfile/changelog changes. Tag/publication remain pending;
+  guide pins stay at published v0.1.6 until new assets exist.
+- This is manually maintained plan text, not release-generator output.
+  Documentation gate and diff checks run before committing; user owns push.
