@@ -1,6 +1,7 @@
 //! Current paid-request allowances; this input carries no goal-writing authority.
 use super::store::Priority;
 use super::*;
+use crate::runtime::ChildBudget;
 
 #[derive(Clone)]
 pub(crate) struct GoalPaidInput {
@@ -75,17 +76,21 @@ impl GoalPaidInput {
         &self,
         ceiling: u32,
         input_tokens: u64,
+        caller: ChildBudget,
     ) -> Result<PaidRequestAdmission, SessionRuntimeError> {
         let identity = self.identity;
         let pricing = self.pricing.clone();
+        let clock = caller.deadline.map(|_| tokio::runtime::Handle::current());
         self.store
             .call_after_group(Priority::AwaitControl, move |connection| {
+                let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
                 request_allowance(
                     connection,
                     identity,
                     ceiling,
                     input_tokens,
                     pricing.as_deref(),
+                    caller,
                 )
             })
             .await
@@ -95,6 +100,7 @@ impl GoalPaidInput {
         &self,
         proposed: u32,
         input_tokens: u64,
+        caller: ChildBudget,
     ) -> Result<PaidRequestAdmission, SessionRuntimeError> {
         let identity = *self
             .admitted_identity
@@ -103,7 +109,9 @@ impl GoalPaidInput {
         let expected_owner = self.expected_owner;
         let store_id = self.store.store_id();
         let pricing = self.pricing.clone();
+        let clock = caller.deadline.map(|_| tokio::runtime::Handle::current());
         self.store.call_write(Priority::AwaitControl, move |connection| {
+            let _clock = clock.as_ref().map(tokio::runtime::Handle::enter);
             let transaction = store::begin_unit(connection)?;
             if let Some(expected_owner) = expected_owner {
                 let owner: Option<String> = transaction.query_row(
@@ -112,7 +120,7 @@ impl GoalPaidInput {
                 )?;
                 if owner.as_deref() != Some(expected_owner.to_string().as_str()) { return Err(SessionRuntimeError::CONSTRAINT); }
             }
-            let allowed = request_allowance(&transaction, identity, proposed, input_tokens, pricing.as_deref())?;
+            let allowed = request_allowance(&transaction, identity, proposed, input_tokens, pricing.as_deref(), caller)?;
             match allowed {
                 PaidRequestAdmission::Reprepare { max_output_tokens } if max_output_tokens == proposed => {}
                 other => return Ok(other),
@@ -146,6 +154,7 @@ fn request_allowance(
     ceiling: u32,
     input_tokens: u64,
     pricing: Option<&qq_protocol::ModelPricing>,
+    caller: ChildBudget,
 ) -> Result<PaidRequestAdmission, SessionRuntimeError> {
     let (base, cancelled): (Option<String>, bool) = connection.query_row(
         "SELECT CASE WHEN kind='prompt' THEN id ELSE auto_compaction_for_run_id END,
@@ -157,7 +166,25 @@ fn request_allowance(
         return Ok(PaidRequestAdmission::Cancelled);
     }
     let base: RunId = parse_id(base.as_deref().ok_or(SessionRuntimeError::CONSTRAINT)?)?;
-    let mut cap = ceiling;
+    let exhausted = |limit: qq_protocol::BudgetLimitKind| {
+        PaidRequestAdmission::Exhausted(qq_protocol::BudgetExhaustion {
+            limit,
+            final_response: false,
+            message: format!(
+                "current caller or goal allowance cannot admit a provider request: {}",
+                limit.as_str()
+            ),
+        })
+    };
+    let caller_limits = match caller.limits_at(tokio::time::Instant::now()) {
+        Ok(limits) => limits,
+        Err(kind) => return Ok(exhausted(kind)),
+    };
+    let mut cap = match output_allowance(ceiling, input_tokens, caller_limits, pricing) {
+        Ok(cap) => cap,
+        Err(kind) => return Ok(exhausted(kind)),
+    };
+    let mut deadline = u64::MAX;
     let mut seen = Vec::new();
     for (_, session, goal_id) in goals::paid_goal_owners(connection, base)? {
         let Some(goal_id) = goal_id else {
@@ -176,16 +203,7 @@ fn request_allowance(
         if !live || goal.status != qq_protocol::GoalStatus::Active {
             return Ok(PaidRequestAdmission::Cancelled);
         }
-        let exhausted = |limit: qq_protocol::BudgetLimitKind| {
-            PaidRequestAdmission::Exhausted(qq_protocol::BudgetExhaustion {
-                limit,
-                final_response: false,
-                message: format!(
-                    "current goal allowance cannot admit a provider request: {}",
-                    limit.as_str()
-                ),
-            })
-        };
+        deadline = deadline.min(goal.budget.deadline_ms);
         if now_ms() >= goal.budget.deadline_ms {
             return Ok(exhausted(qq_protocol::BudgetLimitKind::Duration));
         }
@@ -224,72 +242,95 @@ fn request_allowance(
                 };
             }
         }
-        if let Some(limit) = goal.budget.max_total_tokens {
-            let Some(spent) = tokens else {
-                return Ok(exhausted(qq_protocol::BudgetLimitKind::TokensUnknown));
-            };
-            let remaining = limit.saturating_sub(spent).saturating_sub(input_tokens);
-            if remaining == 0 {
-                return Ok(exhausted(qq_protocol::BudgetLimitKind::TotalTokens));
-            }
-            cap = cap.min(u32::try_from(remaining).unwrap_or(u32::MAX));
-        }
-        if let Some(limit) = goal.budget.max_cost_usd_nanos {
-            let (Some(spent), Some(pricing)) = (cost, pricing) else {
-                return Ok(exhausted(qq_protocol::BudgetLimitKind::CostUnknown));
-            };
-            let input_rate =
-                pricing
-                    .context_tier
-                    .as_ref()
-                    .map_or(pricing.input_usd_nanos_per_token, |tier| {
-                        tier.input_usd_nanos_per_token
-                            .max(pricing.input_usd_nanos_per_token)
-                    });
-            let input_rate = input_rate
-                .max(pricing.cache_read_usd_nanos_per_token.unwrap_or(input_rate))
-                .max(
-                    pricing
-                        .cache_write_usd_nanos_per_token
-                        .unwrap_or(input_rate),
-                );
-            let input_rate = pricing.context_tier.as_ref().map_or(input_rate, |tier| {
-                input_rate
-                    .max(tier.cache_read_usd_nanos_per_token.unwrap_or(input_rate))
-                    .max(tier.cache_write_usd_nanos_per_token.unwrap_or(input_rate))
-            });
-            let output_rate =
-                pricing
-                    .context_tier
-                    .as_ref()
-                    .map_or(pricing.output_usd_nanos_per_token, |tier| {
-                        tier.output_usd_nanos_per_token
-                            .max(pricing.output_usd_nanos_per_token)
-                    });
-            let Some(input_cost) = input_tokens.checked_mul(input_rate) else {
-                return Ok(exhausted(qq_protocol::BudgetLimitKind::Cost));
-            };
-            let remaining = limit.saturating_sub(spent).saturating_sub(input_cost);
-            if spent >= limit || input_cost > limit.saturating_sub(spent) {
-                return Ok(exhausted(qq_protocol::BudgetLimitKind::Cost));
-            }
-            if output_rate > 0 {
-                cap = cap.min(u32::try_from(remaining / output_rate).unwrap_or(u32::MAX));
-            }
-        }
+        let remaining_tokens = match (goal.budget.max_total_tokens, tokens) {
+            (Some(_), None) => return Ok(exhausted(qq_protocol::BudgetLimitKind::TokensUnknown)),
+            (Some(limit), Some(spent)) => Some(limit.saturating_sub(spent)),
+            (None, _) => None,
+        };
+        let remaining_cost = match (goal.budget.max_cost_usd_nanos, cost) {
+            (Some(_), None) => return Ok(exhausted(qq_protocol::BudgetLimitKind::CostUnknown)),
+            (Some(limit), Some(spent)) => Some(limit.saturating_sub(spent)),
+            (None, _) => None,
+        };
+        let limits = RunLimits {
+            max_total_tokens: remaining_tokens,
+            max_cost_usd_nanos: remaining_cost,
+            ..RunLimits::default()
+        };
+        cap = match output_allowance(cap, input_tokens, limits, pricing) {
+            Ok(cap) => cap,
+            Err(kind) => return Ok(exhausted(kind)),
+        };
     }
-    if cap == 0 {
-        return Ok(PaidRequestAdmission::Exhausted(
-            qq_protocol::BudgetExhaustion {
-                limit: qq_protocol::BudgetLimitKind::Cost,
-                final_response: false,
-                message: "current goal allowance has no output reserve".to_owned(),
-            },
-        ));
+    if now_ms() >= deadline || caller.limits_at(tokio::time::Instant::now()).is_err() {
+        return Ok(exhausted(qq_protocol::BudgetLimitKind::Duration));
     }
     Ok(PaidRequestAdmission::Reprepare {
         max_output_tokens: cap,
     })
+}
+
+fn output_allowance(
+    ceiling: u32,
+    input_tokens: u64,
+    limits: RunLimits,
+    pricing: Option<&qq_protocol::ModelPricing>,
+) -> Result<u32, qq_protocol::BudgetLimitKind> {
+    use qq_protocol::BudgetLimitKind;
+    let mut cap = ceiling;
+    if limits
+        .max_input_tokens
+        .is_some_and(|remaining| input_tokens > remaining)
+    {
+        return Err(BudgetLimitKind::InputTokens);
+    }
+    if let Some(remaining) = limits.max_output_tokens {
+        if remaining == 0 {
+            return Err(BudgetLimitKind::OutputTokens);
+        }
+        cap = cap.min(u32::try_from(remaining).unwrap_or(u32::MAX));
+    }
+    if let Some(remaining) = limits.max_total_tokens {
+        let output = remaining.saturating_sub(input_tokens);
+        if output == 0 {
+            return Err(BudgetLimitKind::TotalTokens);
+        }
+        cap = cap.min(u32::try_from(output).unwrap_or(u32::MAX));
+    }
+    if let Some(remaining) = limits.max_cost_usd_nanos {
+        let Some(pricing) = pricing else {
+            return Err(BudgetLimitKind::CostUnknown);
+        };
+        let mut input_rate = pricing
+            .input_usd_nanos_per_token
+            .max(pricing.cache_read_usd_nanos_per_token.unwrap_or(0))
+            .max(pricing.cache_write_usd_nanos_per_token.unwrap_or(0));
+        let mut output_rate = pricing.output_usd_nanos_per_token;
+        if let Some(tier) = pricing.context_tier.as_ref() {
+            input_rate = input_rate
+                .max(tier.input_usd_nanos_per_token)
+                .max(tier.cache_read_usd_nanos_per_token.unwrap_or(0))
+                .max(tier.cache_write_usd_nanos_per_token.unwrap_or(0));
+            output_rate = output_rate.max(tier.output_usd_nanos_per_token);
+        }
+        let Some(input_cost) = input_tokens.checked_mul(input_rate) else {
+            return Err(BudgetLimitKind::Cost);
+        };
+        if remaining == 0 || input_cost > remaining {
+            return Err(BudgetLimitKind::Cost);
+        }
+        if output_rate > 0 {
+            let output = (remaining - input_cost) / output_rate;
+            if output == 0 {
+                return Err(BudgetLimitKind::Cost);
+            }
+            cap = cap.min(u32::try_from(output).unwrap_or(u32::MAX));
+        }
+    }
+    if cap == 0 {
+        return Err(BudgetLimitKind::OutputTokens);
+    }
+    Ok(cap)
 }
 
 fn total_tokens(usage: TokenUsage) -> Option<u64> {

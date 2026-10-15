@@ -1633,8 +1633,15 @@ Main and between-run summary requests carry a private accounting-only
 allowance before request preparation, then revalidates it in the transaction
 that records pending provider work. A tighter allowance repeats preparation at
 the same turn ordinal without dispatch. The request cap is separate from the
-caller's cumulative meter; terminal counters and distinct unsettled direct
-run/helper aggregates are counted once. Resolved pricing is carried separately
+caller's cumulative meter. Each dispatch intersects the caller's freshly reduced
+input, output, total-token and cost limits with every sponsoring goal's current
+remainder. The quote reserves estimated input before selecting output, using
+the greatest applicable base/tier fresh, cached-read or cached-write input rate.
+The caller's absolute deadline is checked again inside the store actor after
+queueing; an expired admission writes no pending marker. Turn/tool-count limits
+still permit their reserved tool-free reply when hard spending and time remain.
+Terminal counters and distinct unsettled direct run/helper aggregates are
+counted once. Resolved pricing is carried separately
 from the internal compactor's meter. A summary previews its owner and binds its
 committed helper identity before paid admission. The input grants no goal tools
 or mutation authority. Goal-less requests retain the ordinary activity path.

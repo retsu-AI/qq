@@ -1439,7 +1439,21 @@ impl RunState {
                         }) } else { 0 };
                         let mut request_cap = run.max_output_tokens;
                         if let Some(paid) = goal_paid.as_ref() {
-                            match paid.preview_request(request_cap, input_tokens).await {
+                            // The first Prepared lets session start refresh a queued
+                            // goal clamp. Enforce the caller at atomic admission after
+                            // that handshake; later previews use the running meter.
+                            let caller = if turn_ordinal == 1 {
+                                runtime::ChildBudget::default()
+                            } else {
+                                match run.budget.child_budget(tokio::time::Instant::now()) {
+                                    Ok(caller) => caller,
+                                    Err(kind) => {
+                                        yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {exhaustion:run.budget.exhaustion(kind,false,tokio::time::Instant::now())});
+                                        yield TurnStep::Stop; return;
+                                    }
+                                }
+                            };
+                            match paid.preview_request(request_cap, input_tokens, caller).await {
                                 Ok(sessions::PaidRequestAdmission::Reprepare { max_output_tokens }) => request_cap = max_output_tokens,
                                 Ok(sessions::PaidRequestAdmission::Cancelled) => {
                                     yield TurnStep::Emit(RuntimeEvent::GoalPaidCancelled);
@@ -1474,7 +1488,14 @@ impl RunState {
                             },
                         });
                             let Some(paid) = goal_paid.as_ref() else { break; };
-                            match paid.admit_request(request_cap, input_tokens).await {
+                            let caller=match run.budget.child_budget(tokio::time::Instant::now()) {
+                                Ok(caller)=>caller,
+                                Err(kind)=>{
+                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {exhaustion:run.budget.exhaustion(kind,false,tokio::time::Instant::now())});
+                                    yield TurnStep::Stop; return;
+                                }
+                            };
+                            match paid.admit_request(request_cap, input_tokens, caller).await {
                                 Ok(sessions::PaidRequestAdmission::Allowed { cursor }) => {
                                     yield TurnStep::Emit(RuntimeEvent::GoalRequestAdmitted { cursor });
                                     break;

@@ -11,6 +11,9 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             let first = {
                 let mut calls = self.calls.lock().unwrap();
                 let first = calls.is_empty();
+                if (!first && self.kind == "turns") || self.kind == "tools" {
+                    assert_eq!(request.tool_choice(), qq_provider::ToolChoice::None);
+                }
                 calls.push(request.max_output_tokens());
                 first
             };
@@ -25,7 +28,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                 cache_write_input_tokens: 0,
                 reasoning_tokens: None,
             };
-            let mut events = if first {
+            let mut events = if first && self.kind != "tools" {
                 vec![
                     Ok(qq_provider::ProviderEvent::ToolCallStarted {
                         id: "read".to_owned(),
@@ -75,7 +78,7 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
         }
     }
     for goal_origin in [false, true] {
-        for kind in ["output", "total", "input", "cost"] {
+        for kind in ["output", "total", "input", "cost", "turns", "tools"] {
             let directory = TempDir::new().unwrap();
             std::fs::write(directory.path().join("note"), "bounded read").unwrap();
             let calls = Arc::new(StdMutex::new(Vec::new()));
@@ -108,6 +111,8 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
                 })
                 .unwrap();
             let limits = RunLimits {
+                max_model_turns: (kind == "turns").then_some(2),
+                max_tool_calls: (kind == "tools").then_some(1),
                 max_output_tokens: (kind == "output").then_some(1000),
                 max_total_tokens: (kind == "total").then_some(100_000),
                 max_input_tokens: (kind == "input").then_some(100_000),
@@ -156,7 +161,22 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             let observed = collect_until_run_finished(&mut events, run).await;
             runtime.shutdown().await.unwrap();
             let calls = calls.lock().unwrap().clone();
-            if kind == "output" {
+            if matches!(kind, "turns" | "tools") {
+                assert_eq!(
+                    calls.len(),
+                    if kind == "turns" { 2 } else { 1 },
+                    "the reserved tool-free final reply remains affordable: kind={kind}, outcome={:?}",
+                    finished_outcome(&observed, run)
+                );
+                let expected = if kind == "turns" {
+                    qq_protocol::BudgetLimitKind::ModelTurns
+                } else {
+                    qq_protocol::BudgetLimitKind::ToolCalls
+                };
+                assert!(
+                    matches!(finished_outcome(&observed,run),Some(RunOutcome::BudgetExhausted {exhaustion}) if exhaustion.limit==expected && exhaustion.final_response)
+                );
+            } else if kind == "output" {
                 assert_eq!(
                     calls,
                     vec![1000, 300],
@@ -184,4 +204,77 @@ async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
             }
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn goal_paid_admission_rechecks_caller_deadline_after_store_queue_wait() {
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    for expires in [false, true] {
+        let (_directory, store, claim) = super::goals::model_goal_claim(true).await;
+        let paid = crate::sessions::goal_paid::GoalPaidInput::new(&store, &claim, None).unwrap();
+        let caller = crate::runtime::ChildBudget {
+            limits: RunLimits::default(),
+            deadline: Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+        };
+        assert!(matches!(
+            paid.preview_request(100, 1, caller).await.unwrap(),
+            crate::sessions::goal_paid::PaidRequestAdmission::Reprepare {
+                max_output_tokens: 100
+            }
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let blocked_store = store.clone();
+        let blocker = tokio::spawn(async move {
+            blocked_store
+                .call(Priority::Control, move |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let admission = tokio::spawn(async move { paid.admit_request(100, 1, caller).await });
+        tokio::task::yield_now().await;
+        if expires {
+            tokio::time::advance(Duration::from_secs(2)).await;
+        }
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let result = admission.await.unwrap().unwrap();
+        if expires {
+            assert!(
+                matches!(result, crate::sessions::goal_paid::PaidRequestAdmission::Exhausted(exhaustion)
+                if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+            );
+        } else {
+            assert!(matches!(
+                result,
+                crate::sessions::goal_paid::PaidRequestAdmission::Allowed { .. }
+            ));
+        }
+        let run = claim.identity.run_id;
+        let pending = store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT goal_request_pending FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            pending, !expires,
+            "expired admission cannot persist provider-dispatch proof"
+        );
+        store.close().await.unwrap();
+    }
+    keep_clock.abort();
 }

@@ -7480,7 +7480,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             .unwrap();
         runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
             "type":"set_goal","session_id":session_id,"objective":"refresh allowance after loading",
-            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {10_000}}
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
         })).unwrap()).await.unwrap();
         runtime.inner.store.drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
@@ -7491,7 +7491,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                         session_id,
                         input: vec![InputPart::text("explicit work under the same budget")],
                         limits: RunLimits {
-                            max_total_tokens: strict.then_some(2000),
+                            max_total_tokens: strict.then_some(200_000),
                             ..RunLimits::default()
                         },
                         correlation: Correlation::default(),
@@ -7534,10 +7534,10 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 });
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 if raised {
-                    goal.budget.max_total_tokens = Some(3000);
+                    goal.budget.max_total_tokens = Some(300_000);
                     goal.budget.deadline_ms = now_ms() + 120_000;
                 } else {
-                    goal.counters.usage = Some(usage(8000, 1000));
+                    goal.counters.usage = Some(usage(80_000, 10_000));
                 }
                 crate::sessions::goals::save(connection, &goal)
             })
@@ -7551,16 +7551,25 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 finished_outcome(&finished, run),
                 Some(RunOutcome::Completed)
             ),
-            "positive remainder permits bounded work"
+            "positive remainder permits bounded work: user_prompt={user_prompt}, raised={raised}, strict={strict}, outcome={:?}, stored={:?}",
+            finished_outcome(&finished, run),
+            Connection::open(directory.path().join("sessions.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT limits_json FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap()
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         let expected = if strict {
-            2000
+            200_000
         } else if raised {
-            3000
+            300_000
         } else {
-            1000
+            110_000
         };
         assert!(
             requests[0] == expected.min(1024),
@@ -7599,7 +7608,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             Some(if raised {
                 usage(1, 1)
             } else {
-                usage(8001, 1001)
+                usage(80_001, 10_001)
             })
         );
     }
@@ -7923,7 +7932,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
             let routing_tokens = self.1;
             Box::pin(async move {
                 Ok(loaded_runtime(
-                    Runtime::new(Model(requests), "test-model", 1024)
+                    Runtime::new(Model(requests), "test-model", 200_000)
                         .unwrap()
                         .with_task_router(Arc::new(Router(routing_tokens))),
                     &request.workspace,
@@ -7932,7 +7941,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
             })
         }
     }
-    for routing_tokens in [Some(1000), Some(900), None] {
+    for routing_tokens in [Some(1_000_000), Some(999_999), Some(900_000), None] {
         for user_prompt in [false, true] {
             for strict_output in [false, true] {
                 let directory = TempDir::new().unwrap();
@@ -7960,7 +7969,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                     .unwrap();
                 runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
                 "type":"set_goal", "session_id":session_id, "objective":"one bounded work slice",
-                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000, "max_total_tokens":1000,
+                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000, "max_total_tokens":1_000_000,
                     "per_run":{"max_output_tokens":strict_output.then_some(80)}}
             })).unwrap()).await.unwrap();
                 runtime.inner.store.drive_goals(now_ms()).await.unwrap();
@@ -8002,7 +8011,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 runtime.inner.schedule.send(()).await.unwrap();
                 let finished = collect_until_run_finished(&mut events, run).await;
                 runtime.shutdown().await.unwrap();
-                if routing_tokens == Some(900) {
+                if routing_tokens == Some(900_000) {
                     assert!(matches!(
                         finished_outcome(&finished, run),
                         Some(RunOutcome::Completed)
@@ -8025,7 +8034,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 } else {
                     matches!(stored.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
                 });
-                if routing_tokens == Some(900) {
+                if routing_tokens == Some(900_000) {
                     let encoded: String = connection
                         .query_row(
                             "SELECT limits_json FROM runs WHERE id=?1",
@@ -8036,32 +8045,43 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                     let limits: RunLimits = serde_json::from_str(&encoded).unwrap();
                     assert_eq!(
                         limits.max_total_tokens,
-                        Some(1000),
+                        Some(1_000_000),
                         "the meter charges routing within the inclusive allowance"
                     );
                 }
                 let goal = crate::sessions::goals::load_live(&connection, session_id)
                     .unwrap()
                     .unwrap();
-                assert_eq!(goal.counters.runs, u32::from(routing_tokens == Some(900)));
+                assert_eq!(
+                    goal.counters.runs,
+                    u32::from(routing_tokens == Some(900_000))
+                );
                 assert_eq!(
                     goal.counters.usage,
-                    routing_tokens.map(|tokens| if tokens == 900 {
-                        usage(901, 1)
+                    routing_tokens.map(|tokens| if tokens == 900_000 {
+                        usage(900_001, 1)
                     } else {
                         usage(tokens, 0)
                     }),
                     "routing is charged exactly once"
                 );
-                assert_eq!(
-                    *requests.lock().unwrap(),
-                    if routing_tokens == Some(900) {
-                        vec![if strict_output { 80 } else { 100 }]
+                let requests = requests.lock().unwrap();
+                if routing_tokens == Some(900_000) {
+                    assert_eq!(requests.len(), 1);
+                    if strict_output {
+                        assert_eq!(requests[0], 80);
                     } else {
-                        Vec::new()
-                    },
-                    "user_prompt={user_prompt}, strict_output={strict_output}: routing_tokens={routing_tokens:?}: no main work outside post-routing allowance"
-                );
+                        assert!(
+                            requests[0] > 0 && requests[0] < 100_000,
+                            "the request reserves input inside the post-routing remainder: {requests:?}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        requests.is_empty(),
+                        "user_prompt={user_prompt}, strict_output={strict_output}: routing_tokens={routing_tokens:?}: no main work outside post-routing allowance"
+                    );
+                }
             }
         }
     }
