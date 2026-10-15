@@ -1867,7 +1867,12 @@ rather than publishing completion. Results retain an exit/timeout diagnostic and
 UTF-8 output suffix within4KiB. Goal changes and terminal settlement share one
 transaction and require the live active audit revision. Recovery pauses a
 started check as CheckInterrupted without refunding Once authority; an unstarted
-check remains queued. Native process supervision outside Unix is unavailable.
+check remains queued. An expired unstarted check retains Once authority and is settled through the
+queued-run path, releasing its preparation pointer and queue count. Admission
+preserves its explicit calendar-expiry reason independently of the monotonic
+process clock; ordinary timeout counts as a failed check, while the goal
+deadline takes exhaustion precedence. Native process supervision outside Unix
+is unavailable.
 
 ## Workspaces And Tools
 

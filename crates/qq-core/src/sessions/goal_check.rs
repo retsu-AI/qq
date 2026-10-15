@@ -290,6 +290,7 @@ pub(super) fn queue(
 }
 
 enum Start {
+    Expired,
     Waiting,
     Started(Vec<SessionEventEnvelope>),
     Stop,
@@ -303,6 +304,9 @@ fn try_start(
 ) -> Result<Start, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
+    if now >= deadline_ms {
+        return Ok(Start::Expired);
+    }
     let Some(mut goal) = goals::load_live(&transaction, claimed.identity.session_id)? else {
         return Ok(Start::Stop);
     };
@@ -315,7 +319,6 @@ fn try_start(
         || !goal.audit_pending
         || goal.audit_revision != Some(goal.revision)
         || goal.pending_run_id != Some(claimed.identity.run_id)
-        || now >= deadline_ms
         || run_cancel_requested(&transaction, claimed.identity.run_id)?
     {
         return Ok(Start::Stop);
@@ -536,14 +539,32 @@ fn finish(
             _ => execution::internal_failure("goal completion check did not verify success"),
         }
     };
-    if let Some(settled) = settle_run(
-        &transaction,
-        store_id,
-        claimed,
-        outcome,
-        None,
-        SettlementCause::Executor,
-    )? {
+    let queued: bool = transaction.query_row(
+        "SELECT status='queued' FROM runs WHERE id=?1",
+        [claimed.identity.run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let settled = if queued {
+        finish_queued_run_with_outcome(
+            &transaction,
+            store_id,
+            claimed.identity.workspace_id,
+            claimed.identity.session_id,
+            claimed.identity.run_id,
+            outcome,
+            now,
+        )?
+    } else {
+        settle_run(
+            &transaction,
+            store_id,
+            claimed,
+            outcome,
+            None,
+            SettlementCause::Executor,
+        )?
+    };
+    if let Some(settled) = settled {
         events.extend(settled)
     }
     transaction.commit()?;
@@ -610,6 +631,12 @@ pub(super) async fn execute(
             })
             .await;
         match started {
+            Ok(Start::Expired) => {
+                break Completion::Process(ProcessResult {
+                    outcome: ProcessOutcome::TimedOut,
+                    tail: String::new(),
+                });
+            }
             Ok(Start::Stop) => {
                 break if tokio::time::Instant::now() >= deadline {
                     Completion::Process(ProcessResult {
