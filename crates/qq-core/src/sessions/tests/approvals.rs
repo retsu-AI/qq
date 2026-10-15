@@ -3927,7 +3927,7 @@ async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve()
 }
 
 #[tokio::test]
-async fn goal_approval_wait_pauses_without_another_request_and_deadline_still_wins() {
+async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
     struct Authority(u64);
     impl WorkspaceGrantAuthority for Authority {
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
@@ -3943,16 +3943,22 @@ async fn goal_approval_wait_pauses_without_another_request_and_deadline_still_wi
             })))
         }
     }
-    for (ordinary_wait, goal_wait_ms, deadline_ms) in [
-        (None, 50, 10_000),
-        (Some(Duration::from_millis(10)), 500, 10_000),
-        (None, 5000, 1000),
+    for (ordinary_wait, goal_wait_ms, deadline_ms, delegate) in [
+        (None, 50, 10_000, false),
+        (Some(Duration::from_millis(10)), 500, 10_000, false),
+        (None, 5000, 1000, false),
+        (None, 50, 10_000, true),
+        (None, 5000, 1000, true),
     ] {
         let directory = TempDir::new().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
         options.approval_timeout = ordinary_wait;
         options.grant_authority = Some(Arc::new(Authority(goal_wait_ms)));
+        let (reviewer, _release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
+        if delegate {
+            options.approval_reviewer = Some(reviewer);
+        }
         let runtime = SessionRuntime::open(
             options,
             Arc::new(ApprovalLoader {
@@ -3960,7 +3966,11 @@ async fn goal_approval_wait_pauses_without_another_request_and_deadline_still_wi
                 tool: "__test_mutate",
                 arguments: "{}",
                 tool_turns: 1,
-                delegate: approval::ApprovalDelegate::Off,
+                delegate: if delegate {
+                    approval::ApprovalDelegate::On
+                } else {
+                    approval::ApprovalDelegate::Off
+                },
             }),
         )
         .await
@@ -4004,27 +4014,192 @@ async fn goal_approval_wait_pauses_without_another_request_and_deadline_still_wi
             .await
             .unwrap();
         let goal = snapshot.focused.unwrap().goal.unwrap();
-        if deadline_ms < goal_wait_ms {
-            assert!(matches!(
-                goal.status,
-                qq_protocol::GoalStatus::BudgetExhausted {
-                    reason: qq_protocol::GoalExhaustion::Deadline
-                }
-            ));
-        } else {
-            assert!(matches!(goal.status, qq_protocol::GoalStatus::Paused {
+        assert!(matches!(goal.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+            }
+        } if tool_call_id == call.id));
+        assert!(observed.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::ToolApprovalResolved {
+                resolution: ApprovalResolution::DeniedTimeout,
+                ..
+            }
+        )));
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
+    struct Loader {
+        inner: DepthLoader,
+        root_loads: AtomicUsize,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            if request.model.model.as_deref() != Some("test/child")
+                && self.root_loads.fetch_add(1, Ordering::SeqCst) > 0
+            {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.load(request)
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let start = now_ms();
+    let epoch = super::goal_driver_soak::Epoch::new(start);
+    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+    let child_requests = Arc::new(StdMutex::new(Vec::new()));
+    let parent: Arc<dyn Provider> = Arc::new(MeteredDelegationProvider {
+        inner: ScriptedRunProvider {
+            requests: parent_requests.clone(),
+            script: vec![(
+                "spawn_agent",
+                r#"{"task":"ask the operator before proceeding","model":"test/child"}"#.to_owned(),
+            )],
+            turn: StdMutex::new(0),
+        },
+        usage: vec![Some(usage(1, 1))],
+        turn: AtomicUsize::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(ApprovalProvider {
+        requests: child_requests.clone(),
+        turn: StdMutex::new(0),
+        tool: "ask_user",
+        arguments: r#"{"questions":[{"prompt":"May the sponsored child proceed?"}]}"#,
+        tool_turns: 1,
+        usage: Some(provider_usage_of(usage(1, 1))),
+    });
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.approval_timeout = None;
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(Loader {
+            inner: DepthLoader {
+                inner: QueueLoader {
+                    routed: vec![("test/child", child)],
+                    queue: StdMutex::new(vec![parent]),
+                },
+                max_depth: 2,
+                write_children: false,
+                pricing: None,
+            },
+            root_loads: AtomicUsize::new(0),
+        }),
+    )
+    .await
+    .unwrap();
+    // Real Store I/O must not let paused Tokio time advance before the
+    // child has actually requested approval. The keeper is wall-clock bounded.
+    let keeper = tokio::spawn(async {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < until {
+            tokio::task::yield_now().await;
+        }
+    });
+    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: workspace,
+            after: created.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session_id,
+                "objective":"wait for the sponsored child's explicit answer",
+                "budget":{"max_goal_runs":10,"max_total_tokens":1_000_000,
+                    "deadline_ms":start+1000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (observed, call) = collect_until_approval_requested(&mut events).await;
+    assert_eq!(call.name, "ask_user");
+    assert_ne!(call.session_id, session_id);
+    let parent = observed
+        .iter()
+        .find_map(|event| match event.event {
+            SessionEvent::RunStarted { run_id, .. } if event.session_id == session_id => {
+                Some(run_id)
+            }
+            _ => None,
+        })
+        .expect("the parent started before the child asked");
+    let child = call.run_id;
+    let owner: String = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
+                [child.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(owner, parent.to_string());
+    assert_eq!(parent_requests.lock().unwrap().len(), 1);
+    assert_eq!(child_requests.lock().unwrap().len(), 1);
+    // The finite token allowance keeps the read child blocking. Both model
+    // requests and the actual held call precede the only time advance.
+    epoch.advance(start + 1001);
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    let completed = collect_until_run_finished(&mut events, parent).await;
+    runtime.shutdown().await.unwrap();
+    keeper.abort();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 16))
+        .await
+        .unwrap();
+    let child_snapshot = runtime
+        .snapshot(SnapshotRequest::new(
+            workspace,
+            Some(call.session_id),
+            8,
+            16,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap();
+    assert_eq!(
+        child_snapshot
+            .runs
+            .iter()
+            .find(|run| run.id == child)
+            .unwrap()
+            .outcome,
+        Some(RunOutcome::Cancelled),
+        "the regression requires parent teardown to cancel the held child"
+    );
+    assert!(
+        completed.iter().any(|event| matches!(
+            event.event, SessionEvent::RunFinished { run_id, .. } if run_id == child
+        )),
+        "the child must settle before its parent's terminal event"
+    );
+    let goal = snapshot.focused.unwrap().goal.unwrap();
+    assert!(
+        matches!(goal.status,
+            qq_protocol::GoalStatus::Paused {
                 reason: qq_protocol::GoalPauseReason::NeedsUser {
                     cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
                 }
-            } if tool_call_id == call.id));
-            assert!(observed.iter().any(|event| matches!(
-                event.event,
-                SessionEvent::ToolApprovalResolved {
-                    resolution: ApprovalResolution::DeniedTimeout,
-                    ..
-                }
-            )));
-        }
-        runtime.shutdown().await.unwrap();
-    }
+            } if tool_call_id == call.id
+        ),
+        "the sponsored held approval must outrank the owner's deadline: {:?}",
+        goal.status
+    );
+    assert_eq!(parent_requests.lock().unwrap().len(), 1);
+    assert_eq!(child_requests.lock().unwrap().len(), 1);
 }
