@@ -116,6 +116,7 @@ impl LoadedRuntime {
         .with_delegation(runtime.delegation.as_ref().clone())
         .with_audit(runtime.audit)
         .with_shell_policy(runtime.shell.as_ref().clone())
+        .with_process_producer(Arc::clone(&runtime.process_producer))
         .with_network_policy(runtime.network.as_ref().clone())
         .with_profile_id(profile_id);
         for host in runtime.hosts.iter() {

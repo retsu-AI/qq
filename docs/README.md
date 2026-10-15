@@ -100,6 +100,8 @@ phase-gate evidence.
 - [`run-output-queries.md`](runbooks/run-output-queries.md) — read-only
   session-store queries: do long runs and sub-agents produce output, or only
   activity.
+- [`action-bias-qualification.md`](runbooks/action-bias-qualification.md) —
+  bounded snapshot export, pinned classifier recount and cohort provenance.
 - [`tui-qa.md`](runbooks/tui-qa.md) — credential-free, loopback-only TUI
   diagnostic fixture and cleanup.
 - [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,

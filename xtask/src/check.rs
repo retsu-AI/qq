@@ -835,14 +835,32 @@ fn git_head(root: &Path) -> Result<(String, bool, String), CheckError> {
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
         let path = root.join(name);
-        let bytes = if path.is_symlink() {
-            fs::read_link(&path).map(|target| target.as_os_str().as_encoded_bytes().to_vec())
+        if path.is_symlink() {
+            let bytes = fs::read_link(&path)
+                .map(|target| target.as_os_str().as_encoded_bytes().to_vec())
+                .map_err(|error| CheckError::Read(path.clone(), error))?;
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(&bytes);
         } else {
-            fs::read(&path)
+            use std::io::Read as _;
+            let mut file =
+                fs::File::open(&path).map_err(|error| CheckError::Read(path.clone(), error))?;
+            let mut content = Sha256::new();
+            let mut size = 0u64;
+            let mut buffer = [0u8; 65536];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| CheckError::Read(path.clone(), error))?;
+                if read == 0 {
+                    break;
+                }
+                size += read as u64;
+                content.update(&buffer[..read]);
+            }
+            digest.update(size.to_le_bytes());
+            digest.update(content.finalize());
         }
-        .map_err(|error| CheckError::Read(path, error))?;
-        digest.update((bytes.len() as u64).to_le_bytes());
-        digest.update(&bytes);
     }
     Ok((
         head.trim().to_owned(),

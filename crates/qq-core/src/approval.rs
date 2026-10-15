@@ -14,6 +14,28 @@ pub use rules::RuleId;
 /// Entry point for the `classify_command` bench. Not a public API.
 #[doc(hidden)]
 pub mod bench_support {
+    pub use crate::tools::process_context::{
+        ProcessEvidenceStatus, ProcessProducerPin, recorded_work_receipt, validate_process_evidence,
+    };
+
+    pub fn process_policy_digest() -> qq_protocol::ContentHash {
+        crate::tools::process_context::policy_digest()
+    }
+    /// Original command-byte ceiling of the progress-read recognizer.
+    pub const MAX_READ_COMMAND_BYTES: usize = super::classify::MAX_CLASSIFIED_BYTES;
+
+    /// Progress/audit read predicate; this does not classify approval authority.
+    #[must_use]
+    pub fn read_only_shell_command(command: &str) -> bool {
+        super::read_only_shell_command(command)
+    }
+
+    /// Exact execution command and whether a process environment was requested.
+    #[must_use]
+    pub fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
+        crate::tools::parsed_shell_command(arguments)
+    }
+
     /// Classifies `command` and returns the decision's name.
     #[must_use]
     pub fn classify(command: &str) -> &'static str {
@@ -413,17 +435,18 @@ fn spawn_class(arguments: &str) -> ToolClass {
     }
 }
 
+#[derive(Deserialize)]
+struct ShellArguments {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 /// The shell class for `shell` (a command string) or `exec` (an argv). An
 /// `exec` uses literal argv for progress reads. Its command-line rendering
 /// remains the shared approval preview and prefix-grant shape.
 fn shell_class(name: &str, arguments: &str) -> ToolClass {
-    #[derive(Deserialize)]
-    struct ShellArguments {
-        #[serde(default)]
-        command: String,
-        #[serde(default)]
-        cwd: Option<String>,
-    }
     #[derive(Deserialize)]
     struct ExecArguments {
         #[serde(default)]

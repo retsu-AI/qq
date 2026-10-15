@@ -180,6 +180,8 @@ pub(crate) async fn execute(
         shell_policy,
         network_policy,
         Arc::default(),
+        Arc::default(),
+        None,
     )
     .await
 }
@@ -199,6 +201,8 @@ pub(crate) async fn execute_with_images(
     shell_policy: Arc<crate::runtime::ShellPolicy>,
     network_policy: Arc<super::network::NetworkPolicy>,
     approved_read_images: Arc<crate::runtime::ApprovedReadImages>,
+    process_producer: Arc<crate::ProcessProducer>,
+    call_id: Option<qq_protocol::ToolCallId>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::error("tool arguments exceed the 64 KiB limit");
@@ -259,6 +263,8 @@ pub(crate) async fn execute_with_images(
                 &workspace,
                 &shell_policy,
                 approved_read_images,
+                process_producer,
+                call_id,
                 launch,
                 &cancelled,
                 output.as_ref(),

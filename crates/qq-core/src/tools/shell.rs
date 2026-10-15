@@ -144,6 +144,17 @@ impl Launch<'_> {
         }) {
             return Err(InvalidLaunch::Cwd);
         }
+        if let Some(cwd) = cwd {
+            let mut depth = 0_usize;
+            for component in std::path::Path::new(cwd).components() {
+                match component {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if depth > 0 => depth -= 1,
+                    _ => return Err(InvalidLaunch::Cwd),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -216,10 +227,16 @@ enum ShellOutcome {
 /// output budget, live chunks forwarded to `output`, and the whole process
 /// group killed on timeout or cancellation. The dispatch task owns this
 /// future through kill and reap even when its result waiter disappears.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "process identity, producer, image approvals and supervision are distinct capabilities"
+)]
 pub(super) async fn run_shell(
     workspace: &Workspace,
     policy: &ShellPolicy,
     approved_read_images: std::sync::Arc<crate::runtime::ApprovedReadImages>,
+    process_producer: std::sync::Arc<crate::ProcessProducer>,
+    call_id: Option<qq_protocol::ToolCallId>,
     launch: Launch<'_>,
     cancelled: &ToolCancellation,
     output: Option<&mpsc::Sender<String>>,
@@ -278,6 +295,8 @@ pub(super) async fn run_shell(
             preparation_workspace,
             owned,
             approved_read_images,
+            process_producer,
+            call_id,
             &preparation_cancelled,
             preparation_deadline,
         )

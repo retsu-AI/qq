@@ -174,6 +174,7 @@ struct RuntimeFactoryInner {
     credentials: CredentialStore,
     mode: RuntimeMode,
     approved_read_images: qq_core::ApprovedReadImages,
+    process_producer: Arc<qq_core::ProcessProducer>,
     providers: ProviderCompiler,
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
@@ -315,6 +316,9 @@ impl RuntimeFactory {
                 credentials,
                 mode,
                 approved_read_images,
+                process_producer: Arc::new(qq_core::ProcessProducer::new(env!(
+                    "QQ_SOURCE_REVISION"
+                ))),
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
@@ -1769,6 +1773,7 @@ impl RuntimeFactory {
                 .with_audit(audit)
                 .with_shell_policy(shell)
                 .with_approved_read_images(self.inner.approved_read_images.clone())
+                .with_process_producer(Arc::clone(&self.inner.process_producer))
                 .with_network_policy(network)
                 .with_approval_delegate(approval_delegate)
                 .with_approval_delegate_identity(

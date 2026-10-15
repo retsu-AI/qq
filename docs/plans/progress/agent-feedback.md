@@ -116,3 +116,14 @@ Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
   This removes the admission-vs-500ms race; attachment/guidance/skill all pass.
 - Focused regressions pass; full CI-profile gate passes in 181.1s. Continuing
   until remote CI and Codex are green, not treating local gates as completion.
+
+
+#### PR #282 rebase and latest review fixes
+
+- Rebased with merge preservation onto current main, retaining action-bias wiring
+  and restoring prior gate, smoke, and safe-cleanup fixes after conflict resolution.
+- Peel annotated tag tips; require crate-level unsafe forbids; stream untracked
+  evidence hashing; bound fake-provider retention and fail explicitly on overflow.
+- Focused xtask suite passed 113 tests before added regressions; latest lint 11/11
+  and smoke 4/4 passed. Formatting applied. Full CI-profile run was interrupted;
+  no full-gate success claimed. User requested immediate push; remote CI pending.

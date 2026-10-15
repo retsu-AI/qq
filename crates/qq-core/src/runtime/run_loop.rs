@@ -2739,6 +2739,7 @@ impl RunState {
                     let delegation = &plan.runtime.delegation;
                     let shell_policy = &plan.runtime.shell;
                     let approved_read_images = &plan.runtime.approved_read_images;
+                    let process_producer = &plan.runtime.process_producer;
                     let network_policy = &plan.runtime.network;
                     let reasoning_effort = plan.runtime.reasoning_effort;
 
@@ -2890,6 +2891,7 @@ impl RunState {
                             let delegation = Arc::clone(delegation);
                             let shell_policy = Arc::clone(shell_policy);
                             let approved_read_images = Arc::clone(approved_read_images);
+                            let process_producer = Arc::clone(process_producer);
                             let network_policy = Arc::clone(network_policy);
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
@@ -3193,6 +3195,8 @@ impl RunState {
                                             shell_policy,
                                             network_policy,
                                             approved_read_images,
+                                            process_producer,
+                                            Some(call.id),
                                         )
                                         .await
                                     }
