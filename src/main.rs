@@ -2075,9 +2075,18 @@ mod tests {
     #[test]
     fn headless_close_failure_preserves_selected_goal_exit() {
         for code in [0, 4, 6, 7, 8, 130] {
-            assert_eq!(headless_close_exit(code, true, Err(qq_core::SessionRuntimeError::Unavailable)), ExitCode::from(code));
-            assert_eq!(headless_close_exit(code, false, Err(qq_core::SessionRuntimeError::Unavailable)), ExitCode::from(4));
-            assert_eq!(headless_close_exit(code, true, Ok(())), ExitCode::from(code));
+            assert_eq!(
+                headless_close_exit(code, true, Err(qq_core::SessionRuntimeError::Unavailable)),
+                ExitCode::from(code)
+            );
+            assert_eq!(
+                headless_close_exit(code, false, Err(qq_core::SessionRuntimeError::Unavailable)),
+                ExitCode::from(4)
+            );
+            assert_eq!(
+                headless_close_exit(code, true, Ok(())),
+                ExitCode::from(code)
+            );
         }
     }
 
