@@ -949,6 +949,12 @@ impl App {
             .as_ref()
             .is_some_and(|body| !body_is_current(body))
         {
+            if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                && snapshot.focused.as_ref().is_some_and(|body| body.summary.id == form.session)
+            {
+                // The local body is already newer than the requested refresh.
+                form.refresh = crate::input::GoalFormRefresh::Ready;
+            }
             snapshot.focused = None;
         }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
