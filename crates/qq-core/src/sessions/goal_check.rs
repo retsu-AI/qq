@@ -412,20 +412,6 @@ pub(super) async fn run_process(
             biased;
             () = cancellation.cancelled() => break Ok(ProcessOutcome::Cancelled),
             () = tokio::time::sleep_until(deadline) => break Ok(ProcessOutcome::TimedOut),
-            result = async { stdout.as_mut().expect("guarded stdout").read(&mut out_buffer).await }, if stdout.is_some() => {
-                match result {
-                    Ok(0) => { stdout = None; continue; }
-                    Ok(count) => &out_buffer[..count],
-                    Err(error) => break Err(ProcessError::Read(error)),
-                }
-            },
-            result = async { stderr.as_mut().expect("guarded stderr").read(&mut err_buffer).await }, if stderr.is_some() => {
-                match result {
-                    Ok(0) => { stderr = None; continue; }
-                    Ok(count) => &err_buffer[..count],
-                    Err(error) => break Err(ProcessError::Read(error)),
-                }
-            },
             status = &mut exited, if !observed => {
                 observed = true;
                 match status {
@@ -451,6 +437,20 @@ pub(super) async fn run_process(
                     reaped_status = Some(status);
                 }
                 continue;
+            },
+            result = async { stdout.as_mut().expect("guarded stdout").read(&mut out_buffer).await }, if stdout.is_some() => {
+                match result {
+                    Ok(0) => { stdout = None; continue; }
+                    Ok(count) => &out_buffer[..count],
+                    Err(error) => break Err(ProcessError::Read(error)),
+                }
+            },
+            result = async { stderr.as_mut().expect("guarded stderr").read(&mut err_buffer).await }, if stderr.is_some() => {
+                match result {
+                    Ok(0) => { stderr = None; continue; }
+                    Ok(count) => &err_buffer[..count],
+                    Err(error) => break Err(ProcessError::Read(error)),
+                }
             },
             status = async {
                 match reaped_status.take() {
