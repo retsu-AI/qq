@@ -9,7 +9,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
-| G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
+| G4 | TUI, CLI and foreground hosting | In progress | ENG-1064 | feat/eng-1064-goal-surfaces | Config/policy foundations are in G2/G3; surface acceptance follows |
 | G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
@@ -944,3 +944,8 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
   complete retained lines. Masked durable messages/reopen/context and long-secret
   truncation are covered. Focused completion tests:31/31 pass. Independent review,
   final gate/smoke/restack/publication and thread resolution remain pending.
+### 2026-10-16 — G4 surface integration
+
+- Root owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Integrated `/goal` status, explicit check consent, revision-fenced forms/controls, server `qq goal` and foreground `qq run --goal`, with complete terminal records and binary smoke scenarios.
+- Protocol35 adds foreground goal records and input-pause controls; schema58 and descriptor15 remain unchanged. All forced protocol consumers and guide/design docs move together. Verification feature copies remain identical; the lockfile adds only the existing workspace time dependency to qq-tui.
+- Retained all75 existing counted sleeps and refreshed their source positions, with no new sites or ceiling change. Local integrated gates, binary smoke and independent review remain pending; no PR or live G5 receipt yet.

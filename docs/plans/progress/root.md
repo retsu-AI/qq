@@ -976,3 +976,7 @@ Root reserves store schema49 for nullable runs.goal_paid_owner_run_id on initial
 
 - Required first push exposed inherited Git-local hook environment reaching temporary-repository tests: a linked worktree fixture changed the owned branch/index. The push failed closed. All physical source blobs independently matched ae835237; preserve the synthetic init commit under rescue/g3-prepush-corruption-20261016 and restore only the owned branch/index by compare-and-swap/read-tree.
 - Root owns the necessary `.githooks/pre-push`, `xtask/src/check.rs`, `.github/scripts/test-pre-push.sh` and AGENTS enforcer row. Clear Git-local variables after original-tip/clean-tree validation, before Cargo. Actual local-push regression covers regular and linked worktrees, unchanged HEAD/index, fixture-local commits and remote tip. Hook changes select the full gate; no gate is skipped.
+
+### 2026-10-16 — ENG-1064 surface ownership
+
+- Root alone owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Own TUI/forms/CLI/foreground, protocol35 fixtures, guide/design and verify feature copies. Preserve descriptor15/schema58 and G3 crash holds. G5 will use a separate isolated workspace and subscription-only openai-codex/gpt-6.1-sol, with no paid API fallback.
