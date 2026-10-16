@@ -2407,6 +2407,8 @@ async fn a_reviewer_denial_is_final_for_a_supervised_child_and_is_durable() {
             cost_usd_nanos: Some(0),
         },
         delegate: DelegateIdentity::Reviewer,
+        delegate_model: None,
+        delegate_request_id: None,
     });
     let child_requests = Arc::new(StdMutex::new(Vec::new()));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
