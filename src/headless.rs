@@ -835,13 +835,6 @@ fn finish_goal(
     // A failed write can have emitted a prefix; never retry it. Once stdout
     // is flushed, its selected exit remains authoritative despite trace errors.
     sink.goal_record = GoalRecordState::Attempted;
-    sink.record(stdout, HeadlessRecordRef::Goal(&record))
-        .map_err(|error| Failure::harness(error.to_string()))?;
-    if options.format == HeadlessFormat::Jsonl {
-        sink.goal_record = GoalRecordState::Emitted(status.code());
-    }
-    sink.finish()
-        .map_err(|error| Failure::harness(error.to_string()))?;
     if options.format == HeadlessFormat::Text {
         writeln!(
             stdout,
@@ -852,6 +845,13 @@ fn finish_goal(
         .map_err(|error| Failure::harness(error.to_string()))?;
         sink.goal_record = GoalRecordState::Emitted(status.code());
     }
+    sink.record(stdout, HeadlessRecordRef::Goal(&record))
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    if options.format == HeadlessFormat::Jsonl {
+        sink.goal_record = GoalRecordState::Emitted(status.code());
+    }
+    sink.finish()
+        .map_err(|error| Failure::harness(error.to_string()))?;
     Ok(status.code())
 }
 
@@ -1182,6 +1182,11 @@ async fn prepare_session(
     options: &HeadlessOptions,
     intent: SessionIntent<'_>,
 ) -> Result<SessionHandle, Failure> {
+    if options.session.is_none() && let SessionIntent::Goal(request) = intent {
+        let validation_target = SessionId::generate()
+            .map_err(|error| Failure::harness(error.to_string()))?;
+        prepare_goal_request(request, options, validation_target, None)?;
+    }
     let workspace = options.workspace.display().to_string();
     let resolved = send(
         sessions,
