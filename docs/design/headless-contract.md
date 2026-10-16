@@ -343,8 +343,12 @@ naturally before closing. A fresh close-phase Ctrl-C listener can request
 ordinary shutdown, cancelling and draining the remaining accepted work while
 preserving the already-emitted selected goal result and exit status. The
 lifecycle admission guard is released before that shutdown; a settlement
-subscription precedes each idle check. If cleanup fails the invocation reports
-harness failure. New records do not change the
+subscription precedes each idle check. Cleanup failure before final output
+reports harness failure. After final stdout is flushed, trace or runtime-close
+failures are reported on stderr and preserve its selected exit code. A final
+write is attempted at most once, including uncertain partial writes. Accepted
+goal cleanup atomically pauses only the matching active revision and preserves
+existing stopped reasons. New records do not change the
 ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
 requires an existing session and resumes its specification. Separate
 `--goal-check-approval` plus the exact reviewed `--check` authorizes checks.
@@ -456,7 +460,10 @@ Before adding a headless flag, record, or field, answer:
 
 If a foreground goal encounters a harness failure after accepting a goal, its
 final JSONL goal record uses `harness_failure` and exit code `4` when output is
-still writable. The record includes the current snapshot of that same goal when
+still writable and no final write has been attempted. A final write is never
+retried, because an output error can leave a partial record. Once the final
+stdout record is flushed, later trace or runtime-close failures are reported
+on stderr and preserve that record's exit code. The record includes the current snapshot of that same goal when
 available, otherwise its last observed snapshot. This fallback supplies context;
 it does not assert that the goal is still current or reached a terminal state.
 Clearing or replacing the goal never substitutes the replacement in this record.

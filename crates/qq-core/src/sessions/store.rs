@@ -263,6 +263,7 @@ fn pause_after_committed_command(command_id: CommandId) {
 pub(super) struct Store {
     inner: Arc<StoreInner>,
     store_id: StoreId,
+    startup_goal_event_rowid: Option<i64>,
 }
 
 pub(super) struct FeedAttachment {
@@ -313,7 +314,7 @@ impl Store {
             .ready
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)??;
-        let store = Self {
+        let mut store = Self {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
@@ -330,9 +331,10 @@ impl Store {
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
+            startup_goal_event_rowid: None,
         };
         let present = Arc::clone(&store.inner.goals_present);
-        store
+        store.startup_goal_event_rowid = store
             .call(Priority::Control, move |connection| {
                 let enabled: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
@@ -340,10 +342,39 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 present.store(enabled, Ordering::Release);
-                Ok(())
+                if enabled {
+                    // Capture before recovery or scheduling can append events.
+                    connection
+                        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |row| {
+                            row.get(0)
+                        })
+                        .map(Some)
+                        .map_err(Into::into)
+                } else {
+                    Ok(None)
+                }
             })
             .await?;
         Ok(store)
+    }
+
+    pub(super) async fn startup_goal_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<EventCursor>, SessionRuntimeError> {
+        let Some(boundary) = self.startup_goal_event_rowid else {
+            return Ok(None);
+        };
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            ensure_workspace(connection, workspace_id)?;
+            let sequence = connection.query_row(
+                "SELECT sequence FROM events WHERE workspace_id=?1 AND rowid<=?2 ORDER BY sequence DESC LIMIT 1",
+                rusqlite::params![workspace_id.to_string(), boundary],
+                |row| row.get(0),
+            ).optional()?.unwrap_or(0);
+            Ok(Some(EventCursor { store_id, workspace_id, sequence }))
+        }).await
     }
 
     pub(super) const fn store_id(&self) -> StoreId {

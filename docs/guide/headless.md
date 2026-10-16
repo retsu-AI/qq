@@ -229,7 +229,10 @@ environment when nothing is stored. `QQ_CONFIG_CONTENT='(version: 1, model:
 
 If a foreground goal encounters a harness failure after accepting a goal, its
 final JSONL goal record uses `harness_failure` and exit code `4` when output is
-still writable. The record includes the current snapshot of that same goal when
+still writable and no final write has been attempted. A final write is never
+retried, because an output error can leave a partial record. Once the final
+stdout record is flushed, later trace or runtime-close failures are reported
+on stderr and preserve that record's exit code. The record includes the current snapshot of that same goal when
 available, otherwise its last observed snapshot. This fallback supplies context;
 it does not assert that the goal is still current or reached a terminal state.
 Clearing or replacing the goal never substitutes the replacement in this record.

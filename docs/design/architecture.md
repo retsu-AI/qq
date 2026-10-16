@@ -1859,6 +1859,11 @@ An OS ownership lock excludes a second store worker before SQLite opens. Store
 clones share the presence cache; a successor reads durable presence after acquiring
 ownership. Replayed goal controls and cancellations retain the scheduler wake
 without changing their original durable receipts.
+When live goals exist at open, the store also captures an immutable event-row
+boundary before recovery and scheduling. Foreground adoption translates that
+boundary into the selected workspace's cursor, so completed startup runs and
+already-held input requests remain replayable. Stores without live goals skip
+this boundary query; ordinary prompt adoption keeps its existing cursor.
 
 After acquiring a scheduler permit, reservation derives paid-work admission
 from the captured goal's current durable budget. Goal-origin runs use current

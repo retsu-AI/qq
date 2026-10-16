@@ -948,6 +948,15 @@ impl SessionRuntime {
         self.inner.store.store_id()
     }
 
+    /// Replay boundary captured before startup recovery and goal scheduling.
+    /// Absent when the opened store had no live goals.
+    pub async fn startup_goal_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<EventCursor>, SessionRuntimeError> {
+        self.inner.store.startup_goal_cursor(workspace_id).await
+    }
+
     pub async fn command(
         &self,
         command_id: CommandId,
