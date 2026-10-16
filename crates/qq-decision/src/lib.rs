@@ -101,9 +101,16 @@ pub fn validate_response(
                 }
             }
             (QuestionKind::Boolean { .. }, AnswerValue::Boolean { probability_true }) => {
+                let lower = (probabilities[1] - rounding_error)
+                    .max(0.0)
+                    .max(1.0 - (probabilities[0] + rounding_error).min(1.0));
+                let upper = (probabilities[1] + rounding_error)
+                    .min(1.0)
+                    .min(1.0 - (probabilities[0] - rounding_error).max(0.0));
                 if !probability_true.is_finite()
                     || !(0.0..=1.0).contains(probability_true)
-                    || (probability_true - probabilities[1]).abs() > rounding_error + numeric_slack
+                    || probability_true + rounding_error + numeric_slack < lower
+                    || probability_true - rounding_error - numeric_slack > upper
                 {
                     return Err(invalid());
                 }

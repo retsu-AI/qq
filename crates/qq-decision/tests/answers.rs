@@ -170,6 +170,15 @@ fn boolean_score_and_wrong_type_use_the_same_production_boundary() {
         probability_true: 0.2,
     };
     assert!(validate_response(&request, &response, 0.005).is_err());
+    response.answers[0].probabilities = Some(vec![0.94, 0.04]);
+    response.answers[0].value = AnswerValue::Boolean {
+        probability_true: 0.031,
+    };
+    assert!(validate_response(&request, &response, 0.01).is_err());
+    response.answers[0].value = AnswerValue::Boolean {
+        probability_true: 0.05,
+    };
+    assert_eq!(validate_response(&request, &response, 0.01), Ok(()));
     request.questions[0].kind = QuestionKind::Score {
         anchors: vec!["low".into(), "medium".into(), "high".into()],
     };
