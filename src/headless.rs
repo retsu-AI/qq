@@ -4586,6 +4586,18 @@ mod tests {
             !stderr.is_empty(),
             "the trace failure must still be reported"
         );
+        let goal: Box<qq_protocol::GoalSnapshot> = serde_json::from_value(finals[0]["goal"].clone()).unwrap();
+        let workspace = serde_json::from_value(finals[0]["workspace_id"].clone()).unwrap();
+        let mut trace = BufWriter::with_capacity(8192, std::fs::File::create("/dev/full").unwrap());
+        trace.write_all(&vec![b' '; 8191]).unwrap();
+        let mut sink = RecordSink { goal_record: GoalRecordState::Pending,
+            trace: Some(trace), to_stdout: true };
+        let mut final_stdout = Vec::new();
+        assert!(finish_goal(&mut sink, &mut final_stdout, &options(&fixture.workspace), workspace, goal, None).is_err());
+        let records = parse_records(&String::from_utf8(final_stdout).unwrap());
+        assert_eq!(records.len(), 1, "final stdout must survive an implicit trace-buffer flush failure");
+        assert_eq!(records[0]["exit_code"], 6);
+        assert!(matches!(sink.goal_record, GoalRecordState::Emitted(6)));
         fixture.sessions.close().await.unwrap();
     }
 
