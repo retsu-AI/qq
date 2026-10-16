@@ -335,9 +335,11 @@ pub async fn run_goal(
     stderr: &mut impl Write,
 ) -> u8 {
     let mut cleanup = None;
+    let mut accepted: Option<(WorkspaceId, Box<qq_protocol::GoalSnapshot>)> = None;
+    let mut record_sink = None;
     let result: Result<u8, Failure> = async {
-        let mut sink = RecordSink::open(&options)
-            .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?;
+        let mut sink = record_sink.insert(RecordSink::open(&options)
+            .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
         let handle = prepare_session(sessions, &options, SessionIntent::Goal).await?;
         let snapshot = sessions.snapshot(SnapshotRequest::new(
             handle.workspace_id, Some(handle.session_id), 1, 1,
@@ -377,6 +379,7 @@ pub async fn run_goal(
         } else if !creating && request.check.is_some() {
             return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
         }
+        accepted = Some((handle.workspace_id, goal.clone()));
         cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
         let guard = cleanup.as_mut().unwrap();
         if let Some(scope) = request.check_approval {
@@ -456,6 +459,7 @@ pub async fn run_goal(
                             if updated.session_id == handle.session_id
                             && updated.goal_id == expected.goal_id
                             && updated.revision >= expected.revision => {
+                            accepted = Some((handle.workspace_id, updated.clone()));
                             if updated.status != qq_protocol::GoalStatus::Active && final_goal.is_none() {
                                 interrupt_armed = false;
                                 guard.expected = goal_identity(updated);
@@ -522,13 +526,28 @@ pub async fn run_goal(
         Ok(code) => code,
         Err(failure) => {
             let _ = writeln!(stderr, "error: {}", failure.message);
+            let mut code = failure.status.code();
             if let Some(guard) = &mut cleanup
                 && let Err(error) = guard.settle().await
             {
                 let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
-                return HeadlessStatus::HarnessFailure.code();
+                code = HeadlessStatus::HarnessFailure.code();
             }
-            failure.status.code()
+            if code == HeadlessStatus::HarnessFailure.code()
+                && let Some((workspace, mut goal)) = accepted
+                && let Some(sink) = record_sink.as_mut()
+            {
+                // Prefer authoritative state when readable; otherwise retain
+                // the last observed goal without inventing a durable outcome.
+                if let Ok(snapshot) = sessions.snapshot(SnapshotRequest::new(workspace, Some(goal.session_id), 1, 1)).await
+                    && let Some(current) = snapshot.focused.and_then(|session| session.goal)
+                    && current.goal_id == goal.goal_id
+                { goal = current; }
+                if let Err(error) = finish_goal(sink, stdout, &options, workspace, goal, Some(qq_protocol::HeadlessGoalStatus::HarnessFailure)) {
+                    let _ = writeln!(stderr, "error: final goal record failed: {}", error.message);
+                }
+            }
+            code
         }
     }
 }
