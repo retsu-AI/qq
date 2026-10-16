@@ -86,6 +86,8 @@ may append a **request** row; only root changes a request's status.
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 | 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
 
+| 0063 | Opt-in metadata-only structured tracing with bounded asynchronous JSON output | developer-experience AF5 (ENG-1028) | Reserved for AF5 before design |
+
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
 docs. Root owns required architecture/protocol/doc-index amendments and any
@@ -156,7 +158,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0063. Reserve here before opening a PR that adds an ADR.
+Next free number: 0064. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 

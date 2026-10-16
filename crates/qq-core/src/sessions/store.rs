@@ -521,7 +521,7 @@ impl Store {
         drop(admission);
         Ok(response)
     }
-
+    #[tracing::instrument(target = "qq::diagnostic", name = "store", skip_all)]
     async fn call_with<T, F>(
         &self,
         priority: Priority,

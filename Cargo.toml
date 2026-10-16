@@ -101,6 +101,9 @@ tree-sitter-bash = "0.25"
 tempfile = "3"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry", "std"] }
 webbrowser = "1"
 
 [dependencies]
@@ -127,6 +130,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
 webbrowser.workspace = true
 
 # `qq init` opens its target relative to a no-follow directory handle.

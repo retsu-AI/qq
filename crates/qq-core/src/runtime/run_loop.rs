@@ -2,6 +2,8 @@
 use super::loop_guard::{CallKey, LoopGuard};
 use crate::*;
 
+use tracing::Instrument as _;
+
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
 /// these counters (ADR-0048 § 1: harness bounds reset at their seams, so none
 /// of these is a lifetime bound on output). Stall and checkpoint state retain
@@ -285,6 +287,8 @@ impl plan::CompiledAgentPlan {
         });
         let plan = Arc::clone(self);
         let events: RuntimeStream = Box::pin(stream! {
+
+            let run_span = tracing::info_span!(target: "qq::diagnostic", "run");
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             let mut state = {
                 let initialization = plan.initialize(messages, cancelled, gate, file_state, capabilities, (started, deadline));
@@ -299,11 +303,13 @@ impl plan::CompiledAgentPlan {
                 }
             };
             'turns: for turn_ordinal in 1..=u32::MAX {
+
+                let turn_span = tracing::info_span!(target: "qq::diagnostic", parent: &run_span, "turn", turn_ordinal);
                 let turn = {
                     let phase = state.prepare_turn(turn_ordinal);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -316,7 +322,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.compact_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -329,7 +335,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.stream_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -342,7 +348,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.settle_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -355,7 +361,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.route_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -369,7 +375,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.finish_candidate(turn_ordinal, assistant);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -384,7 +390,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.settle_tools(turn_ordinal, final_answer_turn, calls);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -397,7 +403,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.checkpoint_tools(outcomes);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -410,7 +416,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.close_tool_turn(outcomes);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -1474,6 +1480,8 @@ impl RunState {
                         let activity = RunActivity::WaitingForProvider;
                         yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity });
                         let mut provider_events = provider.stream(request);
+
+                        let provider_span = tracing::info_span!(target: "qq::diagnostic", "provider");
                     let mut attempt = AttemptScope {
                         rejected_before_work: false,
                         activity,
@@ -1513,7 +1521,7 @@ impl RunState {
                             let event = tokio::select! {
                                 biased;
                                 () = interrupt => StreamStep::Interrupted,
-                                event = provider_events.next() => StreamStep::Event(event),
+                                event = provider_events.next().instrument(provider_span.clone()) => StreamStep::Event(event),
                             };
                             let event = match event {
                                 StreamStep::Interrupted => {
@@ -2971,6 +2979,8 @@ impl RunState {
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
                             // way to make it available.
+
+                            let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
                             async move {
                                 // `Some` when a sub-agent ran: its spend (or unknown
                                 // spend) is charged to the parent's budgets.
@@ -3244,7 +3254,7 @@ impl RunState {
                                     }
                                 };
                                 (call, result, child_spend)
-                            }
+                            }.instrument(tool_span)
                         };
                         // Read-only turns overlap under a small bound; a turn with any
                         // mutating, shell, or external call runs entirely in request

@@ -22,20 +22,69 @@ mod docs_truth;
 mod doctor;
 mod headless;
 mod init;
+
+mod logging;
 mod mcp;
 mod output;
 mod plan;
 mod runtime;
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+fn main() -> ExitCode {
+    let logging = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
+        Ok(false) => None,
+        Ok(true) => match (|| {
+            let project = directories::ProjectDirs::from("dev", "qq", "qq")
+                .ok_or_else(|| io::Error::other("system directories unavailable"))?;
+            logging::LogGuard::start(
+                &project
+                    .state_dir()
+                    .unwrap_or_else(|| project.data_local_dir())
+                    .join("logs"),
+            )
+        })() {
+            Ok(logger) => {
+                if let Err(error) = logger.install() {
+                    eprintln!("error: {error}");
+                    return ExitCode::FAILURE;
+                }
+                Some(logger)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let executor = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(executor) => executor,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = match executor.block_on(run()) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    };
+    // Runtime teardown drops remaining task spans before draining diagnostics.
+    drop(executor);
+    if let Some(logger) = logging {
+        if let Err(error) = logger.finish() {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
     }
+    code
 }
 
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
