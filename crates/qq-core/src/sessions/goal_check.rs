@@ -135,8 +135,18 @@ async fn confirm_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
 }
 
 #[cfg(all(unix, any(test, not(target_os = "linux"))))]
-pub(super) async fn confirm_reaped_group_exit(_pgid: rustix::process::Pid) -> std::io::Result<()> {
-    Ok(())
+pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            // The leader was reaped after the last kill. A reused pgid can
+            // only delay confirmation: signal zero never affects that group.
+            match rustix::process::test_kill_process_group(pgid) {
+                Err(rustix::io::Errno::SRCH) => return Ok(()),
+                Err(error) => return Err(error.into()),
+                Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "check process group did not exit"))?
 }
 
 #[cfg(target_os = "linux")]
@@ -384,6 +394,7 @@ pub(super) async fn run_process(
         }
     });
     let mut observed = false;
+    let mut reaped_status = None;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut out_buffer = [0_u8; OUTPUT_BYTES];
@@ -416,12 +427,30 @@ pub(super) async fn run_process(
                     Err(error) => break Err(ProcessError::ObserverTask(error)),
                 }
                 if let Err(error) = group.kill() { break Err(ProcessError::Kill(error)); }
+                #[cfg(target_os = "linux")]
                 if let Err(error) = confirm_group_exit(pid).await {
                     break Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                 }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let status = match child.wait().await {
+                        Ok(status) => status,
+                        Err(error) => break Err(ProcessError::Reap(error)),
+                    };
+                    group.disarm();
+                    if let Err(error) = confirm_reaped_group_exit(pid).await {
+                        return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
+                    }
+                    reaped_status = Some(status);
+                }
                 continue;
             },
-            status = child.wait(), if observed && stdout.is_none() && stderr.is_none() => match status {
+            status = async {
+                match reaped_status.take() {
+                    Some(status) => Ok(status),
+                    None => child.wait().await,
+                }
+            }, if observed && stdout.is_none() && stderr.is_none() => match status {
                 Ok(status) => {
                     group.disarm();
                     lease.process_reaped();
@@ -451,16 +480,19 @@ pub(super) async fn run_process(
         } else {
             None
         };
+        #[cfg(target_os = "linux")]
         let confirmation_error = if matches!(&outcome, Err(ProcessError::Cleanup { .. })) {
             None
         } else {
             confirm_group_exit(pid).await.err()
         };
-        let group_error = group_error.or(confirmation_error);
-        let reap_error = child.wait().await.err();
+        let reap_error = if reaped_status.is_some() { None } else { child.wait().await.err() };
         if reap_error.is_none() {
             group.disarm();
         }
+        #[cfg(not(target_os = "linux"))]
+        let confirmation_error = if reap_error.is_none() { confirm_reaped_group_exit(pid).await.err() } else { None };
+        let group_error = group_error.or(confirmation_error);
         if group_error.is_some() || leader_error.is_some() || reap_error.is_some() {
             return Err(ProcessError::Cleanup {
                 original: outcome.err().or(observer_error).map(Box::new),
