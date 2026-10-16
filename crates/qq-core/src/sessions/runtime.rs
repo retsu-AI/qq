@@ -1512,6 +1512,8 @@ pub enum SessionRuntimeError {
     GoalImmutable,
     #[error("goal cancellation is still draining")]
     GoalCancellationPending,
+    #[error("the interrupted check does not match an unacknowledged workspace hold")]
+    CheckInterruptionMismatch,
     #[error("goal check authorization is required")]
     GoalCheckApprovalRequired,
     #[error("goal has no check to authorize")]

@@ -56,6 +56,7 @@ impl BenchHarness {
         };
         let mut app = App::new(options);
         app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+            check_interruption: None,
             sessions: summaries,
             focused: Some(focused),
             ..fixtures::workspace_snapshot()
@@ -180,6 +181,7 @@ impl BenchHarness {
         self.next_sequence += 1;
         self.app
             .apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+                check_interruption: None,
                 cursor: fixtures::cursor(sequence),
                 sessions: Vec::new(),
                 focused: None,

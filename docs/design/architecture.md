@@ -1881,10 +1881,14 @@ is unavailable.
 
 Hard-killing QQ can leave a running check shell alive because process guards
 cannot run. Startup recovery pauses the matching goal without repeating its
-check; it does not identify or stop that orphan. The recovered workspace
-exclusion follows durable run state, rather than observing surviving OS
-processes. Resuming an interrupted check acknowledges uncertain effects as
-specified by ADR-0049.
+check; it does not identify or stop that orphan. Recovery durably holds the
+workspace against new run and side-question admission, including after the goal
+is cleared or replaced. Snapshots expose the oldest unacknowledged check.
+`AcknowledgeCheckInterruption` releases that exact workspace/run hold after the
+operator resolves its uncertain effects; acknowledging one cannot release other
+holds. A matching interrupted goal remains user-paused and needs separate
+resume and any fresh Once authorization. The hold also prevents deleting its
+session, and survives repeated restarts.
 
 A no-check achievement claim queues a separate Goal-origin prompt run with a
 persisted zero-repair output contract. Its single primary turn has no tools,

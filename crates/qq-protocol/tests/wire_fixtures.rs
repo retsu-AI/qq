@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 33);
+    assert_eq!(PROTOCOL_VERSION, 34);
     check(
         "outcome_paused_no_progress",
         &RunOutcome::Paused {
@@ -1451,6 +1451,36 @@ fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
 
 #[test]
 fn current_goal_commands_receipts_and_origins_match_goldens() {
+    let workspace_id = WorkspaceId::from_bytes([1; 16]);
+    let interrupted = qq_protocol::CheckInterruption {
+        session_id: SessionId::from_bytes([3; 16]),
+        run_id: RunId::from_bytes([4; 16]),
+    };
+    check(
+        "command_acknowledge_check_interruption",
+        &SessionCommand::AcknowledgeCheckInterruption {
+            workspace_id,
+            run_id: interrupted.run_id,
+        },
+    );
+    check(
+        "event_check_interruption_changed",
+        &SessionEvent::CheckInterruptionChanged {
+            interruption: Some(interrupted),
+        },
+    );
+    check(
+        "outcome_check_interruption_acknowledged",
+        &CommandOutcome::CheckInterruptionAcknowledged {
+            workspace_id,
+            run_id: interrupted.run_id,
+        },
+    );
+    let snapshot:qq_protocol::WorkspaceSnapshot = serde_json::from_value(serde_json::json!({
+        "cursor":{"store_id":StoreId::from_bytes([2;16]),"workspace_id":workspace_id,"sequence":7},
+        "workspace":{"id":workspace_id,"path":"/workspace"},"sessions":[],"has_older_sessions":false,"check_interruption":interrupted
+    })).unwrap();
+    check("snapshot_check_interruption", &snapshot);
     let session_id = SessionId::from_bytes([3; 16]);
     let goal_id = qq_protocol::GoalId::from_bytes([0x61; 16]);
     let goal: Box<qq_protocol::GoalSnapshot> = serde_json::from_value(serde_json::json!({

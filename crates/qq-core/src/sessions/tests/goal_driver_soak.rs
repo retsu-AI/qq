@@ -32,6 +32,9 @@ enum Reply {
 enum Input {
     Advance(u64),
     Command(Box<SessionCommand>),
+    ExactCommand(CommandId, Box<SessionCommand>),
+    TryCommand(Box<SessionCommand>),
+    WorkspaceHold,
     Reply(Reply),
     Snapshot,
     Close,
@@ -248,6 +251,24 @@ async fn child(setup: Setup) {
                     let receipt = runtime.command(CommandId::generate().unwrap(),*command).await.unwrap();
                     emit(Output::Ack(serde_json::to_value(receipt).unwrap())).await;
                 }
+                Input::ExactCommand(id,command) => {
+                    let receipt = runtime.command(id,*command).await.unwrap();
+                    emit(Output::Ack(serde_json::to_value(receipt).unwrap())).await;
+                }
+                Input::TryCommand(command) => {
+                    let error = runtime.command(CommandId::generate().unwrap(),*command).await.unwrap_err();
+                    let error = match error {
+                        SessionRuntimeError::CheckInterruptionMismatch => "check_interruption_mismatch",
+                        SessionRuntimeError::SessionActive => "session_active",
+                        SessionRuntimeError::SideQuestionBusy => "side_question_busy",
+                        error => panic!("unexpected command error: {error}"),
+                    };
+                    emit(Output::Ack(serde_json::json!(error))).await;
+                }
+                Input::WorkspaceHold => {
+                    let snapshot = runtime.snapshot(SnapshotRequest::new(workspace,Some(session),256,256)).await.unwrap();
+                    emit(Output::Ack(serde_json::to_value(snapshot.check_interruption).unwrap())).await;
+                }
                 Input::Reply(reply) => {
                     pending.take().expect("a provider request is held").send(reply).unwrap_or_else(|_| panic!("provider request disappeared"));
                     emit(Output::Ack(serde_json::Value::Null)).await;
@@ -271,17 +292,18 @@ async fn child(setup: Setup) {
                     emit(Output::Ack(serde_json::Value::Null)).await;
                 }
                 Input::ProbeAdmission => {
-                    let permits = Arc::clone(&runtime.inner.permits).try_acquire_many_owned(runtime.inner.max_active_runs as u32).unwrap();
-                    runtime.command(CommandId::generate().unwrap(),SessionCommand::SubmitPrompt {
+                    let permits = tokio::time::timeout(Duration::from_secs(5), Arc::clone(&runtime.inner.permits).acquire_many_owned(runtime.inner.max_active_runs as u32)).await.unwrap().unwrap();
+                    let receipt = runtime.command(CommandId::generate().unwrap(),SessionCommand::SubmitPrompt {
                         session_id:session, input:vec![InputPart::text("probe-after-check-crash")], limits:RunLimits::default(), correlation:Correlation::default(), output:None,
                     }).await.unwrap();
+                    let CommandOutcome::PromptQueued { run_id:admitted, .. } = receipt.outcome else { panic!("probe prompt") };
                     let claim = runtime.inner.store.reserve_next_run_at_depth(0).await.unwrap();
                     let escaped = claim.is_some();
                     if let Some(claim) = claim {
                         runtime.inner.store.finish_reserved_run(&claim,RunOutcome::Cancelled).await.unwrap();
                     }
                     drop(permits);
-                    emit(Output::Ack(serde_json::json!(escaped))).await;
+                    emit(Output::Ack(serde_json::json!({"escaped":escaped,"run_id":admitted}))).await;
                 }
                 Input::CheckState => {
                     let state = runtime.inner.store.call(super::super::store::Priority::AwaitControl, move |connection| {
@@ -903,7 +925,13 @@ pub(super) fn signal_pipe(
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "current_thread")]
 async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_started_checks() {
-    for phase in ["queued", "reserved", "running"] {
+    for phase in [
+        "queued",
+        "reserved",
+        "running",
+        "running_clear",
+        "running_replace",
+    ] {
         let directory = TempDir::new().unwrap();
         let mut pipes = Vec::new();
         for name in ["check-ready", "check-release"] {
@@ -956,7 +984,7 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
             "reserved" => {
                 driver.ask(Input::HoldPolicy).await;
             }
-            "running" => {}
+            phase if phase.starts_with("running") => {}
             _ => unreachable!(),
         }
         driver.ask(Input::Reply(Reply::Text)).await;
@@ -967,7 +995,7 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                 driver.keep(output);
             }
         }
-        let mut process = if phase == "running" {
+        let mut process = if phase.starts_with("running") {
             check_ready(&pipes[0]).await;
             Some(observe_check(directory.path()).await)
         } else {
@@ -994,7 +1022,7 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
         let goal = before.goal.as_ref().unwrap();
         assert_eq!(goal.counters.runs, 1);
         assert!(goal.audit_pending);
-        if phase == "running" {
+        if phase.starts_with("running") {
             assert_eq!(check.status, qq_protocol::RunStatus::Running);
             assert_eq!(
                 goal.check_authorization,
@@ -1019,7 +1047,7 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
         }
         driver.kill().await;
         let mut recovered = Driver::open(&setup).await;
-        if phase == "running" {
+        if phase.starts_with("running") {
             let snapshot = recovered.snapshot().await;
             let goal = snapshot.goal.as_ref().unwrap();
             assert!(matches!(
@@ -1046,17 +1074,80 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                 Some(RunOutcome::Interrupted)
             );
             assert!(recovered.pending.is_empty());
+            let expected_hold = qq_protocol::CheckInterruption {
+                session_id: recovered.session,
+                run_id: check_id,
+            };
             assert_eq!(
-                recovered.ask(Input::ProbeAdmission).await,
-                serde_json::json!(false),
-                "a surviving interrupted check must keep workspace admission closed"
+                recovered.ask(Input::WorkspaceHold).await,
+                serde_json::to_value(Some(expected_hold)).unwrap()
             );
-            recovered.ask(Input::Close).await;
-            assert!(recovered.process.wait().await.unwrap().success());
+            assert_eq!(
+                recovered
+                    .ask(Input::TryCommand(Box::new(SessionCommand::DeleteSession {
+                        session_id: recovered.session
+                    })))
+                    .await,
+                serde_json::json!("session_active")
+            );
+            assert_eq!(
+                recovered
+                    .ask(Input::TryCommand(Box::new(
+                        SessionCommand::AcknowledgeCheckInterruption {
+                            workspace_id: recovered.workspace,
+                            run_id: work
+                        }
+                    )))
+                    .await,
+                serde_json::json!("check_interruption_mismatch")
+            );
+            if phase == "running_clear" {
+                recovered
+                    .ask(Input::Command(Box::new(SessionCommand::GoalControl {
+                        session_id: recovered.session,
+                        expected: qq_protocol::GoalIdentity {
+                            goal_id: goal.goal_id,
+                            revision: goal.revision,
+                        },
+                        action: qq_protocol::GoalControl::Clear,
+                    })))
+                    .await;
+            } else if phase == "running_replace" {
+                recovered.ask(Input::Command(Box::new(serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":recovered.session,"objective":"replacement remains paused","replace":true,
+                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                    "check":{"command":CHECK,"timeout_ms":5000},"budget":{"max_goal_runs":10,"deadline_ms":setup_epoch+60_000}
+                })).unwrap()))).await;
+            }
+            assert_eq!(
+                recovered
+                    .ask(Input::TryCommand(Box::new(
+                        SessionCommand::SubmitSideQuestion {
+                            session_id: recovered.session,
+                            question: "inspect the held workspace".to_owned(),
+                            new_thread: false,
+                        }
+                    )))
+                    .await,
+                serde_json::json!("side_question_busy"),
+                "side questions cannot bypass an interrupted check hold"
+            );
+            let probe = recovered.ask(Input::ProbeAdmission).await;
+            assert_eq!(
+                probe["escaped"],
+                serde_json::json!(false),
+                "surviving check must retain workspace admission"
+            );
+            let held = recovered.snapshot().await;
+            recovered.kill().await;
             recovered = Driver::open(&setup).await;
             let again = recovered.snapshot().await;
-            assert_eq!(again.goal, snapshot.goal);
-            assert_eq!(again.runs, snapshot.runs);
+            assert_eq!(again.goal, held.goal);
+            assert_eq!(again.runs, held.runs);
+            assert_eq!(
+                recovered.ask(Input::WorkspaceHold).await,
+                serde_json::to_value(Some(expected_hold)).unwrap()
+            );
             let process = process.as_ref().unwrap();
             let mut exited = Box::pin(process.0.readable());
             assert!(
@@ -1079,16 +1170,63 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
         .unwrap()
         .unwrap();
         exited.retain_ready();
-        if phase == "running" {
+        if phase.starts_with("running") {
             let after = recovered.snapshot().await;
-            assert!(matches!(
-                after.goal.unwrap().status,
-                qq_protocol::GoalStatus::Paused {
-                    reason: qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+            if phase == "running" {
+                assert!(matches!(
+                    after.goal.as_ref().unwrap().status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+                        }
                     }
-                }
-            ));
+                ));
+            }
+            assert_eq!(
+                recovered.ask(Input::WorkspaceHold).await,
+                serde_json::to_value(Some(qq_protocol::CheckInterruption {
+                    session_id: recovered.session,
+                    run_id: check_id
+                }))
+                .unwrap()
+            );
+            let id = CommandId::generate().unwrap();
+            let acknowledge = SessionCommand::AcknowledgeCheckInterruption {
+                workspace_id: recovered.workspace,
+                run_id: check_id,
+            };
+            let receipt = recovered
+                .ask(Input::ExactCommand(id, Box::new(acknowledge.clone())))
+                .await;
+            assert_eq!(
+                recovered
+                    .ask(Input::ExactCommand(id, Box::new(acknowledge)))
+                    .await,
+                receipt
+            );
+            assert_eq!(
+                recovered.ask(Input::WorkspaceHold).await,
+                serde_json::Value::Null
+            );
+            let (resumed, texts) = recovered.request().await;
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text.contains("probe-after-check-crash"))
+            );
+            recovered.ask(Input::Reply(Reply::Text)).await;
+            assert_eq!(recovered.finished(resumed).await, RunOutcome::Completed);
+            let final_goal = recovered.snapshot().await.goal;
+            if phase == "running" {
+                assert!(matches!(
+                    final_goal.unwrap().status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::User
+                    }
+                ));
+            } else {
+                assert_eq!(final_goal, after.goal);
+            }
             assert_eq!(
                 after
                     .runs

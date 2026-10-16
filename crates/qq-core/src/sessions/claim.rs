@@ -503,7 +503,7 @@ pub(super) fn reserve_next_run_recoverable(
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
                AND NOT EXISTS(SELECT 1 FROM runs check_run JOIN sessions check_session ON check_session.id=check_run.session_id
-                   WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND check_run.status='running')
+                   WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND (check_run.status='running' OR check_run.check_acknowledgment_pending=1))
                AND s.depth = ?1
                AND (r.kind!='prompt' OR g.goal_id IS NULL
                     OR json_extract(g.payload_json,'$.status.type')!='active'

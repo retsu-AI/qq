@@ -804,10 +804,49 @@ pub(super) async fn execute(
     }
 }
 
+pub(super) fn interruption(
+    connection: &Connection,
+    workspace: WorkspaceId,
+) -> Result<Option<qq_protocol::CheckInterruption>, SessionRuntimeError> {
+    let row: Option<(String,String)> = connection.query_row(
+        "SELECT r.session_id,r.id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE s.workspace_id=?1 AND r.check_acknowledgment_pending=1 ORDER BY r.rowid LIMIT 1",
+        [workspace.to_string()],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    match row {
+        Some((session, run)) => Ok(Some(qq_protocol::CheckInterruption {
+            session_id: parse_id(&session)?,
+            run_id: parse_id(&run)?,
+        })),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn recover(
     transaction: &Connection,
     store_id: StoreId,
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
+    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0")?;
+    let ids = workspaces
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(workspaces);
+    transaction.execute("UPDATE runs SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running'",[])?;
+    let mut hold_cursors = Vec::new();
+    for workspace in ids {
+        let workspace = parse_id(&workspace)?;
+        if let Some(hold) = interruption(transaction, workspace)? {
+            hold_cursors.push(
+                append_event(
+                    transaction,
+                    EventContext::for_session(store_id, workspace, hold.session_id, None, now_ms()),
+                    SessionEvent::CheckInterruptionChanged {
+                        interruption: Some(hold),
+                    },
+                )?
+                .cursor,
+            );
+        }
+    }
     let mut statement=transaction.prepare("SELECT r.id,r.session_id,s.workspace_id,r.goal_id,r.goal_revision
         FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running'")?;
     let rows = statement
@@ -821,7 +860,7 @@ pub(super) fn recover(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut cursors = Vec::new();
+    let mut cursors = hold_cursors;
     for (run, session, workspace, goal_id, revision) in rows {
         let session: SessionId = parse_id(&session)?;
         let run: RunId = parse_id(&run)?;

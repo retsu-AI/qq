@@ -839,7 +839,7 @@ pub(super) fn admit_side_question(
         return Err(SessionRuntimeError::InvalidSideQuestion);
     }
     let checking:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM runs r JOIN sessions checker ON checker.id=r.session_id
-        JOIN sessions target ON target.workspace_id=checker.workspace_id WHERE target.id=?1 AND r.kind='goal_check' AND r.status='running')",
+        JOIN sessions target ON target.workspace_id=checker.workspace_id WHERE target.id=?1 AND r.kind='goal_check' AND (r.status='running' OR r.check_acknowledgment_pending=1))",
         [session_id.to_string()],|row|row.get(0))?;
     if checking {
         return Err(SessionRuntimeError::SideQuestionBusy);

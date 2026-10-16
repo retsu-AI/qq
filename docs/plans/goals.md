@@ -214,8 +214,10 @@ the run, and the **runtime** pauses the goal. The status line then shows
 - `SessionSnapshot.goal`, and `RunOrigin` on runs.
 
 A client that reconnects gets the goal from its snapshot. All wire shapes,
-including the G3 authorization and cancellation reasons, land in G0's one
-protocol bump; G2 and G3 add behavior, not another wire change.
+including the G3 authorization and cancellation reasons, land in G0's initial
+protocol bump. The interrupted-check workspace recovery extension below adds
+protocol34/schema57 after real hard-kill evidence exposed a separate admission
+gap; the other G2/G3 behavior retains the initial wire contract.
 
 **Configuration** (`[goals]`):
 - default and maximum deadline, 24 h and 7 d;

@@ -80,8 +80,10 @@ pub(super) fn load_snapshot(
             Err(error) => return Err(error),
         }
     }
+    let check_interruption = super::goal_check::interruption(&transaction, request.workspace_id)?;
     transaction.commit()?;
     Ok(WorkspaceSnapshot {
+        check_interruption,
         cursor: EventCursor {
             store_id,
             workspace_id: request.workspace_id,

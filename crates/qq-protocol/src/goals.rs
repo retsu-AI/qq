@@ -1,7 +1,17 @@
 use crate::{GoalId, RunId, RunLimits, SessionId, TokenUsage, ToolCallId};
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_GOAL_RUN_MODEL_TURNS: u32 = 256;
-use serde::{Deserialize, Serialize};
+
+/// An uncertain check still holds its workspace after host recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckInterruption {
+    /// Session whose completion check was interrupted.
+    pub session_id: SessionId,
+    /// Exact interrupted run whose uncertain effects need acknowledgment.
+    pub run_id: RunId,
+}
 
 /// A client specification/control generation; model data writes retain it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

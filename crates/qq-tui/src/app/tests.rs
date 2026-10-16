@@ -2561,6 +2561,7 @@ fn warm_bodies_are_bounded_and_evict_least_recently_focused() {
         app.focus_session(*session_id);
         let summary = app.sessions[session_id].summary.clone();
         app.apply_snapshot(WorkspaceSnapshot {
+            check_interruption: None,
             focused: Some(body_for(&summary, "body")),
             ..snapshot()
         });
@@ -3247,6 +3248,7 @@ fn the_shown_session_is_pinned_warm_while_others_evict() {
         app.focus_session(*session_id);
         let summary = app.sessions[session_id].summary.clone();
         app.apply_snapshot(WorkspaceSnapshot {
+            check_interruption: None,
             focused: Some(body_for(&summary, "body")),
             ..snapshot()
         });
@@ -3314,6 +3316,7 @@ fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() 
     let (mut app, first, _) = two_session_app();
     let cold = summary_named(0x77, "cold");
     app.apply_snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![cold.clone()],
         focused: None,
         ..snapshot()
@@ -3326,6 +3329,7 @@ fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() 
 
     let installed = app
         .apply_snapshot(WorkspaceSnapshot {
+            check_interruption: None,
             focused: Some(body_for(&cold, "arrived")),
             ..snapshot()
         })
@@ -3340,12 +3344,14 @@ fn a_body_fetched_for_a_session_the_user_left_is_dropped_without_moving_focus() 
     // Likewise for a session that was never shown.
     let gone = summary_named(0x78, "gone");
     app.apply_snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![gone.clone()],
         focused: None,
         ..snapshot()
     });
     assert!(
         !app.apply_snapshot(WorkspaceSnapshot {
+            check_interruption: None,
             focused: Some(body_for(&gone, "late")),
             ..snapshot()
         })
@@ -4820,6 +4826,7 @@ fn untrusted_project_app() -> App {
         ..TuiOptions::default()
     });
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: Vec::new(),
         focused: None,
         ..snapshot()
@@ -5343,4 +5350,70 @@ fn deleting_the_side_views_source_leaves_the_view() {
         SessionEvent::SessionDeleted { session_id: id },
     )));
     assert_eq!(app.view(), View::Transcript(None));
+}
+
+#[test]
+fn check_interruption_snapshot_and_live_replay_preserve_the_current_workspace_hold() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let first = qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x71; 16]),
+    };
+    let other = SessionId::from_bytes([0x73; 16]);
+    initial.sessions.push(fixtures::session_summary(other));
+    let second = qq_protocol::CheckInterruption {
+        session_id: other,
+        run_id: RunId::from_bytes([0x74; 16]),
+    };
+    initial.check_interruption = Some(first);
+    app.apply_snapshot(initial.clone());
+    assert_eq!(app.check_interruption, Some(first));
+    app.apply_live_event(fixtures::envelope(
+        2,
+        session,
+        SessionEvent::CheckInterruptionChanged {
+            interruption: Some(second),
+        },
+    ));
+    assert_eq!(app.check_interruption, Some(second));
+    app.apply_live_event(fixtures::envelope(
+        3,
+        other,
+        SessionEvent::CheckInterruptionChanged { interruption: None },
+    ));
+    assert!(app.check_interruption.is_none());
+    app.apply_snapshot(initial);
+    assert!(
+        app.check_interruption.is_none(),
+        "an older snapshot cannot restore an acknowledged hold"
+    );
+    let next = qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x72; 16]),
+    };
+    app.apply_live_event(fixtures::envelope(
+        4,
+        session,
+        SessionEvent::CheckInterruptionChanged {
+            interruption: Some(next),
+        },
+    ));
+    app.apply_live_event(fixtures::envelope(
+        3,
+        other,
+        SessionEvent::CheckInterruptionChanged { interruption: None },
+    ));
+    assert_eq!(
+        app.check_interruption,
+        Some(next),
+        "a replayed old acknowledgment cannot erase a newer hold"
+    );
+    app.apply_live_event(fixtures::envelope(
+        5,
+        session,
+        SessionEvent::CheckInterruptionChanged { interruption: None },
+    ));
+    assert!(app.check_interruption.is_none());
 }

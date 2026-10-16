@@ -302,6 +302,20 @@ the TUI instead, or run jobs one after another. Concurrent CI jobs on one
 machine each need their own data directory (`XDG_DATA_HOME` on Linux). Two
 machines must not share one data directory.
 
+### Workspace held after an interrupted completion check
+
+A completion check may survive a hard-killed QQ process. After restart, QQ
+holds new workspace work until you resolve the check's uncertain effects.
+Clearing or replacing its goal does not release the hold. The workspace snapshot's
+`check_interruption` identifies the session and exact interrupted run.
+
+After confirming the check and any work it started have stopped, API clients
+can send `acknowledge_check_interruption` with that `workspace_id` and `run_id`
+to `POST /v1/workspaces/check-interruptions/acknowledge`, using the normal
+command envelope and authentication. Repeat for any next hold reported by the
+snapshot. Acknowledgment releases queued workspace work; the matching goal
+stays paused until a separate resume and any fresh check authorization.
+
 ## Getting more detail
 
 - `qq doctor --json` — the same checks as a JSON object, for scripts and

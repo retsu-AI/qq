@@ -157,6 +157,7 @@ pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
 pub fn workspace_snapshot() -> WorkspaceSnapshot {
     let summary = session_summary(SESSION);
     WorkspaceSnapshot {
+        check_interruption: None,
         included: Vec::new(),
         cursor: cursor(1),
         workspace: WorkspaceSummary {

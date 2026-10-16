@@ -77,6 +77,7 @@ pub struct ReduceContext<'a> {
 /// updated when these are returned; the surface applies them in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateEffect {
+    CheckInterruptionChanged(Option<qq_protocol::CheckInterruption>),
     /// A transient notice for `session` (or the focused session).
     Notice {
         session: Option<SessionId>,
@@ -93,7 +94,10 @@ pub enum StateEffect {
     /// This surface created the session; it is warm and should be shown.
     AdoptCreated(SessionId),
     /// The session's run finished idle and a queued draft is ready: submit it.
-    SubmitDraft { session_id: SessionId, text: String },
+    SubmitDraft {
+        session_id: SessionId,
+        text: String,
+    },
     /// A session left the store; drop anything keyed by it or its calls.
     SessionRemoved {
         session_id: SessionId,
@@ -133,7 +137,8 @@ impl SessionStore {
                 effect @ (StateEffect::RequestSnapshot(_)
                 | StateEffect::Refocus(_)
                 | StateEffect::SessionRemoved { .. }) => Some(effect),
-                StateEffect::Notice { .. }
+                StateEffect::CheckInterruptionChanged(_)
+                | StateEffect::Notice { .. }
                 | StateEffect::Attention(_)
                 | StateEffect::AdoptCreated(_)
                 | StateEffect::SubmitDraft { .. } => None,
@@ -192,6 +197,9 @@ impl SessionStore {
             }
             SessionEvent::SessionUpdated { session } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
+            }
+            SessionEvent::CheckInterruptionChanged { interruption } => {
+                effects.push(StateEffect::CheckInterruptionChanged(*interruption));
             }
             SessionEvent::GoalUpdated { goal } => {
                 if let Some(view) = self.get_mut(&session_id) {

@@ -3390,6 +3390,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::GoalNotFound
         | SessionRuntimeError::GoalImmutable
         | SessionRuntimeError::GoalCancellationPending
+        | SessionRuntimeError::CheckInterruptionMismatch
         | SessionRuntimeError::GoalCheckApprovalRequired
         | SessionRuntimeError::GoalCheckMissing
         | SessionRuntimeError::GoalCheckCommandMismatch

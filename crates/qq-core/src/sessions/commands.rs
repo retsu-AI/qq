@@ -358,6 +358,7 @@ pub(super) fn execute_command(
                 SessionCommand::SetGoal { .. }
                     | SessionCommand::GoalControl { .. }
                     | SessionCommand::CancelRun { .. }
+                    | SessionCommand::AcknowledgeCheckInterruption { .. }
             ),
             replayed: true,
             side_launch: None,
@@ -490,6 +491,92 @@ pub(super) fn execute_command(
                     outcome: CommandOutcome::GoalUpdated {
                         session_id,
                         goal: Box::new(goal),
+                    },
+                },
+                true,
+            )
+        }
+        SessionCommand::AcknowledgeCheckInterruption {
+            workspace_id,
+            run_id,
+        } => {
+            ensure_workspace(&transaction, workspace_id)?;
+            let session: Option<String> = transaction.query_row(
+                "SELECT r.session_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE s.workspace_id=?1 AND r.id=?2 AND r.check_acknowledgment_pending=1 AND r.status='interrupted'",
+                params![workspace_id.to_string(),run_id.to_string()],|row|row.get(0),
+            ).optional()?;
+            let Some(session) = session else {
+                return Err(SessionRuntimeError::CheckInterruptionMismatch);
+            };
+            let session_id = parse_id(&session)?;
+            transaction.execute(
+                "UPDATE runs SET check_acknowledgment_pending=0 WHERE id=?1",
+                [run_id.to_string()],
+            )?;
+            if let Some(goal) = goals::load_live(&transaction, session_id)?
+                && matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+                        }
+                    }
+                )
+            {
+                let captured: (Option<String>, Option<u32>) = transaction.query_row(
+                    "SELECT goal_id,goal_revision FROM runs WHERE id=?1",
+                    [run_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if captured.0.as_deref() == Some(goal.goal_id.to_string().as_str())
+                    && captured.1 == Some(goal.revision)
+                {
+                    let (goal, _) = goals::control(
+                        &transaction,
+                        session_id,
+                        qq_protocol::GoalIdentity {
+                            goal_id: goal.goal_id,
+                            revision: goal.revision,
+                        },
+                        qq_protocol::GoalControl::Pause,
+                        now,
+                        None,
+                    )?;
+                    append_event(
+                        &transaction,
+                        EventContext::for_session(
+                            store_id,
+                            workspace_id,
+                            session_id,
+                            Some(command_id),
+                            now,
+                        ),
+                        SessionEvent::GoalUpdated {
+                            goal: Box::new(goal),
+                        },
+                    )?;
+                }
+            }
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::CheckInterruptionChanged {
+                    interruption: super::goal_check::interruption(&transaction, workspace_id)?,
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::CheckInterruptionAcknowledged {
+                        workspace_id,
+                        run_id,
                     },
                 },
                 true,
@@ -2168,7 +2255,7 @@ pub(super) fn delete_idle_session(
                     EXISTS(
                         SELECT 1 FROM runs
                         WHERE session_id = sessions.id
-                          AND status IN ('queued', 'running')
+                          AND (status IN ('queued', 'running') OR check_acknowledgment_pending=1)
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
