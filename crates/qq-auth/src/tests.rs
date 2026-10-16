@@ -796,6 +796,23 @@ fn keyring_success_records_and_resolves_the_backend() {
 }
 
 #[test]
+fn stored_resolution_reuses_success_and_invalidates_on_epoch_change() {
+    let (store, keyring, _directory) = test_store();
+    store.set("openai", "first", false).unwrap();
+
+    let first = store.resolve(&SecretRef::Stored("openai".to_owned())).unwrap();
+    let second = store.clone().resolve_with_epoch(&SecretRef::Stored("openai".to_owned()), None).unwrap();
+    assert_eq!(first.expose_secret_bytes(), b"first");
+    assert_eq!(second.0.expose_secret_bytes(), b"first");
+    assert_eq!(keyring.read_count("openai"), 1);
+
+    store.set("openai", "rotated", false).unwrap();
+    let rotated = store.resolve(&SecretRef::Stored("openai".to_owned())).unwrap();
+    assert_eq!(rotated.expose_secret_bytes(), b"rotated");
+    assert_eq!(keyring.read_count("openai"), 2);
+}
+
+#[test]
 fn credential_epoch_advances_on_every_durable_mutation_and_survives_reload() {
     let (store, _keyring, directory) = test_store();
     assert_eq!(store.epoch().unwrap(), CredentialEpoch::NONE);
