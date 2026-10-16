@@ -605,8 +605,15 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
         .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
         .await
         .unwrap();
-    harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100}})).unwrap()).await.unwrap();
-    let run = submit_child_budget_prompt(&harness, RunLimits::default()).await;
+    harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100_000}})).unwrap()).await.unwrap();
+    let run = submit_child_budget_prompt(
+        &harness,
+        RunLimits {
+            max_output_tokens: Some(70),
+            ..RunLimits::default()
+        },
+    )
+    .await;
     drop(held);
     harness.runtime.inner.schedule.send(()).await.unwrap();
     let events = collect_until_run_finished(&mut harness.events, run).await;
@@ -622,7 +629,11 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
             _ => None,
         })
         .expect("positive remainder admits child");
-    assert_eq!(child.limits.as_ref().unwrap().max_total_tokens, Some(60));
+    assert_eq!(
+        child.limits.as_ref().unwrap().max_total_tokens,
+        Some(99_960)
+    );
+    assert_eq!(child.limits.as_ref().unwrap().max_output_tokens, Some(60));
     assert_eq!(
         *requests.lock().unwrap(),
         vec![60],
