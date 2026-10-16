@@ -7,9 +7,9 @@ Owner: ENG-1054; release handoff on `chore/0.1.7`.
 | --- | --- | --- | --- | --- |
 | R017-prep | Reconcile docs and review candidate readiness before bump | Shipped (`9df32a5b`) | [#316](https://github.com/retsu-AI/qq/pull/316) | Main CI passes |
 | R017-perf | Release size/performance repair and qualification | Shipped (repair `21332992`; known qualification gap accepted by maintainer) | ENG-834, #315 | ENG-834 closed by explicit maintainer decision; H0 remains failed/unqualified, not a passing result |
-| R017-bump | Separate `chore/0.1.7` bump PR | In progress | `chore/0.1.7` | Generated bump and upgrade notes; verification before push |
+| R017-bump | Separate `chore/0.1.7` bump PR | Shipped (`dc41c332`) | #318 | Bump merged; not publication verification |
 | R017-publish | Tag merged main and verify assets/install routes | Planned | — (merged main; no PR yet) | Separate release authorization; never tag this branch |
-| R017-docs | Move guide pins after assets publish | Planned | — (follow-up PR not opened) | `cargo xtask release --docs`; not before publication |
+| R017-docs | Move guide pins after assets publish | Shipped (`55936a1e`) | #321 | Guide pins merged; does not itself prove all asset/install routes |
 
 ## Entries
 
@@ -115,3 +115,11 @@ Owner: ENG-1054; release handoff on `chore/0.1.7`.
   guide pins stay at published v0.1.6 until new assets exist.
 - This is manually maintained plan text, not release-generator output.
   Documentation gate and diff checks run before committing; user owns push.
+
+## Consolidation review — retained publication handoff
+
+- #318 and #321 are merged in the checked-out history; bump and guide pins
+  can be marked shipped. No tag/assets/checksums/install/Homebrew verification
+  receipt is established here. R017-publish remains Planned until observed.
+- The shortened release plan retains that owner; do not infer publication
+  completion from the guide-pin commit. Historical entries above unchanged.

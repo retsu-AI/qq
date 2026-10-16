@@ -4,7 +4,7 @@
 acceptance, from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
-**Implements:** [`goals.md`](../plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](../plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
+**Implements:** [`goals.md`](../plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
 
 ## Context
 

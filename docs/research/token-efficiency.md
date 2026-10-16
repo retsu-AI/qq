@@ -11,10 +11,10 @@ for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
 | --- | --- | --- |
 | Hash-aware reads, outlines/ranges, bounded search, batched edits, spills and exact recall | [Tool contracts](../design/tools.md); [tool-layer plan](../plans/tool-layer.md) | That defaults minimize tokens per successful task; T13 remains an evaluation owner |
 | Provider prompt-cache breakpoints | [Providers](../design/providers.md), prompt-cache discussion | Cross-turn cache-hit rate, prefix stability, or savings across compaction |
-| Bounded delegation and experimental worker/depth arms | [Delegation plan](../plans/supervised-delegation.md); `benchmarks/arms/` | That more agents beat root-only work on tokens or dollars per pass |
+| Bounded delegation and experimental worker/depth arms | [Delegation plan](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md); `benchmarks/arms/` | That more agents beat root-only work on tokens or dollars per pass |
 | Durable history and bounded model-facing tool output | [Transcript](../design/transcript.md); [ADR-0019](../adr/0019-spill-handles.md) | A shared cross-agent evidence protocol or arbitrary permission to read another session |
-| In-run compaction at safe boundaries | [ADR-0039](../adr/0039-in-run-compaction.md); [autonomous-core plan](../plans/autonomous-core.md) | Real-model constraint retention over repeated summaries |
-| Evaluation comparison and usage accounting | [Delegation evaluation](../plans/supervised-delegation.md); [evaluation program ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | A complete, deduplicated task-tree waste report with uncertain usage explicitly represented |
+| In-run compaction at safe boundaries | [ADR-0039](../adr/0039-in-run-compaction.md); [autonomous-core plan](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) | Real-model constraint retention over repeated summaries |
+| Evaluation comparison and usage accounting | [Delegation evaluation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md); [evaluation program ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | A complete, deduplicated task-tree waste report with uncertain usage explicitly represented |
 
 These are source/document observations, not fresh benchmark results. Tracker
 status and merged implementation can differ; the owning ledger and exact commit

@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch/PR | Evidence |
 | --- | --- | --- | --- | --- |
-| ENG-834 | Repair inherited size/retry failures and qualify unchanged speed limits | In review | [#315](https://github.com/retsu-AI/qq/pull/315) | User authorizes follow-up after #306 merged; ceilings remain 48/41 MB |
+| ENG-834 | Repair inherited size/retry failures and qualify unchanged speed limits | Shipped repair (`21332992`); H0 qualification open | [#315](https://github.com/retsu-AI/qq/pull/315) | ENG-834 closed by maintainer acceptance for release; H0 still failed/unqualified, quiet-host evidence pending; ceilings remain 48/41 MB |
 
 ## 2026-10-14 — baseline and ownership
 
@@ -244,3 +244,9 @@
   standalone xtask invocation had one socket EPERM; the full gate passes that
   test without source changes or skips. Actionlint passes; the overlay guard
   additionally rejects wrong baseline/candidate versions (6/6 cases).
+
+## Consolidation review reconciliation
+
+- #315 repair merged as 21332992; release acceptance of the known H0 gap
+  did not turn failed A/B or A/A receipts into passes. Top row now separates
+  shipped repair from remaining quiet-host qualification. Dated evidence stays unchanged.

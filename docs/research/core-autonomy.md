@@ -4,7 +4,7 @@ Research snapshot: 2026-09-28, QQ `origin/main` at `7885f2c`. Reference trees
 under `.source/`: Codex `25270df261` (2026-09-26), OpenCode `696f41bc8e`,
 Pi `d6af72e18`, fx `c8988adc` (all 2026-09-25). This document records
 evidence and proposes work; it does not claim implementation. The plan that
-acts on it is [`../plans/autonomous-core.md`](../plans/autonomous-core.md).
+acts on it is [`../plans/autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md).
 
 ## Question
 
