@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Fifth trial passes live acceptance; subscription only, no paid API fallback; separate continuation measurements remain incomplete |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Historical pinned trial only; current runtime and admission-time isolation evidence remain unqualified; subscription only, no paid API fallback |
 
 ## Entries
 
@@ -1168,3 +1168,19 @@ publication and thread resolution remain pending.
   Raw receipts and transcripts stay untracked; no runtime behavior changes.
 - The final delta is three Markdown files plus the evaluation audit script.
   Fresh real-receipt replay, negative audit probes and final checks follow.
+
+
+### 2026-10-16 — supersede G5 acceptance after audit review
+
+- New Codex findings supersede the earlier live-pass claim: trial4851fc2e does
+  not qualify the final e84e3552 runtime, and its launch receipt lacks structured
+  credential-isolation evidence. G5 remains open; #332 returns to draft.
+- Auditor now filters session/workspace, binds one goal ID, measures admission
+  to terminal event time, and requires subscription billing plus launch isolation
+  evidence. Missing evidence fails; nothing is retroactively added to admission.
+- Eight offline behavioral tests reproduce the old verifier's errors and pass
+  after repair, including foreign compactions, replacement and launcher idle time.
+  Historical stream retains20compactions/441turns/7950.672goal-event seconds;
+  hardened audit against final runtime returns false. Original receipt preserved.
+- Publish fixes and resolve all five findings after the gate. No new live run,
+  paid API request, runtime source change or merge in this correction.

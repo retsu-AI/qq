@@ -1,7 +1,8 @@
 # G5 — subscription-only live goal evaluation
 
-Status: five trials settled. The fifth establishes G5 live acceptance: one
-132.5-minute trial,20 real compactions and a verified terminal budget outcome.
+Status: five trials settled. The fifth records132.5 minutes and20 compactions
+on the earlier4851fc2e runtime. **G5 for the final stacked runtime remains open**;
+admission-time credential-isolation evidence is also missing from that receipt.
 Its useful continuation measurement task remains incomplete. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
@@ -314,10 +315,11 @@ checklist retention pending. The terminal result below supersedes that admission
 status; the admission alone did not establish G5 acceptance.
 
 
-## Fifth trial — terminal result and live acceptance
+## Fifth trial — terminal result and qualification limits
 
 Finished **2026-10-16T13:16:12.402844Z**, after **7951.093 seconds
-(132.5 minutes)**. The foreground process exited **8** at the original
+(132.5 minutes)** from launcher start; admission-to-terminal event time is
+**7950.672 seconds**. The foreground process exited **8** at the original
 **eight-run cap**, with exactly one final `budget_exhausted` record, last in
 complete valid JSONL. The supervisor is stopped. No runner resume, deadline
 extension, cap reset or artificial duration padding occurred.
@@ -336,31 +338,50 @@ extension, cap reset or artificial duration padding occurred.
   `4851fc2e755f7997b3e0cd5086653a64286e69bc`; the launch binary hash still
   matches, and its embedded version identifies that source. Later outer
   #330/#331 fixes are not retroactively qualified by this trial.
-- The independent terminal audit passes every check: actual duration,
-  terminal/process agreement, complete JSONL, usage reconciliation, checklist
-  identity, finite unchanged bounds, exact route and source/binary binding.
-  The [published audit source](../../../benchmarks/goals/audit_live.py) is
-  byte-identical to the evaluator-local script used for this receipt; SHA256
-  `33c1135e24204e07e9dee1bc3477efa5d0944983f0e6488751a9c6f3e2e1a646`.
+- The original v1 audit reported every recorded check passing. Review found
+  that it did not enforce credential-isolation evidence, session/goal identity or
+  event-based duration. Its original source at commit18fb07fe has SHA256
+  `33c1135e24204e07e9dee1bc3477efa5d0944983f0e6488751a9c6f3e2e1a646`;
+  the original private receipt is preserved, not rewritten as stronger evidence.
 
-**G5 / goals acceptance5 passes for this single live trial.** Durations from
-prior trials are not combined. Credentials, transcripts, stores and generated
-receipts remain outside Git. The private terminal receipt is
-`/tmp/qq-goal-delivery-20261015/g5-measurements/g5-terminal-audit.json`.
-Reproduce the audit from the repository root on the evaluation host:
+**G5 remains open for final runtimee84e3552.** This trial ran4851fc2e, before
+production foreground fixes inf04d9e71/e84e3552, and cannot qualify them. A fresh
+trial on the final runtime must also retain admission-time isolation evidence.
+Separate trial durations are not combined. Credentials, transcripts, stores and
+generated receipts remain outside Git.
+
+The [hardened audit source](../../../benchmarks/goals/audit_live.py) scopes events
+to the final record's workspace/session, binds every goal snapshot and compaction
+to one goal ID, and measures duration between the initial and terminal durable
+goal events. It checks recorded subscription-only billing and requires a launch
+`credential_isolation` snapshot with these secret-free fields:
+
+- `credentials`: exactly `[{"provider": "openai-codex", "auth_kind": "oauth"}]`;
+- `api_key_environment_names`: `[]`, listing present API-key variable names only;
+- `paid_fallback_enabled`: `false`;
+- `captured_at_ms`: an integer timestamp no later than goal admission.
+
+These must be captured from the actual launch environment/configuration before
+admission. The old receipt has no such snapshot; no retrospective attestation is
+inserted. Recorded metadata is audit evidence, not independent proof of billing.
+Reproduce the conservative result against the final stacked runtime:
 
 ```sh
 python3 benchmarks/goals/audit_live.py \
   /tmp/qq-goal-delivery-20261015/g5-measurements \
-  4851fc2e755f7997b3e0cd5086653a64286e69bc
+  e84e3552ad567b72f4c72178b02ba81a9edc89e5
+python3 -B -m unittest discover -s benchmarks/goals -p 'test_*.py'
 ```
 
-The private input directory contains `g5-launch.json`, `g5-live.jsonl` and
-`g5-exit.json`; the launch record names the preserved executable. Linux `/proc`
-is used to check the supervisor's PID/start-time identity. The command writes a
-private `g5-terminal-audit.json`; **`qualifies: true` and every check true** are
-required. An active or incomplete trial reports false. The script and invocation
-are published; raw inputs, credentials, executable and receipt remain untracked.
+Private inputs are `g5-launch.json`, `g5-live.jsonl`, `g5-exit.json` and the
+preserved executable named by the launch record. Linux `/proc` checks supervisor
+PID/start-time identity. Output is a separate private `g5-terminal-audit-v2.json`,
+preserving the v1 receipt. **`qualifies: true` and every check true** would be
+required for acceptance. For this historical trial it returns **false**:
+`credential_isolation_recorded` and `runtime_revision_matches_binary` fail.
+Session/goal-bound accounting,20 compactions and7950.672event seconds still pass.
+The eight offline synthetic tests validate the verifier; they are not live G5
+qualification. Raw inputs and receipts remain untracked.
 
 ### Useful task result and separate qualification limits
 

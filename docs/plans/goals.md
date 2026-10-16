@@ -5,7 +5,7 @@
 | | |
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
-| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 merged in #309 (`ffa46942`). G2/G3 closeout is in review in #330 (ENG-1063), G4 in #331 (ENG-1064), and G5 evidence in #332 (ENG-1065). The fifth live trial satisfies acceptance 5; the stack is not merged and resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
+| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 merged in #309 (`ffa46942`). G2/G3 closeout is in review in #330 (ENG-1063), G4 in #331 (ENG-1064), and G5 evidence in #332 (ENG-1065). The fifth trial records an earlier pinned runtime; G5 acceptance for the current stack remains open. The stack is not merged and resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
