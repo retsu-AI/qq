@@ -6,9 +6,9 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | --- | --- | --- | --- | --- | --- |
 | G0 | Foundation: durable goals and AC4 loop guard | Shipped (87d3ed1a) | ENG-1045 | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation merged; whole-plan acceptance remains open |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | Driver closeout | In progress | ENG-1053 / ENG-1063 | feat/eng-1063-goal-completion | G2.1 merged; full G2 acceptance belongs to this closeout |
+| G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
-| G3 | Completion checks and crash-safe recovery | In progress | ENG-1063 | feat/eng-1063-goal-completion | First new PR combines G2 closeout and G3 |
+| G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
 | G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
@@ -835,3 +835,8 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 ### 2026-10-16 — final fixture qualification
 
 - Required push gate exposed a sponsored-approval test race: a five-second real-time keeper delayed scheduler timers and let virtual deadlines race real Store I/O. Setup now uses the normal clock with a one-hour fixture allowance, then crosses both clocks explicitly only after actual approval and paid-owner assertions. Same regression passes1/1 in1.72s; independent read-only review approved. Runtime bounds are unchanged. Final-head push gate follows.
+
+### 2026-10-16 — published stack and current-main reconciliation
+
+- Opened #330 (G2/G3) and #331 (G4 on #330), both non-draft with ci:full. Final old-base gates passed2687/2687 and2733/2733 respectively, plus doctests/Clippy/minimal profiles. Publication revealed bare-repository fetches had left origin/main stale; fixed the owned remote fetch mapping and refreshed explicitly to3e34eea2.
+- Rebased #330 onto current main, preserving #325 fixture stabilization and #299 auth changes. Only conflict was legacy sleep locations: retain main's73 sites and lowered ceiling, then refresh positions against integrated source. Main auth source is unchanged by this PR. Resulting-head qualification follows; previous reports remain evidence for their exact old heads.
