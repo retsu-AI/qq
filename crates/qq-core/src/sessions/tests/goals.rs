@@ -2475,7 +2475,7 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             if routed {
                 assert!(
                     store
-                        .record_routing_started(&claim, true, None)
+                        .record_routing_started(&claim, true, None, (None, None))
                         .await
                         .unwrap()
                         .unwrap()
@@ -3952,7 +3952,7 @@ async fn routing_before_main_charges_historical_goal_spend_on_reserved_settlemen
             let goal = claim.goal.as_ref().unwrap();
             let id = goal.goal_id;
             store
-                .record_routing_started(&claim, paid, None)
+                .record_routing_started(&claim, paid, None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()
@@ -7647,7 +7647,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
 
 #[tokio::test]
 async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() {
-    struct Router(Arc<AtomicUsize>, bool);
+    struct Router(Arc<AtomicUsize>, bool, (Option<u64>, Option<u64>));
     impl TaskRouter for Router {
         fn identity(&self) -> &'static str {
             "fixture/goal-expiry"
@@ -7657,6 +7657,12 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         }
         fn max_cost_usd_nanos(&self) -> Option<u64> {
             if self.1 { None } else { Some(37) }
+        }
+        fn max_input_tokens(&self) -> Option<u64> {
+            self.2.0
+        }
+        fn max_output_tokens(&self) -> Option<u64> {
+            self.2.1
         }
         fn route(&self, _: String) -> TaskRoutingFuture {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -7687,6 +7693,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         routing: Arc<AtomicUsize>,
         main: Arc<AtomicUsize>,
         unknown_cost: bool,
+        token_bounds: (Option<u64>, Option<u64>),
     }
     impl RuntimeLoader for Loader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
@@ -7695,20 +7702,31 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             let routing = Arc::clone(&self.routing);
             let main = Arc::clone(&self.main);
             let unknown_cost = self.unknown_cost;
+            let token_bounds = self.token_bounds;
             Box::pin(async move {
                 entered.notify_one();
                 release.notified().await;
                 Ok(loaded_runtime(
                     Runtime::new(Model(main), "test-model", 256)
                         .unwrap()
-                        .with_task_router(Arc::new(Router(routing, unknown_cost))),
+                        .with_task_router(Arc::new(Router(routing, unknown_cost, token_bounds))),
                     &request.workspace,
                     None,
                 ))
             })
         }
     }
-    for condition in ["expired", "over_cost", "unknown_cost", "over_tokens", "unknown_tokens", "per_run_duration"] {
+    for condition in [
+        "expired",
+        "over_cost",
+        "unknown_cost",
+        "over_tokens",
+        "unknown_tokens",
+        "over_input",
+        "over_output",
+        "overflow_tokens",
+        "per_run_duration",
+    ] {
         for user_prompt in [true, false] {
             let directory = TempDir::new().unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
@@ -7723,6 +7741,11 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                     routing: Arc::clone(&routing),
                     main: Arc::clone(&main),
                     unknown_cost: condition == "unknown_cost",
+                    token_bounds: match condition {
+                        "unknown_tokens" => (None, Some(0)),
+                        "overflow_tokens" => (Some(u64::MAX), Some(1)),
+                        _ => (Some(7), Some(2)),
+                    },
                 }),
             )
             .await
@@ -7748,7 +7771,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         })).unwrap()).await.unwrap();
             runtime.inner.store.drive_goals(now_ms()).await.unwrap();
             let run = if user_prompt {
-                if condition == "per_run_duration" {
+                if matches!(condition, "per_run_duration" | "over_input" | "over_output") {
                     let receipt = runtime
                         .command(
                             CommandId::generate().unwrap(),
@@ -7756,7 +7779,10 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                                 session_id,
                                 input: vec![InputPart::text("explicit task")],
                                 limits: RunLimits {
-                                    max_duration_ms: Some(1000),
+                                    max_duration_ms: (condition == "per_run_duration")
+                                        .then_some(1000),
+                                    max_input_tokens: (condition == "over_input").then_some(1),
+                                    max_output_tokens: (condition == "over_output").then_some(1),
                                     ..RunLimits::default()
                                 },
                                 correlation: Correlation::default(),
@@ -7808,8 +7834,15 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                         if !user_prompt {
                             goal.budget.per_run.max_duration_ms = Some(1);
                         }
-                    } else if matches!(condition, "over_tokens" | "unknown_tokens") {
+                    } else if matches!(
+                        condition,
+                        "over_tokens" | "unknown_tokens" | "overflow_tokens"
+                    ) {
                         goal.budget.max_total_tokens = Some(1);
+                    } else if condition == "over_input" {
+                        goal.budget.per_run.max_input_tokens = Some(1);
+                    } else if condition == "over_output" {
+                        goal.budget.per_run.max_output_tokens = Some(1);
                     } else {
                         goal.budget.max_cost_usd_nanos = Some(30);
                     }
@@ -7850,7 +7883,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             assert_eq!(
                 routing.load(Ordering::SeqCst),
                 0,
-                "user_prompt={user_prompt}: expired work must not spend on routing"
+                "condition={condition}, user_prompt={user_prompt}: refused work must not spend on routing"
             );
             assert_eq!(main.load(Ordering::SeqCst), 0);
             if condition == "expired" || condition == "per_run_duration" {
@@ -7899,6 +7932,12 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
         }
         fn max_cost_usd_nanos(&self) -> Option<u64> {
             Some(37)
+        }
+        fn max_input_tokens(&self) -> Option<u64> {
+            Some(1_000_000)
+        }
+        fn max_output_tokens(&self) -> Option<u64> {
+            Some(0)
         }
         fn route(&self, _: String) -> TaskRoutingFuture {
             let tokens = self.0;

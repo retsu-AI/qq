@@ -215,16 +215,10 @@ fn request_allowance(
     pricing: Option<&qq_protocol::ModelPricing>,
     caller: ChildBudget,
 ) -> Result<PaidRequestAdmission, SessionRuntimeError> {
-    let (base, cancelled): (Option<String>, bool) = connection.query_row(
-        "SELECT CASE WHEN kind='prompt' THEN id ELSE auto_compaction_for_run_id END,
-            cancel_requested OR outcome_json IS NOT NULL FROM runs WHERE id=?1 AND session_id=?2",
-        params![identity.run_id.to_string(), identity.session_id.to_string()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if cancelled {
-        return Ok(PaidRequestAdmission::Cancelled);
-    }
-    let base: RunId = parse_id(base.as_deref().ok_or(SessionRuntimeError::CONSTRAINT)?)?;
+    let goal_limits = match remaining_goal_limits(connection, identity)? {
+        Ok(limits) => limits,
+        Err(refusal) => return Ok(refusal),
+    };
     let exhausted = |limit: qq_protocol::BudgetLimitKind| {
         PaidRequestAdmission::Exhausted(qq_protocol::BudgetExhaustion {
             limit,
@@ -243,6 +237,43 @@ fn request_allowance(
         Ok(cap) => cap,
         Err(kind) => return Ok(exhausted(kind)),
     };
+    cap = match output_allowance(cap, input_tokens, goal_limits, pricing) {
+        Ok(cap) => cap,
+        Err(kind) => return Ok(exhausted(kind)),
+    };
+    if caller.limits_at(tokio::time::Instant::now()).is_err() {
+        return Ok(exhausted(qq_protocol::BudgetLimitKind::Duration));
+    }
+    Ok(PaidRequestAdmission::Reprepare {
+        max_output_tokens: cap,
+    })
+}
+
+pub(super) fn remaining_goal_limits(
+    connection: &Connection,
+    identity: RunIdentity,
+) -> Result<Result<RunLimits, PaidRequestAdmission>, SessionRuntimeError> {
+    let (base, cancelled): (Option<String>, bool) = connection.query_row(
+        "SELECT CASE WHEN kind='prompt' THEN id ELSE auto_compaction_for_run_id END,
+            cancel_requested OR outcome_json IS NOT NULL FROM runs WHERE id=?1 AND session_id=?2",
+        params![identity.run_id.to_string(), identity.session_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if cancelled {
+        return Ok(Err(PaidRequestAdmission::Cancelled));
+    }
+    let base: RunId = parse_id(base.as_deref().ok_or(SessionRuntimeError::CONSTRAINT)?)?;
+    let exhausted = |limit: qq_protocol::BudgetLimitKind| {
+        PaidRequestAdmission::Exhausted(qq_protocol::BudgetExhaustion {
+            limit,
+            final_response: false,
+            message: format!(
+                "current caller or goal allowance cannot admit a provider request: {}",
+                limit.as_str()
+            ),
+        })
+    };
+    let mut remaining = RunLimits::default();
     let mut deadline = u64::MAX;
     let mut seen = Vec::new();
     for (_, session, goal_id) in goals::paid_goal_owners(connection, base)? {
@@ -260,11 +291,11 @@ fn request_allowance(
         )?;
         let goal: qq_protocol::GoalSnapshot = serde_json::from_str(&payload)?;
         if !live || goal.status != qq_protocol::GoalStatus::Active {
-            return Ok(PaidRequestAdmission::Cancelled);
+            return Ok(Err(PaidRequestAdmission::Cancelled));
         }
         deadline = deadline.min(goal.budget.deadline_ms);
         if now_ms() >= goal.budget.deadline_ms {
-            return Ok(exhausted(qq_protocol::BudgetLimitKind::Duration));
+            return Ok(Err(exhausted(qq_protocol::BudgetLimitKind::Duration)));
         }
         let mut tokens = goal.counters.usage.and_then(total_tokens);
         let mut cost = goal.counters.estimated_cost_usd_nanos;
@@ -302,31 +333,32 @@ fn request_allowance(
             }
         }
         let remaining_tokens = match (goal.budget.max_total_tokens, tokens) {
-            (Some(_), None) => return Ok(exhausted(qq_protocol::BudgetLimitKind::TokensUnknown)),
+            (Some(_), None) => {
+                return Ok(Err(exhausted(qq_protocol::BudgetLimitKind::TokensUnknown)));
+            }
             (Some(limit), Some(spent)) => Some(limit.saturating_sub(spent)),
             (None, _) => None,
         };
         let remaining_cost = match (goal.budget.max_cost_usd_nanos, cost) {
-            (Some(_), None) => return Ok(exhausted(qq_protocol::BudgetLimitKind::CostUnknown)),
+            (Some(_), None) => {
+                return Ok(Err(exhausted(qq_protocol::BudgetLimitKind::CostUnknown)));
+            }
             (Some(limit), Some(spent)) => Some(limit.saturating_sub(spent)),
             (None, _) => None,
         };
-        let limits = RunLimits {
-            max_total_tokens: remaining_tokens,
-            max_cost_usd_nanos: remaining_cost,
-            ..RunLimits::default()
+        remaining.max_total_tokens = match (remaining.max_total_tokens, remaining_tokens) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         };
-        cap = match output_allowance(cap, input_tokens, limits, pricing) {
-            Ok(cap) => cap,
-            Err(kind) => return Ok(exhausted(kind)),
+        remaining.max_cost_usd_nanos = match (remaining.max_cost_usd_nanos, remaining_cost) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         };
     }
-    if now_ms() >= deadline || caller.limits_at(tokio::time::Instant::now()).is_err() {
-        return Ok(exhausted(qq_protocol::BudgetLimitKind::Duration));
+    if now_ms() >= deadline {
+        return Ok(Err(exhausted(qq_protocol::BudgetLimitKind::Duration)));
     }
-    Ok(PaidRequestAdmission::Reprepare {
-        max_output_tokens: cap,
-    })
+    Ok(Ok(remaining))
 }
 
 fn output_allowance(

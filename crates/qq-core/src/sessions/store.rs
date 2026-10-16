@@ -1939,6 +1939,7 @@ impl Store {
         claimed: &ClaimedRun,
         paid: bool,
         maximum_cost: Option<u64>,
+        maximum_tokens: (Option<u64>, Option<u64>),
     ) -> Result<claim::RunStart, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1947,7 +1948,6 @@ impl Store {
         let limits = claimed.limits;
         let admission = claimed.goal_admission;
         let goal_spend_owner = claimed.goal_spend_owner;
-        let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
             streaming::record_routing_started(
@@ -1963,8 +1963,8 @@ impl Store {
                     admission,
                 },
                 paid,
-                tracked,
                 maximum_cost,
+                maximum_tokens,
             )
         })
         .await

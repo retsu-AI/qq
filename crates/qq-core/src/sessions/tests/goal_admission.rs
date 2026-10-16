@@ -454,7 +454,7 @@ async fn skipped_routing_crash_preserves_known_zero_and_paid_pending_stays_unkno
         }).await.unwrap();
         assert!(
             store
-                .record_routing_started(&claim, paid, None)
+                .record_routing_started(&claim, paid, None, (None, None))
                 .await
                 .is_err()
         );
@@ -466,7 +466,7 @@ async fn skipped_routing_crash_preserves_known_zero_and_paid_pending_stays_unkno
             Ok(())
         }).await.unwrap();
         assert!(
-            matches!(store.record_routing_started(&claim,paid,None).await.unwrap().unwrap().unwrap().event,SessionEvent::RoutingStarted {run_id} if run_id==run)
+            matches!(store.record_routing_started(&claim, paid, None, (None, None)).await.unwrap().unwrap().unwrap().event,SessionEvent::RoutingStarted {run_id} if run_id==run)
         );
         store.close().await.unwrap();
         let reopened = Store::open(directory.path().join("sessions.sqlite3"))

@@ -146,7 +146,14 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
                 Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
         }
-    }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "check process group did not exit"))?
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "check process group did not exit",
+        )
+    })?
 }
 
 #[cfg(target_os = "linux")]
@@ -486,12 +493,20 @@ pub(super) async fn run_process(
         } else {
             confirm_group_exit(pid).await.err()
         };
-        let reap_error = if reaped_status.is_some() { None } else { child.wait().await.err() };
+        let reap_error = if reaped_status.is_some() {
+            None
+        } else {
+            child.wait().await.err()
+        };
         if reap_error.is_none() {
             group.disarm();
         }
         #[cfg(not(target_os = "linux"))]
-        let confirmation_error = if reap_error.is_none() { confirm_reaped_group_exit(pid).await.err() } else { None };
+        let confirmation_error = if reap_error.is_none() {
+            confirm_reaped_group_exit(pid).await.err()
+        } else {
+            None
+        };
         let group_error = group_error.or(confirmation_error);
         if group_error.is_some() || leader_error.is_some() || reap_error.is_some() {
             return Err(ProcessError::Cleanup {
@@ -970,7 +985,10 @@ pub(super) async fn execute(
                     Err(error) => {
                         break Completion::Process(ProcessResult {
                             outcome: ProcessOutcome::Failed,
-                            tail: truncate_utf8(format!("check workspace could not open: {error}"), OUTPUT_BYTES),
+                            tail: truncate_utf8(
+                                format!("check workspace could not open: {error}"),
+                                OUTPUT_BYTES,
+                            ),
                         });
                     }
                 };

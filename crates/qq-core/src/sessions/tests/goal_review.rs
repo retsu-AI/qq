@@ -396,7 +396,7 @@ async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_un
         };
         if routing != "none" {
             store
-                .record_routing_started(&claim, true, None)
+                .record_routing_started(&claim, true, None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()
@@ -490,9 +490,11 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
     for (boundary, own_goal) in [
         ("claim", false),
         ("routing", false),
+        ("routing_tokens", false),
         ("start", false),
         ("claim", true),
         ("routing", true),
+        ("routing_tokens", true),
         ("start", true),
     ] {
         let (_directory, store, parent) = super::goals::model_goal_claim(true).await;
@@ -528,7 +530,12 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
         store
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
-                goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                if boundary == "routing_tokens" {
+                    goal.budget.max_total_tokens = Some(20_000);
+                    goal.counters.usage = Some(usage(15_000, 0));
+                } else {
+                    goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                }
                 crate::sessions::goals::save(connection, &goal)
             })
             .await
@@ -556,10 +563,20 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
                 ),
                 "queued sponsor deadline must not restart"
             ),
+            "routing_tokens" => assert!(
+                matches!(
+                    store
+                        .record_routing_started(&claim, true, Some(0), (Some(10_000), Some(0)))
+                        .await
+                        .unwrap(),
+                    Err(claim::GoalStartRefusal::RoutingTokens)
+                ),
+                "a child cannot spend past its sponsor's fresh token remainder"
+            ),
             "routing" => assert!(
                 matches!(
                     store
-                        .record_routing_started(&claim, true, Some(0))
+                        .record_routing_started(&claim, true, Some(0), (None, None))
                         .await
                         .unwrap(),
                     Err(claim::GoalStartRefusal::Exhausted(

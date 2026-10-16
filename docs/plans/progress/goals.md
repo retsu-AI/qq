@@ -895,3 +895,18 @@ A real check that writes byte 0xff to its Linux process name reproduced Cleanup
 InvalidData before the correction. Bounded byte reads now decode only the numeric
 stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 `b669c0a1-d4f6-44bc-9ca3-176b4894c37b`: 6/6 process tests passed.
+
+### 2026-10-16 — G3 current-head process and routing corrections
+
+- Reproduced workspace disappearance poisoning the host, unconfirmed portable
+  process groups, and token-capped routing dispatch. Test-first commits retain
+  each red regression. Missing workspaces now settle failed checks normally;
+  portable supervision requires bounded group absence after reap and disarm.
+- Routers declare conservative input/output bounds (default unknown). Atomic
+  admission reuses current paid-owner accounting, including pending spend,
+  before dispatch. TypeSafe leaves billed output unknown and refuses finite
+  total/output caps for paid routing; free single-candidate routing remains0/0.
+- Focused nextest `7bcd21be-7579-4c7d-a318-6356daa6bc3c`:49/49 pass.
+  Independent source review finds no blocker. Linux exercises the portable
+  signal-zero primitive; actual macOS execution remains unverified locally.
+  Full gate, stack integration/publication and review resolution remain pending.

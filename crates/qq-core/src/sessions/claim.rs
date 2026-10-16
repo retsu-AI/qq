@@ -994,6 +994,7 @@ pub(super) enum RoutingCostRefusal {
 pub(super) enum GoalStartRefusal {
     PerRunDuration,
     RoutingCost(RoutingCostRefusal),
+    RoutingTokens,
     Reprepare {
         limits: Box<RunLimits>,
         final_slot: bool,

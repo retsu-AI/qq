@@ -31,6 +31,14 @@ pub trait TaskRouter: Send + Sync + 'static {
     fn configuration_identity(&self) -> &str;
     fn route(&self, task: String) -> TaskRoutingFuture;
     fn max_cost_usd_nanos(&self) -> Option<u64>;
+    /// Conservative billed input ceiling, including cached input.
+    fn max_input_tokens(&self) -> Option<u64> {
+        None
+    }
+    /// Conservative billed output ceiling, including hidden reasoning.
+    fn max_output_tokens(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl LoadedRuntime {

@@ -243,7 +243,7 @@ async fn goal_upgrade_preserves_independent_routing_receipts_before_main_start()
             let claim = store.reserve_next_run(false).await.unwrap().unwrap();
             let run = claim.identity.run_id;
             store
-                .record_routing_started(&claim, state != "skipped", None)
+                .record_routing_started(&claim, state != "skipped", None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()

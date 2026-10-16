@@ -1856,8 +1856,14 @@ anchor, so rechecking the absolute goal deadline does not subtract preparation
 time again. Initial goal-owned and sponsored-child provider output is capped by the accepted total
 and output token limits. When task routing precedes that request, the runtime
 meter charges its reported spend once and caps initial output by the positive
-remaining total/output allowance. Exhausted or unknown routing remainder stops
-before the main provider dispatch. Durable limits remain inclusive of routing
+remaining total/output allowance. Before routing dispatch, the same transaction
+checks declared maximum input, output and cost against caller limits and every
+paid owner's current remainder, including pending spend. Unknown relevant bounds
+refuse finite caps before committing a pending marker. The TypeSafe adapter
+bounds input by its64KiB request limit but has no billed-output ceiling; finite
+output or total caps therefore require disabling multi-candidate routing. Its
+single-candidate path declares zero spend. Exhausted or unknown routing remainder
+stops before the main provider dispatch. Durable limits remain inclusive of routing
 spend; request shaping does not subtract it from the allowance a second time.
 
 Initial delegated prompt runs persist their immediate paid-owner run in the
@@ -1898,10 +1904,15 @@ questions in the workspace until confirmed process teardown and terminal commit.
 The Unix check supervisor reuses minimal-environment/cwd preparation and process
 groups. It observes leader exit without reaping, terminates the group while the
 leader still pins its id, then reaps; this also stops background descendants that
-closed their output pipes. Bounded blocking permits cover preparation and exit
-observation. Cancellation and the shared deadline drain the process group. A
+closed their output pipes. Linux confirms process exit through pidfds before
+reaping the pinned leader. Other Unix targets reap the killed leader, disarm
+signals, and require process-group absence within five seconds using signal-zero
+probes. Reused group ids can only delay confirmation. Bounded blocking permits
+cover preparation and exit observation. Cancellation and the shared deadline drain the process group. A
 resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
-rather than publishing completion. Results retain an exit/timeout diagnostic and
+rather than publishing completion. A workspace-open failure before spawn settles
+as a failed check through ordinary drain and finish, preserving host availability.
+Results retain an exit/timeout diagnostic and
 UTF-8 output suffix within4KiB, including the diagnostic header. Every check
 settlement persists that diagnostic on its original run's assistant message and
 publishes the existing message event in the terminal transaction, even if the

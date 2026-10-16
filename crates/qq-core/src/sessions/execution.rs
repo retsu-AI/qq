@@ -786,7 +786,12 @@ async fn route_run(
         pause_before_routing_admission(claimed.identity.run_id).await;
         match inner
             .store
-            .record_routing_started(claimed, !oversized && !task.is_empty(), routing_cost)
+            .record_routing_started(
+                claimed,
+                !oversized && !task.is_empty(),
+                routing_cost,
+                (router.max_input_tokens(), router.max_output_tokens()),
+            )
             .await
         {
             Ok(Ok(Some(event))) => {
@@ -810,6 +815,12 @@ async fn route_run(
             }
             Ok(Err(claim::GoalStartRefusal::Exhausted(reason))) => {
                 return Err(goal_admission_exhaustion(reason));
+            }
+            Ok(Err(claim::GoalStartRefusal::RoutingTokens)) => {
+                return Err(RunOutcome::Failed { failure: RunFailure {
+                    kind: RunFailureKind::Configuration,
+                    message: "task routing requires declared token ceilings within the current caller and goal allowance; configure routing bounds or disable task routing".to_owned(),
+                }});
             }
             Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal))) => {
                 let message = match refusal {
@@ -1498,7 +1509,8 @@ pub(super) async fn execute_run(
                             claim::GoalStartRefusal::Reprepare { .. } => {
                                 unreachable!("reprepare handled before terminal refusal")
                             }
-                            claim::GoalStartRefusal::RoutingCost(_) => {
+                            claim::GoalStartRefusal::RoutingCost(_)
+                            | claim::GoalStartRefusal::RoutingTokens => {
                                 unreachable!("main start does not check routing cost")
                             }
                         };
