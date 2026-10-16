@@ -157,7 +157,7 @@ async fn once_check(success: bool) {
             serde_json::from_value(serde_json::json!({
                 "type":"set_goal", "session_id":session_id, "objective":"verify checked completion",
                 "check":{"command":command,"timeout_ms":5000},
-                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+                "budget":{"max_goal_runs":if success { 1 } else { 10 },"deadline_ms":now_ms()+60_000}
             }))
             .unwrap(),
         )
