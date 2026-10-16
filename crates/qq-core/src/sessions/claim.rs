@@ -64,6 +64,10 @@ pub(super) struct RunIdentity {
 #[derive(Clone)]
 pub(super) struct ClaimedRun {
     pub(super) identity: RunIdentity,
+    /// Immutable active goal captured at reservation, never reloaded during preparation.
+    pub(super) goal: Option<Arc<qq_protocol::GoalSnapshot>>,
+    pub(super) goal_initial_notice: Option<Arc<str>>,
+    pub(super) origin: Option<qq_protocol::RunOrigin>,
     pub(super) workspace: String,
     /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
     /// run may spawn only while `depth < effective_max_depth`.
@@ -159,6 +163,9 @@ impl ClaimedRun {
     pub(super) fn panic_settlement_claim(&self) -> Self {
         Self {
             identity: self.identity,
+            goal: None,
+            goal_initial_notice: None,
+            origin: self.origin,
             workspace: String::new(),
             user_initiated: self.user_initiated,
             literal_slash: self.literal_slash,
@@ -471,10 +478,15 @@ pub(super) fn reserve_next_run_recoverable(
                                     AND role = 'user' AND steering = 0
                                     AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0),
                     (SELECT owner.plan_descriptor_json FROM runs owner WHERE owner.id = s.owner_run_id),
-                    s.owner_run_id IS NOT NULL, s.model_is_fallback
+                    s.owner_run_id IS NOT NULL, s.model_is_fallback,
+                    CASE WHEN r.goal_snapshot_json IS NULL THEN g.goal_id ELSE r.goal_id END,
+                    CASE WHEN r.goal_snapshot_json IS NULL THEN g.revision ELSE r.goal_revision END,
+                    CASE WHEN r.goal_snapshot_json IS NULL THEN g.payload_json ELSE r.goal_snapshot_json END, r.origin_json,
+                    r.goal_initial_notice, r.goal_snapshot_json IS NOT NULL
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
+             LEFT JOIN session_goals g ON g.session_id = s.id AND g.live = 1
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
                AND s.depth = ?1
@@ -517,6 +529,12 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(26)?,
                     row.get::<_, bool>(27)?,
                     row.get::<_, bool>(28)?,
+                    row.get::<_, Option<String>>(29)?,
+                    row.get::<_, Option<u32>>(30)?,
+                    row.get::<_, Option<String>>(31)?,
+                    row.get::<_, Option<String>>(32)?,
+                    goals::read_notice(row, 33)?,
+                    row.get::<_, bool>(34)?,
                 ))
             },
         )
@@ -551,6 +569,12 @@ pub(super) fn reserve_next_run_recoverable(
         parent_descriptor,
         has_owner,
         model_is_fallback,
+        goal_id,
+        goal_revision,
+        goal_payload,
+        origin_json,
+        goal_initial_notice,
+        goal_frozen,
     )) = row
     else {
         return Ok(None);
@@ -585,6 +609,37 @@ pub(super) fn reserve_next_run_recoverable(
     };
     let session_id: SessionId = parse_id(&session)?;
     let command_id: CommandId = parse_id(&command)?;
+    let goal = match (goal_id, goal_revision, goal_payload) {
+        (None, None, None) => None,
+        (None, None, Some(payload)) if payload == "null" => None,
+        (Some(id), Some(revision), Some(payload)) => {
+            if payload.len() > 64 * 1024 {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            let goal: qq_protocol::GoalSnapshot = serde_json::from_str(&payload)?;
+            if goal.goal_id.to_string() != id
+                || goal.revision != revision
+                || goal.session_id != session_id
+            {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            if goal.status == qq_protocol::GoalStatus::Active && kind == "prompt" {
+                Some(Arc::new(goal))
+            } else {
+                None
+            }
+        }
+        _ => return Err(SessionRuntimeError::CONSTRAINT),
+    };
+
+    let goal_initial_notice = match (&goal, goal_initial_notice, goal_frozen) {
+        (None, None, _) => None,
+        (Some(_), Some(notice), true) => Some(Arc::<str>::from(notice)),
+        (Some(goal), None, false) if crate::tools::goal::fits_notice(goal) => Some(
+            Arc::<str>::from(crate::tools::goal::render_notice(goal, now_ms())),
+        ),
+        _ => return Err(SessionRuntimeError::CONSTRAINT),
+    };
     let user_message_id = parse_id::<MessageId>(&user_message)?;
     let (user_initiated, literal_slash) = match command_request {
         Some(request) => {
@@ -755,8 +810,15 @@ pub(super) fn reserve_next_run_recoverable(
     let cancel_requested = run_cancel_requested(&transaction, run_id)?;
     let file_state = session_file_state_rows(&transaction, session_id)?;
     let pending_steering = pending_steering_rows(&transaction, run_id)?;
+    let origin = origin_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     transaction.commit()?;
     Ok(Some(ClaimedRun {
+        origin,
+        goal,
+        goal_initial_notice,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -813,13 +875,25 @@ pub(super) fn prepared_context_bytes(
     .map_err(|_| SessionRuntimeError::OutputTooLarge)
 }
 
+pub(super) struct RunStartMetadata<'a> {
+    pub(super) goal: Option<&'a qq_protocol::GoalSnapshot>,
+    pub(super) goal_initial_notice: Option<&'a str>,
+    pub(super) origin: Option<qq_protocol::RunOrigin>,
+}
+
 pub(super) fn start_reserved_run(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     audit: &PreparedRunAudit,
+    metadata: RunStartMetadata<'_>,
     resolved_input: Option<&crate::input::ResolvedInput>,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    let RunStartMetadata {
+        goal,
+        goal_initial_notice,
+        origin,
+    } = metadata;
     let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
     let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
     let plan_identity = serde_json::to_string(&audit.plan_identity)?;
@@ -871,6 +945,7 @@ pub(super) fn start_reserved_run(
     if session_started != 1 {
         return Ok(None);
     }
+    goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
     transaction.execute(
         "UPDATE messages SET state = 'complete'
              WHERE run_id = ?1 AND role = 'user' AND state = 'queued'",
@@ -898,6 +973,7 @@ pub(super) fn start_reserved_run(
         &transaction,
         EventContext::for_run(store_id, identity, now).uncaused(),
         SessionEvent::RunStarted {
+            origin,
             session: Box::new(summary),
             run_id: identity.run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
@@ -1075,7 +1151,7 @@ pub(super) fn load_run(
             "SELECT session_id, status, outcome_json, prompt_identity_json,
                     resolved_model_json, usage_json, context_tokens,
                     estimated_cost_usd_nanos, limits_json, plan_identity_json, correlation_json,
-                    audit_json, final_output_json
+                    audit_json, final_output_json, goal_id, goal_revision, origin_json
              FROM runs WHERE id = ?1",
             [run_id.to_string()],
             |row| {
@@ -1093,6 +1169,9 @@ pub(super) fn load_run(
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<u32>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
                 ))
             },
         )
@@ -1112,8 +1191,20 @@ pub(super) fn load_run(
                 correlation,
                 audit,
                 final_output,
+                goal_id,
+                goal_revision,
+                origin,
             )| {
                 Ok(RunSnapshot {
+                    origin: origin.as_deref().map(serde_json::from_str).transpose()?,
+                    goal: match (goal_id, goal_revision) {
+                        (Some(id), Some(revision)) => Some(qq_protocol::GoalIdentity {
+                            goal_id: parse_id(&id)?,
+                            revision,
+                        }),
+                        (None, None) => None,
+                        _ => return Err(SessionRuntimeError::CONSTRAINT),
+                    },
                     id: run_id,
                     session_id: parse_id(&session)?,
                     status: parse_run_status(&status)?,

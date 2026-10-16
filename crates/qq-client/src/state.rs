@@ -422,8 +422,12 @@ impl SessionStore {
             let stats = view.runs.entry(run.id).or_default();
             // A running run outside the session's active slot is internal.
             // Keep that identity if the prompt settles before its step does.
-            stats.owned_step = run.status == qq_protocol::RunStatus::Running
-                && view.summary.active_run_id != Some(run.id);
+            stats.origin = run.origin;
+            stats.owned_step = run
+                .origin
+                .is_some_and(qq_protocol::RunOrigin::is_in_run_compaction)
+                || (run.status == qq_protocol::RunStatus::Running
+                    && view.summary.active_run_id != Some(run.id));
             stats.outcome = run.outcome.clone();
             stats.usage = run.usage;
             stats.cost_usd_nanos = run.estimated_cost_usd_nanos;
@@ -459,6 +463,7 @@ impl SessionStore {
                     stats.turns = observed.turns;
                     stats.live_cost_usd_nanos = observed.live_cost_usd_nanos;
                     stats.owned_step |= observed.owned_step;
+                    stats.origin = stats.origin.or(observed.origin);
                 }
             }
             view.unread = previous.unread;
@@ -479,6 +484,7 @@ impl SessionStore {
         // body's bounded tool-call window may not reach every one.
         view.live.set_holds(&view.summary.pending_holds);
         view.side_questions = snapshot.side_questions;
+        view.goal = snapshot.goal;
         view.messages = Some(messages);
         view.tool_calls = Some(tool_calls);
         self.insert(session_id, view);
@@ -746,6 +752,7 @@ impl Reasoning {
 /// outcome and usage until the protocol records run timing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
+    pub origin: Option<qq_protocol::RunOrigin>,
     /// An internal step observed outside the session's active-run slot.
     /// Its finish remains bookkeeping after the active prompt settles.
     pub owned_step: bool,
@@ -872,6 +879,7 @@ pub struct ApprovalEscalation {
 /// the warm body, live status, and per-run detail a transcript shows.
 #[derive(Debug, Clone)]
 pub struct SessionView {
+    pub goal: Option<Box<qq_protocol::GoalSnapshot>>,
     pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
     /// The last foreground slot identity, retained across idle summaries so
@@ -972,6 +980,7 @@ impl SessionView {
         live.set_holds(&summary.pending_holds);
         Self {
             side_questions: Vec::new(),
+            goal: None,
             summary,
             foreground_run_id,
             messages: None,

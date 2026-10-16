@@ -20,6 +20,12 @@ pub(super) struct AppliedCommand {
     pub(super) replayed: bool,
 }
 
+#[derive(Default)]
+pub(super) struct CommandAdmission {
+    pub(super) seed: WorkspaceGrantSeed,
+    pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
+}
+
 pub(super) struct CreatedChildRun {
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
@@ -201,8 +207,8 @@ pub(super) fn create_child_run(
     transaction.execute(
         "INSERT INTO runs(
                 id, session_id, command_id, user_message_id, assistant_message_id,
-                status, created_at_ms, limits_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
+                status, created_at_ms, limits_json, origin_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8)",
         params![
             run_id.to_string(),
             session_id.to_string(),
@@ -211,6 +217,10 @@ pub(super) fn create_child_run(
             assistant_message_id.to_string(),
             now,
             limits_json,
+            serde_json::to_string(&qq_protocol::RunOrigin::Delegated {
+                owner_run_id: parent_run_id,
+                purpose
+            })?,
         ],
     )?;
     transaction.execute(
@@ -322,7 +332,7 @@ pub(super) fn execute_command(
     command_id: CommandId,
     command: SessionCommand,
     canonical_workspace: Option<Result<String, SessionRuntimeError>>,
-    seed: &WorkspaceGrantSeed,
+    admission: &CommandAdmission,
     origin: CommandOrigin,
 ) -> Result<AppliedCommand, SessionRuntimeError> {
     let request_json = serde_json::to_string(&command)?;
@@ -386,6 +396,110 @@ pub(super) fn execute_command(
     let mut cascade_cancels = Vec::new();
     let mut side_launch = None;
     let (receipt, schedule) = match command {
+        SessionCommand::SetGoal {
+            session_id,
+            objective,
+            check,
+            budget,
+            expected,
+            replace,
+        } => {
+            let goal = goals::set(
+                &transaction,
+                session_id,
+                goals::Specification {
+                    objective,
+                    check,
+                    budget: *budget,
+                },
+                expected,
+                replace,
+                now,
+            )?;
+            let workspace_id = session_workspace(&transaction, session_id)?;
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::GoalUpdated {
+                    goal: Box::new(goal.clone()),
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::GoalUpdated {
+                        session_id,
+                        goal: Box::new(goal),
+                    },
+                },
+                false,
+            )
+        }
+        SessionCommand::GoalControl {
+            session_id,
+            expected,
+            action,
+        } => {
+            let (goal, clear) = goals::control(
+                &transaction,
+                session_id,
+                expected,
+                action,
+                now,
+                admission.goal_check_policy.as_ref(),
+            )?;
+            let workspace_id = session_workspace(&transaction, session_id)?;
+            let (event_body, outcome) = if clear {
+                (
+                    SessionEvent::GoalCleared {
+                        session_id,
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    CommandOutcome::GoalCleared {
+                        session_id,
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                )
+            } else {
+                (
+                    SessionEvent::GoalUpdated {
+                        goal: Box::new(goal.clone()),
+                    },
+                    CommandOutcome::GoalUpdated {
+                        session_id,
+                        goal: Box::new(goal),
+                    },
+                )
+            };
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                event_body,
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome,
+                },
+                false,
+            )
+        }
         SessionCommand::CancelSideQuestion { side_question_id } => {
             let item = side_questions::find_side_snapshot(&transaction, side_question_id)?
                 .ok_or(SessionRuntimeError::SideQuestionNotFound)?;
@@ -589,7 +703,7 @@ pub(super) fn execute_command(
                     ],
                 )
                 ?;
-            insert_seed_grants(&transaction, session_id, seed, now)?;
+            insert_seed_grants(&transaction, session_id, &admission.seed, now)?;
             let summary = load_session_summary(&transaction, session_id)?;
             let event = append_event(
                 &transaction,
@@ -708,8 +822,8 @@ pub(super) fn execute_command(
                 "INSERT INTO runs(
                         id, session_id, command_id, user_message_id, assistant_message_id,
                         status, created_at_ms, limits_json, input_json, correlation_json,
-                        output_contract_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10)",
+                        output_contract_json, origin_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     run_id.to_string(),
                     session_id.to_string(),
@@ -721,6 +835,7 @@ pub(super) fn execute_command(
                     input_json,
                     correlation_json,
                     output_contract_json,
+                    serde_json::to_string(&qq_protocol::RunOrigin::UserPrompt {})?,
                 ],
             )?;
             transaction.execute(
@@ -1575,8 +1690,8 @@ pub(super) fn execute_command(
             transaction.execute(
                 "INSERT INTO runs(
                         id, session_id, command_id, user_message_id, assistant_message_id,
-                        status, kind, created_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 'compaction', ?6)",
+                        status, kind, created_at_ms, origin_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 'compaction', ?6, ?7)",
                 params![
                     run_id.to_string(),
                     session_id.to_string(),
@@ -1584,6 +1699,7 @@ pub(super) fn execute_command(
                     user_message_id.to_string(),
                     assistant_message_id.to_string(),
                     now,
+                    serde_json::to_string(&qq_protocol::RunOrigin::ManualCompaction {})?,
                 ],
             )?;
             // The internal run flows through the ordinary queue accounting so

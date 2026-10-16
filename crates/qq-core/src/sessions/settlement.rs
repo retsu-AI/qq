@@ -164,6 +164,7 @@ fn settle_abandoned_owned_summary(
     summary.identity.run_id = parse_id(run_id)?;
     summary.identity.command_id = parse_id(command_id)?;
     summary.identity.kind = RunKind::Compaction;
+    summary.goal = None;
     events.push(expect_settled(settle_run(
         transaction,
         store_id,
@@ -225,10 +226,20 @@ pub(super) fn settle_run(
     accounting: Option<RunAccounting>,
     cause: SettlementCause,
 ) -> Result<RunSettled, SessionRuntimeError> {
-    let already_settled = run_is_settled(transaction, claimed.identity.run_id)?;
-    if already_settled {
+    let state = transaction
+        .query_row(
+            "SELECT outcome_json IS NOT NULL, origin_json FROM runs WHERE id = ?1",
+            [claimed.identity.run_id.to_string()],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((false, origin_json)) = state else {
         return Ok(None);
-    }
+    };
+    let origin = origin_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     let now = now_ms();
     let caused_by = match cause {
         SettlementCause::Executor => Some(claimed.identity.command_id),
@@ -413,6 +424,7 @@ pub(super) fn settle_run(
         transaction,
         context,
         SessionEvent::RunFinished {
+            origin,
             session: Box::new(summary),
             run_id: claimed.identity.run_id,
             outcome,
@@ -488,11 +500,15 @@ pub(super) fn finish_queued_run_with_outcome(
              WHERE id = ?1",
         params![session_id.to_string(), now, run_id.to_string()],
     )?;
-    let usage_json: Option<String> = transaction.query_row(
-        "SELECT usage_json FROM runs WHERE id = ?1",
+    let (usage_json, origin_json): (Option<String>, Option<String>) = transaction.query_row(
+        "SELECT usage_json, origin_json FROM runs WHERE id = ?1",
         [run_id.to_string()],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let origin = origin_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     let usage = usage_json
         .map(|encoded| serde_json::from_str(&encoded))
         .transpose()?;
@@ -501,6 +517,7 @@ pub(super) fn finish_queued_run_with_outcome(
         transaction,
         EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
         SessionEvent::RunFinished {
+            origin,
             session: Box::new(summary),
             run_id,
             outcome,
@@ -702,6 +719,9 @@ pub(super) fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
+                goal: None,
+                goal_initial_notice: None,
+                origin: None,
                 checkpoint: None,
                 routing: None,
                 approval_delegate: None,
@@ -1156,6 +1176,9 @@ pub(super) fn recover_interrupted_runs(
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
         let claimed = ClaimedRun {
+            goal: None,
+            goal_initial_notice: None,
+            origin: None,
             checkpoint: None,
             routing: None,
             approval_delegate: None,

@@ -184,6 +184,7 @@ struct RuntimeFactoryInner {
     /// folded into the plan key so a compile from before the grant is not
     /// served after it. Never written to the trust state.
     process_trust: std::sync::Mutex<Vec<ProcessTrust>>,
+    check_policy_slots: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 #[derive(Clone)]
@@ -324,6 +325,7 @@ impl RuntimeFactory {
                 mcp: crate::mcp::McpRegistryCache::new(),
                 plans: PlanCache::new(PlanCacheLimits::default()),
                 process_trust: std::sync::Mutex::new(Vec::new()),
+                check_policy_slots: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -2608,6 +2610,75 @@ impl RuntimeLoader for RuntimeFactory {
 }
 
 impl WorkspaceGrantAuthority for RuntimeFactory {
+    fn validate_goal_check(
+        &self,
+        workspace: &Path,
+        command: &str,
+    ) -> qq_core::GoalCheckPolicyFuture {
+        if command.len() > 1024 {
+            return Box::pin(std::future::ready(Err(
+                qq_core::GoalCheckPolicyError::ManagedDenied,
+            )));
+        }
+        let factory = self.clone();
+        let workspace = workspace.to_owned();
+        let command = command.to_owned();
+        Box::pin(async move {
+            let slots = factory
+                .inner
+                .check_policy_slots
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+            let permit = match Arc::clone(slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => return Err(qq_core::GoalCheckPolicyError::Overloaded),
+            };
+            let validated = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let load = match factory.request_for_workspace(&workspace, None) {
+                    Ok(load) => load,
+                    Err(error) => {
+                        return Err(qq_core::GoalCheckPolicyError::Configuration(
+                            RuntimeLoadError {
+                                kind: error.failure_kind(),
+                                message: error.to_string(),
+                            },
+                        ));
+                    }
+                };
+                let snapshot = match factory.load_for_client(&load) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Err(qq_core::GoalCheckPolicyError::Configuration(
+                            RuntimeLoadError {
+                                kind: error.failure_kind(),
+                                message: error.to_string(),
+                            },
+                        ));
+                    }
+                };
+                if snapshot
+                    .policy()
+                    .deny_tools()
+                    .iter()
+                    .any(|name| name == "shell")
+                    || qq_core::goal_check_shell_denied(
+                        &command,
+                        snapshot.policy().deny_shell_prefixes(),
+                    )
+                {
+                    Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+            match validated {
+                Ok(result) => result,
+                Err(_) => Err(qq_core::GoalCheckPolicyError::Unavailable),
+            }
+        })
+    }
+
     fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture {
         let factory = self.clone();
         let workspace = workspace.to_owned();
@@ -3302,10 +3373,26 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::IdempotencyConflict
         | SessionRuntimeError::CursorStoreMismatch
         | SessionRuntimeError::CursorWorkspaceMismatch
+        | SessionRuntimeError::GoalConflict { .. }
+        | SessionRuntimeError::GoalNotFound
+        | SessionRuntimeError::GoalImmutable
+        | SessionRuntimeError::GoalCancellationPending
+        | SessionRuntimeError::GoalCheckApprovalRequired
+        | SessionRuntimeError::GoalCheckMissing
+        | SessionRuntimeError::GoalCheckCommandMismatch
+        | SessionRuntimeError::GoalCheckForbidden
+        | SessionRuntimeError::GoalBudgetSpent
+        | SessionRuntimeError::InvalidGoal(_)
+        | SessionRuntimeError::GoalCheckPolicy(
+            qq_core::GoalCheckPolicyError::ManagedDenied
+            | qq_core::GoalCheckPolicyError::Configuration(_),
+        )
         | SessionRuntimeError::InvalidPageLimit) => {
             ServerHandlerError::InvalidRequest(error.to_string())
         }
         SessionRuntimeError::SideQuestionBusy
+        | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
+        | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
@@ -6546,6 +6633,90 @@ mod tests {
         validate_route(&factory, &workspace, "custom/live-model")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn goal_check_policy_validation_has_a_bounded_lazy_blocking_pool() {
+        let fixture = RuntimeFixture::new();
+        fs::write(
+            fixture.path("global/config.ron"),
+            "(version: 1, model: \"openai/gpt-5.6\")",
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let workspace = fixture.path("work");
+        assert!(factory.inner.check_policy_slots.get().is_none());
+        assert_eq!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, &"x".repeat(1025))
+                .await,
+            Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+        );
+        assert!(factory.inner.check_policy_slots.get().is_none());
+        let slots = factory
+            .inner
+            .check_policy_slots
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+        let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
+        assert_eq!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
+            Err(qq_core::GoalCheckPolicyError::Overloaded)
+        );
+        drop(held);
+        assert_eq!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_check_authority_loads_current_managed_denies_and_refuses_bad_policy() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let workspace = fixture.path("work");
+        assert!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+                .await
+                .is_ok()
+        );
+        for policy in [
+            "deny_tools: [\"shell\"]",
+            "deny_shell_prefixes: [\"cargo test\"]",
+        ] {
+            fs::write(
+                fixture.path("managed/managed.ron"),
+                format!("(version: 1, policy: ({policy}))"),
+            )
+            .unwrap();
+            assert!(matches!(
+                WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+                    .await,
+                Err(qq_core::GoalCheckPolicyError::ManagedDenied)
+            ));
+            for command in [
+                "bash --rcfile /dev/null -c 'cargo test'",
+                "python3 -c '__import__(\"subprocess\").run([\"cargo\",\"test\"])'",
+                "fish -c 'cargo test'",
+                "busybox sh -c 'cargo test'",
+            ] {
+                assert_eq!(
+                    WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, command)
+                        .await,
+                    Err(qq_core::GoalCheckPolicyError::ManagedDenied),
+                    "{command}"
+                );
+            }
+        }
+        fs::write(fixture.path("managed/managed.ron"), "(version: 1)").unwrap();
+        assert!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test")
+                .await
+                .is_ok()
+        );
+        fs::write(fixture.path("managed/managed.ron"), "invalid RON").unwrap();
+        assert!(matches!(
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "cargo test").await,
+            Err(qq_core::GoalCheckPolicyError::Configuration(_))
+        ));
     }
 
     #[tokio::test]

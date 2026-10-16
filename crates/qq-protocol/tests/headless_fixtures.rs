@@ -153,6 +153,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             1,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(SessionStatus::Running, true)),
                 run_id: RUN,
                 plan: None,
@@ -215,6 +216,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         event(
             7,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary(SessionStatus::Idle, false)),
                 run_id: RUN,
                 outcome,
@@ -329,7 +331,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 32);
+    assert_eq!(PROTOCOL_VERSION, 33);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -518,6 +520,7 @@ fn current_version_streams_match_their_goldens() {
                     envelope: Box::new(envelope(
                         2,
                         SessionEvent::RunFinished {
+                            origin: None,
                             session: Box::new(summary(SessionStatus::Idle, false)),
                             run_id: RUN,
                             outcome: RunOutcome::Cancelled,
@@ -583,6 +586,7 @@ fn current_version_streams_match_their_goldens() {
                     envelope: Box::new(envelope(
                         3,
                         SessionEvent::RunFinished {
+                            origin: None,
                             session: Box::new(summary(SessionStatus::Idle, false)),
                             run_id: RUN,
                             outcome: RunOutcome::Cancelled,
@@ -640,6 +644,7 @@ fn current_version_streams_match_their_goldens() {
                         3,
                         COMPACTION,
                         SessionEvent::RunStarted {
+                            origin: None,
                             session: Box::new(compacting()),
                             run_id: COMPACTION,
                             plan: None,
@@ -657,6 +662,7 @@ fn current_version_streams_match_their_goldens() {
                         5,
                         COMPACTION,
                         SessionEvent::RunFinished {
+                            origin: None,
                             session: Box::new(compacting()),
                             run_id: COMPACTION,
                             outcome: RunOutcome::Completed,

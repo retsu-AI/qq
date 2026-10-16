@@ -286,6 +286,7 @@ pub(super) fn load_session_snapshot(
     }
     tool_calls.reverse();
     Ok(SessionSnapshot {
+        goal: goals::load_live(transaction, session_id)?.map(Box::new),
         side_questions,
         summary,
         messages,

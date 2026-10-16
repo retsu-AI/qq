@@ -336,6 +336,14 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub(super) async fn hold_control_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.inner.control_slots)
+            .acquire_many_owned(CONTROL_QUEUE_CAPACITY as u32)
+            .await
+            .expect("test store must remain open")
+    }
+
+    #[cfg(test)]
     pub(super) fn catch_up_reads(&self) -> u64 {
         self.inner.catch_up_reads.load(Ordering::Relaxed)
     }
@@ -675,21 +683,21 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_seed(command_id, command, WorkspaceGrantSeed::default(), None)
+        self.command_with_admission(command_id, command, CommandAdmission::default(), None)
             .await
     }
 
-    pub(super) async fn command_with_seed(
+    pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         self.command_from(
             command_id,
             command,
-            seed,
+            admission,
             promotion_wakeup,
             CommandOrigin::Client,
         )
@@ -706,7 +714,7 @@ impl Store {
         self.command_from(
             command_id,
             SessionCommand::CancelRun { run_id },
-            WorkspaceGrantSeed::default(),
+            CommandAdmission::default(),
             None,
             CommandOrigin::RuntimeSettlement,
         )
@@ -717,7 +725,7 @@ impl Store {
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
@@ -760,7 +768,7 @@ impl Store {
                 command_id,
                 command,
                 canonical_workspace,
-                &seed,
+                &admission,
                 origin,
             )?;
             if applied.grant_promotion_pending
@@ -801,7 +809,7 @@ impl Store {
                 command_id,
                 SessionCommand::CancelRun { run_id },
                 None,
-                &WorkspaceGrantSeed::default(),
+                &CommandAdmission::default(),
                 CommandOrigin::RuntimeSettlement,
             )
         })
@@ -993,12 +1001,20 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(
                 connection,
                 store_id,
                 identity,
                 &audit,
+                claim::RunStartMetadata {
+                    goal: goal.as_deref(),
+                    goal_initial_notice: goal_initial_notice.as_deref(),
+                    origin,
+                },
                 resolved_input.as_deref(),
             )
         })
@@ -1707,6 +1723,27 @@ impl Store {
         .await
     }
 
+    pub(super) async fn interrupt_unstarted_tool_call(
+        &self,
+        claimed: &ClaimedRun,
+        tool_call_id: ToolCallId,
+        message: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            super::tool_calls::settle_unstarted_tool_call(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                &message,
+                true,
+            )
+        })
+        .await
+    }
+
     pub(super) async fn request_tool_approval(
         &self,
         claimed: &ClaimedRun,
@@ -1774,14 +1811,45 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
+    pub(super) async fn update_model_goal(
+        &self,
+        claimed: &ClaimedRun,
+        arguments: crate::tools::goal::UpdateGoalArgs,
+    ) -> Result<crate::tools::goal::UpdateGoalResult, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            goals::update_model(
+                connection,
+                store_id,
+                identity,
+                goal.as_deref(),
+                origin,
+                arguments,
+            )
+        })
+        .await
+    }
+
     pub(super) async fn record_routing_started(
         &self,
         claimed: &ClaimedRun,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
-            streaming::record_routing_started(connection, store_id, identity)
+            streaming::record_routing_started(
+                connection,
+                store_id,
+                identity,
+                goal.as_deref(),
+                goal_initial_notice.as_deref(),
+            )
         })
         .await
     }
@@ -1959,6 +2027,7 @@ impl Store {
         accounting: Option<RunAccounting>,
         record_budget: usize,
         retained_bytes: u64,
+        goal_notice: Option<Arc<str>>,
     ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1967,10 +2036,13 @@ impl Store {
                 connection,
                 store_id,
                 &claimed,
-                summary,
-                accounting,
-                record_budget,
-                retained_bytes,
+                compaction::InRunSummaryCommit {
+                    summary,
+                    accounting,
+                    record_budget,
+                    retained_bytes,
+                    goal_notice: goal_notice.as_deref(),
+                },
             )
         })
         .await

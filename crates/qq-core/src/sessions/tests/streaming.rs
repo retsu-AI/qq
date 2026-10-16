@@ -42,6 +42,8 @@ async fn measured_occupancy_basis_persists_atomically_and_reloads_with_the_reser
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::assistant("measured")
                     .with_replay(Arc::from("signed-continuation")),
@@ -247,6 +249,8 @@ async fn interleaved_turn_framing_accepts_exact_capacity_and_rejects_one_over() 
             .persist_model_turn(
                 &claimed,
                 ModelTurnCommit {
+                    goal_notices: Vec::new(),
+                    reserved_goal_notices: 0,
                     turn_ordinal: 1,
                     message,
                     calls: vec![call],
@@ -377,6 +381,8 @@ async fn turn_and_event_failures_roll_back_message_counter_turn_and_tool_rows() 
                 .persist_model_turn(
                     &claimed,
                     ModelTurnCommit {
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
                         turn_ordinal: 1,
                         message: Message::new(
                             Role::Assistant,
@@ -693,7 +699,7 @@ fn interrupted_compaction_commits_no_marker_and_can_be_retried() {
         CommandId::from_bytes([9; 16]),
         SessionCommand::CompactSession { session_id },
         None,
-        &WorkspaceGrantSeed::default(),
+        &CommandAdmission::default(),
         CommandOrigin::Client,
     )
     .unwrap();

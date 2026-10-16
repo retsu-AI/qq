@@ -1268,6 +1268,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -1331,6 +1332,7 @@ fn prompt_start_and_streaming_do_not_recalculate_session_context() {
     app.apply_live_event(envelope(
         3,
         SessionEvent::RunStarted {
+            origin: None,
             session: Box::new(summary),
             run_id,
             plan: None,
@@ -1440,6 +1442,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(compacted.clone()),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -2436,6 +2439,7 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
+        goal: None,
         side_questions: Vec::new(),
         summary: summary.clone(),
         messages: vec![MessageSnapshot {
@@ -2760,6 +2764,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     summary.active_run_id = None;
     let requests = app
         .apply_client_update(event(SessionEvent::RunFinished {
+            origin: None,
             session: Box::new(summary),
             run_id,
             outcome: RunOutcome::Completed,
@@ -3037,6 +3042,7 @@ fn background_terminal_receipt_refresh_keeps_focus_and_replays_newer_events() {
         2,
         other,
         SessionEvent::RunFinished {
+            origin: None,
             session: Box::new(idle.clone()),
             run_id: run,
             outcome: qq_protocol::RunOutcome::Completed,
@@ -3100,6 +3106,7 @@ fn delayed_background_receipt_replay_does_not_submit_another_draft() {
                 sequence,
                 other,
                 SessionEvent::RunFinished {
+                    origin: None,
                     session: Box::new(idle.clone()),
                     run_id,
                     outcome: qq_protocol::RunOutcome::Completed,
@@ -3125,6 +3132,7 @@ fn delayed_background_receipt_replay_does_not_submit_another_draft() {
             3,
             other,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(running),
                 run_id: second_run,
                 plan: None,
@@ -3482,6 +3490,7 @@ fn a_single_theme_makes_the_picker_a_notice_instead() {
 fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
+        origin: None,
         session: Box::new(SessionSummary {
             model_is_fallback: false,
             status: SessionStatus::Idle,
@@ -3630,6 +3639,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary),
                 run_id,
                 outcome: RunOutcome::Failed {

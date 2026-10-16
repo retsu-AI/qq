@@ -83,6 +83,8 @@ async fn historical_projection_fixture(version: u16) {
                 accounting: None,
                 truncated: false,
                 notice: None,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
             },
         )
         .await
@@ -200,6 +202,8 @@ async fn projection_fixture(
                 accounting: None,
                 truncated: false,
                 notice: None,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
             },
         )
         .await

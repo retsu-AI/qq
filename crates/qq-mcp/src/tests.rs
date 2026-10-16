@@ -407,14 +407,10 @@ async fn calls_succeed_fail_and_map_server_errors_without_reconnecting() {
     let outcome = manager
         .call("mcp__srv__echo", r#"{"text":"hello"}"#, not_cancelled())
         .await;
-    assert_eq!(
-        outcome,
-        McpCallOutcome {
-            content: "hello".to_owned(),
-            is_error: false,
-            failure: None,
-        }
-    );
+    assert_eq!(outcome.content, "hello");
+    assert!(!outcome.is_error);
+    assert_eq!(outcome.failure, None);
+    assert!(outcome.result_digest.is_some());
     assert_eq!(fixture.connects(), 1, "calls must connect lazily too");
 
     let failed = manager.call("mcp__srv__fail", "{}", not_cancelled()).await;
@@ -1251,4 +1247,48 @@ async fn invalid_tool_names_are_not_omitted_from_a_pin_candidate() {
                 .contains("invalid or duplicate")
         );
     }
+}
+
+#[test]
+fn observed_identity_retains_omitted_binary_and_structured_content() {
+    for kind in ["image", "audio", "structured"] {
+        let response = |changed: bool| {
+            let content = match kind {
+                "structured" => serde_json::json!([{"type":"text", "text":"same preview"}]),
+                _ => {
+                    serde_json::json!([{"type":kind,"data":if changed {"AQ=="} else {"AA=="},"mimeType":if kind == "image" {"image/png"} else {"audio/wav"}}])
+                }
+            };
+            let value = serde_json::json!({"content":content,"structuredContent":if kind == "structured" {serde_json::json!({"value":changed})} else {serde_json::Value::Null},"isError":false});
+            render_result(serde_json::from_value(value).unwrap())
+        };
+        let first = response(false);
+        let second = response(true);
+        let repeated = response(false);
+        assert_eq!(first.content, second.content, "{kind}");
+        assert!(
+            first.result_digest.is_some(),
+            "complete observed response needs identity"
+        );
+        assert_ne!(first.result_digest, second.result_digest, "{kind}");
+        assert_eq!(first.result_digest, repeated.result_digest, "{kind}");
+    }
+}
+
+#[test]
+fn observed_identity_excludes_outer_transport_metadata() {
+    let response = |trace| {
+        render_result(
+            serde_json::from_value(serde_json::json!({
+                "content":[{"type":"text","text":"same observed result"}],
+                "_meta":{"trace":trace}, "isError":false,
+            }))
+            .unwrap(),
+        )
+    };
+    let first = response("one");
+    let second = response("two");
+    assert_eq!(first.content, second.content);
+    assert!(first.result_digest.is_some());
+    assert_eq!(first.result_digest, second.result_digest);
 }

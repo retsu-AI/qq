@@ -104,8 +104,15 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response() {
+    // Keep store I/O runnable without auto-advancing the execution deadline.
+    let keep_clock = tokio::spawn(async {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < end {
+            tokio::task::yield_now().await;
+        }
+    });
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
         usage: None,
@@ -121,12 +128,24 @@ async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response()
         },
     )
     .await;
+    let phase_end = std::time::Instant::now() + Duration::from_secs(3);
+    while harness.requests.lock().unwrap().is_empty() && std::time::Instant::now() < phase_end {
+        tokio::task::yield_now().await;
+    }
+    let admitted = harness.requests.lock().unwrap().len() == 1;
+    tokio::time::advance(Duration::from_millis(150)).await;
     let observed = tokio::time::timeout(
         Duration::from_secs(5),
         collect_until(&mut harness.events, finished_for(run_id)),
     )
-    .await
-    .expect("the deadline must settle a provider that never streams");
+    .await;
+    harness.runtime.shutdown().await.unwrap();
+    keep_clock.abort();
+    assert!(
+        admitted,
+        "the hanging provider must be entered before expiry"
+    );
+    let observed = observed.expect("the deadline must settle a provider that never streams");
     let exhaustion = exhaustion_of(&observed, run_id);
     assert_eq!(exhaustion.limit, BudgetLimitKind::Duration);
     assert!(!exhaustion.final_response);

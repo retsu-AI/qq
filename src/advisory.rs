@@ -834,6 +834,7 @@ mod tests {
             created_at_ms: u64::from(id),
         };
         SessionSnapshot {
+            goal: None,
             side_questions: Vec::new(),
             summary,
             messages: vec![

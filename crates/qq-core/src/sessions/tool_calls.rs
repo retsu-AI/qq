@@ -460,6 +460,17 @@ pub(super) fn deny_tool_call(
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    settle_unstarted_tool_call(connection, store_id, identity, tool_call_id, message, false)
+}
+
+pub(super) fn settle_unstarted_tool_call(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    message: &str,
+    interrupted: bool,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, first_result_in_turn) = transaction
         .query_row(
@@ -471,8 +482,8 @@ pub(super) fn deny_tool_call(
                           AND previous.result IS NOT NULL
                     )
              FROM tool_calls current
-             WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'requested'",
-            params![tool_call_id.to_string(), identity.run_id.to_string()],
+             WHERE current.id = ?1 AND current.run_id = ?2 AND (current.state = 'requested' OR (?3 AND current.state = 'awaiting_approval'))",
+            params![tool_call_id.to_string(), identity.run_id.to_string(), interrupted],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()?
@@ -487,13 +498,15 @@ pub(super) fn deny_tool_call(
     let now = now_ms();
     let updated = transaction.execute(
         "UPDATE tool_calls
-             SET state = 'denied', result = ?2, is_error = 1, finished_at_ms = ?3
-             WHERE id = ?1 AND run_id = ?4 AND state = 'requested'",
+             SET state = ?5, result = ?2, is_error = 1, finished_at_ms = ?3
+             WHERE id = ?1 AND run_id = ?4 AND (state = 'requested' OR (?6 AND state = 'awaiting_approval'))",
         params![
             tool_call_id.to_string(),
             message,
             now,
             identity.run_id.to_string(),
+            if interrupted { "interrupted" } else { "denied" },
+            interrupted,
         ],
     )?;
     if updated != 1 {
@@ -1066,9 +1079,14 @@ pub(super) fn interrupt_active_tool_calls(
         RunOutcome::BudgetExhausted { .. } => {
             "Tool execution did not start before the run exhausted its budget."
         }
-        RunOutcome::Paused { .. } => {
-            "Tool execution did not start before the run paused on a provider fault."
-        }
+        RunOutcome::Paused { pause } => match pause.as_ref() {
+            qq_protocol::RunPause::ProviderRetry { .. } => {
+                "Tool execution did not start before the run paused on a provider fault."
+            }
+            qq_protocol::RunPause::NoProgress { .. } => {
+                "Tool execution did not start before the run paused for no progress."
+            }
+        },
         RunOutcome::Failed { .. } => "Tool execution did not start before the run failed.",
     };
     for (id, execution_started) in ids {

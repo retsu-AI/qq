@@ -1221,13 +1221,9 @@ fn settle_outcome(outcome: &RunOutcome, interrupted: bool) -> (HeadlessStatus, O
         ),
         // Same exit a retry-exhausted provider failure has always had, so
         // supervisors see no new code; the message names the pause.
-        RunOutcome::Paused { pause } => (
-            HeadlessStatus::TaskFailed,
-            Some(format!(
-                "the run paused after {} retries of turn {} on a provider fault: {}",
-                pause.attempts, pause.turn_ordinal, pause.message
-            )),
-        ),
+        RunOutcome::Paused { pause } => {
+            (HeadlessStatus::TaskFailed, Some(format!("the run {pause}")))
+        }
         RunOutcome::Cancelled => (
             HeadlessStatus::HarnessFailure,
             Some("the run was cancelled outside this invocation".to_owned()),

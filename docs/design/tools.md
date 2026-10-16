@@ -29,6 +29,24 @@ cancellation watch, run permits, and persist-before-publish ordering. The TUI,
 server, and direct CLI paths share it; no mode gets a parallel agent
 implementation.
 
+### Session Goal Edits
+
+An active goal captured by a prompt's immutable claim exposes `update_goal`.
+Goal-less and internal runs have no mutation capability. The tool changes
+session-owned checklist and notes, so it requires no workspace approval and
+remains available under `ReadOnly`. It never changes objective, check, budget
+or authorization. Status and wait additionally require goal-run origin and
+the exact claimed revision; ordinary user prompts can update only model data.
+
+Goal edits stay in request order among the turn's ordinary calls, outside the
+parallel read batch. Two edits observe successive committed states. Goal
+record and event commit before a successful result; a storage failure stops
+the run without reporting that the write succeeded. Stopped, cancelled,
+replaced and stale-control cases return bounded typed rejection results.
+An interrupting steer can withdraw a goal edit waiting for store capacity.
+After queue admission, the worker owns the edit and its durable result; the
+steer stops later calls without discarding that accepted work.
+
 ### Loop Bounds
 
 "Repeat until no tool calls" needs a ceiling — a model that keeps calling

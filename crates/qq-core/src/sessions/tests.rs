@@ -17,6 +17,8 @@ mod deadlines;
 mod delegation;
 mod execution_context;
 mod feeds;
+mod goals;
+mod loop_guard;
 mod migrations;
 mod nonblocking;
 mod progress;
@@ -994,7 +996,13 @@ impl Provider for RenewableSliceProvider {
             }));
             events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                 id: id.clone(),
-                json: json.to_owned(),
+                // Varied page requests keep this a slice/persistence workload,
+                // rather than a proved identical-read execution loop.
+                json: if name == "read_file" && json == r#"{"path":"note.txt"}"# {
+                    serde_json::json!({"path":"note.txt","limit":current*crate::MAX_TOOL_CALLS_PER_TURN+index+1}).to_string()
+                } else {
+                    json.to_owned()
+                },
             }));
             events.push(Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }));
         }
@@ -1788,6 +1796,8 @@ async fn spill_one_call(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -2166,6 +2176,9 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        goal: None,
+        goal_initial_notice: None,
+        origin: None,
         checkpoint: None,
         routing: None,
         approval_delegate: None,
@@ -2243,7 +2256,7 @@ fn apply_denial_capacity_path(
                 decision: ApprovalDecision::Deny,
             },
             None,
-            &WorkspaceGrantSeed::default(),
+            &CommandAdmission::default(),
             CommandOrigin::Client,
         )
         .map(|_| ()),
@@ -3818,7 +3831,9 @@ impl Provider for AutoCompactProvider {
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                            // Preserve the complete8KiB result while varying the requested
+                            // page size: this fixture tests pruning, not repeat refusal.
+                            json: serde_json::json!({"path":"note.txt","limit":64+prior_results.len()}).to_string(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
@@ -4159,6 +4174,8 @@ async fn project_terminal_run_with_tool_boundaries(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -6553,6 +6570,8 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
                 .persist_in_run_summary_turn(
                     &summary,
                     ModelTurnCommit {
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
                         turn_ordinal: 1,
                         message: Message::new(
                             Role::Assistant,
@@ -6765,6 +6784,8 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
     let mut receipt = Box::pin(store.persist_in_run_summary_turn(
         &summary,
         ModelTurnCommit {
+            goal_notices: Vec::new(),
+            reserved_goal_notices: 0,
             turn_ordinal: 1,
             message: Message::new(
                 Role::Assistant,
@@ -6864,6 +6885,8 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
         .persist_in_run_summary_turn(
             &summary,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,

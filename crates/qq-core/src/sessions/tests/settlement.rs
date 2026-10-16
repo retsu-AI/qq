@@ -370,6 +370,8 @@ async fn recovery_interrupts_only_the_current_turns_message() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -534,6 +536,8 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -692,6 +696,8 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,

@@ -381,7 +381,9 @@ fn assemble_model_context(
         status: String,
         outcome_json: Option<String>,
         ordinal: u64,
+        goal_initial_notice: Option<String>,
     }
+    let mut remaining_turn_bytes = 64 * 1024 * 1024_usize;
     let mut statement = transaction.prepare_cached(
         "SELECT m.run_id, m.output, r.status, r.outcome_json,
                     (SELECT group_concat(c.text, '') FROM (
@@ -389,7 +391,7 @@ fn assemble_model_context(
                          WHERE message_id = m.id AND channel = 'output'
                          ORDER BY chunk_ordinal
                      ) c),
-                    m.id, m.input_json, m.ordinal
+                    m.id, m.input_json, m.ordinal, r.goal_initial_notice
              FROM messages m JOIN runs r ON r.id = m.run_id
              WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
                AND m.role = 'user' AND m.steering = 0
@@ -410,13 +412,24 @@ fn assemble_model_context(
                 status: row.get(2)?,
                 outcome_json: row.get(3)?,
                 ordinal: row.get(7)?,
+                goal_initial_notice: goals::read_notice_with_budget(
+                    row,
+                    8,
+                    &mut remaining_turn_bytes,
+                )?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let mut attachments =
         load_retained_attachments(transaction, &session, through_ordinal, cutoff_ordinal)?;
-    let mut in_run = in_run_compactions(transaction, &session, through_ordinal, cutoff_ordinal)?;
+    let mut in_run = in_run_compactions(
+        transaction,
+        &session,
+        through_ordinal,
+        cutoff_ordinal,
+        &mut remaining_turn_bytes,
+    )?;
     let mut delivered =
         deliveries::retained_deliveries(transaction, &session, through_ordinal, cutoff_ordinal)?;
 
@@ -446,7 +459,7 @@ fn assemble_model_context(
                          THEN CASE WHEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
                                         OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
                                    THEN 0 ELSE 1 END
-                         ELSE 1 END
+                         ELSE 1 END, t.goal_notice
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
@@ -457,7 +470,6 @@ fn assemble_model_context(
     )?;
     let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
     // Include opaque replay envelopes in the allocation budget before decoding.
-    let mut remaining_turn_bytes = 64 * 1024 * 1024_usize;
     while let Some(row) = rows.next()? {
         let raw = row
             .get_ref(2)?
@@ -491,6 +503,7 @@ fn assemble_model_context(
                 ),
                 Err(_) => return Err(SessionRuntimeError::CONSTRAINT),
             },
+            goal_notices: goals::read_turn_notices(row, 10, &mut remaining_turn_bytes)?,
         };
         turns
             .entry(row.get::<_, String>(0)?)
@@ -634,6 +647,9 @@ fn assemble_model_context(
             }
             None => prompt.text,
         };
+        if let Some(notice) = prompt.goal_initial_notice {
+            context.push(Message::user(notice));
+        }
         context.push(Message::user(text));
         // Reconstruct each run immediately after its prompt rather than
         // following message-row ordinals. Follow-up prompts can be queued
@@ -762,6 +778,7 @@ pub(super) fn capture_side_context(
               UNION ALL SELECT length(CAST(c.text AS BLOB)) FROM message_chunks c
                 JOIN messages m ON m.id = c.message_id WHERE m.run_id = ?1
               UNION ALL SELECT length(CAST(assistant_content_json AS BLOB))
+                     + COALESCE(length(CAST(goal_notice AS BLOB)), 0)
                 FROM model_turns WHERE run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(result AS BLOB)), 0)
                 FROM tool_calls WHERE run_id = ?1
@@ -769,13 +786,15 @@ pub(super) fn capture_side_context(
                 FROM message_attachments a JOIN messages m ON m.id = a.message_id
                 JOIN attachment_blobs b ON b.session_id = a.session_id AND b.blob_key = a.blob_key
                 WHERE m.run_id = ?1
-              UNION ALL SELECT length(CAST(summary AS BLOB)) FROM session_compactions
+              UNION ALL SELECT length(CAST(summary AS BLOB))
+                     + COALESCE(length(CAST(goal_notice AS BLOB)), 0) FROM session_compactions
                 WHERE scope_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_deliveries
                 WHERE parent_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(text AS BLOB)), 0) FROM child_reports
                 WHERE parent_run_id = ?1
               UNION ALL SELECT COALESCE(length(CAST(outcome_json AS BLOB)), 0)
+                     + COALESCE(length(CAST(goal_initial_notice AS BLOB)), 0)
                 FROM runs WHERE id = ?1
               LIMIT 1025
             )",
@@ -806,13 +825,20 @@ pub(super) fn capture_side_context(
     // Include the current prompt even when its run is unfinished, but never
     // manufacture results for in-flight tools. Completed units above remain
     // provider-valid; current partial output is explicitly omitted.
-    let active_prompt: Option<String> = connection.query_row(
-        "SELECT CASE WHEN length(CAST(m.output AS BLOB)) <= ?2 THEN m.output ELSE NULL END
-         FROM messages m JOIN sessions s ON s.active_run_id = m.run_id
+    let active_prompt: Option<(Option<String>, Option<String>)> = connection.query_row(
+        "SELECT CASE WHEN length(CAST(m.output AS BLOB))
+                + COALESCE(length(CAST(r.goal_initial_notice AS BLOB)),0) <= ?2 THEN m.output ELSE NULL END,
+                CASE WHEN length(CAST(m.output AS BLOB))
+                + COALESCE(length(CAST(r.goal_initial_notice AS BLOB)),0) <= ?2 THEN r.goal_initial_notice ELSE NULL END
+         FROM messages m JOIN sessions s ON s.active_run_id = m.run_id JOIN runs r ON r.id=m.run_id
          WHERE m.session_id = ?1 AND m.role = 'user' AND m.steering = 0 ORDER BY m.ordinal DESC LIMIT 1",
-        params![session_id.to_string(), remaining.saturating_sub(128)], |row| row.get(0),
-    ).optional()?.flatten();
-    if let Some(prompt) = active_prompt {
+        params![session_id.to_string(), remaining.saturating_sub(128)], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    if let Some((Some(prompt), goal_notice)) = active_prompt {
+        if let Some(notice) = goal_notice {
+            remaining = remaining.saturating_sub(notice.len());
+            active_context.push(Message::user(notice));
+        }
         let prompt =
             format!("[Current main task; unfinished output and tool exchanges omitted]\n{prompt}");
         remaining = remaining.saturating_sub(prompt.len());
@@ -1014,11 +1040,19 @@ pub(super) fn runtime_notice(outcome: &RunOutcome) -> Option<String> {
             "The previous run stopped when its budget ran out: {}",
             exhaustion.message
         ),
-        RunOutcome::Paused { pause } => format!(
-            "The previous run paused after {} retries of turn {} on a provider fault ({}); its \
-             completed turns stand. Continue from where it stopped.",
-            pause.attempts, pause.turn_ordinal, pause.message
-        ),
+        RunOutcome::Paused { pause } => match pause.as_ref() {
+            qq_protocol::RunPause::ProviderRetry {
+                attempts,
+                turn_ordinal,
+                message,
+                ..
+            } => format!(
+                "The previous run paused after {attempts} retries of turn {turn_ordinal} on a provider fault ({message}); its completed turns stand. Continue from where it stopped."
+            ),
+            qq_protocol::RunPause::NoProgress { .. } => format!(
+                "The previous run {pause}; its completed turns stand. Continue from where it stopped."
+            ),
+        },
         RunOutcome::Failed { failure } => format!("The previous run failed: {}", failure.message),
     };
     Some(format!(
@@ -1463,6 +1497,7 @@ pub(super) struct StoredTurn {
     pub(super) truncated: bool,
     /// The runtime notice placed before the turn's request.
     pub(super) notice: Option<crate::runtime::TurnNotice>,
+    pub(super) goal_notices: Vec<crate::runtime::OrderedTurnNotice>,
 }
 
 /// Replays one run's committed turns into `context`: each assistant turn,
@@ -1513,6 +1548,7 @@ pub(super) fn append_run_turns(
             let first_kept = match turns.first_mut() {
                 Some(first) => {
                     first.notice = None;
+                    first.goal_notices.clear();
                     first.ordinal
                 }
                 None => marker.turn_cutoff,
@@ -1533,6 +1569,9 @@ pub(super) fn append_run_turns(
                 "{IN_RUN_COMPACTION_PREAMBLE}\n\n{}",
                 marker.summary
             )));
+            if let Some(notice) = marker.goal_notice {
+                context.push(Message::user(notice));
+            }
             ends.push((marker.turn_cutoff, context.len()));
         }
     }
@@ -1546,6 +1585,7 @@ pub(super) fn append_run_turns(
         content_json,
         truncated,
         notice,
+        goal_notices,
     } in turns
     {
         let mut recorded_turn = recorded.remove(&turn_ordinal).unwrap_or_default();
@@ -1556,8 +1596,29 @@ pub(super) fn append_run_turns(
             let (_, text) = steering.pop_front().expect("front was just checked");
             context.push(Message::user(text));
         }
-        // Delivered sub-agent answers follow the boundary's steering, as the
-        // live run applied them (ADR-0054 § 4).
+        // A child wait can deliver before preparation; an empty reactive
+        // retry can deliver between two goal revisions without committing a
+        // turn. Merge the stored positions instead of grouping all goals first.
+        let positioned_notice =
+            notice.is_some_and(|notice| goal_notices.iter().any(|atom| atom.text == notice.text()));
+        let mut preceding_deliveries = 0;
+        for atom in goal_notices {
+            if atom.preceding_deliveries < preceding_deliveries {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            while preceding_deliveries < atom.preceding_deliveries {
+                if !delivered
+                    .front()
+                    .is_some_and(|(before, _)| before.is_some_and(|before| before <= turn_ordinal))
+                {
+                    return Err(SessionRuntimeError::CONSTRAINT);
+                }
+                let (_, text) = delivered.pop_front().expect("front was just checked");
+                context.push(Message::user(text));
+                preceding_deliveries += 1;
+            }
+            context.push(Message::user(atom.text));
+        }
         while delivered
             .front()
             .is_some_and(|(before, _)| before.is_some_and(|before| before <= turn_ordinal))
@@ -1568,7 +1629,7 @@ pub(super) fn append_run_turns(
         // The live run placed this notice after the boundary's steering and
         // before the request that produced this turn, and kept it even when
         // that attempt was later dropped (an empty truncation below).
-        if let Some(notice) = notice {
+        if let Some(notice) = notice.filter(|_| !positioned_notice) {
             context.push(Message::user(notice.text()));
         }
         let (content, replay) =
@@ -1841,6 +1902,7 @@ mod action_bias_tests {
                 content_json: serde_json::to_string(&blocks).unwrap(),
                 truncated: false,
                 notice: None,
+                goal_notices: Vec::new(),
             }],
             HashMap::from([(1, recorded)]),
             Default::default(),
@@ -1910,6 +1972,7 @@ mod action_bias_tests {
             content_json: serde_json::to_string(&blocks).unwrap(),
             truncated: false,
             notice: None,
+            goal_notices: Vec::new(),
         };
         let mut context = Vec::new();
         append_run_turns(

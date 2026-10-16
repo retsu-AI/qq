@@ -178,10 +178,10 @@ impl SessionRuntime {
             let applied = match runtime
                 .inner
                 .store
-                .command_with_seed(
+                .command_with_admission(
                     command_id,
                     command,
-                    WorkspaceGrantSeed::default(),
+                    CommandAdmission::default(),
                     Some(runtime.inner.grant_promotions.clone()),
                 )
                 .await

@@ -52,15 +52,30 @@ approval) when enabled (ADR-0052); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
 catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
 approved self-contained read images (ADR-0060); version 15 records the strict
-model-facing tool-result projection policy (ADR-0061). Descriptor changes do not
-alter the wire envelope version; associated store migrations are documented
-separately below. Historical descriptor JSON remains historical evidence.
+model-facing tool-result projection policy (ADR-0061). The goal-capable catalog
+also includes the scoped `update_goal` tool. Descriptor changes do not alter
+the wire envelope version; associated store migrations are documented separately
+below. Historical descriptor JSON remains historical evidence.
 
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 32
+PROTOCOL_VERSION = 33
 ```
+
+Version 33 adds durable goal controls (`set_goal`, `goal_control`), exact
+identity/revision fencing, explicit once/for-goal check authorization, session
+goal snapshots and `goal_updated`/`goal_cleared` events. `RunSnapshot.origin`
+records immutable creation provenance; its separate optional `goal` names the
+claim's goal identity/revision. Start/finish events carry the same optional
+stored origin, including recovery terminals. Historical absence remains unknown.
+A user prompt can bind a goal while retaining user-prompt provenance. The
+`goal` and `goal_check` origin tags are accepted wire vocabulary; queueing and
+executing that work belongs to the goal driver/check runner.
+`GoalSnapshot.achievement_claim`, when present, retains the proposing run,
+claimed revision and evidence. It is a pending proposal, separate from
+verified `achieved` status; specification edits clear it. Absent proposals
+omit the field so existing version-33 goal snapshots retain their encoding.
 
 Version 32 adds isolated side-question submission and cancellation commands,
 separate durable side-question snapshots, and replayable side projection updates.
@@ -78,7 +93,7 @@ waiting or answering without loading its body or having seen the request
 event.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v32/`; the `v17`–`v31` directories are
+`crates/qq-protocol/tests/fixtures/v33/`; the `v17`–`v32` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -268,6 +283,23 @@ exact owner-run accounting of internal compaction attempts. Completed, failed
 and cancelled attempts enter their owner's child-spend receipt; manual and
 unrelated compactions do not. Unknown usage or cost remains unknown. Internal
 attempts do not consume the child-count or depth allowance. No wire shape changes.
+Schema 51 adds `session_goals` history with one live goal per session and
+nullable run goal identity/revision, full claim snapshot, and immutable origin
+JSON. Creation records origin; the first existing FULL routing, automatic
+compaction or main-start admission freezes the prompt owner's optional goal
+claim. SQL NULL is uncaptured; JSON null is a captured absence. Re-reservation
+uses the frozen claim. Historical rows retain NULL bindings; synthetic/internal
+compaction claims grant no goal mutation capability.
+The same schema stores the exact initial notice in `runs.goal_initial_notice`,
+ordered boundary notices as a JSON list in `model_turns.goal_notice`, and the
+post-summary atom in `session_compactions.goal_notice`. Each atom is framed
+and at most 16KiB. For goal-bound runs, checkpoint/continuation text shares
+the ordered list; each atom records how many child deliveries preceded it
+since the previous committed turn. Empty reactive retries and child waits
+preserve their live interleaving on replay. Goal-less rows retain NULL and
+use the existing static-notice column. Existing start, turn and marker
+transactions commit the text with the work it describes; historical context
+never regenerates notices from newer goals or the current clock.
 
 Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
 The process executor's receipt commits with its result and finished event;
@@ -1873,6 +1905,7 @@ server's network policy judged and `method` only when it is `HEAD`.
 {
   "type": "paused",
   "pause": {
+    "reason": "provider_retry",
     "kind": "provider_unavailable",
     "message": "provider returned HTTP 529: overloaded_error",
     "turn_ordinal": 7,
@@ -1888,12 +1921,15 @@ reserved tool-free status turn was granted; it is `false` when the wall clock
 elapsed, when cost became unmeasurable, or when the model requested a tool on
 the final turn.
 
-`paused` settles a run whose turn recovery (ADR-0040) spent its allowance on
-a transient provider fault. It is not `failed` either: every completed turn
-is durable, nothing QQ or the model did was wrong, and the next prompt
-continues the session with a notice naming the pause. `kind` is always one
-of `provider_unavailable`, `provider_rate_limited`, `provider_transport`.
-The run status is also `paused`.
+`paused` carries a reason-tagged `RunPause`. `provider_retry` names turn
+recovery (ADR-0040) that spent its allowance on a transient provider fault;
+its `kind` is `provider_unavailable`, `provider_rate_limited`, or
+`provider_transport`. `no_progress` carries `turn_ordinal`, `slices`, and
+`calls`, the run's eligible tool-attempt count; it carries no provider fault
+or retry count. Clients, headless status and retained context describe that
+reason explicitly. Every completed turn remains durable, and the run status
+is `paused`. The next prompt continues from committed context. Historical
+untagged provider pauses still decode; new writes always include `reason`.
 
 `BudgetLimitKind` values:
 

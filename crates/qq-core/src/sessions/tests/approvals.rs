@@ -3518,6 +3518,8 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
