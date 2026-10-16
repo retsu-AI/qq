@@ -2743,6 +2743,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_rejects_preempting_user_work_before_adoption() {
+        let fixture = fixture(|| AskingProvider { turn: Mutex::new(0) }).await;
+        let base = options(&fixture.workspace);
+        let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
+        send(&fixture.sessions, SessionCommand::SubmitPrompt {
+            session_id: owner.session_id, input: vec![InputPart::text("question")],
+            limits: RunLimits::default(), correlation: Default::default(), output: None,
+        }).await.unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        send(&fixture.sessions, SessionCommand::SetGoal {
+            session_id: owner.session_id, objective: "later objective".into(), check: None,
+            budget: Box::new(qq_protocol::GoalBudget { max_goal_runs: 2, deadline_ms: now + 60000,
+                max_total_tokens: None, max_cost_usd_nanos: None, per_run: RunLimits::default() }),
+            expected: None, replace: false,
+        }).await.unwrap();
+        let mut opts = base;
+        opts.session = Some(owner.session_id);
+        let result = prepare_session(&fixture.sessions, &opts, SessionIntent::Goal).await;
+        assert!(matches!(result, Err(Failure { status: HeadlessStatus::InvalidConfiguration, .. })),
+            "must reject same-session user work before accepting exclusive goal ownership");
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn foreground_goal_invalid_resume_does_not_pause_active_goal() {
         for approval in [None, Some(qq_protocol::GoalCheckScope::Once)] {
             let fixture = fixture(|| HangingProvider).await;
