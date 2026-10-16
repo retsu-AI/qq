@@ -3856,6 +3856,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_harness_failure_still_emits_final_record() {
+        let fixture = fixture(|| HangingProvider).await;
+        let opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+        let mut events = fixture.sessions.subscribe(SubscribeRequest { workspace_id: handle.workspace_id,
+            after: handle.subscribe_after }).unwrap();
+        let stop = async {
+            loop {
+                if matches!(events.next().await.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; }
+            }
+            fixture.sessions.close().await.unwrap();
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut opts = opts;
+        opts.session = Some(handle.session_id);
+        assert_eq!(run_goal(&fixture.sessions, opts, goal_request(), stop, &mut stdout, &mut stderr).await, 4);
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(records.last().unwrap()["status"], "harness_failure");
+        assert_eq!(records.last().unwrap()["exit_code"], 4);
+    }
+
+    #[tokio::test]
     async fn foreground_goal_output_failure_pauses_active_work_and_preserves_stopped_reason() {
         for needs_consent in [false, true] {
             let fixture = fixture(|| HangingProvider).await;
