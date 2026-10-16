@@ -1558,3 +1558,19 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     create_session(&runtime, other, None).await;
     runtime.close().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn portable_check_group_confirmation_waits_until_the_group_is_absent() {
+    use std::os::unix::process::CommandExt;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 30"]).process_group(0).spawn().unwrap();
+    let pgid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    let waiting = crate::sessions::goal_check::confirm_reaped_group_exit(pgid);
+    tokio::pin!(waiting);
+    let premature = futures_util::poll!(&mut waiting).is_ready();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(!premature, "a kill signal is not confirmation that a live group exited");
+    waiting.await.unwrap();
+}

@@ -134,8 +134,8 @@ async fn confirm_group_exit(pgid: rustix::process::Pid) -> std::io::Result<()> {
     .map_err(std::io::Error::other)?
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-async fn confirm_group_exit(_pgid: rustix::process::Pid) -> std::io::Result<()> {
+#[cfg(all(unix, any(test, not(target_os = "linux"))))]
+pub(super) async fn confirm_reaped_group_exit(_pgid: rustix::process::Pid) -> std::io::Result<()> {
     Ok(())
 }
 
