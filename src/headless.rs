@@ -4125,7 +4125,7 @@ mod tests {
                     workspace_id: handle.workspace_id, after: snapshot.cursor,
                 }).unwrap();
 
-                let early_code = match action {
+                let early_code: Option<u8> = match action {
                     "interrupt" | "clear" | "replace" => {
                         interrupt.send(()).unwrap();
                         None
@@ -4142,7 +4142,7 @@ mod tests {
                     }
                     "output" => {
                         output.fail.store(true, std::sync::atomic::Ordering::SeqCst);
-                        Some((&mut foreground).await)
+                        None
                     }
                     "abort" => None,
                     _ => unreachable!(),
@@ -4199,6 +4199,9 @@ mod tests {
                         let errors = String::from_utf8_lossy(&stderr);
                         assert!(errors.contains(if action == "clear" { "goal was not found" } else { "goal identity or revision conflicts with the current goal" })
                             || errors.contains("goal changed while terminal work drained"), "{action}: {errors}");
+                    } else if action == "output" {
+                        assert_eq!(code, 4);
+                        assert!(finals.is_empty(), "broken stdout must not be retried");
                     } else {
                         assert_eq!(code, if action == "interrupt" { 130 } else { 6 });
                         assert_eq!(finals.len(), 1, "{action}: {records:?}");
