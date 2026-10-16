@@ -426,13 +426,24 @@ pub async fn run_goal(
                 biased;
                 () = interrupt.as_mut(), if interrupt_armed => {
                     interrupt_armed = false;
-                    goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                    let paused = send(sessions, SessionCommand::GoalControl {
                         session_id: handle.session_id, expected,
                         action: qq_protocol::GoalControl::Pause,
-                    }).await?)?;
+                    }).await;
+                    goal = match paused {
+                        Ok(receipt) => goal_receipt(receipt)?,
+                        Err(error) => {
+                            let current = sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)).await
+                                .map_err(|error| Failure::harness(error.to_string()))?
+                                .focused.and_then(|session| session.goal)
+                                .filter(|goal| goal.goal_id == expected.goal_id && matches!(goal.status, qq_protocol::GoalStatus::Achieved | qq_protocol::GoalStatus::Blocked { .. } | qq_protocol::GoalStatus::BudgetExhausted { .. }));
+                            match current { Some(goal) => goal, None => return Err(error) }
+                        }
+                    };
+                    let terminal = matches!(goal.status, qq_protocol::GoalStatus::Achieved | qq_protocol::GoalStatus::Blocked { .. } | qq_protocol::GoalStatus::BudgetExhausted { .. });
                     guard.expected = goal_identity(&goal);
                     let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
-                    final_goal = Some((goal, through.sequence, Some(qq_protocol::HeadlessGoalStatus::Interrupted)));
+                    final_goal = Some((goal, through.sequence, if terminal { None } else { Some(qq_protocol::HeadlessGoalStatus::Interrupted) }));
                 }
                 event = events.next() => {
                     let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
