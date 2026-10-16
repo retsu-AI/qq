@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In progress | ENG-1063 | feat/eng-1063-goal-completion | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
-| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Model selected; spend/fallback authorization pending |
+| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
 
@@ -818,3 +818,10 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 - User requests three reviewable PRs: G2 closeout+G3 (ENG-1063), G4 surfaces (ENG-1064), G5 evidence (ENG-1065), parent ENG-1011. Start clean isolated worktree `/tmp/qq-goal-delivery-20261015/g3` on exact main3d58b3d3; root is sole writer. Preserve #293 cooperative preparation drain and all #309 review fixes; exclude removed PR319.
 - Pre-change optimized turn_overhead diagnostic:3iterations×1000executed/durable calls,9compactions each, all assertions pass. Median gaps at10/100/1000 are92.690/102.274/57.591ms; broad sample variation is not quiet-host/tail qualification. Exact source/binary/fixture/raw samples: `/tmp/qq-goal-delivery-20261015/baseline.json` and `g3-baseline-turn-overhead.log`. Candidate comparison and acceptance follow.
 - Reuse prepared test-first runtime/check/surface work rather than replay old merge history. Independent static G2/G3 review confirms principal Unix acceptance paths; add literal simulated20-minute permit-wait coverage and resolve/document platform boundaries. G5 provider selected:openai-codex/gpt-6.1-sol; no paid allowance inferred.
+
+### 2026-10-16 — G2/G3 integration and G5 authorization
+
+- Integrated G2 paid-request admission, caller remainders and final-slot handoff onto main3d58b3d3; retained all-sponsor deadlines and #293 cancellation/drain ownership. Corrected the older tiny-total child fixture to retain a binding60-token output allowance with room for request input; focused regression1/1 passes.
+- Ported G3 exact check authorization, bounded process execution, independent model audits, historical results and durable interrupted-check holds; configuration/policy foundations move into this PR because execution must enforce them. G4 retains the TUI, CLI and foreground surfaces. Protocol34/schema56–58 are reserved in root; descriptor15 is unchanged.
+- Driver-only and checked40-run scenarios pass with actual process kills and simulated multi-day waits/outages. Added literal20-minute held-permit acceptance; integrated final checks remain pending. Independent read-only integration review of53043b99 found no defects and verified no PR319 provenance.
+- G5 user authorization: openai-codex/gpt-6.1-sol through subscription only, with no paid API fallback. A failed subscription/auth path must stop rather than select a billable provider. Live evaluation has not started.

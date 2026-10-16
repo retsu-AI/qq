@@ -18,7 +18,8 @@ design only. Side questions (SQ0–SQ2) shipped first
 Each PR targets its immediate predecessor until merge, then rebases/retargets.
 This is delivery ordering, not a runtime dependency. G0 retains AC4 and one
 goal protocol bump; G1 stays dropped. G4 stays together after G3 initially.
-G5 requires ENG-809’s explicit evaluation budget. Side queries never steer,
+G5 uses the explicitly authorized ENG-809 evaluation route: subscription-only
+`openai-codex/gpt-6.1-sol`, with no paid API fallback. Side queries never steer,
 mutate or charge goals, or bypass check workspace exclusion.
 
 ## Goal
@@ -57,9 +58,10 @@ Measured acceptance:
    requests to `main`, verified against a golden request. The one-time
    `DESCRIPTOR_VERSION` bump changes every plan digest once. After that,
    goal and goal-less runs share one compiled plan.
-5. **Live.** One real multi-hour task, run under ENG-809's paid-evaluation
-   budget: its checklist survives at least 3 compactions and the goal
-   reaches a terminal state with its cost reported.
+5. **Live.** One real multi-hour task on the authorized subscription-only
+   route: its checklist survives at least 3 compactions and the goal reaches
+   a terminal state with usage and cost reported. Record paid API spend
+   separately from estimated token value; no paid API fallback is allowed.
 
 ## Non-goals
 
