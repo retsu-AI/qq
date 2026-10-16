@@ -6764,11 +6764,14 @@ mod tests {
         assert_eq!(policy.approval_wait_ms, 40_000);
         let slots = factory.inner.check_policy_slots.get().unwrap();
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
-        assert_eq!(
-            WorkspaceGrantAuthority::goal_policy(&factory, &workspace).await,
-            Err(qq_core::GoalPolicyError::Overloaded)
-        );
+        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        // Dropping a waiter must not leak a pool slot.
+        drop(waiting);
+        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
+        assert_eq!(waiting.await.unwrap(), policy);
         fs::write(
             fixture.path("managed/managed.ron"),
             "(version: 1, policy: (goals: (max_runs: 0)))",
