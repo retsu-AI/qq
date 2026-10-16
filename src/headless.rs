@@ -140,7 +140,16 @@ pub fn exit_code(status: HeadlessStatus) -> ExitCode {
 
 /// Writes trial records to the optional trace file and, in JSONL format, to
 /// stdout. Text format still traces when a trace path is given.
+#[derive(Default)]
+enum GoalRecordState {
+    #[default]
+    Pending,
+    Attempted,
+    Emitted(u8),
+}
+
 struct RecordSink {
+    goal_record: GoalRecordState,
     trace: Option<BufWriter<std::fs::File>>,
     to_stdout: bool,
 }
@@ -154,6 +163,7 @@ impl RecordSink {
             .transpose()?
             .map(BufWriter::new);
         Ok(Self {
+            goal_record: GoalRecordState::Pending,
             trace,
             to_stdout: options.format == HeadlessFormat::Jsonl,
         })
@@ -539,9 +549,13 @@ pub async fn run_goal(
                 let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
                 code = HeadlessStatus::HarnessFailure.code();
             }
+            if let Some(RecordSink { goal_record: GoalRecordState::Emitted(emitted), .. }) = &record_sink {
+                return *emitted;
+            }
             if code == HeadlessStatus::HarnessFailure.code()
                 && let Some((workspace, mut goal)) = accepted
                 && let Some(sink) = record_sink.as_mut()
+                && matches!(sink.goal_record, GoalRecordState::Pending)
             {
                 // Prefer authoritative state when readable; otherwise retain
                 // the last observed goal without inventing a durable outcome.
@@ -661,16 +675,27 @@ fn finish_goal(
         status,
         exit_code: status.code(),
     };
+    if !matches!(sink.goal_record, GoalRecordState::Pending) {
+        return Err(Failure::harness("final goal output was already attempted"));
+    }
+    // A failed write can have emitted a prefix; never retry it. Once stdout
+    // is flushed, its selected exit remains authoritative despite trace errors.
+    sink.goal_record = GoalRecordState::Attempted;
     sink.record(stdout, HeadlessRecordRef::Goal(&record))
-        .and_then(|()| sink.finish())
         .map_err(|error| Failure::harness(error.to_string()))?;
+    if options.format == HeadlessFormat::Jsonl {
+        sink.goal_record = GoalRecordState::Emitted(status.code());
+    }
+    sink.finish().map_err(|error| Failure::harness(error.to_string()))?;
     if options.format == HeadlessFormat::Text {
         writeln!(
             stdout,
             "goal {}: {:?}",
             record.goal.goal_id, record.goal.status
         )
+        .and_then(|()| stdout.flush())
         .map_err(|error| Failure::harness(error.to_string()))?;
+        sink.goal_record = GoalRecordState::Emitted(status.code());
     }
     Ok(status.code())
 }
