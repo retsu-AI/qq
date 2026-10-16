@@ -338,7 +338,7 @@ pub async fn run_goal(
     let mut accepted: Option<(WorkspaceId, Box<qq_protocol::GoalSnapshot>)> = None;
     let mut record_sink = None;
     let result: Result<u8, Failure> = async {
-        let mut sink = record_sink.insert(RecordSink::open(&options)
+        let sink = record_sink.insert(RecordSink::open(&options)
             .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
         let handle = prepare_session(sessions, &options, SessionIntent::Goal).await?;
         let snapshot = sessions.snapshot(SnapshotRequest::new(
@@ -423,7 +423,7 @@ pub async fn run_goal(
             if final_goal.as_ref().is_some_and(|(_, through, _)| observed >= *through) {
                 let (goal, _, forced) = final_goal.take().unwrap();
                 guard.disarm();
-                return finish_goal(&mut sink, stdout, &options, handle.workspace_id, goal, forced);
+                return finish_goal(sink, stdout, &options, handle.workspace_id, goal, forced);
             }
             tokio::select! {
                 biased;
