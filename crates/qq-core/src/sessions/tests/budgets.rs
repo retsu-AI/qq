@@ -4,6 +4,7 @@ use super::*;
 async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: None,
         pricing: None,
         hang: false,
@@ -76,6 +77,7 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
 async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: None,
         pricing: None,
         hang: false,
@@ -104,22 +106,25 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response() {
-    // Keep store I/O runnable without auto-advancing the execution deadline.
-    let keep_clock = tokio::spawn(async {
-        let end = std::time::Instant::now() + Duration::from_secs(10);
-        while std::time::Instant::now() < end {
-            tokio::task::yield_now().await;
-        }
-    });
+    let entered = Arc::new(tokio::sync::Notify::new());
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: Some(Arc::clone(&entered)),
         usage: None,
         pricing: None,
         hang: true,
     })
     .await;
+    tokio::time::pause();
+    // Real store/preparation work must not let Tokio auto-advance the deadline
+    // before the hanging provider has received its first request.
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let run_id = queue_limited_prompt(
         &harness,
         RunLimits {
@@ -128,24 +133,12 @@ async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response()
         },
     )
     .await;
-    let phase_end = std::time::Instant::now() + Duration::from_secs(3);
-    while harness.requests.lock().unwrap().is_empty() && std::time::Instant::now() < phase_end {
-        tokio::task::yield_now().await;
-    }
-    let admitted = harness.requests.lock().unwrap().len() == 1;
-    tokio::time::advance(Duration::from_millis(150)).await;
-    let observed = tokio::time::timeout(
-        Duration::from_secs(5),
-        collect_until(&mut harness.events, finished_for(run_id)),
-    )
-    .await;
-    harness.runtime.shutdown().await.unwrap();
+    entered.notified().await;
+    assert_eq!(harness.requests.lock().unwrap().len(), 1);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::resume();
     keep_clock.abort();
-    assert!(
-        admitted,
-        "the hanging provider must be entered before expiry"
-    );
-    let observed = observed.expect("the deadline must settle a provider that never streams");
+    let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
     let exhaustion = exhaustion_of(&observed, run_id);
     assert_eq!(exhaustion.limit, BudgetLimitKind::Duration);
     assert!(!exhaustion.final_response);
@@ -156,6 +149,7 @@ async fn wall_clock_budget_settles_a_hanging_provider_without_a_final_response()
 async fn cost_budget_settles_on_spend_and_fails_closed_when_usage_goes_missing() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: Some(usage(2, 1)), // 4_000 nanos per turn
         pricing: Some(budget_pricing()),
         hang: false,
@@ -187,6 +181,7 @@ async fn cost_budget_settles_on_spend_and_fails_closed_when_usage_goes_missing()
 
     let mut unmetered = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: None,
         pricing: Some(budget_pricing()),
         hang: false,
@@ -215,6 +210,7 @@ async fn cost_budget_settles_on_spend_and_fails_closed_when_usage_goes_missing()
 async fn cost_budget_without_pricing_is_rejected_before_provider_work() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: Some(usage(1, 1)),
         pricing: None,
         hang: false,
@@ -249,6 +245,7 @@ async fn cost_budget_without_pricing_is_rejected_before_provider_work() {
 async fn token_budget_settles_a_completed_overrun_as_exhausted_not_completed() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: Some(usage(50, 10)),
         pricing: None,
         hang: false,
@@ -273,6 +270,7 @@ async fn token_budget_settles_a_completed_overrun_as_exhausted_not_completed() {
 async fn zero_limits_are_rejected_at_submission() {
     let harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
         usage: None,
         pricing: None,
         hang: false,
@@ -302,6 +300,7 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let harness = budget_harness(BudgetLoopLoader {
         requests: Arc::clone(&requests),
+        entered: None,
         usage: None,
         pricing: None,
         hang: true,
@@ -360,6 +359,7 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
         SessionRuntimeOptions::new(harness.database_path.clone()),
         Arc::new(BudgetLoopLoader {
             requests: Arc::clone(&requests),
+            entered: None,
             usage: None,
             pricing: None,
             hang: false,

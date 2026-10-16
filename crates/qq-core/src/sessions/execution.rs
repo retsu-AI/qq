@@ -805,28 +805,39 @@ async fn route_run(
         }
         decision.model.max_output_tokens = claimed.model.max_output_tokens;
         decision.model.organization = claimed.model.organization.clone();
-        let mut load = inner.loader.load(RuntimeLoadRequest {
-            reasoning_effort: decision.reasoning_effort,
-            routing: Some(RoutingSelection::from_identity(
-                loaded.plan.descriptor().routing.as_deref(),
-            )),
-            checkpoint: Some(CheckpointSelection::from_identity(
-                loaded.plan.descriptor().checkpoint.as_deref(),
-            )),
-            approval_delegate: Some(ApprovalDelegateSelection::from_identity(
-                loaded.plan.descriptor().approval_delegate.as_deref(),
-            )),
-            workspace: claimed.workspace.clone(),
-            model: decision.model.clone(),
-            profile: claimed.profile.clone(),
-        });
+        let load_progress = RuntimeLoadProgress::default();
+        let mut load = inner.loader.load_with_progress(
+            RuntimeLoadRequest {
+                reasoning_effort: decision.reasoning_effort,
+                routing: Some(RoutingSelection::from_identity(
+                    loaded.plan.descriptor().routing.as_deref(),
+                )),
+                checkpoint: Some(CheckpointSelection::from_identity(
+                    loaded.plan.descriptor().checkpoint.as_deref(),
+                )),
+                approval_delegate: Some(ApprovalDelegateSelection::from_identity(
+                    loaded.plan.descriptor().approval_delegate.as_deref(),
+                )),
+                workspace: claimed.workspace.clone(),
+                model: decision.model.clone(),
+                profile: claimed.profile.clone(),
+            },
+            load_progress.clone(),
+        );
         let selected = tokio::select! {
             biased;
             () = RunDeadline::wait(deadline) => {
+                let unfinished_stage = load_progress.stage();
+                load_progress.cancel();
                 let _ = load.await;
-                return Err(RunOutcome::BudgetExhausted { exhaustion: Box::new(deadline.expect("finite deadline woke").exhaustion()) });
+                let mut exhaustion = deadline.expect("finite deadline woke").exhaustion();
+                exhaustion.message.push_str("; selected runtime preparation was still ");
+                exhaustion.message.push_str(unfinished_stage.description());
+                exhaustion.message.push_str(" when the budget expired; no selected model request was started");
+                return Err(RunOutcome::BudgetExhausted { exhaustion: Box::new(exhaustion) });
             },
             changed = cancellation.changed() => {
+                load_progress.cancel();
                 let _ = load.await;
                 return Err(if changed.is_ok() && *cancellation.borrow() { RunOutcome::Cancelled } else { RunOutcome::Interrupted });
             },
@@ -1001,6 +1012,7 @@ pub(super) async fn execute_run(
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
+            load_progress.cancel();
             // The loader owns construction until it returns, even after expiry.
             let _ = load.await;
             let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
@@ -1027,6 +1039,7 @@ pub(super) async fn execute_run(
         changed = cancellation.changed() => {
             if changed.is_ok() && *cancellation.borrow() {
                 // A terminal event releases the session, so construction must exit first.
+                load_progress.cancel();
                 let _ = load.await;
                 finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
                 return;

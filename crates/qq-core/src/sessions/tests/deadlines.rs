@@ -157,6 +157,7 @@ async fn duration_withdraws_pending_approval_without_executing_the_tool() {
 }
 
 struct HeldDeadlineLoader {
+    progress: Arc<StdMutex<Option<RuntimeLoadProgress>>>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     requests: Arc<AtomicUsize>,
@@ -680,6 +681,166 @@ async fn duration_cancels_automatic_compaction_and_settles_the_original_prompt()
     );
 }
 
+struct PreparationRouter;
+
+impl TaskRouter for PreparationRouter {
+    fn identity(&self) -> &'static str {
+        "fixture/preparation"
+    }
+    fn configuration_identity(&self) -> &str {
+        "fixture/preparation"
+    }
+    fn max_cost_usd_nanos(&self) -> Option<u64> {
+        Some(0)
+    }
+    fn route(&self, _task: String) -> TaskRoutingFuture {
+        Box::pin(async {
+            qq_protocol::RoutingDecision {
+                model: ModelSelection {
+                    model: Some("test/selected".to_owned()),
+                    ..ModelSelection::default()
+                },
+                reasoning_effort: None,
+                outcome: qq_protocol::RoutingOutcome::Selected,
+                reason: "fixture selection".to_owned(),
+                usage: Some(TokenUsage::default()),
+                estimated_cost_usd_nanos: Some(0),
+            }
+        })
+    }
+}
+
+struct CooperativePreparationLoader {
+    routing: bool,
+    requests: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    drained: Arc<tokio::sync::Notify>,
+    signalled: Arc<AtomicUsize>,
+}
+
+impl RuntimeLoader for CooperativePreparationLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        if self.routing && request.model.model.as_deref() != Some("test/selected") {
+            let load = CountingTextLoader {
+                provider_calls: Arc::clone(&self.requests),
+            }
+            .load(request);
+            return Box::pin(async move {
+                let mut loaded = load.await?;
+                loaded.router = Some(Arc::new(PreparationRouter));
+                Ok(loaded)
+            });
+        }
+        let entered = Arc::clone(&self.entered);
+        let drained = Arc::clone(&self.drained);
+        let signalled = Arc::clone(&self.signalled);
+        Box::pin(async move {
+            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            entered.notify_one();
+            progress.cancelled().await;
+            signalled.fetch_add(1, Ordering::SeqCst);
+            progress.set(RuntimeLoadStage::Complete);
+            drained.notify_one();
+            Err(RuntimeLoadError {
+                kind: RunFailureKind::Server,
+                message: "preparation stopped".to_owned(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
+    for (cancel, routing) in [(false, false), (true, false), (false, true), (true, true)] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let drained = Arc::new(tokio::sync::Notify::new());
+        let signalled = Arc::new(AtomicUsize::new(0));
+        let mut harness = DeadlineSession::open(
+            Arc::new(CooperativePreparationLoader {
+                routing,
+                requests: Arc::clone(&requests),
+                entered: Arc::clone(&entered),
+                drained: Arc::clone(&drained),
+                signalled: Arc::clone(&signalled),
+            }),
+            ApprovalMode::Full,
+        )
+        .await;
+        if routing {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SetSessionModel {
+                        session_id: harness.session_id,
+                        model: ModelSelection {
+                            model_is_fallback: true,
+                            model: Some("test/model".to_owned()),
+                            ..ModelSelection::default()
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let run_id = harness
+            .submit("prepare", if cancel { 10_000 } else { 100 })
+            .await;
+        entered.notified().await;
+        if !cancel {
+            tokio::time::pause();
+        }
+        if cancel {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun { run_id },
+                )
+                .await
+                .unwrap();
+        } else {
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        drained.notified().await;
+        if !cancel {
+            tokio::time::resume();
+        }
+        let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
+        harness.runtime.shutdown().await.unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "cancelled preparation must not send provider requests"
+        );
+        assert_eq!(
+            signalled.load(Ordering::SeqCst),
+            1,
+            "loader must receive cooperative cancellation"
+        );
+        if cancel {
+            assert!(matches!(
+                finished_outcome(&observed, run_id),
+                Some(RunOutcome::Cancelled)
+            ));
+        } else {
+            assert!(
+                matches!(finished_outcome(&observed, run_id), Some(RunOutcome::BudgetExhausted { exhaustion })
+                if exhaustion.message.contains("resolving checkpoint reviewer credentials"))
+            );
+        }
+    }
+}
+
 impl RuntimeLoader for HeldDeadlineLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         self.load_with_progress(request, RuntimeLoadProgress::default())
@@ -693,8 +854,10 @@ impl RuntimeLoader for HeldDeadlineLoader {
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
         let requests = Arc::clone(&self.requests);
+        let observed_progress = Arc::clone(&self.progress);
         Box::pin(async move {
             progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            *observed_progress.lock().unwrap() = Some(progress.clone());
             entered.notify_one();
             release.notified().await;
             CountingTextLoader {
@@ -712,9 +875,11 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let requests = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(StdMutex::new(None));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(HeldDeadlineLoader {
+            progress: Arc::clone(&progress),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
             requests: Arc::clone(&requests),
@@ -752,22 +917,30 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
         panic!("prompt")
     };
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .unwrap();
-    let premature = tokio::time::timeout(Duration::from_millis(250), async {
-        loop {
-            let event = events.next().await.unwrap().unwrap();
-            if matches!(event.event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id) {
-                break;
-            }
-        }
-    }).await;
-    release.notify_one();
+    entered.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let progress = progress.lock().unwrap().clone().unwrap();
+    progress.cancelled().await;
+    assert_eq!(runtime.inner.permits.available_permits(), 7);
     assert!(
-        premature.is_err(),
-        "loader ownership must outlive expiry until it exits"
+        runtime
+            .inner
+            .store
+            .unfinished_run_ids()
+            .await
+            .unwrap()
+            .contains(&run_id)
     );
+    // No terminal publication can release this reservation while the legacy
+    // loader still owns preparation, even though it received cancellation.
+    while let Some(Some(event)) = futures_util::FutureExt::now_or_never(events.next()) {
+        assert!(
+            !matches!(event.unwrap().event, SessionEvent::RunFinished { run_id: finished, .. } if finished == run_id)
+        );
+    }
+    release.notify_one();
+    tokio::time::resume();
     let observed = collect_until(&mut events, finished_for(run_id)).await;
     runtime.shutdown().await.unwrap();
     let exhaustion = observed
