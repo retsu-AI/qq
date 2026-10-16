@@ -4,9 +4,9 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | Planned | | | One PR, one protocol bump |
+| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation checkpoint; not on main, full goal acceptance incomplete |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | The driver | Planned | | | Depends on G0; fresh goal recovery, not AC5 |
+| G2 | The driver | In review | [ENG-1053](https://linear.app/retsu-ai/issue/ENG-1053) | [#309](https://github.com/retsu-AI/qq/pull/309), stacked on #308 | Implemented checkpoint only; full G2 acceptance remains open; not shipped |
 | G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
 | G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
 | G5 | Evidence | Planned | | | ENG-809 |
@@ -16,7 +16,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 ### 2026-09-28 — plan opened
 
 This is a design PR only. The reference survey is in
-`design/goal-reference-survey-2026-09-28.md`. Of the reference harnesses,
+`../../research/goal-pursuit.md`. Of the reference harnesses,
 only Codex has a real goal. OpenCode, Pi and fx have pieces: a todo list
 that is never re-injected, a finish-turn hook, and a stop hook that fails
 open.
@@ -111,3 +111,9 @@ and accounting contracts; final consistency review and verification follow.
 - Full-PR relative links, fences, ledger status checks and `git diff --check`: passed.
 - No runtime/hot-path changes; provider minimal profile and performance benches not applicable.
 - ADR-0049 remains Proposed; lead decisions are in `decisions-needed.md` row 11.
+
+### 2026-10-06 — delivery stack planned
+
+- ENG-1011 tracks SQ0/SQ1/SQ2 before G0/G2/G3/G4/G5; no goal implementation claimed.
+- Immediate-parent PR bases, retarget after merge; G0 retains AC4 and one bump.
+- Side questions remain isolated from goal accounting and workspace check authority.

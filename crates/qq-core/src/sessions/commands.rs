@@ -5,6 +5,7 @@
 use super::*;
 
 pub(super) struct AppliedCommand {
+    pub(super) side_launch: Option<side_questions::SideLaunch>,
     pub(super) receipt: CommandReceipt,
     pub(super) schedule: bool,
     /// Other runs whose in-memory cancellation must be signalled with this
@@ -341,6 +342,7 @@ pub(super) fn execute_command(
             receipt,
             schedule: false,
             replayed: true,
+            side_launch: None,
             cascade_cancels: match &command {
                 SessionCommand::CancelRun { run_id } => {
                     cancellation_signal_run_ids(connection, *run_id)?
@@ -382,7 +384,93 @@ pub(super) fn execute_command(
     let now = now_ms();
     let mut grant_promotion_pending = false;
     let mut cascade_cancels = Vec::new();
+    let mut side_launch = None;
     let (receipt, schedule) = match command {
+        SessionCommand::CancelSideQuestion { side_question_id } => {
+            let item = side_questions::find_side_snapshot(&transaction, side_question_id)?
+                .ok_or(SessionRuntimeError::SideQuestionNotFound)?;
+            if item.state == qq_protocol::SideQuestionState::Running {
+                // In-flight spend already reads unknown: the executor nulls it
+                // before each request it sends.
+                transaction.execute(
+                    "UPDATE side_questions SET state = 'cancelled', finished_at_ms = ?2
+                     WHERE id = ?1 AND state = 'running'",
+                    params![side_question_id.to_string(), now],
+                )?;
+                let event =
+                    side_questions::append_side_event(&transaction, store_id, side_question_id)?;
+                (
+                    CommandReceipt {
+                        command_id,
+                        committed_through: event.cursor,
+                        outcome: CommandOutcome::SideQuestionCancelled { side_question_id },
+                    },
+                    false,
+                )
+            } else {
+                let workspace_id = session_workspace(&transaction, item.session_id)?;
+                let sequence = workspace_sequence(&transaction, workspace_id)?;
+                (
+                    CommandReceipt {
+                        command_id,
+                        committed_through: EventCursor {
+                            store_id,
+                            workspace_id,
+                            sequence,
+                        },
+                        outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                            side_question_id,
+                            state: item.state,
+                        },
+                    },
+                    false,
+                )
+            }
+        }
+        SessionCommand::SubmitSideQuestion {
+            session_id,
+            question,
+            new_thread,
+        } => {
+            let id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+            let (request, messages) = side_questions::admit_side_question(
+                &transaction,
+                store_id,
+                session_id,
+                id,
+                question.clone(),
+                new_thread,
+            )?;
+            let snapshot = side_questions::load_side_snapshot(&transaction, id)?;
+            let workspace = session_workspace(&transaction, session_id)?;
+            let sequence = transaction.query_row(
+                "SELECT next_sequence FROM workspaces WHERE id = ?1",
+                [workspace.to_string()],
+                |row| row.get(0),
+            )?;
+            side_launch = Some(side_questions::SideLaunch {
+                session: session_id,
+                id,
+                question,
+                request,
+                messages,
+            });
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: EventCursor {
+                        store_id,
+                        workspace_id: workspace,
+                        sequence,
+                    },
+                    outcome: CommandOutcome::SideQuestionSubmitted {
+                        side_question_id: id,
+                        thread_id: snapshot.thread_id,
+                    },
+                },
+                false,
+            )
+        }
         SessionCommand::ResolveWorkspace { .. } => {
             let canonical = canonical_workspace.ok_or(SessionRuntimeError::InvalidWorkspace)??;
             let path = canonical.as_str();
@@ -1414,6 +1502,10 @@ pub(super) fn execute_command(
                        AND NOT EXISTS (
                            SELECT 1 FROM runs WHERE runs.session_id = sessions.id
                        )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM side_questions q
+                           WHERE q.session_id = sessions.id AND q.state = 'running'
+                       )
                      ORDER BY rowid",
             )?;
             let victims = statement
@@ -1622,6 +1714,7 @@ pub(super) fn execute_command(
         cascade_cancels,
         grant_promotion_pending,
         replayed: false,
+        side_launch,
     })
 }
 
@@ -1766,7 +1859,8 @@ pub(super) fn validate_model_selection(model: &ModelSelection) -> Result<(), Ses
 /// Deletes one idle session and every row it owns, then appends
 /// `SessionDeleted`, all inside the caller's transaction.
 ///
-/// Refused while the session has an active run. That guard also keeps the
+/// Refused while the session has an active run or a running side question
+/// (whose executor would otherwise lose its row). That guard also keeps the
 /// runtime's in-memory maps clean without extra plumbing: cancellation
 /// senders and pending approvals exist only for claimed (executing) runs and
 /// are removed when the run finishes, so a deletable session can have none.
@@ -1795,6 +1889,9 @@ pub(super) fn delete_idle_session(
                         SELECT 1 FROM runs
                         WHERE session_id = sessions.id
                           AND status IN ('queued', 'running')
+                    ) OR EXISTS(
+                        SELECT 1 FROM side_questions
+                        WHERE session_id = sessions.id AND state = 'running'
                     )
              FROM sessions WHERE id = ?1",
             [session_id.to_string()],

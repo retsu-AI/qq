@@ -29,13 +29,12 @@ each pane is described in [`transcript.md`](./transcript.md) and
 | Compact | < 90 | One transcript column. When more than one session exists, a one-row agent strip above the composer rule. Composer grows to at most 4 rows. |
 | Regular | 90–159 | Transcript plus a sessions rail on the right (a quarter of the width, 20–28 columns) when more than one session exists or the rail is pinned. |
 | Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
-| Ultra | ≥ 240 | Wide, with two or three transcript panes side by side. |
+| Ultra | ≥ 240 | Wide; the tier is distinct, but the layout still shows one transcript pane. |
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
-ULTRA_MIN_WIDTH}`. Slice L1 shipped the tier function, the rail placement,
-the measure, and the inspector's geometry; slice L3 fills the inspector and
-its `Auto` state shows it from Wide. The layout produces one transcript pane
-until slice L4 adds the split.
+ULTRA_MIN_WIDTH}`. The inspector's `Auto` state shows it from Wide. The
+layout produces one transcript slot at every tier (`compute_layout` in
+`view/layout.rs`).
 
 Below 32 × 9 the frame is a "terminal is too small" notice.
 
@@ -101,8 +100,8 @@ pane's body into its slot, and collects one reconciled state per pane;
 `commit` writes them back after composition so building a frame never
 mutates the model. Overlays paint into the focused pane's slot only. A pane
 whose session no longer exists renders the empty prompt rather than a
-loading notice. Until slice L4 the layout produces one slot, so exactly the
-focused pane is on screen.
+loading notice. The layout produces one slot, so exactly the focused pane is
+on screen.
 
 ## Preferences
 
@@ -148,9 +147,8 @@ derives one itself only when the transcript did not lay that call out this
 frame (an overlay is up), so it never repeats JSON parsing.
 
 Rows are bounded by the pane: content past the height is cut with a `… N
-rows more` line and no row is built beyond what fits. The inspector does not
-scroll yet, and it follows the focused pane only; with the split (L4) it
-will follow focus across panes.
+rows more` line and no row is built beyond what fits. The inspector follows
+the focused pane and does not scroll.
 
 ## Sessions rail
 
@@ -219,4 +217,4 @@ same frames as ANSI for a real terminal. The render bench (`cargo bench -p
 qq-tui --bench render`) includes `compact_80x24`, `wide_160x48_full`,
 `tool_calls_32_expanded_inspector`, and `resize_ultra_480x120` alongside the
 legacy 160 × 48 scenes, which hold the rail and inspector off so they
-measure one transcript column at a fixed geometry across slices.
+measure one transcript column at a fixed geometry across changes.

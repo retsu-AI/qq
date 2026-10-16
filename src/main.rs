@@ -17,7 +17,6 @@ use qq_server as server;
 mod advisory;
 mod catalog;
 mod cli;
-mod diagnostic;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
@@ -42,98 +41,63 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let cli = cli::Cli::parse();
     validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
-    let diagnostic = activate_credential_diagnostics(cli.credential_diagnostics.as_deref())?;
-    let diagnostic_sink: Option<Arc<dyn auth::CredentialDiagnosticSink>> = diagnostic
-        .as_ref()
-        .map(|session| Arc::clone(session) as Arc<dyn auth::CredentialDiagnosticSink>);
+    if !cli.approved_read_images.is_empty()
+        && !matches!(
+            cli.command,
+            None | Some(
+                cli::Command::Ask { .. } | cli::Command::Run(_) | cli::Command::Serve { .. }
+            )
+        )
+    {
+        return Err(io::Error::other("read image approvals are only valid when starting ask, run, serve or interactive execution").into());
+    }
     let overrides = CliOverrides {
+        approved_read_images: qq_core::ApprovedReadImages::new(cli.approved_read_images)?,
         model: cli.model,
         max_output_tokens: cli.max_output_tokens,
         organization: cli.organization,
-        diagnostic: diagnostic_sink,
     };
 
-    let result: Result<ExitCode, Box<dyn Error>> = async {
-        match cli.command {
-            Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-            Some(cli::Command::Run(args)) => {
-                let code = headless_run(args, &overrides).await;
-                return Ok(code);
-            }
-            Some(cli::Command::Serve {
-                bind,
-                allow_origins,
-            }) => serve(bind, &allow_origins, overrides.diagnostic.clone()).await?,
-            Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
-            Some(cli::Command::Auth { command }) => {
-                run_blocking_command(move || auth_command(command)).await?
-            }
-            Some(cli::Command::Jev {
-                command: cli::JevCommand::Observe(args),
-            }) => advisory::run(args, overrides.diagnostic.clone()).await?,
-            Some(cli::Command::Jev {
-                command: cli::JevCommand::Setup { allow_file },
-            }) => run_blocking_command(move || jev_setup(allow_file)).await?,
-            Some(cli::Command::Mcp {
-                command: cli::McpCommand::Inspect { name },
-            }) => {
-                let request = overrides.load_request()?;
-                let settings = tokio::task::spawn_blocking(move || {
-                    mcp::inspection_settings(&name, &request).map_err(|error| error.to_string())
-                })
-                .await?
-                .map_err(io::Error::other)?;
-                let report = mcp::inspect_server(settings).await?;
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
-            Some(cli::Command::Org { command }) => organization_command(command)?,
-            Some(cli::Command::Trust) => trust_command(&overrides)?,
-            Some(cli::Command::Doctor(args)) => {
-                return doctor_command(args, &overrides).await;
-            }
-            Some(cli::Command::Init(args)) => {
-                run_blocking_command(move || init_command(args)).await?
-            }
-            Some(cli::Command::Version) => print!("{}", version_report()),
-            None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
+    match cli.command {
+        Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
+        Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Serve {
+            bind,
+            allow_origins,
+        }) => serve(bind, &allow_origins, &overrides).await?,
+        Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
+        Some(cli::Command::Auth { command }) => {
+            run_blocking_command(move || auth_command(command)).await?
         }
-
-        Ok(ExitCode::SUCCESS)
+        Some(cli::Command::Jev {
+            command: cli::JevCommand::Observe(args),
+        }) => advisory::run(args).await?,
+        Some(cli::Command::Jev {
+            command: cli::JevCommand::Setup { allow_file },
+        }) => run_blocking_command(move || jev_setup(allow_file)).await?,
+        Some(cli::Command::Mcp {
+            command: cli::McpCommand::Inspect { name },
+        }) => {
+            let request = overrides.load_request()?;
+            let settings = tokio::task::spawn_blocking(move || {
+                mcp::inspection_settings(&name, &request).map_err(|error| error.to_string())
+            })
+            .await?
+            .map_err(io::Error::other)?;
+            let report = mcp::inspect_server(settings).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(cli::Command::Org { command }) => organization_command(command)?,
+        Some(cli::Command::Trust) => trust_command(&overrides)?,
+        Some(cli::Command::Doctor(args)) => {
+            return doctor_command(args, &overrides).await;
+        }
+        Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
+        Some(cli::Command::Version) => print!("{}", version_report()),
+        None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }
-    .await;
-    finish_credential_diagnostics(diagnostic.as_deref(), result, |notice| {
-        eprintln!("{notice}")
-    })
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiagnosticActivationFailure;
-
-impl std::fmt::Display for DiagnosticActivationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("credential diagnostic activation failed; output unavailable")
-    }
-}
-
-impl Error for DiagnosticActivationFailure {}
-
-fn activate_credential_diagnostics(
-    path: Option<&Path>,
-) -> Result<Option<Arc<diagnostic::DiagnosticSession>>, DiagnosticActivationFailure> {
-    path.map(diagnostic::DiagnosticSession::open)
-        .transpose()
-        .map(|session| session.map(Arc::new))
-        .map_err(|_| DiagnosticActivationFailure)
-}
-fn finish_credential_diagnostics<T>(
-    session: Option<&diagnostic::DiagnosticSession>,
-    result: T,
-    mut report: impl FnMut(&'static str),
-) -> T {
-    if session.is_some_and(|session| session.close() == diagnostic::CloseOutcome::Incomplete) {
-        report("[diagnostic] output incomplete; the command result is unchanged");
-    }
-    result
+    Ok(ExitCode::SUCCESS)
 }
 
 fn validate_tui_qa_invocation(root: &Option<PathBuf>, has_command: bool) -> Result<(), io::Error> {
@@ -159,12 +123,12 @@ fn version_report() -> String {
     )
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct CliOverrides {
     model: Option<String>,
     max_output_tokens: Option<u32>,
     organization: Option<String>,
-    diagnostic: Option<Arc<dyn auth::CredentialDiagnosticSink>>,
+    approved_read_images: qq_core::ApprovedReadImages,
 }
 
 impl CliOverrides {
@@ -197,7 +161,8 @@ impl CliOverrides {
 }
 
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
-    let factory = runtime::RuntimeFactory::system_with_diagnostic(overrides.diagnostic.clone())?;
+    let factory =
+        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())?;
     let load = overrides.load_request()?;
     let compiler = factory.clone();
     let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
@@ -369,8 +334,9 @@ async fn prepare_headless(
         }
     };
 
-    let factory = runtime::RuntimeFactory::system_with_diagnostic(overrides.diagnostic.clone())
-        .map_err(|error| invalid(error.to_string()))?;
+    let factory =
+        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())
+            .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
@@ -483,10 +449,22 @@ async fn prepare_headless(
     Ok((handler.sessions().clone(), options))
 }
 
+fn reject_read_approvals_for_existing_server(
+    images: &qq_core::ApprovedReadImages,
+) -> Result<(), io::Error> {
+    if images.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "read image approvals cannot change an existing server; stop it and start a new server with the approval flags",
+        ))
+    }
+}
+
 async fn serve(
     bind: std::net::SocketAddr,
     allow_origins: &[String],
-    diagnostic: Option<Arc<dyn auth::CredentialDiagnosticSink>>,
+    overrides: &CliOverrides,
 ) -> Result<(), Box<dyn Error>> {
     let options = server::ServerOptions::for_user()?
         .with_bind_address(bind)
@@ -494,10 +472,13 @@ async fn serve(
         .with_allowed_origins(server::AllowedOrigins::new(allow_origins)?);
     match server::reserve(options).await? {
         server::ReserveOutcome::Existing(connection) => {
+            reject_read_approvals_for_existing_server(&overrides.approved_read_images)?;
             println!("qq server already running at {}", connection.address());
         }
         server::ReserveOutcome::Reserved(reservation) => {
-            let factory = runtime::RuntimeFactory::system_with_diagnostic(diagnostic)?;
+            let factory = runtime::RuntimeFactory::system_with_read_images(
+                overrides.approved_read_images.clone(),
+            )?;
             // The server's own configuration decides the approval wait for
             // every session it serves: a server-side control like the Jev
             // settings, not one a client forwards. Absent is no deadline. A
@@ -604,6 +585,7 @@ async fn interactive(
         .into());
     }
     let environment = InteractiveEnvironment::open(overrides, tui_qa_root)?;
+    let approved_read_images = overrides.approved_read_images.clone();
     let factory = environment.factory;
     let request = environment.request;
     let environment_request = request.clone();
@@ -700,7 +682,11 @@ async fn interactive(
                 .await
                 .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?
             {
-                server::ReserveOutcome::Existing(connection) => (connection, initial(false)),
+                server::ReserveOutcome::Existing(connection) => {
+                    reject_read_approvals_for_existing_server(&approved_read_images)
+                        .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?;
+                    (connection, initial(false))
+                }
                 server::ReserveOutcome::Reserved(reservation) => {
                     owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
@@ -782,11 +768,7 @@ async fn interactive(
                     match factory.resolve_trust(&request, choice, &reviewed) {
                         Ok(granted) => Ok(qq_tui::TrustResolved {
                             trusted: granted.trusted,
-                            // Preserve the configured route only as the
-                            // server Models request selection. The attached
-                            // app installs no usable model until the server
-                            // returns its authoritative selection.
-                            model: granted.state.configured_model,
+                            model: granted.state.tui_model,
                             models: granted.state.models.into_iter().map(Into::into).collect(),
                             unauthenticated_providers: granted
                                 .state
@@ -866,12 +848,11 @@ impl InteractiveEnvironment {
     ) -> Result<Self, Box<dyn Error>> {
         let Some(root) = tui_qa_root else {
             let config = config::ConfigLoader::system()?;
-            let credentials = auth::CredentialStore::system()?;
-            let credentials = match overrides.diagnostic.clone() {
-                Some(sink) => credentials.with_diagnostic_sink(sink),
-                None => credentials,
-            };
-            let factory = runtime::RuntimeFactory::new(config.clone(), credentials)?;
+            let factory = runtime::RuntimeFactory::new_with_read_images(
+                config.clone(),
+                auth::CredentialStore::system()?,
+                overrides.approved_read_images.clone(),
+            )?;
             return Ok(Self {
                 factory,
                 config,
@@ -881,6 +862,12 @@ impl InteractiveEnvironment {
             });
         };
 
+        if !overrides.approved_read_images.is_empty() {
+            return Err(io::Error::other(
+                "read image approvals are not supported in the isolated TUI QA fixture",
+            )
+            .into());
+        }
         let root = prepare_tui_qa_root(&root)?;
         let config = config::ConfigLoader::new(config::ConfigPaths::new(
             root.join("config"),
@@ -889,10 +876,6 @@ impl InteractiveEnvironment {
         ));
         let credentials =
             auth::CredentialStore::with_paths(auth::CredentialPaths::new(root.join("credentials")));
-        let credentials = match overrides.diagnostic.clone() {
-            Some(sink) => credentials.with_diagnostic_sink(sink),
-            None => credentials,
-        };
         let workspace = root.join("workspace");
         let factory = runtime::RuntimeFactory::isolated_tui_qa(
             config.clone(),
@@ -1992,6 +1975,30 @@ mod tests {
     }
 
     #[test]
+    fn ab1_existing_server_cannot_silently_ignore_read_approvals() {
+        assert!(
+            reject_read_approvals_for_existing_server(&qq_core::ApprovedReadImages::default())
+                .is_ok()
+        );
+        let images = qq_core::ApprovedReadImages::new(vec![
+            format!("grep:{}", "01".repeat(32)).parse().unwrap(),
+        ])
+        .unwrap();
+        assert!(
+            reject_read_approvals_for_existing_server(&images)
+                .unwrap_err()
+                .to_string()
+                .contains("existing server")
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let overrides = CliOverrides {
+            approved_read_images: images,
+            ..CliOverrides::default()
+        };
+        assert!(InteractiveEnvironment::open(&overrides, Some(fixture.path().to_owned())).is_err());
+    }
+
+    #[test]
     fn auth_login_rejects_a_provider_it_cannot_bind_and_lists_the_accepted_ones() {
         let error = auth_command(cli::AuthCommand::Login(cli::LoginArgs {
             provider: "opnai".to_owned(),
@@ -2509,364 +2516,6 @@ mod tests {
             models[0].selection.model.as_deref(),
             Some("custom/test-model")
         );
-    }
-
-    #[test]
-    fn credential_diagnostic_activation_refusals_are_fixed_and_pre_runtime() {
-        let root = private_tempdir();
-        let existing = root.path().join("private-path-marker");
-        std::fs::write(&existing, b"preserved-file-marker").unwrap();
-        let before = diagnostic::resource_counts();
-        assert!(activate_credential_diagnostics(None).unwrap().is_none());
-        for path in [
-            existing.clone(),
-            root.path().to_owned(),
-            root.path().join("missing-parent-marker/output"),
-        ] {
-            let error = match activate_credential_diagnostics(Some(&path)) {
-                Err(error) => error,
-                Ok(_) => panic!("activation unexpectedly accepted a rejected path"),
-            };
-            assert_eq!(error, DiagnosticActivationFailure);
-            assert_eq!(
-                error.to_string(),
-                "credential diagnostic activation failed; output unavailable"
-            );
-            assert!(error.source().is_none());
-            assert_eq!(format!("{error:?}"), "DiagnosticActivationFailure");
-            assert!(!error.to_string().contains("marker"));
-        }
-        assert_eq!(before, diagnostic::resource_counts());
-        assert_eq!(std::fs::read(existing).unwrap(), b"preserved-file-marker");
-    }
-
-    #[test]
-    fn credential_diagnostic_cli_activation_runs_real_process_pipeline() {
-        let root = private_tempdir();
-        let path = root.path().join("diagnostic.jsonl");
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::credential_diagnostic_cli_child",
-                "--nocapture",
-            ])
-            .env("QQ_DIAGNOSTIC_CHILD_PATH", &path)
-            .env_remove("QQ_JEV_API_KEY")
-            .env_remove("TYPESAFE_API_KEY")
-            .env_remove("QQ_JEV_ACTIVATION")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        let text = std::fs::read_to_string(path).unwrap();
-        assert!(text.lines().any(|line| line.contains("Summary")));
-        assert!(!text.contains("diagnostic.jsonl"));
-    }
-
-    #[test]
-    fn credential_diagnostic_cli_child() {
-        use clap::Parser as _;
-        let Some(path) = std::env::var_os("QQ_DIAGNOSTIC_CHILD_PATH") else {
-            return;
-        };
-        let mode = std::env::var("QQ_DIAGNOSTIC_CHILD_MODE").unwrap_or_else(|_| "enabled".into());
-        let path = PathBuf::from(path);
-        let before = diagnostic::resource_counts();
-        let mut args = vec!["qq".to_owned()];
-        if mode == "enabled" {
-            args.extend([
-                "--credential-diagnostics".into(),
-                path.to_string_lossy().into_owned(),
-            ]);
-        }
-        args.push("version".into());
-        let cli = cli::Cli::try_parse_from(args).unwrap();
-        let session =
-            activate_credential_diagnostics(cli.credential_diagnostics.as_deref()).unwrap();
-        let sink = session
-            .as_ref()
-            .map(|s| Arc::clone(s) as Arc<dyn auth::CredentialDiagnosticSink>);
-        let root = private_tempdir();
-        let first_backend = Arc::new(CountingDiagnosticKeyring::default());
-        let second_backend = Arc::new(CountingDiagnosticKeyring::default());
-        let mut first = auth::CredentialStore::with_backend(
-            auth::CredentialPaths::new(root.path().join("normal")),
-            first_backend.clone(),
-        );
-        if let Some(sink) = sink.clone() {
-            first = first.with_diagnostic_sink(sink);
-        }
-        first
-            .set_with_metadata(
-                "provider/private-name-marker",
-                b"private-secret-marker",
-                false,
-                Some("provider"),
-                Some("https://private-url-marker.example"),
-            )
-            .unwrap();
-        assert_eq!(
-            first
-                .resolve_with_endpoint(
-                    &qq_provider::SecretRef::Stored("provider/private-name-marker".into()),
-                    Some("https://private-url-marker.example")
-                )
-                .unwrap()
-                .expose_secret_bytes(),
-            b"private-secret-marker"
-        );
-        let second = auth::CredentialStore::with_backend(
-            auth::CredentialPaths::new(root.path().join("advisory")),
-            second_backend.clone(),
-        );
-        second
-            .set_with_metadata(
-                "typesafe-jev",
-                b"private-reviewer-secret-marker",
-                false,
-                Some("typesafe-jev"),
-                Some("https://api.typesafe.ai"),
-            )
-            .unwrap();
-        let _reviewer = runtime::advisory_reviewer_from_store(second, sink).unwrap();
-        assert_eq!(
-            first_backend
-                .reads
-                .load(std::sync::atomic::Ordering::Acquire),
-            1
-        );
-        assert_eq!(
-            second_backend
-                .reads
-                .load(std::sync::atomic::Ordering::Acquire),
-            1
-        );
-        let result: Result<u8, &'static str> = Ok(7);
-        assert_eq!(
-            finish_credential_diagnostics(session.as_deref(), result, |_| panic!(
-                "unexpected incomplete output"
-            )),
-            Ok(7)
-        );
-        let after = diagnostic::resource_counts();
-        if mode == "enabled" {
-            assert_eq!(after.0, before.0 + 1);
-            assert_eq!(after.1, before.1 + 1);
-            assert_eq!(after.2, before.2 + 1);
-        } else {
-            assert_eq!(before, after);
-            assert!(!path.exists());
-        }
-        println!(
-            "ACTUAL DIAGNOSTIC FIXTURE mode={mode} reads=2 session_launches={} writer_launches={}",
-            after.1 - before.1,
-            after.2 - before.2
-        );
-    }
-
-    #[derive(Default)]
-    struct CountingDiagnosticKeyring {
-        inner: TestKeyring,
-        reads: std::sync::atomic::AtomicUsize,
-    }
-    impl auth::KeyringBackend for CountingDiagnosticKeyring {
-        fn get(&self, name: &str) -> Result<Vec<u8>, auth::KeyringError> {
-            self.reads.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.inner.get(name)
-        }
-        fn set(&self, name: &str, secret: &[u8]) -> Result<(), auth::KeyringError> {
-            self.inner.set(name, secret)
-        }
-        fn remove(&self, name: &str) -> Result<(), auth::KeyringError> {
-            self.inner.remove(name)
-        }
-    }
-
-    #[test]
-    fn credential_diagnostic_default_enabled_deactivated_process_resources_and_privacy() {
-        for mode in ["disabled", "enabled", "deactivated"] {
-            let root = private_tempdir();
-            let path = root.path().join("events.jsonl");
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::credential_diagnostic_cli_child",
-                    "--nocapture",
-                ])
-                .env("QQ_DIAGNOSTIC_CHILD_PATH", &path)
-                .env("QQ_DIAGNOSTIC_CHILD_MODE", mode)
-                .env_remove("QQ_JEV_API_KEY")
-                .env_remove("TYPESAFE_API_KEY")
-                .env_remove("QQ_JEV_ACTIVATION")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("reads=2"));
-            if mode == "enabled" {
-                let raw = std::fs::read_to_string(&path).unwrap();
-                for marker in [
-                    "private-name-marker",
-                    "private-secret-marker",
-                    "private-reviewer-secret-marker",
-                    "private-url-marker",
-                    "events.jsonl",
-                ] {
-                    assert!(!raw.contains(marker));
-                }
-                let rows: Vec<serde_json::Value> = raw
-                    .lines()
-                    .map(|l| serde_json::from_str(l).unwrap())
-                    .collect();
-                let starts: Vec<_> = rows
-                    .iter()
-                    .filter(|r| r["kind"] == "BackendReadStarted")
-                    .collect();
-                assert_eq!(starts.len(), 2);
-                assert_eq!(starts[0]["pid"], starts[1]["pid"]);
-                assert_eq!(starts[0]["session_id"], starts[1]["session_id"]);
-                assert_ne!(starts[0]["store_id"], starts[1]["store_id"]);
-                assert_ne!(starts[0]["coordinator_id"], starts[1]["coordinator_id"]);
-                assert_eq!(starts[1]["route"], "TypesafeReviewer");
-                assert_eq!(starts[1]["endpoint"], "Typesafe");
-            } else {
-                assert!(!path.exists());
-            }
-        }
-    }
-
-    #[test]
-    fn credential_diagnostic_finalization_preserves_success_and_failure_results() {
-        struct BrokenWriter;
-        impl std::io::Write for BrokenWriter {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("private-error-marker"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Err(io::Error::other("private-error-marker"))
-            }
-        }
-        for result in [Ok(7u8), Err("original-command-error")] {
-            let session = diagnostic::DiagnosticSession::open_with_writer(BrokenWriter);
-            let mut notices = Vec::new();
-            let observed =
-                finish_credential_diagnostics(Some(&session), result, |n| notices.push(n));
-            assert_eq!(observed, result);
-            assert_eq!(
-                notices,
-                vec!["[diagnostic] output incomplete; the command result is unchanged"]
-            );
-            assert!(!notices[0].contains("private-error-marker"));
-        }
-    }
-
-    #[test]
-    fn credential_diagnostic_composes_two_real_stores_with_one_session() {
-        let root = private_tempdir();
-        let path = root.path().join("composed.jsonl");
-        let session = Arc::new(diagnostic::DiagnosticSession::open(&path).unwrap());
-        let first = auth::CredentialStore::with_backend(
-            auth::CredentialPaths::new(root.path().join("first")),
-            Arc::new(TestKeyring::default()),
-        )
-        .with_diagnostic_sink(Arc::clone(&session) as Arc<dyn auth::CredentialDiagnosticSink>);
-        let second = auth::CredentialStore::with_backend(
-            auth::CredentialPaths::new(root.path().join("second")),
-            Arc::new(TestKeyring::default()),
-        )
-        .with_diagnostic_sink(Arc::clone(&session) as Arc<dyn auth::CredentialDiagnosticSink>);
-        first
-            .set_with_metadata(
-                "provider/first",
-                b"first-secret",
-                false,
-                Some("provider"),
-                Some("https://provider.example"),
-            )
-            .unwrap();
-        second
-            .set_with_metadata(
-                "provider/second",
-                b"second-secret",
-                false,
-                Some("provider"),
-                Some("https://provider.example"),
-            )
-            .unwrap();
-        assert_eq!(
-            first
-                .resolve_with_endpoint(
-                    &qq_provider::SecretRef::Stored("provider/first".to_owned()),
-                    Some("https://provider.example"),
-                )
-                .unwrap()
-                .expose_secret_bytes(),
-            b"first-secret"
-        );
-        assert_eq!(
-            second
-                .resolve_with_endpoint(
-                    &qq_provider::SecretRef::Stored("provider/second".to_owned()),
-                    Some("https://provider.example"),
-                )
-                .unwrap()
-                .expose_secret_bytes(),
-            b"second-secret"
-        );
-        assert_eq!(session.close(), diagnostic::CloseOutcome::Closed);
-        let text = std::fs::read_to_string(path).unwrap();
-        let records: Vec<serde_json::Value> = text
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let starts: Vec<_> = records
-            .iter()
-            .filter(|record| record["kind"] == "BackendReadStarted")
-            .collect();
-        assert_eq!(starts.len(), 2);
-        assert!(
-            starts
-                .iter()
-                .all(|record| record["pid"] == std::process::id())
-        );
-        assert_eq!(
-            starts[0]["session_id"], starts[1]["session_id"],
-            "both stores must use one diagnostic session"
-        );
-        assert_ne!(starts[0]["store_id"], starts[1]["store_id"]);
-        assert_ne!(starts[0]["coordinator_id"], starts[1]["coordinator_id"]);
-        let attempts: std::collections::HashSet<_> = records
-            .iter()
-            .filter(|record| record["kind"] == "OwnerAdmitted")
-            .map(|record| record["attempt_id"].clone())
-            .collect();
-        let flights: std::collections::HashSet<_> = starts
-            .iter()
-            .map(|record| record["flight_id"].clone())
-            .collect();
-        let reads: std::collections::HashSet<_> = starts
-            .iter()
-            .map(|record| record["read_id"].clone())
-            .collect();
-        assert_eq!(
-            attempts.len(),
-            2,
-            "caller IDs must share one non-reusing allocator"
-        );
-        assert_eq!(
-            flights.len(),
-            2,
-            "flight IDs must share one non-reusing allocator"
-        );
-        assert_eq!(
-            reads.len(),
-            2,
-            "read IDs must share one non-reusing allocator"
-        );
-        assert!(!text.contains("first-secret"));
-        assert!(!text.contains("second-secret"));
     }
 
     #[test]

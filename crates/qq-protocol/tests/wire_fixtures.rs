@@ -77,6 +77,8 @@ fn summary() -> SessionSummary {
         estimated_cost_usd_nanos: Some(42),
         updated_at_ms: 1_700_000_000_000,
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
     }
 }
 
@@ -208,13 +210,93 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
         command_id: CommandId::from_bytes([byte; 16]),
         command,
     };
+
+    check(
+        "command_cancel_side_question",
+        &command(
+            0x7b,
+            SessionCommand::CancelSideQuestion {
+                side_question_id: run_id,
+            },
+        ),
+    );
+    check(
+        "command_submit_side_question",
+        &command(
+            0x7a,
+            SessionCommand::SubmitSideQuestion {
+                session_id,
+                question: "What does this mean?".to_owned(),
+                new_thread: false,
+            },
+        ),
+    );
+    check(
+        "receipt_side_question",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7a; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            outcome: CommandOutcome::SideQuestionSubmitted {
+                side_question_id: run_id,
+                thread_id: run_id,
+            },
+        },
+    );
+    check(
+        "receipt_side_question_already_finished",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7b; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 2,
+            },
+            outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                side_question_id: run_id,
+                state: qq_protocol::SideQuestionState::Completed,
+            },
+        },
+    );
+    check(
+        "event_side_question_updated",
+        &SessionEventEnvelope {
+            cursor: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            session_id,
+            run_id: None,
+            caused_by: None,
+            occurred_at_ms: 2,
+            event: SessionEvent::SideQuestionUpdated {
+                side_question: Box::new(qq_protocol::SideQuestionSnapshot {
+                    id: run_id,
+                    thread_id: run_id,
+                    session_id,
+                    question: "What does this mean?".to_owned(),
+                    answer: "An isolated answer.".to_owned(),
+                    state: qq_protocol::SideQuestionState::Completed,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    model_turns: 1,
+                    created_at_ms: 1,
+                    finished_at_ms: Some(2),
+                }),
+            },
+        },
+    );
 
     check(
         "command_create_session",
@@ -584,6 +666,64 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
+            },
+        ),
+    );
+    // Version 32: the hold goes to an approval delegate before any human.
+    check(
+        "event_tool_approval_requested_delegated",
+        &envelope(
+            22,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"git push"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: Some(Box::new(ShellCommandPreview {
+                    command: "git push".to_owned(),
+                    cwd: None,
+                    verdict: Some(ShellVerdict::Prompt),
+                    reasons: vec!["publishes".to_owned()],
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
+            },
+        ),
+    );
+    // Version 32: a summary says who each held call waits on and whether a
+    // side question runs, for clients that never load the body.
+    check(
+        "event_session_updated_with_holds",
+        &envelope(
+            22,
+            SessionEvent::SessionUpdated {
+                session: Box::new(SessionSummary {
+                    pending_holds: vec![
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([6; 16]),
+                            delegated: false,
+                        },
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([7; 16]),
+                            delegated: true,
+                        },
+                    ],
+                    running_side_question: Some(RunId::from_bytes([8; 16])),
+                    ..summary()
+                }),
             },
         ),
     );
@@ -655,6 +795,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     }],
                 })),
                 fetch: None,
+                delegated: false,
             },
         ),
     );
@@ -686,6 +827,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         ),
     );

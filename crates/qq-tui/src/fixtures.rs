@@ -73,6 +73,8 @@ pub fn session_summary(id: SessionId) -> SessionSummary {
         estimated_cost_usd_nanos: Some(0),
         updated_at_ms: 1,
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
     }
 }
 
@@ -137,6 +139,7 @@ pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
 #[must_use]
 pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
     SessionSnapshot {
+        side_questions: Vec::new(),
         summary,
         messages: Vec::new(),
         runs: Vec::new(),

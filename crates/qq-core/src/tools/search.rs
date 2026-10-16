@@ -18,24 +18,44 @@ use serde::Deserialize;
 use crate::workspace::Workspace;
 
 use super::{
-    dispatch::{ToolCancellation, ToolOutput},
+    dispatch::{ReadSideOutput, ToolCancellation},
     lang::{Language, REGEX_SIZE_LIMIT, SymbolError, SymbolMatchers},
     output::{Bounds, Header, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len},
     walk::{
-        Child, EntryKind, IgnoreStack, ListError, MAX_FILE_SCAN_BYTES, PathFilter, ScanBudget,
-        StopReason, list_children, looks_binary, relative_string,
+        Child, EntryKind, IgnoreStack, ListError, ListingLimits, MAX_FILE_SCAN_BYTES, PathFilter,
+        ScanBudget, StopReason, list_children_bounded, looks_binary, relative_string,
     },
 };
 
 /// Model-facing bound. Search stops emitting at this budget and returns a
 /// cursor, so the bound is a ceiling the walk itself respects.
-pub(super) const SEARCH_BOUNDS: Bounds = Bounds::new(12 * 1024, 4_000);
+pub(super) const SEARCH_BOUNDS: Bounds = Bounds {
+    max_line_bytes: 12 * 1024,
+    ..Bounds::new(12 * 1024, 4_000)
+};
 /// File bytes one call may scan before returning `partial=bytes`.
 pub(super) const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 /// Directory entries one call may visit before returning `partial=scan`.
 pub(super) const MAX_SCAN_ENTRIES: usize = 50_000;
 /// Soft deadline; the walk returns `partial=time` with a cursor.
 const SEARCH_DEADLINE: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_SCAN_ENTRIES) };
+}
+
+#[cfg(test)]
+pub(super) fn with_scan_entries<T>(entries: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset(usize);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_SCAN_ENTRIES.set(self.0);
+        }
+    }
+    let _reset = Reset(TEST_SCAN_ENTRIES.replace(entries));
+    run()
+}
 pub(super) const MAX_QUERY_BYTES: usize = 1_024;
 pub(super) const MAX_LIMIT: usize = 500;
 const DEFAULT_LIMIT: usize = 60;
@@ -44,7 +64,8 @@ const DEFAULT_MAX_PER_FILE: usize = 10;
 pub(super) const MAX_CONTEXT: usize = 5;
 pub(super) const MAX_GLOBS: usize = 8;
 pub(super) const MAX_GLOB_BYTES: usize = 256;
-pub(super) const MAX_CURSOR_BYTES: usize = 512;
+pub(super) const MAX_CURSOR_PATH_BYTES: usize = 4_096;
+pub(super) const MAX_CURSOR_BYTES: usize = ((MAX_CURSOR_PATH_BYTES + 1 + 10) * 4).div_ceil(3);
 /// Cursor values models send for "the first page". None can be a real cursor
 /// under any casing: a real one is base64url of `path\0line` with a non-empty
 /// path, so at least four alphabet characters that decode to a NUL byte.
@@ -163,7 +184,7 @@ impl Cursor {
         let split = raw.iter().position(|&byte| byte == 0)?;
         let path = std::str::from_utf8(&raw[..split]).ok()?;
         let line = std::str::from_utf8(&raw[split + 1..]).ok()?.parse().ok()?;
-        (!path.is_empty()).then(|| Self {
+        (!path.is_empty() && path.len() <= MAX_CURSOR_PATH_BYTES).then(|| Self {
             path: path.to_owned(),
             line,
         })
@@ -178,6 +199,14 @@ impl Cursor {
     fn skips_dir(&self, dir: &str) -> bool {
         let prefix_len = dir.len() + 1;
         let cursor = self.path.as_bytes();
+        // A trailing slash with the terminal line marks a fully visited subtree.
+        if self.line == u32::MAX
+            && cursor.len() == prefix_len
+            && cursor.starts_with(dir.as_bytes())
+            && cursor[dir.len()] == b'/'
+        {
+            return true;
+        }
         if cursor.len() >= prefix_len
             && &cursor[..dir.len()] == dir.as_bytes()
             && cursor[dir.len()] == b'/'
@@ -216,6 +245,28 @@ enum Stop {
     Cancelled,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum SearchWalkError {
+    #[error(transparent)]
+    List(#[from] ListError),
+    #[error("could not resolve {path} inside the workspace: {source}")]
+    Resolve {
+        path: String,
+        #[source]
+        source: crate::workspace::WorkspacePathError,
+    },
+    #[error("instruction link {path} does not resolve to a regular file")]
+    InstructionNotAFile { path: String },
+    #[error(
+        "search_path_budget: path exceeds the {MAX_CURSOR_PATH_BYTES}-byte cursor bound; select a nearer workspace root"
+    )]
+    CursorPathBudget,
+    #[error(
+        "search_output_budget: a complete match cannot fit with its cursor; reduce context or select a nearer workspace root"
+    )]
+    MatchBudget,
+}
+
 struct Walker<'a> {
     workspace: &'a Workspace,
     cancelled: &'a ToolCancellation,
@@ -238,21 +289,55 @@ struct Walker<'a> {
     last_emitted: Option<Cursor>,
     last_scanned: Option<String>,
     stop: Option<Stop>,
+    depth_skipped: usize,
     buffer: Vec<u8>,
     scratch: String,
 }
 
 impl Walker<'_> {
-    fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<(), ListError> {
+    /// Reserve the longest possible line position before advancing the frontier.
+    /// A larger cursor must not consume bytes already promised to the body.
+    fn reserve_cursor(&mut self, path: &str) -> Result<bool, SearchWalkError> {
+        if self.count_only {
+            return Ok(true);
+        }
+        if path.len() > MAX_CURSOR_PATH_BYTES {
+            return Err(SearchWalkError::CursorPathBudget);
+        }
+        let encoded = ((path.len() + 1 + 10) * 4).div_ceil(3);
+        let budget = SEARCH_BOUNDS
+            .max_bytes
+            .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES + encoded);
+        if self.body_escaped > budget {
+            self.stop = Some(Stop::Bytes);
+            return Ok(false);
+        }
+        self.body_budget = budget;
+        Ok(true)
+    }
+
+    fn visit_dir(&mut self, dir: &str, depth: usize) -> Result<(), SearchWalkError> {
         if self.cancelled.is_cancelled() {
             self.stop = Some(Stop::Cancelled);
             return Ok(());
         }
-        let children = list_children(
+        if !self.reserve_cursor(dir)? {
+            return Ok(());
+        }
+        let skipped_before = self.depth_skipped;
+        let children = list_children_bounded(
             self.workspace,
             dir,
             &mut self.stack,
             &mut self.budget.unreadable,
+            Some(ListingLimits {
+                max_entries: 100_000,
+                max_bytes: 32 * 1024 * 1024,
+                deadline: self.budget.deadline,
+                cancelled: self.cancelled,
+                #[cfg(test)]
+                observe: None,
+            }),
         )?;
         for child in &children {
             if self.stop.is_some() {
@@ -261,21 +346,34 @@ impl Walker<'_> {
             match child.kind {
                 EntryKind::Dir => {
                     if child.ignored
-                        || depth >= MAX_WALK_DEPTH
                         || self
                             .cursor
                             .is_some_and(|cursor| cursor.skips_dir(&child.path))
                     {
                         continue;
                     }
+                    let excluded_subtree =
+                        (depth >= MAX_WALK_DEPTH).then(|| format!("{}/", child.path));
+                    let frontier = excluded_subtree.as_deref().unwrap_or(&child.path);
+                    if !self.reserve_cursor(frontier)? {
+                        break;
+                    }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
                         break;
                     }
+                    if let Some(frontier) = excluded_subtree {
+                        self.depth_skipped += 1;
+                        // This policy-excluded subtree is terminal for this scope.
+                        self.last_scanned = Some(frontier);
+                        continue;
+                    }
                     self.visit_dir(&child.path, depth + 1)?;
                 }
                 EntryKind::File { size, .. } => {
-                    if child.ignored
+                    if (child.ignored
+                        && !(matches!(self.matcher, Matcher::Names(_))
+                            && matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md")))
                         || !self.filter.admits_file(&child.path)
                         || self
                             .cursor
@@ -283,28 +381,100 @@ impl Walker<'_> {
                     {
                         continue;
                     }
+                    if !self.reserve_cursor(&child.path)? {
+                        break;
+                    }
                     if let Some(reason) = self.budget.charge_entry() {
                         self.stop = Some(Stop::Scan(reason));
                         break;
                     }
                     self.scan(child, size)?;
                 }
-                EntryKind::Symlink | EntryKind::Other => {}
+                EntryKind::Symlink => {
+                    if self.cancelled.is_cancelled() {
+                        self.stop = Some(Stop::Cancelled);
+                        break;
+                    }
+                    let Matcher::Names(regex) = self.matcher else {
+                        continue;
+                    };
+                    if (child.ignored
+                        && !(matches!(self.matcher, Matcher::Names(_))
+                            && matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md")))
+                        || !self.filter.admits_file(&child.path)
+                        || self
+                            .cursor
+                            .is_some_and(|cursor| cursor.skips_file(&child.path))
+                    {
+                        continue;
+                    }
+                    if !self.reserve_cursor(&child.path)? {
+                        break;
+                    }
+                    if let Some(reason) = self.budget.charge_entry() {
+                        self.stop = Some(Stop::Scan(reason));
+                        break;
+                    }
+                    self.last_scanned = Some(child.path.clone());
+                    if !regex.is_match(child.path.as_bytes()) {
+                        continue;
+                    }
+                    let instruction = matches!(child.name.as_str(), "AGENTS.md" | "CLAUDE.md");
+                    let resolved = match self.workspace.contained_path(&child.path) {
+                        Ok(path) => path,
+                        Err(source) if instruction => {
+                            return Err(SearchWalkError::Resolve {
+                                path: child.path.clone(),
+                                source,
+                            });
+                        }
+                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                    };
+                    let metadata = match self.workspace.root().metadata(&resolved) {
+                        Ok(metadata) => metadata,
+                        Err(source) if instruction => {
+                            return Err(ListError::Inspect {
+                                path: child.path.clone(),
+                                source,
+                            }
+                            .into());
+                        }
+                        Err(_) => continue, // Other unresolved links retain the existing exclusion.
+                    };
+                    if metadata.is_file() {
+                        self.scanned_files += 1;
+                        self.emit_name(&child.path)?;
+                    } else if instruction {
+                        return Err(SearchWalkError::InstructionNotAFile {
+                            path: child.path.clone(),
+                        });
+                    }
+                }
+                EntryKind::Other => {}
             }
         }
         self.stack.leave();
+        if self.stop.is_none() && dir != "." && self.depth_skipped == skipped_before {
+            let completed = format!("{dir}/");
+            if self.reserve_cursor(&completed)? {
+                self.last_scanned = Some(completed);
+            }
+        }
         Ok(())
     }
 
-    fn scan(&mut self, child: &Child, size: u64) -> Result<(), ListError> {
+    fn scan(&mut self, child: &Child, size: u64) -> Result<(), SearchWalkError> {
         if self.cancelled.is_cancelled() {
             self.stop = Some(Stop::Cancelled);
+            return Ok(());
+        }
+        if !self.reserve_cursor(&child.path)? {
             return Ok(());
         }
         if let Matcher::Names(regex) = self.matcher {
             self.scanned_files += 1;
             if regex.is_match(child.path.as_bytes()) {
-                self.emit_name(&child.path);
+                self.emit_name(&child.path)?;
             }
             self.last_scanned = Some(child.path.clone());
             return Ok(());
@@ -335,7 +505,7 @@ impl Walker<'_> {
         if looks_binary(&self.buffer) {
             self.budget.skipped_binary += 1;
         } else {
-            self.scan_buffer(&child.path);
+            self.scan_buffer(&child.path)?;
         }
         self.last_scanned = Some(child.path.clone());
         if self.stop.is_none()
@@ -346,25 +516,28 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn emit_name(&mut self, path: &str) {
+    fn emit_name(&mut self, path: &str) -> Result<(), SearchWalkError> {
         if self.cursor.is_some_and(|cursor| cursor.skips_line(path, 0)) {
-            return;
+            return Ok(());
         }
         self.total += 1;
         if self.count_only {
             if self.total >= MAX_HINT_MATCHES {
                 self.stop = Some(Stop::Limit);
             }
-            return;
+            return Ok(());
         }
         if self.shown >= self.limit {
             self.stop = Some(Stop::Limit);
-            return;
+            return Ok(());
         }
         let cost = escaped_len(path) + 1;
+        if cost > self.body_budget && self.body.is_empty() {
+            return Err(SearchWalkError::MatchBudget);
+        }
         if self.body_escaped + cost > self.body_budget {
             self.stop = Some(Stop::Bytes);
-            return;
+            return Ok(());
         }
         self.body.push_str(path);
         self.body.push('\n');
@@ -375,12 +548,13 @@ impl Walker<'_> {
             path: path.to_owned(),
             line: 0,
         });
+        Ok(())
     }
 
     /// Finds every matching line in `self.buffer` and emits it. Matches are
     /// located over the whole buffer (one vectorized pass) and mapped to
     /// lines afterwards; a line with several matches is reported once.
-    fn scan_buffer(&mut self, path: &str) {
+    fn scan_buffer(&mut self, path: &str) -> Result<(), SearchWalkError> {
         let buffer = std::mem::take(&mut self.buffer);
         let language = Language::from_path(path);
         let mut file_shown = 0_usize;
@@ -495,6 +669,9 @@ impl Walker<'_> {
                 pending_after = Some((line_number + self.context as u32, line_end + 1));
             }
             let cost = escaped_len(&self.scratch);
+            if cost > self.body_budget && self.body.is_empty() {
+                return Err(SearchWalkError::MatchBudget);
+            }
             if self.body_escaped + cost > self.body_budget {
                 self.stop = Some(Stop::Bytes);
                 break;
@@ -543,6 +720,7 @@ impl Walker<'_> {
             }
         }
         self.buffer = buffer;
+        Ok(())
     }
 }
 
@@ -601,20 +779,20 @@ pub(super) fn search(
     workspace: &Workspace,
     mut arguments: SearchArgs,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     let started = Instant::now();
     if arguments.query.is_empty() || arguments.query.len() > MAX_QUERY_BYTES {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_query: query must contain between 1 and {MAX_QUERY_BYTES} bytes"
         ));
     }
     if arguments.limit == 0 || arguments.limit > MAX_LIMIT {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_limit: limit must be between 1 and {MAX_LIMIT}"
         ));
     }
     if arguments.max_per_file == 0 || arguments.max_per_file > MAX_PER_FILE {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "invalid_max_per_file: max_per_file must be between 1 and {MAX_PER_FILE}"
         ));
     }
@@ -640,13 +818,13 @@ pub(super) fn search(
             .chain(&arguments.exclude)
             .any(|glob| glob.len() > MAX_GLOB_BYTES)
     {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "bad_glob: at most {MAX_GLOBS} include and {MAX_GLOBS} exclude globs of 1 to {MAX_GLOB_BYTES} bytes"
         ));
     }
     let filter = match PathFilter::new(&arguments.include, &arguments.exclude) {
         Ok(filter) => filter,
-        Err(error) => return ToolOutput::error(error.to_string()),
+        Err(error) => return ReadSideOutput::error(error.to_string()),
     };
     let cursor = match arguments.cursor.as_deref().map(str::trim) {
         // Models routinely send an empty or placeholder cursor on the first
@@ -667,7 +845,7 @@ pub(super) fn search(
         Some(encoded) => match Cursor::decode(encoded) {
             Some(cursor) => Some(cursor),
             None => {
-                return ToolOutput::error(
+                return ReadSideOutput::error(
                     "cursor_invalid: omit `cursor` for the first page; to continue a previous search, pass the exact next= value from its result header",
                 );
             }
@@ -675,7 +853,7 @@ pub(super) fn search(
     };
     let root = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolOutput::error(path_error(&arguments.path, &error)),
+        Err(error) => return ReadSideOutput::error(path_error(&arguments.path, &error)),
     };
     let root = relative_string(&root);
     let case_insensitive = match arguments.case {
@@ -693,7 +871,7 @@ pub(super) fn search(
             match build_regex(&pattern, case_insensitive) {
                 Ok(regex) if arguments.mode == SearchMode::Names => Matcher::Names(regex),
                 Ok(regex) => Matcher::Content(regex),
-                Err(message) => return ToolOutput::error(message),
+                Err(message) => return ReadSideOutput::error(message),
             }
         }
         SearchMode::Definition | SearchMode::References => {
@@ -702,19 +880,26 @@ pub(super) fn search(
                     matchers: Box::new(matchers),
                     definitions: arguments.mode == SearchMode::Definition,
                 },
-                Err(error @ SymbolError::Invalid) => return ToolOutput::error(error.to_string()),
+                Err(error @ SymbolError::Invalid) => {
+                    return ReadSideOutput::error(error.to_string());
+                }
             }
         }
     };
 
     let deadline = started + SEARCH_DEADLINE;
+
+    #[cfg(test)]
+    let max_scan_entries = TEST_SCAN_ENTRIES.get();
+    #[cfg(not(test))]
+    let max_scan_entries = MAX_SCAN_ENTRIES;
     let mut walker = Walker {
         workspace,
         cancelled,
         matcher: &matcher,
         filter: &filter,
         stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
-        budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
+        budget: ScanBudget::new(max_scan_entries, MAX_SCAN_BYTES, deadline),
         cursor: cursor.as_ref(),
         limit: arguments.limit,
         max_per_file: arguments.max_per_file,
@@ -732,14 +917,15 @@ pub(super) fn search(
         last_emitted: None,
         last_scanned: None,
         stop: None,
+        depth_skipped: 0,
         buffer: Vec::new(),
         scratch: String::new(),
     };
     if let Err(message) = run(&mut walker, &root) {
-        return ToolOutput::error(message);
+        return ReadSideOutput::error(message);
     }
     if walker.stop == Some(Stop::Cancelled) {
-        return ToolOutput::error(CANCELLED_MESSAGE);
+        return ReadSideOutput::error(CANCELLED_MESSAGE);
     }
 
     // A sensitive search that found nothing tells the model what a
@@ -759,7 +945,7 @@ pub(super) fn search(
             matcher: &insensitive,
             filter: &filter,
             stack: IgnoreStack::open(workspace, &root, arguments.include_ignored),
-            budget: ScanBudget::new(MAX_SCAN_ENTRIES, MAX_SCAN_BYTES, deadline),
+            budget: ScanBudget::new(max_scan_entries, MAX_SCAN_BYTES, deadline),
             cursor: cursor.as_ref(),
             limit: usize::MAX,
             max_per_file: usize::MAX,
@@ -775,11 +961,15 @@ pub(super) fn search(
             last_emitted: None,
             last_scanned: None,
             stop: None,
+            depth_skipped: 0,
             buffer: std::mem::take(&mut walker.buffer),
             scratch: String::new(),
         };
         if run(&mut counter, &root).is_ok() && counter.total > 0 {
-            hint_insensitive = Some((counter.total, counter.stop.is_some()));
+            hint_insensitive = Some((
+                counter.total,
+                counter.stop.is_some() || counter.depth_skipped > 0,
+            ));
         }
     }
 
@@ -811,7 +1001,11 @@ pub(super) fn search(
                 "{}/{}{}",
                 walker.shown,
                 walker.total,
-                if walker.stop.is_some() { "+" } else { "" }
+                if walker.stop.is_some() || walker.depth_skipped > 0 {
+                    "+"
+                } else {
+                    ""
+                }
             ),
         )
         .field("files", walker.files_with_matches)
@@ -833,6 +1027,13 @@ pub(super) fn search(
         }
         (false, true) => header = header.field("note", "empty_glob_ignored"),
         (false, false) => {}
+    }
+    if walker.depth_skipped > 0 {
+        header = if walker.stop.is_none() {
+            header.field("partial", "depth")
+        } else {
+            header.field("depth_limited", MAX_WALK_DEPTH)
+        };
     }
     let next = match walker.stop {
         None | Some(Stop::Cancelled) => None,
@@ -863,7 +1064,7 @@ pub(super) fn search(
     }
     let mut text = header.into_line();
     text.push_str(&walker.body);
-    ToolOutput::bounded(text, &SEARCH_BOUNDS, false)
+    ReadSideOutput::with_bounds(text, &SEARCH_BOUNDS, false)
 }
 
 /// `path_escapes_workspace` for absolute, parent-relative, and symlinked-out
@@ -909,4 +1110,101 @@ fn run(walker: &mut Walker<'_>, root: &str) -> Result<(), String> {
         }
     };
     result.map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ab2_depth_excluded_siblings_advance_the_scan_frontier() {
+        let directory = tempfile::tempdir().unwrap();
+        let deep = vec!["a"; MAX_WALK_DEPTH].join("/");
+        std::fs::create_dir_all(directory.path().join(&deep)).unwrap();
+        for index in 0..12 {
+            let child = directory.path().join(&deep).join(format!("d{index:02}"));
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("AGENTS.md"), "excluded\n").unwrap();
+        }
+        std::fs::create_dir(directory.path().join("z")).unwrap();
+        std::fs::write(directory.path().join("z/AGENTS.md"), "reachable\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let cancelled = ToolCancellation::new(crate::RunCancellation::new());
+        let matcher = Matcher::Names(build_regex(r"(^|/)AGENTS\.md$", false).unwrap());
+        let filter = PathFilter::new(&[], &[]).unwrap();
+        let mut cursor = None::<Cursor>;
+        let mut found = Vec::new();
+        let mut completed = false;
+        let mut pages = 0;
+        for _ in 0..4 {
+            pages += 1;
+            let mut walker = Walker {
+                workspace: &workspace,
+                cancelled: &cancelled,
+                matcher: &matcher,
+                filter: &filter,
+                stack: IgnoreStack::open(&workspace, ".", false),
+                budget: ScanBudget::new(
+                    70,
+                    MAX_SCAN_BYTES,
+                    Instant::now() + std::time::Duration::from_secs(60),
+                ),
+                cursor: cursor.as_ref(),
+                limit: 100,
+                max_per_file: 10,
+                context: 0,
+                count_only: false,
+                body: String::new(),
+                body_escaped: 0,
+                body_budget: SEARCH_BOUNDS
+                    .max_bytes
+                    .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES),
+                shown: 0,
+                total: 0,
+                files_with_matches: 0,
+                scanned_files: 0,
+                last_emitted: None,
+                last_scanned: None,
+                stop: None,
+                depth_skipped: 0,
+                buffer: Vec::new(),
+                scratch: String::new(),
+            };
+            run(&mut walker, ".").unwrap();
+            assert!(walker.budget.entries <= 70);
+            found.extend(walker.body.lines().map(str::to_owned));
+            let next = match walker.stop {
+                None => None,
+                Some(Stop::Scan(StopReason::Entries)) => {
+                    assert!(walker.depth_skipped > 0);
+                    let next = Cursor {
+                        path: walker
+                            .last_scanned
+                            .clone()
+                            .expect("depth exclusions must advance the frontier"),
+                        line: u32::MAX,
+                    };
+                    assert!(next.path.ends_with('/'));
+                    if let Some(previous) = &cursor {
+                        assert!(next.path.as_bytes() > previous.path.as_bytes());
+                    }
+                    let encoded = next.encode();
+                    assert_eq!(Cursor::decode(&encoded), Some(next.clone()));
+                    Some(Cursor::decode(&encoded).unwrap())
+                }
+                other => panic!("unexpected stop: {other:?}"),
+            };
+            drop(walker);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => {
+                    completed = true;
+                    break;
+                }
+            }
+        }
+        assert!(completed, "continuation must finish within four pages");
+        assert_eq!(pages, 3);
+        assert_eq!(found, ["z/AGENTS.md"]);
+    }
 }

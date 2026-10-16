@@ -86,6 +86,8 @@ fn summary(status: SessionStatus, active: bool) -> SessionSummary {
         estimated_cost_usd_nanos: None,
         updated_at_ms: 1_700_000_000_000,
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
     }
 }
 
@@ -327,7 +329,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -573,6 +575,7 @@ fn current_version_streams_match_their_goldens() {
                                 }],
                             })),
                             fetch: None,
+                            delegated: false,
                         },
                     )),
                 },

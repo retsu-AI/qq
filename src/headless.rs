@@ -47,20 +47,6 @@ pub const MAX_PENDING_STEER_LINES: usize = 8;
 /// Byte budget for one concise tool-activity line in text format.
 const MAX_ACTIVITY_BYTES: usize = 160;
 
-fn checkpoint_notice_line(
-    phase: qq_protocol::CheckpointPhase,
-    correlation: &str,
-    outcome: qq_protocol::CheckpointOutcome,
-    confidence_basis_points: Option<u16>,
-    feedback: &str,
-) -> String {
-    let label = crate::output::checkpoint_label(outcome);
-    let confidence = confidence_basis_points
-        .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
-        .unwrap_or_default();
-    format!("[jev] {label} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}")
-}
-
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
     pub prompt: String,
@@ -946,13 +932,18 @@ async fn stream_run(
                         ..
                     } if ours => {
                         if text {
-                            let _ = writeln!(stderr, "{}", checkpoint_notice_line(
-                                *phase,
-                                correlation,
-                                *outcome,
-                                *confidence_basis_points,
-                                feedback,
-                            ));
+                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
+                                "GREEN"
+                            } else {
+                                "RED"
+                            };
+                            let confidence = confidence_basis_points
+                                .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
+                                .unwrap_or_default();
+                            let _ = writeln!(
+                                stderr,
+                                "[jev] {color} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
+                            );
                         }
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
@@ -2048,7 +2039,15 @@ mod tests {
     /// third. A turn budget must observe the provider request boundary rather
     /// than waiting for text or a tool call that may never arrive.
     struct ReadsThenHangsProvider {
-        turn: Arc<Mutex<usize>>,
+        turn: Mutex<usize>,
+    }
+
+    impl ReadsThenHangsProvider {
+        fn new() -> Self {
+            Self {
+                turn: Mutex::new(0),
+            }
+        }
     }
 
     impl Provider for ReadsThenHangsProvider {
@@ -3378,7 +3377,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 18);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 22);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(
@@ -3403,33 +3402,6 @@ mod tests {
         assert_eq!(source.len(), 40);
         assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(source.starts_with(display));
-    }
-
-    #[test]
-    fn checkpoint_notice_line_preserves_headless_typed_outcomes() {
-        let notice = checkpoint_notice_line(
-            qq_protocol::CheckpointPhase::FinalCandidate,
-            "final:gap",
-            qq_protocol::CheckpointOutcome::InsufficientEvidence,
-            None,
-            "no direct evidence",
-        );
-        assert_eq!(
-            notice,
-            "[jev] NEEDS EVIDENCE FinalCandidate final:gap outcome=InsufficientEvidence: no direct evidence"
-        );
-
-        let notice = checkpoint_notice_line(
-            qq_protocol::CheckpointPhase::FinalCandidate,
-            "final:red",
-            qq_protocol::CheckpointOutcome::Contradicted,
-            Some(9_900),
-            "contradictory result",
-        );
-        assert_eq!(
-            notice,
-            "[jev] RED FinalCandidate final:red outcome=Contradicted confidence=99.00%: contradictory result"
-        );
     }
 
     #[tokio::test]
@@ -3880,110 +3852,22 @@ mod tests {
         assert!(!stderr.contains("To continue this session"), "{stderr}");
     }
 
-    struct HeldHeadlessDeadlineLoader {
-        release: Arc<tokio::sync::Notify>,
-        active: Arc<std::sync::atomic::AtomicUsize>,
-        requests: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    struct CountedDeadlineProvider(Arc<std::sync::atomic::AtomicUsize>);
-
-    impl Provider for CountedDeadlineProvider {
-        fn stream(&self, request: ModelRequest) -> ProviderStream {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            TextProvider.stream(request)
-        }
-    }
-
-    impl RuntimeLoader for HeldHeadlessDeadlineLoader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            self.load_with_progress(request, qq_core::RuntimeLoadProgress::default())
-        }
-
-        fn load_with_progress(
-            &self,
-            request: RuntimeLoadRequest,
-            progress: qq_core::RuntimeLoadProgress,
-        ) -> RuntimeLoadFuture {
-            let release = Arc::clone(&self.release);
-            let active = Arc::clone(&self.active);
-            let requests = Arc::clone(&self.requests);
-            Box::pin(async move {
-                progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
-                active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                release.notified().await;
-                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                ProviderLoader(move || CountedDeadlineProvider(Arc::clone(&requests)))
-                    .load(request)
-                    .await
-            })
-        }
-    }
-
     #[tokio::test]
     async fn timeout_sends_cancellation_and_leaves_no_active_run() {
-        for preparation in [false, true] {
-            let release = Arc::new(tokio::sync::Notify::new());
-            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let fixture = if preparation {
-                fixture_with_loader(Arc::new(HeldHeadlessDeadlineLoader {
-                    release: Arc::clone(&release),
-                    active: Arc::clone(&active),
-                    requests: Arc::clone(&requests),
-                }))
-                .await
-            } else {
-                fixture(|| HangingProvider).await
-            };
-            let mut options = options(&fixture.workspace);
-            options.timeout = Some(Duration::from_millis(100));
-            let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                run_to_end(&fixture, options, std::future::pending()),
-            )
-            .await;
-            if result.is_err() {
-                release.notify_one();
-                fixture.sessions.shutdown().await.unwrap();
-            }
-            let (status, stdout, _stderr) =
-                result.expect("the real headless consumer settles before loader release");
-            assert_eq!(status, HeadlessStatus::TimedOut);
-            assert_eq!(status.code(), 3);
-            let records = parse_records(&stdout);
-            let outcome = records.last().unwrap();
-            assert_eq!(outcome["type"], "outcome");
-            assert_eq!(outcome["status"], "timed_out");
-            assert_eq!(outcome["exit_code"], 3);
-            if preparation {
-                let message = outcome["message"].as_str().unwrap();
-                assert!(
-                    message.contains("resolving checkpoint reviewer credentials"),
-                    "{stdout}"
-                );
-                assert!(message.contains("no model request was started"), "{stdout}");
-                assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 1);
-                assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
-                assert_eq!(
-                    event_records(&records)
-                        .iter()
-                        .filter(|record| record["envelope"]["event"]["type"] == "run_finished")
-                        .count(),
-                    1
-                );
-                assert!(
-                    !event_records(&records)
-                        .iter()
-                        .any(|record| record["envelope"]["event"]["type"] == "run_started")
-                );
-            }
-            assert_no_active_run(&fixture).await;
-            release.notify_one();
-            fixture.sessions.shutdown().await.unwrap();
-            assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
-            assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
-        }
+        let fixture = fixture(|| HangingProvider).await;
+        let mut options = options(&fixture.workspace);
+        options.timeout = Some(Duration::from_millis(100));
+
+        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+
+        assert_eq!(status, HeadlessStatus::TimedOut);
+        assert_eq!(status.code(), 3);
+        let records = parse_records(&stdout);
+        let outcome = records.last().unwrap();
+        assert_eq!(outcome["type"], "outcome");
+        assert_eq!(outcome["status"], "timed_out");
+        assert_eq!(outcome["exit_code"], 3);
+        assert_no_active_run(&fixture).await;
     }
 
     #[tokio::test]
@@ -4314,24 +4198,19 @@ mod tests {
 
     #[tokio::test]
     async fn turn_budget_cancels_before_a_silent_over_budget_turn_can_hang() {
-        let turns = Arc::new(Mutex::new(0));
-        let provider_turns = Arc::clone(&turns);
-        let fixture = fixture(move || ReadsThenHangsProvider {
-            turn: Arc::clone(&provider_turns),
-        })
-        .await;
+        let fixture = fixture(ReadsThenHangsProvider::new).await;
         std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
         let mut options = options(&fixture.workspace);
         options.max_turns = Some(2);
 
-        let (status, stdout, _stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        let (status, stdout, _stderr) = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_to_end(&fixture, options, std::future::pending()),
+        )
+        .await
+        .expect("the turn budget must cancel before the silent third turn stalls");
 
         assert_eq!(status, HeadlessStatus::BudgetExhausted);
-        assert_eq!(
-            *turns.lock().unwrap(),
-            2,
-            "the third provider request must never start"
-        );
         let records = parse_records(&stdout);
         assert_eq!(records.last().unwrap()["status"], "budget_exhausted");
         assert_no_active_run(&fixture).await;

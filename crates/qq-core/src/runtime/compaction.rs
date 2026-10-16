@@ -12,6 +12,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use qq_protocol::RunFailureKind;
 use qq_provider::{Message, ToolSpec};
 
 /// What the loop hands the compactor: the run's live request cut after the
@@ -31,21 +32,50 @@ pub(crate) struct InRunCompactionRequest {
     pub(crate) system: Arc<str>,
     /// The run's declared tools. Calls are rejected, never run.
     pub(crate) tools: Arc<[ToolSpec]>,
+    /// The live request's weight without the replaced span and without the
+    /// summary: system prompt, tool schemas, session context before the
+    /// prompt, the prompt, and the retained turns. The store adds the framed
+    /// summary it commits and re-bases the run's context reservation to the
+    /// total in the marker's transaction (ADR-0048 § 1).
+    pub(crate) retained_bytes: u64,
+    pub(crate) budget: super::ChildBudget,
 }
 
 /// A committed in-run summary the loop splices in.
 pub(crate) struct InRunCompaction {
     pub(crate) summary: String,
+    /// Observed spend belongs to the internal run in storage, and is also
+    /// charged to the prompt's caller allowance in memory.
+    pub(crate) usage: Option<qq_protocol::TokenUsage>,
+    pub(crate) estimated_cost_usd_nanos: Option<u64>,
 }
 
 pub(crate) type InRunCompactionFuture =
     Pin<Box<dyn Future<Output = Result<InRunCompaction, InRunCompactionError>> + Send + 'static>>;
 
-/// Why an in-run compaction did not commit. The loop fails the run with the
-/// context diagnosis for a summarizer or availability failure, and as a
-/// server failure when the store could not record the compaction.
+/// Why an in-run compaction did not commit. The loop retries a transient
+/// summarizer fault under the run's turn recovery and pauses the run when
+/// that is spent (ADR-0048 § 2); it fails the run with the context diagnosis
+/// for a rejected summary or an availability failure, and as a server
+/// failure when the store could not record the compaction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum InRunCompactionError {
+    /// The summarizer's provider faulted transiently (overload, rate limit,
+    /// transport loss). The compaction run settled failed; the prompt run's
+    /// turns are untouched, so the step can be retried.
+    #[error("the summarizer's provider is unavailable: {message}")]
+    SummarizerUnavailable {
+        kind: RunFailureKind,
+        message: String,
+        usage: Option<qq_protocol::TokenUsage>,
+        estimated_cost_usd_nanos: Option<u64>,
+    },
+    #[error("summarizer budget exhausted: {kind:?}")]
+    BudgetExhausted {
+        kind: qq_protocol::BudgetLimitKind,
+        usage: Option<qq_protocol::TokenUsage>,
+        estimated_cost_usd_nanos: Option<u64>,
+    },
     /// The summarizer ran and settled failed (rejected, malformed, did not
     /// shrink). Its outcome is durable on its own run.
     #[error("the summarizer failed: {0}")]
@@ -62,4 +92,33 @@ pub(crate) enum InRunCompactionError {
 
 pub(crate) trait InRunCompactor: Send + Sync {
     fn compact(&self, request: InRunCompactionRequest) -> InRunCompactionFuture;
+}
+
+/// Pull-driven summarizer boundaries. A request cannot be dispatched until
+/// its starting step has been admitted, and each completed turn can be
+/// persisted before the generator is polled for more provider work.
+pub(crate) enum SummarizeStep {
+    RequestStarting,
+    TurnCompleted {
+        ordinal: u32,
+        message: Message,
+        usage: Option<qq_protocol::TokenUsage>,
+        truncated: bool,
+    },
+    Summary(String),
+}
+
+/// Why one summarizer request produced no summary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SummarizeError {
+    /// A provider fault worth re-issuing the request for, as for a model turn.
+    #[error("{message}")]
+    Transient {
+        kind: RunFailureKind,
+        message: String,
+    },
+    /// The reply itself is unusable, or the provider refused the request in
+    /// a way a retry would repeat.
+    #[error("{0}")]
+    Rejected(String),
 }

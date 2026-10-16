@@ -17,6 +17,13 @@ Every install route reads these assets, so nothing else is published:
 
 ## Procedure
 
+
+Before a version-bump PR, reconcile merged behavior, current contract values,
+open release gates and deferred roadmap work. A preparation PR does not bump
+the version, generate a changelog section, move download pins, or create a tag.
+Finish the preparation's explicit pre-bump gates before following the
+procedure below. A green CI size-report job alone is not evidence that the
+executable performance/size budgets pass.
 `main` only accepts pull requests, and merging rewrites commit SHAs, so a
 release is a bump PR followed by a tag on the merged result.
 
@@ -214,14 +221,15 @@ come from `!` commits and are the per-change record; do not edit them.
 `qq version` prints all of it together:
 
 ```text
-qq 0.1.5 (151fe94 2026-09-09)
-protocol 21, capabilities 1, descriptor 6, store schema 28
+qq X.Y.Z (<short-sha> <date>)
+protocol <P>, capabilities <C>, descriptor <D>, store schema <S>
 ```
 
-(Illustrative; `docs/design/protocol.md` § Versioning carries the current
-contract numbers.) The server reports the same build as
-`0.1.5+151fe94.2026-09-09` (semver build
-metadata, no spaces) in `/v1/health`, the discovery file, and capabilities.
+(The numbers come from `PROTOCOL_VERSION`, `CAPABILITIES_VERSION`,
+`DESCRIPTOR_VERSION`, and `STORE_SCHEMA_VERSION` in the build;
+[`../design/protocol.md`](../design/protocol.md#protocol-version) records the
+current protocol version and what each one changed.) The server reports the
+same build as `X.Y.Z+<short-sha>.<date>` (semver build metadata, no spaces) in `/v1/health`, the discovery file, and capabilities.
 A long-running `qq serve` left over from before an upgrade is therefore
 distinguishable from the TUI that connects to it even when the protocol
 matches. Upgrading a client and a server independently would need protocol

@@ -4782,6 +4782,30 @@ async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes()
         .unwrap();
     assert!((1..=3).contains(&scoped), "{scoped}");
     assert_eq!(unscoped, 0);
+    // AC2: in-run steps do not draw on the between-run step budget, and
+    // each re-based the run's reservation to its new window: the final
+    // reservation covers one window (base plus this window's increments),
+    // not the run's lifetime output.
+    let (attempted, base, increment): (u32, u64, u64) = connection
+        .query_row(
+            "SELECT context_compaction_attempted, context_base_bytes, context_increment_bytes
+             FROM runs WHERE id = ?1",
+            [run.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(attempted, 0, "in-run steps are off the between-run budget");
+    let lifetime_result_bytes: u64 = connection
+        .query_row(
+            "SELECT SUM(length(CAST(result AS BLOB))) FROM tool_calls WHERE run_id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        base + increment < lifetime_result_bytes,
+        "reservation {base} + {increment} must be re-based below the run's lifetime {lifetime_result_bytes} result bytes"
+    );
     drop(connection);
 
     // Replay renders the same shape the live run saw: prompt, summary, then
@@ -5447,6 +5471,81 @@ async fn a_provider_window_rejection_compacts_the_run_and_continues() {
 }
 
 #[tokio::test]
+async fn an_empty_faulted_attempt_inside_the_replaced_span_keeps_replay_equal_to_live() {
+    // ENG-991: an empty faulted attempt is stored as a turn row but never
+    // joins the live transcript, so a cutoff counted from live assistant
+    // messages fell one short of the stored ordinal of the last replaced
+    // turn, and replay kept a turn the live run had summarized. The cutoff
+    // is now the stored ordinal the loop tracks per live turn.
+    let faults = Arc::new(AtomicUsize::new(0));
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![AutoCompactScript::ShellRepeatedlyWithEarlyFault {
+                turns: 30,
+                fault_at: 2,
+                text: "task complete".to_owned(),
+                summary: valid_summary("work so far"),
+                faults: Arc::clone(&faults),
+            }],
+            loads: StdMutex::new(0),
+            context_window: Some(16 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "do the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    assert!(
+        faults.load(Ordering::SeqCst) >= 1,
+        "the scripted fault fired"
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "the run must compact in-run"
+    );
+    // The live run's last request is what the model saw; replaying the
+    // settled run renders it plus the final answer.
+    let live = {
+        let requests = harness.requests.lock().unwrap();
+        requests.last().unwrap().messages().to_vec()
+    };
+    let store = harness.runtime.inner.store.clone();
+    let session_id = harness.session_id;
+    let replayed = store
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction().unwrap();
+            load_model_context(&transaction, session_id, u64::MAX)
+        })
+        .await
+        .unwrap();
+    drop(store);
+    assert_eq!(
+        &replayed[..replayed.len() - 1],
+        live.as_slice(),
+        "replay keeps exactly the turns the live run kept"
+    );
+    harness.runtime.shutdown().await.unwrap();
+    assert_assembly_matches_reference(
+        &harness.workspace_path.join("sessions.sqlite3"),
+        harness.session_id,
+    );
+}
+
+#[tokio::test]
 async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
     // RR6 (c): after the fold ran and the retained transcript still does not
     // fit, the prompt used to be refused with "automatic compaction ran N
@@ -5555,6 +5654,11 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
             truncated: false,
@@ -5591,6 +5695,11 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     live.splice(1..1 + replace_through, [summary]);
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
             truncated: false,
@@ -5645,6 +5754,11 @@ fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            strict_projection: true,
+            checkpoint_projection_required: false,
+            projection_json: None,
+            run_id: "fixture".to_owned(),
+            legacy_projection: false,
             ordinal: n,
             content_json: format!("[{{\"type\":\"text\",\"text\":\"turn {n}\"}}]"),
             truncated: false,
@@ -5895,4 +6009,162 @@ async fn compacting_after_a_slice_report_replays_the_live_context() {
         &harness.workspace_path.join("sessions.sqlite3"),
         harness.session_id,
     );
+}
+
+#[tokio::test]
+async fn snapshot_run_tail_retains_the_foreground_receipt_after_many_owned_compactions() {
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    let session_id = prompt.identity.session_id;
+    let run_id = prompt.identity.run_id;
+    store
+        .call(Priority::Control, move |connection| {
+            for index in 0..258 {
+                let internal = RunId::generate().unwrap().to_string();
+                connection.execute(
+                    "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                 assistant_message_id, status, kind, created_at_ms, auto_compaction_for_run_id)
+                 VALUES (?1, ?2, ?1, ?1, ?1, 'completed', 'compaction', ?3, ?4)",
+                    params![
+                        internal,
+                        session_id.to_string(),
+                        i64::MAX - 258 + index,
+                        run_id.to_string()
+                    ],
+                )?;
+            }
+            for finished in [false, true] {
+                if finished {
+                    connection.execute(
+                        "UPDATE runs SET status = 'cancelled', outcome_json = ?2,
+                     estimated_cost_usd_nanos = 1234567, finished_at_ms = 1 WHERE id = ?1",
+                        params![
+                            run_id.to_string(),
+                            serde_json::to_string(&RunOutcome::Cancelled).unwrap()
+                        ],
+                    )?;
+                    connection.execute(
+                        "UPDATE sessions SET active_run_id = NULL WHERE id = ?1",
+                        [session_id.to_string()],
+                    )?;
+                }
+                for limit in [1, 2, 256] {
+                    let mut budget = snapshots::SnapshotBudget::new(16 * 1024 * 1024);
+                    let body = snapshots::load_session_snapshot(
+                        connection,
+                        session_id,
+                        limit,
+                        &mut budget,
+                    )?;
+                    assert_eq!(
+                        body.runs.len(),
+                        usize::from(limit),
+                        "the run tail stays bounded"
+                    );
+                    let receipt = body
+                        .runs
+                        .iter()
+                        .find(|run| run.id == run_id)
+                        .expect("foreground receipt survives newer internal steps");
+                    if finished {
+                        assert_eq!(receipt.outcome, Some(RunOutcome::Cancelled));
+                        assert_eq!(receipt.estimated_cost_usd_nanos, Some(1234567));
+                    } else {
+                        assert_eq!(receipt.status, RunStatus::Running);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_messages() {
+    let (_directory, store, prompt) = claimed_store_fixture().await;
+    let session_id = prompt.identity.session_id;
+    let owner = prompt.identity.run_id;
+    store.call(Priority::Control,move |connection| {
+        for index in 0..258 {
+            let id = RunId::generate().unwrap().to_string();
+            connection.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,kind,created_at_ms,auto_compaction_for_run_id)
+                VALUES (?1,?2,?1,?1,?1,'completed','compaction',?3,?4)",
+                params![id,session_id.to_string(),i64::MAX-258+index,owner.to_string()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    store
+        .finish_run(
+            &prompt,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET estimated_cost_usd_nanos = 7654321 WHERE id = ?1",
+                [owner.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let queued = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("queued later")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id: later, .. } = queued.receipt.outcome else {
+        panic!("queued")
+    };
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: later },
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, move |connection| {
+            for limit in [256, 2, 1] {
+                for bytes in [16 * 1024 * 1024, 1024] {
+                    let mut budget = snapshots::SnapshotBudget::new(bytes);
+                    let body = snapshots::load_session_snapshot(
+                        connection,
+                        session_id,
+                        limit,
+                        &mut budget,
+                    )?;
+                    assert!(body.runs.len() <= usize::from(limit));
+                    for message in &body.messages {
+                        assert!(
+                            body.runs.iter().any(|run| run.id == message.run_id),
+                            "every displayed message has its receipt: limit={limit},bytes={bytes}"
+                        );
+                    }
+                    if limit == 256 && bytes > 1024 {
+                        assert!(body.messages.iter().any(|message| message.run_id == owner));
+                        let receipt = body.runs.iter().find(|run| run.id == owner).unwrap();
+                        assert_eq!(receipt.outcome, Some(RunOutcome::Completed));
+                        assert_eq!(receipt.estimated_cost_usd_nanos, Some(7654321));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
 }

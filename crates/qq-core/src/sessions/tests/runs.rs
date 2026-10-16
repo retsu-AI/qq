@@ -1184,10 +1184,7 @@ async fn cancellation_after_durable_tool_result_records_unavailable_checkpoint()
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(BlockingCheckpointLoader {
-            requests,
-            review_entered: Arc::new(tokio::sync::Notify::new()),
-        }),
+        Arc::new(BlockingCheckpointLoader { requests }),
     )
     .await
     .unwrap();
@@ -1258,7 +1255,6 @@ async fn runtime_failure_after_durable_tool_result_records_unavailable_checkpoin
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(BlockingCheckpointLoader {
             requests: Arc::new(StdMutex::new(Vec::new())),
-            review_entered: Arc::new(tokio::sync::Notify::new()),
         }),
     )
     .await
@@ -1550,6 +1546,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                 "tool result\n".to_owned(),
                 false,
                 Vec::new(),
+                None,
                 None,
                 None,
             )
@@ -3218,4 +3215,52 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
         without_retry_notice.as_slice()
     );
     assert_assembly_matches_reference(&database, session_id);
+}
+
+#[tokio::test]
+async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::ReadOnly,
+        vec![vec![(
+            "read_file",
+            r#"{"path":"note.txt","ranges":"[\"1\"]","include_ignored":true}"#.to_owned(),
+        )]],
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
+    submit_prompt(&harness, "read the note").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(&event.event, SessionEvent::ToolCallStarted { .. }))
+            .count(),
+        1
+    );
+    let results = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    let result = results[0].result.as_deref().unwrap();
+    assert!(result.contains("note=ranges_array_coerced,include_ignored_ignored"));
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(harness.session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    let focused = snapshot.focused.unwrap();
+    assert_eq!(focused.tool_calls.len(), 1);
+    assert_eq!(focused.tool_calls[0].state, ToolCallState::Completed);
+    assert_eq!(focused.tool_calls[0].result.as_deref(), Some(result));
 }

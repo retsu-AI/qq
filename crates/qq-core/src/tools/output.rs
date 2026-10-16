@@ -29,7 +29,7 @@ pub(crate) const MAX_SPILL_ITEM_BYTES: usize = 8 * 1024 * 1024;
 /// The marker's provisional tail; [`finalize_spill_marker`] replaces it once
 /// the runtime knows whether (and under which handle) the text was stored.
 const NOT_STORED: &str = "; not stored]…\n";
-/// Longest header line a pruning stub preserves.
+/// Longest ordinary header line a pruning stub preserves; search keeps its bounded page header.
 pub(crate) const MAX_STUB_HEADER_BYTES: usize = 512;
 /// Every marker line qq inserts into model text starts with this, so clients
 /// can tell a marker from content with one prefix check.
@@ -84,14 +84,7 @@ impl Bounds {
     }
 
     const fn with_max_bytes(self, max_bytes: usize) -> Self {
-        Self {
-            max_bytes: if max_bytes < MIN_MODEL_TEXT_BYTES {
-                MIN_MODEL_TEXT_BYTES
-            } else {
-                max_bytes
-            },
-            ..self
-        }
+        Self { max_bytes, ..self }
     }
 }
 
@@ -436,7 +429,12 @@ impl Header {
 pub(crate) fn header_line<'a>(tool: &str, text: &'a str) -> Option<&'a str> {
     let first = text.lines().next()?;
     let rest = first.strip_prefix(tool)?;
-    (rest.starts_with(' ') && first.len() <= MAX_STUB_HEADER_BYTES).then_some(first)
+    let limit = if tool == "search" {
+        super::search::SEARCH_BOUNDS.max_bytes
+    } else {
+        MAX_STUB_HEADER_BYTES
+    };
+    (rest.starts_with(' ') && first.len() <= limit).then_some(first)
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +731,19 @@ fn next_hit(bytes: &[u8], from: usize, copied: usize) -> Option<Hit> {
     None
 }
 
+/// JSON-escaped size after the same masking used at the output boundary.
+/// Secret spans never cross a line, so a complete rendered row is measurable.
+pub(crate) fn masked_escaped_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut copied = 0;
+    let mut cost = 0;
+    while let Some(hit) = next_hit(bytes, copied, copied) {
+        cost += escaped_len(&text[copied..hit.start]) + 9 + hit.kind.label().len();
+        copied = hit.end;
+    }
+    cost + escaped_len(&text[copied..])
+}
+
 /// Replaces secret-shaped spans with `[masked:<kind>]`. Returns the input
 /// untouched (no allocation) when nothing matches, which is the common case.
 pub fn mask_secrets(text: String) -> String {
@@ -783,20 +794,165 @@ pub(crate) fn result_handle(tool: &str, call: ToolCallId, digest: &str) -> Strin
     format!("t:{tool}:{}:{}", &call[..8], &digest[..8])
 }
 
-/// Caps the model-facing text one turn's tool calls add to context. A call
-/// that would overshoot is re-bounded to the remainder (never below
-/// [`MIN_MODEL_TEXT_BYTES`]) and its marker says so.
-///
-/// This is the one projection from persisted per-call results to what the
-/// model sees: the live run applies it as the turn's results enter context,
-/// and context assembly re-applies it to the stored rows in the same call
-/// order, so replay reproduces the live request byte for byte.
+/// Reply space reserved for every call, including administrative rejections.
+/// Variable tool names still leave room for their recall marker.
+pub(crate) fn result_reserve_bytes(tool: &str) -> usize {
+    384 + tool.len()
+}
+
+pub(crate) const fn search_reservation_bytes(reviews_tools: bool) -> usize {
+    super::search::SEARCH_BOUNDS.max_bytes
+        + if reviews_tools {
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 512
+        } else {
+            0
+        }
+}
+
+fn complete_search_page(tool: &str, text: &str) -> bool {
+    tool == "search" && text.starts_with("search ") && text.len() <= search_reservation_bytes(true)
+}
+
+/// One strict projection from persisted per-call results to model context.
+/// Reserve complete admitted search pages and short replies before ordinary
+/// text is cut; replay uses the same call order and complete result bytes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutputBudget {
     remaining: usize,
+    protected: usize,
+    replies: usize,
 }
 
 impl TurnOutputBudget {
+    #[cfg(test)]
+    pub(crate) const fn new() -> Self {
+        Self {
+            remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
+            protected: 0,
+            replies: 0,
+        }
+    }
+
+    pub(crate) fn for_results<'a>(
+        results: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    ) -> Self {
+        let replies = results.clone().fold(0_usize, |bytes, (tool, _)| {
+            bytes.saturating_add(result_reserve_bytes(tool))
+        });
+        let mut space = MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(replies);
+        let mut protected = 0;
+        for (tool, text) in results {
+            if complete_search_page(tool, text) && text.len() <= space {
+                protected += text.len();
+                space -= text.len();
+            }
+        }
+        Self {
+            remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
+            protected,
+            replies,
+        }
+    }
+
+    /// Admits one result, shrinking it when the turn is nearly spent, and
+    /// charges what remains of it. A cut's marker points at `recall`.
+    ///
+    /// Deterministic: the same text and recall produce the same bytes, which
+    /// is what lets assembly reconstruct the projection instead of storing
+    /// it.
+    pub(crate) fn admit(
+        &mut self,
+        tool: &str,
+        text: &mut String,
+        recall: ResultRecall<'_>,
+    ) -> bool {
+        self.replies = self.replies.saturating_sub(result_reserve_bytes(tool));
+        if complete_search_page(tool, text) && text.len() <= self.protected {
+            self.protected -= text.len();
+            self.remaining -= text.len();
+            return false;
+        }
+        let allowed = self
+            .remaining
+            .saturating_sub(self.protected)
+            .saturating_sub(self.replies);
+        if allowed == 0 {
+            let cut = !text.is_empty();
+            text.clear();
+            return cut;
+        }
+        let mut cut = false;
+        if text.len() > allowed {
+            // The stored-result handle digests the row's text, which is the
+            // text before this cut; hashing happens only on this cold path.
+            let stored_result = match recall {
+                ResultRecall::StoredResult { tool, call } => Some(result_handle(
+                    tool,
+                    call,
+                    &crate::workspace::content_hash(text.as_bytes()),
+                )),
+                ResultRecall::None | ResultRecall::Spill(_) => None,
+            };
+            let recall_reserve = match recall {
+                ResultRecall::None => 0,
+                ResultRecall::Spill(handle) => escaped_len(handle) + 64,
+                ResultRecall::StoredResult { .. } => stored_result
+                    .as_ref()
+                    .map_or(0, |handle| escaped_len(handle) + 64),
+            };
+            let bounded_bytes = allowed.saturating_sub(recall_reserve);
+            if bounded_bytes < MARKER_RESERVE_BYTES {
+                text.clear();
+                let notice = "turn output budget reached";
+                text.push_str(&notice[..notice.len().min(allowed)]);
+                self.remaining -= text.len();
+                return true;
+            }
+            let bounds = Bounds::DEFAULT.with_max_bytes(bounded_bytes);
+            let bounded = bound_text(std::mem::take(text), &bounds, Some("turn budget reached"));
+            cut = bounded.truncated();
+            *text = bounded.text;
+            if bounded.omitted_bytes > 0 {
+                match recall {
+                    ResultRecall::None => {}
+                    ResultRecall::Spill(handle) => {
+                        finalize_spill_marker(text, Some(handle), None);
+                    }
+                    ResultRecall::StoredResult { .. } => {
+                        finalize_spill_marker(
+                            text,
+                            stored_result.as_deref(),
+                            Some(bounded.omitted_from_line),
+                        );
+                    }
+                }
+            }
+        }
+        // Legacy/unreserved callers can leave less room than a marker itself.
+        // The production reservation path always leaves a complete short reply.
+        if text.len() > allowed {
+            text.clear();
+            let notice = "turn output budget reached";
+            text.push_str(&notice[..notice.len().min(allowed)]);
+            cut = true;
+        }
+        self.remaining = self.remaining.saturating_sub(text.len());
+        cut
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn remaining(&self) -> usize {
+        self.remaining
+    }
+}
+
+/// Original generic-floor projection for recorded pre-AB2 plan identities.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegacyTurnOutputBudget {
+    remaining: usize,
+}
+
+impl LegacyTurnOutputBudget {
     pub(crate) const fn new() -> Self {
         Self {
             remaining: MAX_TURN_TOOL_OUTPUT_BYTES,
@@ -845,11 +1001,6 @@ impl TurnOutputBudget {
         }
         self.remaining = self.remaining.saturating_sub(text.len());
         cut
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn remaining(&self) -> usize {
-        self.remaining
     }
 }
 
@@ -1025,12 +1176,32 @@ mod tests {
     }
 
     #[test]
+    fn ab2_sixteen_search_pages_cannot_bypass_the_turn_cap() {
+        let page = format!(
+            "search mode=content rows=128 next=cursor\n{}",
+            "path:1:needle\n".repeat(940)
+        );
+        let mut budget = TurnOutputBudget::new();
+        let mut total = 0;
+        for _ in 0..16 {
+            let mut projected = page.clone();
+            budget.admit("search", &mut projected, ResultRecall::None);
+            total += projected.len();
+        }
+        assert!(
+            total <= MAX_TURN_TOOL_OUTPUT_BYTES,
+            "{total} bytes exceeds the turn cap"
+        );
+    }
+
+    #[test]
     fn the_turn_budget_marker_points_at_the_spill_when_one_exists() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        budget.admit(&mut first, ResultRecall::None);
+        budget.admit("other", &mut first, ResultRecall::None);
         let mut second = lines(4_000);
         assert!(budget.admit(
+            "other",
             &mut second,
             ResultRecall::Spill("t:read_file:0123abcd:89ef0123")
         ));
@@ -1255,29 +1426,103 @@ mod tests {
     }
 
     #[test]
+    fn ab2_checkpoint_annotated_search_pages_survive_a_spent_turn() {
+        for feedback_size in [
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES,
+            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 1,
+        ] {
+            let header = "search . mode=names next=YWJjADA\n";
+            let mut page = header.to_owned();
+            page.push_str(
+                &"match\n"
+                    .repeat((super::super::search::SEARCH_BOUNDS.max_bytes - header.len()) / 6),
+            );
+            let feedback = crate::runtime::bounded_checkpoint_text(&"x".repeat(feedback_size));
+            let annotated = format!("{page}\n\n[JEV RED checkpoint: {feedback}]");
+            for recall in [
+                ResultRecall::None,
+                ResultRecall::StoredResult {
+                    tool: "search",
+                    call: ToolCallId::from_bytes([7; 16]),
+                },
+            ] {
+                let mut spent = "x".repeat(MAX_TURN_TOOL_OUTPUT_BYTES);
+                let mut budget = TurnOutputBudget::for_results(
+                    [("other", spent.as_str()), ("search", annotated.as_str())].into_iter(),
+                );
+                budget.admit("other", &mut spent, ResultRecall::None);
+                let mut actual = annotated.clone();
+                assert!(!budget.admit("search", &mut actual, recall));
+                assert_eq!(actual, annotated);
+            }
+        }
+    }
+
+    #[test]
+    fn ab2_mixed_pages_and_long_recall_names_fit_all_sixty_four_replies() {
+        let long_name = "x".repeat(128);
+        let page = format!(
+            "search . mode=names next=YWJjADA\n{}",
+            "match\n".repeat(2_030)
+        );
+        let mut results = vec![(long_name.as_str(), "ordinary\n".repeat(4_000)); 64];
+        for index in [1, 12, 23, 34, 63] {
+            results[index] = ("search", page.clone());
+        }
+        let mut projected = Vec::new();
+        for _ in 0..2 {
+            let mut budget = TurnOutputBudget::for_results(
+                results.iter().map(|(name, text)| (*name, text.as_str())),
+            );
+            let mut texts = Vec::new();
+            for (index, (name, result)) in results.iter().enumerate() {
+                let mut text = result.clone();
+                budget.admit(
+                    name,
+                    &mut text,
+                    ResultRecall::StoredResult {
+                        tool: name,
+                        call: ToolCallId::from_bytes([index as u8 + 1; 16]),
+                    },
+                );
+                if *name == "search" {
+                    assert_eq!(text, page);
+                } else {
+                    assert!(!text.is_empty(), "each admitted slot has a reply");
+                    assert!(text.contains("full output t:"), "{text}");
+                }
+                texts.push(text);
+            }
+            assert!(texts.iter().map(String::len).sum::<usize>() <= MAX_TURN_TOOL_OUTPUT_BYTES);
+            projected.push(texts);
+        }
+        assert_eq!(projected[0], projected[1]);
+    }
+
+    #[test]
     fn the_turn_budget_shrinks_late_results_to_the_remainder() {
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(90 * 1024);
-        assert!(!budget.admit(&mut first, ResultRecall::None));
+        assert!(!budget.admit("other", &mut first, ResultRecall::None));
         assert_eq!(first.len(), 90 * 1024);
         assert_eq!(budget.remaining(), 6 * 1024);
 
         let mut second = lines(4_000);
         assert!(second.len() > 6 * 1024);
-        assert!(budget.admit(&mut second, ResultRecall::None));
+        assert!(budget.admit("other", &mut second, ResultRecall::None));
         assert!(second.len() <= 6 * 1024);
         assert!(second.contains("turn budget reached; not stored]"));
         assert!(budget.remaining() < MIN_MODEL_TEXT_BYTES);
 
-        // Never below the floor: a spent turn still gets a useful result.
+        let available = budget.remaining();
         let mut third = lines(4_000);
-        assert!(budget.admit(&mut third, ResultRecall::None));
-        assert!(third.len() <= MIN_MODEL_TEXT_BYTES);
-        assert!(third.len() > MIN_MODEL_TEXT_BYTES / 2);
+        assert!(budget.admit("other", &mut third, ResultRecall::None));
+        assert!(third.len() <= available);
 
+        let available = budget.remaining();
         let mut small = "fits".to_owned();
-        assert!(!budget.admit(&mut small, ResultRecall::None));
-        assert_eq!(small, "fits");
+        budget.admit("other", &mut small, ResultRecall::None);
+        assert!(small.len() <= available);
     }
 
     #[test]
@@ -1289,9 +1534,10 @@ mod tests {
         let digest = crate::workspace::content_hash(text.as_bytes());
         let mut budget = TurnOutputBudget::new();
         let mut first = "x".repeat(92 * 1024);
-        budget.admit(&mut first, ResultRecall::None);
+        budget.admit("other", &mut first, ResultRecall::None);
         let mut second = text.clone();
         assert!(budget.admit(
+            "other",
             &mut second,
             ResultRecall::StoredResult {
                 tool: "read_file",
@@ -1315,9 +1561,10 @@ mod tests {
         // reconstruct the projection from the stored row.
         let mut again = TurnOutputBudget::new();
         let mut first_again = "x".repeat(92 * 1024);
-        again.admit(&mut first_again, ResultRecall::None);
+        again.admit("other", &mut first_again, ResultRecall::None);
         let mut replayed = text;
         again.admit(
+            "other",
             &mut replayed,
             ResultRecall::StoredResult {
                 tool: "read_file",

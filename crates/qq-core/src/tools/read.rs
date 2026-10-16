@@ -5,10 +5,11 @@ use serde::Deserialize;
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
 
 use super::{
-    dispatch::{ToolCancellation, ToolOutput},
+    dispatch::{ReadSideOutput, ToolCancellation},
     lang::Language,
     output::{
-        Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len, push_line,
+        Bounds, Header, MARKER_PREFIX, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, masked_escaped_len,
+        push_line,
     },
     search::path_error,
     walk::looks_binary,
@@ -24,7 +25,6 @@ const MAX_OUTLINE_ITEMS: usize = 400;
 /// The short content hash carried by the header: `h:` + 12 hex digits.
 pub(super) const SHORT_HASH_LEN: usize = 12;
 /// Escaped bytes reserved for the header line ahead of the body.
-const HEADER_RESERVE_BYTES: usize = 256;
 const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 const IMAGE_EXTENSIONS_EXTRA: [&str; 1] = ["webp"];
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
@@ -66,13 +66,57 @@ struct Loaded {
     perms: String,
 }
 
+#[cfg(test)]
+struct ReadHook {
+    workspace: std::path::PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static READ_HOOKS: std::sync::Mutex<Vec<ReadHook>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds the next `read_file` in `workspace` on its blocking thread until
+/// released, ignoring cancellation, as a slow filesystem would.
+#[cfg(test)]
+pub(crate) fn hold_tool_read(
+    workspace: &std::path::Path,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    READ_HOOKS.lock().unwrap().push(ReadHook {
+        workspace: workspace.to_owned(),
+        entered,
+        release: release_rx,
+    });
+    (entered_rx, release)
+}
+
 #[inline]
 pub(super) fn read_file(
     workspace: &Workspace,
     file_state: &FileState,
     arguments: ReadFileArgs,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+    argument_note_bytes: usize,
+) -> ReadSideOutput {
+    #[cfg(test)]
+    {
+        let hook = {
+            let mut hooks = READ_HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|hook| hook.workspace == workspace.path())
+                .map(|index| hooks.remove(index))
+        };
+        if let Some(hook) = hook {
+            let _ = hook.entered.send(());
+            let _ = hook.release.recv();
+        }
+    }
     // Models that fill every optional field send `offset`/`limit` beside
     // `ranges` (usually offset = the first range's start). `ranges` is the
     // more specific request, so it wins and the header says so.
@@ -80,21 +124,21 @@ pub(super) fn read_file(
         !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some());
     let ranges = match parse_ranges(&arguments) {
         Ok(ranges) => ranges,
-        Err(error) => return ToolOutput::error(error),
+        Err(error) => return ReadSideOutput::error(error),
     };
     if let Some(since) = &arguments.if_changed_since
         && !(since.len() == SHORT_HASH_LEN + 2
             && since.starts_with("h:")
             && since[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
-        return ToolOutput::error("invalid_if_changed_since: expected h:<12 hex digits>");
+        return ReadSideOutput::error("invalid_if_changed_since: expected h:<12 hex digits>");
     }
     let loaded = match load(workspace, &arguments.path) {
         Ok(loaded) => loaded,
-        Err(error) => return ToolOutput::error(error),
+        Err(error) => return ReadSideOutput::error(error),
     };
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ReadSideOutput::error("tool execution was cancelled");
     }
     let update = loaded.hash.as_ref().map(|hash| FileStateUpdate {
         path: loaded.path.clone(),
@@ -128,7 +172,7 @@ pub(super) fn read_file(
             if offset_ignored {
                 header = header.field("note", "offset_ignored");
             }
-            ToolOutput::success(header.into_line())
+            ReadSideOutput::success(header.into_line())
         }
         _ if image => {
             let mut header = Header::new("read", Some(&loaded.path))
@@ -147,9 +191,9 @@ pub(super) fn read_file(
             if offset_ignored {
                 header = header.field("note", "offset_ignored");
             }
-            ToolOutput::success(header.into_line())
+            ReadSideOutput::success(header.into_line())
         }
-        _ if binary => ToolOutput::error(format!(
+        _ if binary => ReadSideOutput::error(format!(
             "not_text: {} is binary ({} bytes); use mode=info",
             loaded.path, loaded.size
         )),
@@ -165,14 +209,18 @@ pub(super) fn read_file(
                 if offset_ignored {
                     header = header.field("note", "offset_ignored");
                 }
-                ToolOutput::success(header.into_line())
+                ReadSideOutput::success(header.into_line())
             } else {
                 lines(
                     &loaded,
                     short,
                     total_lines,
                     &ranges,
-                    offset_ignored,
+                    arguments.ranges.is_empty(),
+                    HeaderNotes {
+                        offset_ignored,
+                        argument_note_bytes,
+                    },
                     cancelled,
                 )
             }
@@ -201,21 +249,23 @@ fn parse_ranges(arguments: &ReadFileArgs) -> Result<Vec<Range>, String> {
     let mut ranges = Vec::with_capacity(arguments.ranges.len().max(1));
     if arguments.ranges.is_empty() {
         let offset = arguments.offset.unwrap_or(1);
-        let limit = arguments.limit.unwrap_or(200);
         if offset == 0 || offset > MAX_READ_OFFSET {
             return Err(format!(
                 "invalid_offset: offset must be between 1 and {MAX_READ_OFFSET}"
             ));
         }
-        if limit == 0 || limit > MAX_READ_LINES {
-            return Err(format!(
-                "invalid_limit: limit must be between 1 and {MAX_READ_LINES}"
-            ));
-        }
-        ranges.push(Range {
-            start: offset,
-            end: offset.saturating_add(limit - 1),
-        });
+        let end = match arguments.limit {
+            Some(limit) if (1..=MAX_READ_LINES).contains(&limit) => {
+                offset.saturating_add(limit - 1)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "invalid_limit: limit must be between 1 and {MAX_READ_LINES}"
+                ));
+            }
+            None => usize::MAX,
+        };
+        ranges.push(Range { start: offset, end });
         return Ok(ranges);
     }
     for text in &arguments.ranges {
@@ -307,6 +357,11 @@ fn load(workspace: &Workspace, requested: &str) -> Result<Loaded, String> {
     })
 }
 
+struct HeaderNotes {
+    offset_ignored: bool,
+    argument_note_bytes: usize,
+}
+
 /// Line-numbered content for the merged `ranges`. Numbers use one gutter
 /// width per call so columns align across ranges; ranges are separated by
 /// `--`. Lines past the end of the file are reported, not silently dropped.
@@ -315,9 +370,10 @@ fn lines(
     short: &str,
     total_lines: usize,
     ranges: &[Range],
-    offset_ignored: bool,
+    continue_to_eof: bool,
+    notes: HeaderNotes,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     let text = match std::str::from_utf8(&loaded.bytes) {
         Ok(text) => text,
         // The scan cap (or the file itself) ended inside a multibyte
@@ -327,13 +383,13 @@ fn lines(
                 .expect("the UTF-8 validator reported a valid prefix")
         }
         Err(_) => {
-            return ToolOutput::error(format!("not_text: {} is not valid UTF-8", loaded.path));
+            return ReadSideOutput::error(format!("not_text: {} is not valid UTF-8", loaded.path));
         }
     };
     if let Some(first) = ranges.first()
         && first.start > total_lines
     {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "range_out_of_bounds: {} has {total_lines} lines (last_line={total_lines})",
             loaded.path
         ));
@@ -345,9 +401,37 @@ fn lines(
         .unwrap_or(0)
         .min(total_lines);
     let width = last_wanted.max(1).to_string().len();
-    let body_budget = READ_BOUNDS
-        .max_bytes
-        .saturating_sub(HEADER_RESERVE_BYTES + MARKER_RESERVE_BYTES);
+    // Render the largest header this window can produce, including its real path.
+    // The actual first line numbers have no more digits than their range ends.
+    let mut header_window = String::with_capacity(ranges.len() * 16);
+    for (index, range) in ranges.iter().enumerate() {
+        if index > 0 {
+            header_window.push(',');
+        }
+        let last = range.end.min(total_lines);
+        let _ = write!(header_window, "{last}-{last}");
+    }
+    let header_bound = Header::new("read", Some(&loaded.path))
+        .token(format_args!("L{header_window}/{total_lines}"))
+        .token(format_args!("h:{short}"))
+        .field("clipped", READ_BOUNDS.max_lines)
+        .field("truncated", "bytes")
+        .field("scanned", MAX_READ_SCAN_BYTES)
+        .field("note", "offset_ignored")
+        .into_line();
+    // Keep ordinary-path windows stable; long headers reserve their full weight.
+    // Dispatch chooses note placement before masking, so a large raw header
+    // can require an extra row even when its masked rendering is short.
+    let note_row = usize::from(notes.argument_note_bytes > 0);
+    let header_bytes =
+        (masked_escaped_len(&header_bound) + notes.argument_note_bytes + note_row).max(256);
+    let header_lines = header_bound.lines().count() + note_row;
+    if header_bytes + MARKER_RESERVE_BYTES >= READ_BOUNDS.max_bytes
+        || header_lines + 1 >= READ_BOUNDS.max_lines
+    {
+        return ReadSideOutput::error("output_limit: read header exceeds the output bound");
+    }
+    let body_budget = READ_BOUNDS.max_bytes - header_bytes - MARKER_RESERVE_BYTES;
     // Sized to the file, not the budget: most reads are small and a 32 KiB
     // allocation per call is measurable on the tool loop.
     let mut body = String::with_capacity(
@@ -355,6 +439,10 @@ fn lines(
             .saturating_add(total_lines.saturating_mul(width + 1))
             .min(body_budget),
     );
+    // Keep the header and a possible continuation marker inside the bound.
+    let body_line_budget = READ_BOUNDS.max_lines - header_lines - 1;
+    let mut body_lines = 0_usize;
+    let mut line_stopped = false;
     let mut body_escaped = 0_usize;
     let mut shown = Vec::with_capacity(ranges.len());
     let mut clipped_lines = 0_usize;
@@ -364,7 +452,7 @@ fn lines(
     let mut number_buffer = String::with_capacity(width + 1);
     'ranges: for (index, range) in ranges.iter().enumerate() {
         if cancelled.is_cancelled() {
-            return ToolOutput::error("tool execution was cancelled");
+            return ReadSideOutput::error("tool execution was cancelled");
         }
         let mut first_shown = None;
         let mut last_shown = 0_usize;
@@ -377,6 +465,11 @@ fn lines(
             if number < range.start {
                 continue;
             }
+            if body_lines >= body_line_budget {
+                stopped = true;
+                line_stopped = true;
+                break;
+            }
             number_buffer.clear();
             let _ = write!(number_buffer, "{number:>width$}\t");
             let before = body.len();
@@ -387,17 +480,18 @@ fn lines(
             });
             // A row is shown whole (clipped only at the per-line ceiling) or
             // not at all: a partial last line would break edit anchors.
-            let (cost, clipped) =
+            let (_cost, clipped) =
                 push_line(&mut body, content, MAX_LINE_BYTES, usize::MAX).unwrap_or((0, false));
             body.push('\n');
             // The gutter's tab and the newline each escape to two bytes.
-            let row_cost = escaped_len(&number_buffer) + cost + 2;
+            let row_cost = masked_escaped_len(&body[before..]);
             if body_escaped + row_cost > body_budget {
                 body.truncate(before);
                 stopped = true;
                 break;
             }
             body_escaped += row_cost;
+            body_lines += 1;
             clipped_lines += usize::from(clipped);
             first_shown.get_or_insert(number);
             last_shown = number;
@@ -409,9 +503,20 @@ fn lines(
             break 'ranges;
         }
         if index + 1 < ranges.len() && current.is_some() {
+            if body_lines >= body_line_budget || body_escaped + 4 > body_budget {
+                stopped = true;
+                line_stopped = body_lines >= body_line_budget;
+                break 'ranges;
+            }
             body.push_str("--\n");
-            body_escaped += 3;
+            body_escaped += 4;
+            body_lines += 1;
         }
+    }
+    if stopped && shown.is_empty() {
+        return ReadSideOutput::error(
+            "output_limit: first requested row cannot fit with the read header; select a nearer workspace root",
+        );
     }
     let mut window = String::with_capacity(32);
     for (index, (first, last)) in shown.iter().enumerate() {
@@ -434,23 +539,42 @@ fn lines(
         header = header.field("clipped", clipped_lines);
     }
     if stopped {
-        header = header.field("truncated", "bytes");
+        header = header.field("truncated", if line_stopped { "lines" } else { "bytes" });
     }
     if loaded.hash.is_none() {
         header = header.field("scanned", MAX_READ_SCAN_BYTES);
     }
     // In the header before bounding, so a spilled result stores it too.
-    if offset_ignored {
+    if notes.offset_ignored {
         header = header.field("note", "offset_ignored");
     }
     let mut out = header.into_line();
     out.push_str(&body);
-    if stopped {
+    if stopped || (continue_to_eof && shown.last().is_some_and(|(_, last)| *last < total_lines)) {
         let next = shown.last().map_or(0, |(_, last)| last + 1);
-        let _ = writeln!(
-            out,
-            "{MARKER_PREFIX}output limit; continue from offset={next}]…"
-        );
+        if next > MAX_READ_OFFSET {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}more lines; start-offset limit {MAX_READ_OFFSET} reached; no later starting offset is supported]…"
+            );
+        } else if loaded.hash.is_none() {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}more lines (count unknown; {} MiB scan cap); continue from offset={next}]…",
+                MAX_READ_SCAN_BYTES / (1024 * 1024)
+            );
+        } else if stopped {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}output limit; continue from offset={next}]…"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{MARKER_PREFIX}{} more lines; continue from offset={next}]…",
+                total_lines - next + 1
+            );
+        }
     } else if loaded.hash.is_none()
         && ranges
             .iter()
@@ -462,15 +586,24 @@ fn lines(
             MAX_READ_SCAN_BYTES / (1024 * 1024)
         );
     }
-    ToolOutput::bounded(out, &READ_BOUNDS, false)
+    let bounds = Bounds {
+        max_line_bytes: READ_BOUNDS.max_bytes,
+        ..READ_BOUNDS
+    };
+    ReadSideOutput::with_bounds(out, &bounds, false)
 }
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the
 /// defining line's indentation, ≤ [`MAX_OUTLINE_ITEMS`] rows.
-fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: bool) -> ToolOutput {
+fn outline(
+    loaded: &Loaded,
+    short: &str,
+    total_lines: usize,
+    offset_ignored: bool,
+) -> ReadSideOutput {
     let language = Language::from_path(&loaded.path);
     let Some(items) = language.outline(&loaded.bytes) else {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::error(format!(
             "outline_unsupported: no outline table for {}; read it by lines",
             loaded.path
         ));
@@ -525,7 +658,7 @@ fn outline(loaded: &Loaded, short: &str, total_lines: usize, offset_ignored: boo
     }
     let mut out = header.into_line();
     out.push_str(&body);
-    ToolOutput::bounded(out, &READ_BOUNDS, false)
+    ReadSideOutput::with_bounds(out, &READ_BOUNDS, false)
 }
 
 #[cfg(unix)]
@@ -577,5 +710,101 @@ fn image_mime(path: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ab3_zero_row_window_returns_an_explicit_budget_error() {
+        let path = format!(
+            "{}/f.txt",
+            std::iter::repeat_n("界".repeat(95), 110)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = format!("{}\n", "x".repeat(2_000)).into_bytes();
+        let hash = content_hash(&bytes);
+        let loaded = Loaded {
+            path,
+            size: bytes.len() as u64,
+            bytes,
+            hash: Some(hash.clone()),
+            perms: "rw".to_owned(),
+        };
+        let output = lines(
+            &loaded,
+            &hash[..SHORT_HASH_LEN],
+            1,
+            &[Range { start: 1, end: 1 }],
+            true,
+            HeaderNotes {
+                offset_ignored: false,
+                argument_note_bytes: 0,
+            },
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        )
+        .with_test_notes(&[]);
+        assert!(output.is_error, "{}", output.model_text);
+        assert!(output.model_text.contains("output_limit:"));
+        assert!(!output.model_text.contains("offset=0"));
+    }
+
+    #[test]
+    fn ab3_masked_long_header_keeps_room_for_a_separate_repair_note() {
+        // Valid Windows component/UTF-16 lengths can exceed the UTF-8 line cap.
+        let path = format!(
+            "SECRET={}/f.txt",
+            std::iter::repeat_n("界".repeat(100), 110)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = vec![b'\n'; 5_000];
+        let hash = content_hash(&bytes);
+        let loaded = Loaded {
+            path,
+            size: bytes.len() as u64,
+            bytes,
+            hash: Some(hash.clone()),
+            perms: "rw".to_owned(),
+        };
+        let output = lines(
+            &loaded,
+            &hash[..SHORT_HASH_LEN],
+            5_000,
+            &[Range {
+                start: 1,
+                end: 5_000,
+            }],
+            true,
+            HeaderNotes {
+                offset_ignored: false,
+                argument_note_bytes: " note=cwd_ignored".len(),
+            },
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        );
+        assert!(loaded.path.len() > READ_BOUNDS.max_bytes);
+        let bounded = output.with_test_notes(&["cwd_ignored"]);
+        assert!(
+            bounded.spill.is_none(),
+            "the contiguous window must survive the extra row"
+        );
+        let rows = bounded
+            .model_text
+            .lines()
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+            })
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty());
+        assert_eq!(rows, (1..=rows.len()).collect::<Vec<_>>());
+        assert!(
+            bounded
+                .model_text
+                .contains(&format!("continue from offset={}", rows.len() + 1))
+        );
     }
 }

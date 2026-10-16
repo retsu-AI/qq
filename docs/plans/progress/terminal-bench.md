@@ -1,6 +1,6 @@
 # Ledger — Terminal-Bench readiness
 
-Plan: [`../terminal-bench-readiness.md`](../terminal-bench-readiness.md).
+Plan: [`../terminal-bench.md`](../terminal-bench.md).
 Only the agent working this plan edits this file. Current state on top;
 dated entries appended below, newest last.
 
@@ -12,9 +12,10 @@ and qualified; receipts are in Git history (the plan collapsed to its open items
 | --- | --- | --- | --- | --- |
 | R6-search | Ignore-aware search candidate | Superseded | tool-layer T2 (#32) | Shipped as `search` v2 / `tree` ahead of the paired evaluation; the evaluation is tool-layer T13 |
 | R6-patch | Patch-style edit candidate | Superseded | tool-layer T5 (#37) | Shipped as `edit_file` v2 (batch, cascade, anchors); evaluation is T13 |
-| R6-terminal | Persistent terminal/process contract candidate | Planned (gated) | tool-layer T10 | Ships only on T13 / trajectory evidence; gates speed-first H10 |
+| R6-terminal | Persistent terminal/process contract candidate | Planned (gated) | tool-layer T10 | Ships only on T13 / trajectory evidence; H10 is an independent lane per root decision |
 | R7 | Sub-agent economics and provider-aware scheduling | Planned | | H23/H24 shipped the ownership and budget repairs; remaining items are worker-model defaults and queue-wait recording |
-| R8 | Remaining warm-path candidates: credential-lease caching, MCP bounds, prompt-cache determinism | Planned | | Retry (H14), shared messages and encode bench (H18), and cold-path load work (H22.2) shipped in speed-first; what remains here is the prompt-cache determinism measurement |
+| D6b / ENG-812 | Paired delegation arms/default decisions | Planned (paid gate) | — | ENG-809 authorization required; former delegation plan now owned by R7 |
+| R8 | MCP response bounds (F13) and prompt-cache determinism | Planned | | Retry (H14), shared messages and encode bench (H18), and cold-path load work (H22.2) shipped in speed-first; remaining: bounded MCP response decoding/rendering with peak-RSS tests, plus prompt-cache determinism measurement |
 | TB-pilot | Credentialed Terminal-Bench pilot beyond the first smoke | Planned | | First smoke recorded `9e275be`; Harbor adapter `990df3e`, `af6ed7e`, `9d38c08`, `b80c919` |
 
 ## Entries
@@ -48,3 +49,10 @@ reads `PROTOCOL_VERSION` from `crates/qq-protocol/src/lib.rs`, so a future
 bump regenerates rather than drifts. 20 Python tests and
 `harbor_atif_fixtures` pass. Contributor commits from #187/#189 were kept
 verbatim where they were correct; no core change.
+
+## Consolidation review reconciliation
+
+- D6b now has a current R7 status row. Worker model resolution/persistence,
+  usage roll-up and headless/ATIF trajectories are shipped baseline, not new
+  R7 implementation. Queue-wait recording and measured defaults remain open.
+- H10 is independent per adopted root decision; R6 still gates T10 terminal.

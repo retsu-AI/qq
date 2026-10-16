@@ -279,9 +279,10 @@ async fn a_childs_answer_is_progress_for_the_parent() {
     let parent = parent_requests.lock().unwrap();
     assert_eq!(parent.len(), 122, "one call per turn, then the answer");
     assert!(
-        parent
-            .iter()
-            .all(|request| notice_of(request) != Some(crate::STALL_REPORT_NOTICE)),
+        parent.iter().all(|request| !matches!(
+            notice_of(request),
+            Some(crate::STALL_REPORT_NOTICE | crate::ROOT_STALL_REPORT_NOTICE)
+        )),
         "the child's answer reset the parent's count"
     );
 }
@@ -552,4 +553,192 @@ async fn a_report_retried_after_a_fault_reaches_the_parent_whole() {
             crate::sessions::subagents::INTERIM_REPORT_LABEL
         )
     );
+}
+
+#[tokio::test]
+async fn ab5_read_only_root_notice_replays_and_legacy_notice_keeps_its_text() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&requests),
+        script: vec![("read_file", r#"{"path":"inventory.rs"}"#.to_owned()); 64],
+        turn: StdMutex::new(0),
+    });
+    let mut harness = spawn_harness(
+        Vec::new(),
+        vec![Arc::clone(&provider), Arc::clone(&provider), provider],
+        8,
+    )
+    .await;
+    std::fs::write(
+        harness._directory.path().join("inventory.rs"),
+        "struct Widget;\n",
+    )
+    .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::ReadOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "inspect").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            notice_of(&requests[64]),
+            Some(crate::ROOT_STALL_REPORT_NOTICE)
+        );
+        assert!(
+            requests[64]
+                .system()
+                .unwrap()
+                .contains("This run cannot change files or run commands")
+        );
+    }
+    let follow_up = submit_prompt_to(&harness.runtime, harness.session_id, "thanks").await;
+    collect_until_run_finished(&mut harness.events, follow_up).await;
+    {
+        let requests = requests.lock().unwrap();
+        let notices: Vec<String> = request_texts(requests.last().unwrap())
+            .into_iter()
+            .filter(|text| text.starts_with("[QQ runtime notice"))
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|text| text == crate::ROOT_STALL_REPORT_NOTICE)
+        );
+    }
+    assert_assembly_matches_reference(
+        &harness._directory.path().join("sessions.sqlite3"),
+        harness.session_id,
+    );
+    let connection =
+        rusqlite::Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+    assert_eq!(connection.execute("UPDATE model_turns SET notice='stall_report' WHERE run_id=?1 AND notice='root_stall_report'", [run_id.to_string()]).unwrap(), 1);
+    drop(connection);
+    let legacy = submit_prompt_to(&harness.runtime, harness.session_id, "legacy replay").await;
+    collect_until_run_finished(&mut harness.events, legacy).await;
+    let requests = requests.lock().unwrap();
+    let notices: Vec<String> = request_texts(requests.last().unwrap())
+        .into_iter()
+        .filter(|text| text.starts_with("[QQ runtime notice"))
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text == crate::STALL_REPORT_NOTICE)
+    );
+    assert!(
+        !notices
+            .iter()
+            .any(|text| text == crate::ROOT_STALL_REPORT_NOTICE)
+    );
+}
+
+#[tokio::test]
+async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (_, session, claimed) = create_claimed_parent(&store, directory.path()).await;
+    store
+        .persist_model_turn(
+            &claimed,
+            ModelTurnCommit {
+                turn_ordinal: 1,
+                message: Message::assistant("report evidence"),
+                calls: Vec::new(),
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: None,
+                truncated: false,
+                notice: Some(crate::runtime::TurnNotice::RootStallReport),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("ALTER TABLE model_turns DROP COLUMN tool_results_projection_json; UPDATE metadata SET value='48' WHERE key='schema_version'; UPDATE runs SET plan_descriptor_json=json_remove(json_set(plan_descriptor_json,'$.version',14,'$.prompt_version',22),'$.tool_output_projection'),plan_identity_json=json_set(plan_identity_json,'$.descriptor_version',14)").unwrap();
+    let store_id: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='store_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_notice_version BEFORE UPDATE OF value ON metadata WHEN NEW.key='schema_version' AND NEW.value='50' BEGIN SELECT RAISE(ABORT,'injected final notice migration failure'); END;").unwrap();
+    drop(connection);
+    assert!(Store::open(path.clone()).await.is_err());
+    let connection = Connection::open(&path).unwrap();
+    let failed_version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        failed_version, "48",
+        "failed48 upgrade must never expose49 to a reader without root-notice support"
+    );
+    assert!(!has_column(&connection, "model_turns", "tool_results_projection_json").unwrap());
+    connection
+        .execute_batch("DROP TRIGGER reject_notice_version")
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let reopened = Store::open(path.clone()).await.unwrap();
+        let expected_id = store_id.clone();
+        let context = reopened
+            .call(Priority::Control, move |connection| {
+                let version: String = connection.query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(version, "50");
+                let current_id: String = connection.query_row(
+                    "SELECT value FROM metadata WHERE key='store_id'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(current_id, expected_id);
+                let notice: String =
+                    connection.query_row("SELECT notice FROM model_turns", [], |row| row.get(0))?;
+                assert_eq!(notice, "root_stall_report");
+                assert!(has_column(
+                    connection,
+                    "model_turns",
+                    "tool_results_projection_json"
+                )?);
+                load_model_context(connection, session, u64::MAX)
+            })
+            .await
+            .unwrap();
+        assert!(context.contains(&Message::user(crate::ROOT_STALL_REPORT_NOTICE)));
+        reopened.close().await.unwrap();
+    }
 }

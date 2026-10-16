@@ -407,6 +407,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
             Vec::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2002,6 +2003,8 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -2074,6 +2077,8 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -2728,6 +2733,9 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
         )
         .unwrap();
     connection
+        .execute("DROP INDEX runs_owned_compaction", [])
+        .unwrap();
+    connection
         .execute(
             "ALTER TABLE runs DROP COLUMN auto_compaction_for_run_id",
             [],
@@ -3261,6 +3269,8 @@ async fn schedules_ready_sessions_fairly() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,

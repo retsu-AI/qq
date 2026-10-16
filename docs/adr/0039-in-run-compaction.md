@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-20
 **Deciders:** ENG-793 (audit F03; ROOT-5 "true mid-run summarization" deferral)
-**Implements:** [`architecture.md` § run loop step 3](../design/architecture.md#runtime), [`mid-run-compaction.md`](../plans/mid-run-compaction.md) (supersedes its Durable Protocol; see § Alternatives)
+**Implements:** [`architecture.md` § run loop step 3](../design/architecture.md#runtime), `plans/mid-run-compaction.md` (deleted; see § Clarification) (supersedes its Durable Protocol; see § Alternatives)
 
 ## Context
 
@@ -131,7 +131,7 @@ from **Implements**, was deleted on 2026-09-28 because this ADR records the
 design as built. Read the plan with
 `git log -- docs/plans/mid-run-compaction.md`. Its open MRC-4 (surfaces) and
 MRC-5 (live evidence) moved to
-[`autonomous-core.md`](../plans/autonomous-core.md) AC14 and Goal 5.
+[`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC14 and Goal 5.
 ADR-0048's continuation of a *stopped* run is not the "auto-start a
 follow-up" rejected above: in-run compaction still keeps a live run in one
 run, and ADR-0048 § 3 applies only after a run has already settled.

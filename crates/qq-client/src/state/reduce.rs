@@ -7,8 +7,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use qq_protocol::{
     AuditOutcome, MessageRole, MessageState, RunOutcome, ServerCapabilities, SessionEvent,
-    SessionEventEnvelope, SessionId, SnapshotRequest, TextChannel, ToolCallState,
-    WorkspaceGrantOutcome, WorkspaceId,
+    SessionEventEnvelope, SessionId, SideQuestionState, SnapshotRequest, TextChannel,
+    ToolCallState, WorkspaceGrantOutcome, WorkspaceId,
 };
 
 use super::{
@@ -105,6 +105,42 @@ pub enum StateEffect {
 pub type StateEffects = Vec<StateEffect>;
 
 impl SessionStore {
+    /// Rebuild a replaced body from retained events already observed live.
+    /// Keep local unread state and drafts; preserve receipt refresh and deletion effects.
+    pub fn replay_event(
+        &mut self,
+        envelope: &SessionEventEnvelope,
+        context: ReduceContext<'_>,
+    ) -> StateEffects {
+        let local = self.get_mut(&envelope.session_id).map(|view| {
+            (
+                view.unread,
+                view.finished_unread,
+                std::mem::take(&mut view.drafts),
+            )
+        });
+        let effects = self.reduce_event(envelope, context);
+        if let Some((unread, finished_unread, drafts)) = local
+            && let Some(view) = self.get_mut(&envelope.session_id)
+        {
+            view.unread = unread;
+            view.finished_unread = finished_unread;
+            view.drafts = drafts;
+        }
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                effect @ (StateEffect::RequestSnapshot(_)
+                | StateEffect::Refocus(_)
+                | StateEffect::SessionRemoved { .. }) => Some(effect),
+                StateEffect::Notice { .. }
+                | StateEffect::Attention(_)
+                | StateEffect::AdoptCreated(_)
+                | StateEffect::SubmitDraft { .. } => None,
+            })
+            .collect()
+    }
+
     /// Apply one durable event. The caller has already deduplicated by cursor
     /// and checked the workspace.
     pub fn reduce_event(
@@ -115,6 +151,38 @@ impl SessionStore {
         let mut effects = StateEffects::new();
         let session_id = envelope.session_id;
         match &envelope.event {
+            SessionEvent::SideQuestionUpdated { side_question } => {
+                // Whether one runs is summary state, kept for every session
+                // so the aggregate sees cold sessions too.
+                if let Some(view) = self.body_mut(&session_id) {
+                    let running = side_question.state == SideQuestionState::Running;
+                    match view.summary.running_side_question {
+                        _ if running => view.summary.running_side_question = Some(side_question.id),
+                        Some(id) if id == side_question.id => {
+                            view.summary.running_side_question = None;
+                        }
+                        Some(_) | None => {}
+                    }
+                }
+                // Side bodies follow the transcript body: a summary-only view
+                // holds none, so cold sessions cannot accumulate them.
+                if let Some(view) = self.get_mut(&session_id)
+                    && view.is_warm()
+                {
+                    if let Some(existing) = view
+                        .side_questions
+                        .iter_mut()
+                        .find(|item| item.id == side_question.id)
+                    {
+                        *existing = side_question.as_ref().clone();
+                    } else {
+                        view.side_questions.push(side_question.as_ref().clone());
+                        if view.side_questions.len() > 64 {
+                            view.side_questions.remove(0);
+                        }
+                    }
+                }
+            }
             SessionEvent::SessionCreated { session } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if context.caused_by_me {
@@ -141,14 +209,11 @@ impl SessionStore {
             } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if let Some(view) = self.get_mut(&session_id) {
-                    let cost_before = view
-                        .summary
-                        .accounting
-                        .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                        .unwrap_or(view.summary.estimated_cost_usd_nanos);
                     let stats = view.runs.entry(*run_id).or_default();
                     stats.started_at_ms = Some(envelope.occurred_at_ms);
-                    stats.cost_usd_nanos = cost_before;
+                    stats.owned_step = session
+                        .active_run_id
+                        .is_some_and(|active| active != *run_id);
                     stats.plan = plan.as_deref().map(plan_label);
                     if let Some(messages) = view.messages.as_mut() {
                         for message in messages.iter_mut().filter(|message| {
@@ -250,8 +315,12 @@ impl SessionStore {
                 edit,
                 question,
                 fetch,
+                delegated,
             } => {
                 if let Some(session) = self.get_mut(&session_id) {
+                    if tool_call.state == ToolCallState::AwaitingApproval && *delegated {
+                        session.live.with_delegate.insert(tool_call.id);
+                    }
                     if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
                         effects.push(StateEffect::Attention(Attention::ApprovalRequested {
                             session_title: session.summary.title.clone(),
@@ -275,7 +344,8 @@ impl SessionStore {
             }
             // A delegate handed the hold to the human: keep why beside the
             // preview so the prompt can say so. Advisory; the hold itself is
-            // unchanged, and a preview-less hold gets one to carry it.
+            // unchanged, and a preview-less hold gets one to carry it. A late
+            // escalation for a call already answered changes nothing.
             SessionEvent::ToolApprovalEscalated {
                 tool_call_id,
                 delegate,
@@ -284,6 +354,7 @@ impl SessionStore {
                 if let Some(session) = self.get_mut(&session_id)
                     && session.live.awaiting_approval.contains(tool_call_id)
                 {
+                    session.live.with_delegate.remove(tool_call_id);
                     session
                         .approval_previews
                         .entry(*tool_call_id)
@@ -449,22 +520,16 @@ impl SessionStore {
                 spend,
                 ..
             } => {
-                let (level, label) = match outcome {
-                    qq_protocol::CheckpointOutcome::Supported => (NoticeLevel::Info, "GREEN"),
-                    qq_protocol::CheckpointOutcome::InsufficientEvidence => {
-                        (NoticeLevel::Warning, "NEEDS EVIDENCE")
-                    }
-                    qq_protocol::CheckpointOutcome::Unavailable => {
-                        (NoticeLevel::Warning, "UNAVAILABLE")
-                    }
-                    qq_protocol::CheckpointOutcome::PartiallySupported
-                    | qq_protocol::CheckpointOutcome::Contradicted => (NoticeLevel::Error, "RED"),
-                };
+                let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
                 effects.push(StateEffect::Notice {
                     session: Some(session_id),
-                    level,
+                    level: if supported {
+                        NoticeLevel::Info
+                    } else {
+                        NoticeLevel::Error
+                    },
                     text: format!(
-                        "Jev {label} {outcome:?} {correlation}: {feedback}; reviewer spend {}",
+                        "Jev {outcome:?} {correlation}: {feedback}; reviewer spend {}",
                         spend
                             .as_ref()
                             .and_then(|spend| spend.estimated_cost_usd_nanos)
@@ -598,11 +663,13 @@ impl SessionStore {
                     if let Some(route) = &model.model {
                         stats.resolved_route = Some(route.clone());
                     }
-                    stats.turns = stats.turns.max(*turn_ordinal);
-                    if let Some(cost) = estimated_cost_usd_nanos {
+                    if *turn_ordinal > stats.turns
+                        && let Some(cost) = estimated_cost_usd_nanos
+                    {
                         stats.live_cost_usd_nanos =
                             Some(stats.live_cost_usd_nanos.unwrap_or(0).saturating_add(*cost));
                     }
+                    stats.turns = stats.turns.max(*turn_ordinal);
                 }
             }
             // The run-level context audit is not session state: old persisted
@@ -622,12 +689,33 @@ impl SessionStore {
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
-                let cost_before = self
-                    .get(&session_id)
-                    .and_then(|view| view.runs.get(run_id))
-                    .and_then(|stats| stats.cost_usd_nanos);
+                // A run that finishes while another run holds the session is
+                // bookkeeping, not the end of the visible work: an in-run
+                // compaction step (its prompt run keeps the slot; a retried
+                // summarizer outage reports through the prompt run's
+                // `run_turn_retrying` and final outcome instead), or a queued
+                // prompt cancelled or interrupted behind the active run. No
+                // attention, unread count or notice, and the active run's
+                // live tool and approval state stay.
+                let owned_step = session
+                    .active_run_id
+                    .is_some_and(|active| active != *run_id)
+                    || self
+                        .get(&session_id)
+                        .and_then(|view| view.runs.get(run_id))
+                        .is_some_and(|stats| stats.owned_step);
+                let owned_step = owned_step
+                    || self.get(&session_id).is_some_and(|view| {
+                        // Cancelling the last queued prompt has no RunStarted;
+                        // its queue transition still releases the idle slot.
+                        let finished_queued = view.summary.queued_prompts > session.queued_prompts;
+                        !finished_queued
+                            && view
+                                .foreground_run_id
+                                .is_some_and(|foreground| foreground != *run_id)
+                    });
                 self.upsert_summary((**session).clone(), context.models, 0);
-                if !context.attentive {
+                if !context.attentive && !owned_step {
                     effects.push(StateEffect::Attention(Attention::RunFinished {
                         session_title: session.title.clone(),
                     }));
@@ -635,29 +723,27 @@ impl SessionStore {
                 let Some(view) = self.get_mut(&session_id) else {
                     return effects;
                 };
-                if !shown {
+                if !shown && !owned_step {
                     view.finished_unread = true;
                     view.unread += 1;
                 }
-                let cost_after = session
-                    .accounting
-                    .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
-                    .unwrap_or(session.estimated_cost_usd_nanos);
                 let stats = view.runs.entry(*run_id).or_default();
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
                 stats.usage = *usage;
-                stats.cost_usd_nanos = match (cost_before, cost_after) {
-                    (Some(before), Some(after)) => Some(after.saturating_sub(before)),
-                    _ => None,
-                };
+                // A session delta includes owned summaries and concurrent
+                // routing/review spend. Only the run snapshot is authoritative.
+                stats.cost_usd_nanos = None;
                 // An in-run compaction run finishes while its prompt run
                 // still holds the session; that run's activity stays.
                 if view.activity.is_some_and(|(active, _)| active == *run_id) {
                     view.activity = None;
                 }
-                view.live.active_tool = None;
-                view.live.awaiting_approval.clear();
+                if !owned_step {
+                    view.live.active_tool = None;
+                    view.live.awaiting_approval.clear();
+                    view.live.with_delegate.clear();
+                }
                 if let Some(reasoning) = view.reasoning.get_mut(run_id) {
                     reasoning.streaming = false;
                 }
@@ -667,7 +753,9 @@ impl SessionStore {
                     let retained: HashSet<_> =
                         messages.iter().map(|message| message.run_id).collect();
                     view.reasoning.retain(|run, _| retained.contains(run));
-                    view.runs.retain(|run, _| retained.contains(run));
+                    view.runs.retain(|run, stats| {
+                        retained.contains(run) || (stats.owned_step && stats.outcome.is_none())
+                    });
                     let state = match outcome {
                         RunOutcome::Completed => MessageState::Complete,
                         RunOutcome::Cancelled => MessageState::Cancelled,
@@ -696,7 +784,20 @@ impl SessionStore {
                         }
                     }
                 }
-                // One draft per run so each becomes its own run in order.
+                if owned_step {
+                    return effects;
+                }
+                if (shown || view.is_warm())
+                    && let Some(workspace_id) = context.workspace_id
+                {
+                    let mut request = body_request(workspace_id, session_id);
+                    if !shown {
+                        request.focused_session_id = None;
+                        request.include_sessions.push(session_id);
+                    }
+                    effects.push(StateEffect::RequestSnapshot(request));
+                }
+                // One draft per foreground run, in order.
                 if session.active_run_id.is_none()
                     && session.queued_prompts == 0
                     && let Some(text) = view.drafts.pop_front()

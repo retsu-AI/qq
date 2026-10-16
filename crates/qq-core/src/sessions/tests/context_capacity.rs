@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn the_between_run_fold_still_stops_at_its_step_budget() {
+    // AC2: in-run compactions left `MAX_COMPACTION_STEPS`; the between-run
+    // fold keeps it. A prompt that has spent 31 steps with transcript left
+    // may take one more; at 32 the fold is exhausted.
+    let (_directory, _connection, _store_id, mut claimed, _, _) =
+        denial_capacity_fixture(DenialCapacityPath::Policy, 0);
+    claimed.context_compaction_remaining = true;
+    claimed.context_compaction_attempted = context::MAX_COMPACTION_STEPS - 1;
+    assert_eq!(
+        super::super::execution::compaction_disposition(&claimed),
+        context::CompactionDisposition::Eligible
+    );
+    claimed.context_compaction_attempted = context::MAX_COMPACTION_STEPS;
+    assert_eq!(
+        super::super::execution::compaction_disposition(&claimed),
+        context::CompactionDisposition::Exhausted(context::CompactionExhaustion::Attempted {
+            steps: context::MAX_COMPACTION_STEPS
+        })
+    );
+}
+#[test]
 fn assembly_pruning_stubs_old_read_only_results_and_preserves_errors() {
     let call = |id: &str, name: &str| {
         ContentBlock::tool_call(
@@ -151,7 +172,7 @@ fn a_stub_is_never_stubbed_again_but_a_result_that_merely_ends_like_one_is() {
     // header's bound: not a stub.
     let long_first_line = format!(
         "search {}\n[pruned: search {{\"query\":\"needle\"}} returned 1 bytes; call it again if needed]",
-        "m".repeat(4 * 1024)
+        "m".repeat(crate::tools::MAX_MODEL_TEXT_BYTES)
     );
     // A stub line whose size is not a `u64`: not a stub.
     let huge_size = format!(
@@ -484,6 +505,16 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
                 MessageId::from_bytes([5; 16]).to_string(),
                 session_id.to_string(),
                 run_id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2 WHERE id=?3",
+            params![
+                r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+                r#"{"descriptor_version":15}"#,
+                run_id.to_string()
             ],
         )
         .unwrap();

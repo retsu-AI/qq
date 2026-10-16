@@ -1,8 +1,8 @@
 # Jev: first-class, opt-in, and worth turning on
 
-**Status:** Proposed 2026-09-28. JV0 (this plan) is in review. No
-implementation slice (JV1–JV13) has started. Merging it doesn't enable Jev or authorize implementation or paid
-evaluation.
+**Status:** Proposed 2026-09-28. JV0 (this plan, #210), JV1's activation
+fix (#214) and JV2 (#215) shipped; JV3–JV13 are planned. Paid evaluation is
+not authorized.
 **Tracking:** ENG-791 (parent). JV slices get their own issues when started.
 ENG-938 and draft #193 are folded in here. ENG-811 owns paid evaluation and
 the quiet-host run, ENG-815 routing qualification, and ENG-809 spend approval.
@@ -34,6 +34,102 @@ total cost to an independently verified result.
 - Mandatory completion verification. Strict completion from #187 is a
   separate product decision.
 - Changing a model the user pinned.
+
+## Target design
+
+Moved here from the design doc. This is the target the slices build toward,
+not behavior as built; [`../design/jev.md`](../design/jev.md) §§ 2–3
+describe today. Where it differs from today, the
+owning JV slice is the change (for example, `enforce` does add a serial
+review today: finding 8, JV12).
+
+**Jev replaces an LLM turn or a human interruption. It should never add a
+serial wait to the hot path.** The rules below follow from that.
+
+- **Code owns authority; Jev answers the semantic questions code cannot.**
+  - Classify every action by effect: local read, recoverable workspace
+    write, public network read, network write, credential access,
+    system-level, publish.
+  - Operator policy decides which classes may be delegated at all.
+  - Publishing, protected-branch operations, credential access, privilege
+    escalation, cross-workspace access and policy changes are always
+    decided by a human. Jev's confidence doesn't change that.
+  - A GET is not safe by itself: the URL, query data, credentials,
+    redirects and destination policy all matter.
+- **Ask narrow questions in parallel, then combine in code.**
+  - One request asks whether the call is relevant to the effective task,
+    whether it conflicts with an explicit constraint, whether the evidence
+    is sufficient, and for a typed concern reason.
+  - Code combines the answers with thresholds per effect class, calibrated
+    on QQ outcomes.
+  - Correlated probabilities are never multiplied as though independent.
+- **Give Jev the real context, bounded.**
+  - Include the effective task (original request plus applied steering),
+    the delegated scope, the current plan, and short summaries of recent
+    results with provenance.
+  - Mark missing information as missing; it is never proof that an action
+    is unnecessary.
+  - Tool output and model rationale are untrusted data, never permission.
+- **The server owns the hold lifecycle.**
+  - Phases are durable and replayable: delegate-pending, fallback-pending,
+    human-required, terminal.
+  - Clients take focus and alert only for human-required.
+  - A human can still deliberately override a pending decision.
+  - Headless follows the same phases, not a guessed flag or timer.
+- **Batch per turn.** All held calls from one model turn share one Jev
+  request. Independent reads keep running in parallel.
+- **Every attempt leaves a receipt.** Before dispatch, admit the worst-case
+  spend and persist a pending marker. Persist the result or unknown spend
+  before publishing. Record the raw distribution, confidence, parse result,
+  policy identity, latency and cost.
+- **Shadow before settle.** A new policy scores real holds while humans keep
+  deciding. It settles holds only after a pre-agreed safety and utility gate
+  passes.
+- **Opt-in is easy and honest.**
+  - A preset may bundle capabilities, but only as an explained multi-choice
+    that still lists each capability separately.
+  - `jev_approval` keeps its own consent.
+  - One server-side Off wins everywhere.
+  - A `/jev` view shows effective settings with their sources, what is sent
+    to TypeSafe, spend, and interruptions saved.
+- **Measure what matters.** The headline metric is human interruptions per
+  successful agent-hour, within false-approval limits. Report it alongside
+  time, tokens and cost to an independently verified result. Count
+  human-required phases and actual human answers, not
+  `ToolApprovalRequested`.
+
+### Acceleration opportunities
+
+These are hypotheses until the plan measures them. Take them one at a time;
+each ships only on evidence.
+
+| Opportunity | Replaces | Question shape |
+| --- | --- | --- |
+| Per-turn effort and model routing by predicted adequacy; code chooses among adequate options by measured cost and latency | Over-provisioned reasoning on every turn | `noul` per candidate |
+| Context retention ranking at compaction | Tokens resent every turn | `score` per unit |
+| Search and file result ranking before reads | Speculative reads | `score` per result |
+| Failure classification (transient, logic, environment, flaky) driving retry policy | An LLM diagnosis turn | `choice` |
+| Loop and stuck detection (repeated reads, edit back-and-forth) | Wasted turns, human rescue | `noul` |
+| Claim-to-evidence completion check, advisory | LLM self-verification turns | `noul` per claim |
+
+Jev never replaces running tests, citing sources, durable state, idempotent
+tools, cancellation or bounded resources. For long runs, those matter more
+than any judge.
+
+### Rejected alternatives
+
+- **Lower thresholds to reduce prompts.** This confuses missing context and
+  authority with model uncertainty.
+- **Prompt the human while Jev races them.** Successful delegation becomes
+  an interruption, and a quick human answer cancels valid work.
+- **A longer headless grace timer.** A timing guess duplicates server state
+  and still fails under load, reconnect or fallback.
+- **Let a stored credential or one intensity knob enable everything.**
+  Consent, review frequency and authorization are different things.
+- **Require strict completion review before approving tools.** A review
+  after the result can't authorize a side effect that already happened.
+- **A generic decision-engine crate or a separate recovery agent.** The
+  existing approval, routing, checkpoint and budget seams are enough.
 
 ## Invariants every slice preserves
 
@@ -68,7 +164,7 @@ total cost to an independently verified result.
 | JV8 | Layered approval pilot: effect classes, narrow parallel questions, per-turn batching (findings 1, 7) | JV7 and the owner accepting the pilot scope | Approval adapter and composition, pilot fixtures | A8 |
 | JV9 | `/jev` panel, explained preset, one server-side Off | JV1, JV6 | `qq-tui`, `qq-client`, `qq-protocol` session command | A9 |
 | JV10 | Routing by adequacy: code picks among adequate candidates using measured cost and latency (finding 8) | JV3, JV6 | `src/runtime/routing.rs`, candidate metadata | A10 |
-| JV11 | One further acceleration experiment from the design doc's § Acceleration opportunities | JV6, JV10 result | That seam only | A11 |
+| JV11 | One further acceleration experiment from § Target design's acceleration opportunities | JV6, JV10 result | That seam only | A11 |
 | JV12 | `enforce`: batch and parallelize, or relabel it as a high-assurance profile | JV6 | `qq-core/src/lib.rs` checkpoint path, `runtime/checkpoint.rs` | A12 |
 | JV13 | Paired qualification and rollout decision | JV1–JV8, plus JV10 for the routing arm | Existing evaluation tooling; receipts | A13 |
 

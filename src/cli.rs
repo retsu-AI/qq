@@ -35,6 +35,15 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub tui_qa_root: Option<PathBuf>,
 
+    /// Attest that this exact native image performs only self-contained reads
+    /// for admitted arguments/stdin in a C locale; repeat for up to ten families.
+    #[arg(
+        long = "approve-self-contained-read-image",
+        global = true,
+        value_name = "FAMILY:SHA256"
+    )]
+    pub approved_read_images: Vec<qq_core::ApprovedReadImage>,
+
     /// Override the configured provider/model route.
     #[arg(long, global = true, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,
@@ -52,11 +61,6 @@ pub struct Cli {
     /// has its own `--session`.
     #[arg(long, value_name = "ID")]
     pub session: Option<qq_protocol::SessionId>,
-
-    /// Write bounded, secret-free credential attribution records to this new
-    /// file. Disabled by default; the path is never appended or replaced.
-    #[arg(long, value_name = "PATH")]
-    pub credential_diagnostics: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -81,7 +85,8 @@ pub enum Command {
     /// The task runs through the same durable session runtime as the TUI and
     /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
-    /// persistence failure, 130 interrupted by Ctrl-C.
+    /// persistence failure, 5 needs input (the model asked a question no
+    /// client could answer), 130 interrupted by Ctrl-C.
     Run(RunArgs),
 
     /// Run the user-scoped QQ server in the foreground.
@@ -348,8 +353,11 @@ pub enum ConfigCommand {
     Show,
     /// Explain the source of one effective field.
     Explain {
-        /// Field name: model, organization, max_output_tokens, provider.NAME,
-        /// grant.tool.NAME, or grant.shell.PREFIX.
+        /// Field name: model, worker_model, organization, delegation, audit,
+        /// jev_review, jev_routing, jev_approval, approval_delegate,
+        /// approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
+        /// profile.NAME, provider.NAME, grant.tool.NAME, grant.shell.PREFIX,
+        /// tui.theme, or tui.bindings.ACTION.
         field: String,
     },
 }
@@ -513,6 +521,45 @@ mod tests {
         let mut out = Vec::new();
         walk(&Cli::command(), "", &mut out);
         out
+    }
+
+    #[test]
+    fn ab1_read_approval_flag_parses_for_every_execution_surface() {
+        let value = format!("grep:{}", "01".repeat(32));
+        for command in [
+            Vec::new(),
+            vec!["ask", "task"],
+            vec!["run", "task"],
+            vec!["serve"],
+        ] {
+            let args = [
+                vec!["qq", "--approve-self-contained-read-image", value.as_str()],
+                command,
+            ]
+            .concat();
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert_eq!(parsed.approved_read_images.len(), 1);
+            assert_eq!(
+                parsed.approved_read_images[0].family,
+                qq_core::ReadImageFamily::Grep
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "qq",
+                "--approve-self-contained-read-image",
+                "grep:bad",
+                "ask",
+                "task"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["qq", "ask", "task"])
+                .unwrap()
+                .approved_read_images
+                .is_empty()
+        );
     }
 
     #[test]

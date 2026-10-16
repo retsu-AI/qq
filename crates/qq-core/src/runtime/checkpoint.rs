@@ -5,6 +5,7 @@ use qq_provider::{ContentBlock, Message, Role};
 use sha2::{Digest, Sha256};
 
 pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 24 * 1024;
+pub(crate) const MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES: usize = 32 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_ITEM_BYTES: usize = 2048;
 const MAX_EVIDENCE_ITEMS: usize = 32;
@@ -212,33 +213,6 @@ pub enum CheckpointOutcome {
     Unavailable,
 }
 
-/// How a reviewer outcome may spend the bounded model-repair allowance.
-/// Reviewers default to the historical strict policy; the built-in advisory
-/// final reviewer opts into the evidence-gap policy explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckpointRepairPolicy {
-    Strict,
-    AdvisoryFinalEvidenceGaps,
-}
-
-impl CheckpointRepairPolicy {
-    #[must_use]
-    pub const fn requests_correction(self, outcome: CheckpointOutcome) -> bool {
-        match self {
-            Self::Strict => !matches!(
-                outcome,
-                CheckpointOutcome::Supported | CheckpointOutcome::Unavailable
-            ),
-            Self::AdvisoryFinalEvidenceGaps => {
-                matches!(
-                    outcome,
-                    CheckpointOutcome::PartiallySupported | CheckpointOutcome::Contradicted
-                )
-            }
-        }
-    }
-}
-
 impl CheckpointOutcome {
     pub const fn allows_progress(self) -> bool {
         matches!(self, Self::Supported)
@@ -273,11 +247,6 @@ pub trait CheckpointReviewer: Send + Sync {
     fn reviews_tools(&self) -> bool {
         true
     }
-    /// Policy for spending a correction turn after this reviewer's typed
-    /// outcome. Custom reviewers retain the historical strict behavior.
-    fn repair_policy(&self) -> CheckpointRepairPolicy {
-        CheckpointRepairPolicy::Strict
-    }
     /// Maximum estimated charge for one request. A hard cost allowance cannot
     /// admit a reviewer without a bound, even if previous calls were cheap.
     fn max_cost_usd_nanos(&self) -> Option<u64> {
@@ -308,11 +277,26 @@ pub(crate) fn bounded_checkpoint_text(text: &str) -> String {
     if text.len() <= MAX_CHECKPOINT_TEXT_BYTES {
         return text.to_owned();
     }
-    let mut end = MAX_CHECKPOINT_TEXT_BYTES;
+    let mut end = MAX_CHECKPOINT_TEXT_BYTES - "…[truncated]".len();
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     format!("{}…[truncated]", &text[..end])
+}
+
+pub(crate) fn bounded_checkpoint_correction_notice(mut notice: String) -> String {
+    if notice.len() <= MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES {
+        return notice;
+    }
+    let suffix = "…[truncated]";
+    let mut end = MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES - suffix.len();
+    while !notice.is_char_boundary(end) {
+        end -= 1;
+    }
+    notice.truncate(end);
+    notice.push_str(suffix);
+    notice.shrink_to_fit();
+    notice
 }
 
 pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
@@ -321,9 +305,7 @@ pub(crate) fn checkpoint_text_fits(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CheckpointOutcome, CheckpointRepairPolicy, MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits,
-    };
+    use super::{MAX_CHECKPOINT_TEXT_BYTES, checkpoint_text_fits};
 
     #[test]
     fn checkpoint_bound_accepts_boundary_and_rejects_first_byte_over() {
@@ -338,40 +320,5 @@ mod tests {
         let evidence = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
         let payload = format!("final candidate:\nok\n\nretained tool evidence:\n{evidence}");
         assert!(!checkpoint_text_fits(&payload));
-    }
-
-    #[test]
-    fn repair_policy_keeps_strict_gaps_and_advisory_red_outcomes_distinct() {
-        assert!(
-            CheckpointRepairPolicy::Strict
-                .requests_correction(CheckpointOutcome::InsufficientEvidence)
-        );
-        assert!(
-            CheckpointRepairPolicy::Strict
-                .requests_correction(CheckpointOutcome::PartiallySupported)
-        );
-        assert!(
-            CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Contradicted)
-        );
-        assert!(
-            !CheckpointRepairPolicy::Strict.requests_correction(CheckpointOutcome::Unavailable)
-        );
-
-        assert!(
-            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
-                .requests_correction(CheckpointOutcome::InsufficientEvidence)
-        );
-        assert!(
-            !CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
-                .requests_correction(CheckpointOutcome::Unavailable)
-        );
-        assert!(
-            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
-                .requests_correction(CheckpointOutcome::PartiallySupported)
-        );
-        assert!(
-            CheckpointRepairPolicy::AdvisoryFinalEvidenceGaps
-                .requests_correction(CheckpointOutcome::Contradicted)
-        );
     }
 }

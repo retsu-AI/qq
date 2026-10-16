@@ -43,6 +43,8 @@ pub(crate) enum TurnNotice {
     /// A stall report after calls without progress (ADR-0054 § 2): the same
     /// kind of turn as the slice checkpoint, under its own wording.
     StallReport,
+    /// A root report asks for the next permitted action without changing historical notices.
+    RootStallReport,
     /// The turn after a report: tools are available again.
     Continuation,
     /// A sub-agent's last turn: answer the brief from what it has. The
@@ -56,6 +58,7 @@ impl TurnNotice {
             Self::Report => "report",
             Self::Continuation => "continuation",
             Self::StallReport => "stall_report",
+            Self::RootStallReport => "root_stall_report",
             Self::FinalAnswer => "final_answer",
         }
     }
@@ -65,6 +68,7 @@ impl TurnNotice {
             "report" => Some(Self::Report),
             "continuation" => Some(Self::Continuation),
             "stall_report" => Some(Self::StallReport),
+            "root_stall_report" => Some(Self::RootStallReport),
             "final_answer" => Some(Self::FinalAnswer),
             _ => None,
         }
@@ -75,6 +79,7 @@ impl TurnNotice {
             Self::Report => crate::SLICE_CHECKPOINT_NOTICE,
             Self::Continuation => crate::SLICE_CONTINUATION_NOTICE,
             Self::StallReport => crate::STALL_REPORT_NOTICE,
+            Self::RootStallReport => crate::ROOT_STALL_REPORT_NOTICE,
             Self::FinalAnswer => crate::SUBAGENT_FINAL_ANSWER_NOTICE,
         }
     }
@@ -168,6 +173,10 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         chunk: String,
     },
+    ToolResultsProjected {
+        turn_ordinal: u32,
+        projection: Arc<ProjectedToolTurn>,
+    },
     ToolCallFinished {
         id: ToolCallId,
         result: String,
@@ -181,6 +190,7 @@ pub(crate) enum RuntimeEvent {
         /// The complete output when `result` was cut and a session store
         /// will keep it under the handle the marker already names.
         spill: Option<crate::tools::SpillRecord>,
+        execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     },
     CheckpointStarted {
         correlation: String,
@@ -302,6 +312,27 @@ pub(crate) enum RuntimeEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectedToolTurn {
+    pub(crate) message: Message,
+    pub(crate) correction_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallRejection {
+    Runtime(String),
+    OutputBudget,
+}
+
+impl CallRejection {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Runtime(message) => message,
+            Self::OutputBudget => "turn_output_budget: search was not executed; retry the exact same arguments on the next turn".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeToolCall {
     pub(crate) id: ToolCallId,
@@ -318,7 +349,7 @@ pub(crate) struct RuntimeToolCall {
     /// were not valid JSON, or the name is not in the catalog. The call never
     /// reaches the gate; this message is returned to the model as a
     /// retryable tool error instead of failing the run.
-    pub(crate) rejection: Option<String>,
+    pub(crate) rejection: Option<CallRejection>,
 }
 
 pub(crate) struct PendingToolCall {

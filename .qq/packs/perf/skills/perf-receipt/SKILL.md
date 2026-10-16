@@ -5,7 +5,7 @@ description: Measure a QQ performance change end to end and write the receipt. L
 # QQ Performance Receipt
 
 This is the procedure that produced every receipt in
-`docs/plans/speed-first-extensible-agent-harness.md`. Follow it in order;
+`docs/plans/speed-first.md`. Follow it in order;
 the point is a number someone else can reproduce.
 
 ## 1. Pick the instrument
@@ -109,5 +109,5 @@ was ruled out as noise and how. Never omit a number that got worse.
 - `xtask/src/perf.rs` — the recorder; `FIXTURE_VERSION` bumps when a fixture's
   shape changes.
 - `benchmarks/perf/budgets-v1.json` — the 61 budgets (absolute and relative).
-- `docs/plans/speed-first-extensible-agent-harness.md` — the receipts and
+- `docs/plans/speed-first.md` — the receipts and
   the performance constitution ("What To Measure").

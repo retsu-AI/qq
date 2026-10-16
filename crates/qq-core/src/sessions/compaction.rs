@@ -235,6 +235,7 @@ pub(super) fn start_auto_compaction(
             model: original.model.clone(),
             messages: Vec::new(),
             message_effects: Vec::new(),
+            unresolved_tool_projection: None,
             context_compaction_attempted: original.context_compaction_attempted.saturating_add(1),
             context_compaction_failed: false,
             context_compaction_remaining: false,
@@ -658,27 +659,19 @@ pub(super) fn start_in_run_compaction(
     if !running {
         return Ok(None);
     }
-    // Every in-run step is a summarizer request charged to this prompt.
-    let admitted = transaction.execute(
-        "UPDATE runs SET context_compaction_attempted = context_compaction_attempted + 1
-             WHERE id = ?1 AND context_compaction_attempted < ?2",
-        params![
-            prompt_run.identity.run_id.to_string(),
-            context::MAX_COMPACTION_STEPS
-        ],
-    )?;
-    if admitted != 1 {
-        return Ok(None);
-    }
+    // In-run steps do not draw on `MAX_COMPACTION_STEPS`: that budget bounds
+    // one between-run fold. An in-run step must still shrink the context and
+    // is charged to the caller's token and cost limits like any turn, which is
+    // what bounds how many can run (ADR-0048 § 1).
     transaction.execute(
         "INSERT INTO runs(
                  id, session_id, command_id, user_message_id, assistant_message_id,
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
-                 created_at_ms, started_at_ms, activity
+                 created_at_ms, started_at_ms, activity, usage_json, estimated_cost_usd_nanos
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8,
-                 'compacting'
+                 'compacting', ?9, 0
              )",
         params![
             run_id.to_string(),
@@ -689,6 +682,7 @@ pub(super) fn start_in_run_compaction(
             prompt_run.identity.run_id.to_string(),
             resolved_model_json,
             now,
+            serde_json::to_string(&TokenUsage::default())?,
         ],
     )?;
     let summary = load_session_summary(&transaction, prompt_run.identity.session_id)?;
@@ -746,6 +740,7 @@ pub(super) fn complete_in_run_compaction(
     summary: String,
     accounting: Option<RunAccounting>,
     record_budget: usize,
+    retained_bytes: u64,
 ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
     let Some((scope_run_id, turn_cutoff)) = claimed.in_run_turn_cutoff else {
         return Err(SessionRuntimeError::CONSTRAINT);
@@ -843,6 +838,27 @@ pub(super) fn complete_in_run_compaction(
                 "UPDATE sessions SET context_tokens = NULL, context_occupancy_json = NULL
                      WHERE id = ?1",
                 [session.to_string()],
+            )?;
+            // A new window: the prompt run's reservation is re-based to what
+            // its next request carries, the retained weight plus the framed
+            // summary committed here, in the marker's transaction. A crash
+            // leaves the old marker with the old reservation or the new marker
+            // with the new one (ADR-0048 § 1). The summary is framed exactly
+            // as the live splice frames it.
+            let framed_summary_bytes = crate::measure_message(&Message::user(format!(
+                "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
+            )));
+            let context_base_bytes =
+                i64::try_from(retained_bytes.saturating_add(framed_summary_bytes))
+                    .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
+            // A prompt run that settled while this commit was queued (its task
+            // dropped at a deadline or cancel) has no window left to re-base:
+            // zero rows updated is expected then, and the marker still records
+            // the summary its replay renders.
+            transaction.execute(
+                "UPDATE runs SET context_base_bytes = ?2, context_increment_bytes = 0
+                     WHERE id = ?1 AND status = 'running'",
+                params![scope_run_id.to_string(), context_base_bytes],
             )?;
             events.push(expect_settled(settle_run(
                 &transaction,

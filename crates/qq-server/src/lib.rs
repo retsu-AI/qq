@@ -795,7 +795,9 @@ async fn session_command(
         SessionCommand::SubmitPrompt { input, .. } | SessionCommand::SteerRun { input, .. } => {
             Some(input.as_slice())
         }
-        SessionCommand::ResolveWorkspace { .. }
+        SessionCommand::CancelSideQuestion { .. }
+        | SessionCommand::SubmitSideQuestion { .. }
+        | SessionCommand::ResolveWorkspace { .. }
         | SessionCommand::CreateSession { .. }
         | SessionCommand::CancelRun { .. }
         | SessionCommand::RespondToolApproval { .. }
@@ -2204,6 +2206,14 @@ mod tests {
         let run_id = qq_protocol::RunId::from_bytes([4; 16]);
         let workspace_id = WorkspaceId::from_bytes([5; 16]);
         match kind {
+            SessionCommandKind::CancelSideQuestion => SessionCommand::CancelSideQuestion {
+                side_question_id: run_id,
+            },
+            SessionCommandKind::SubmitSideQuestion => SessionCommand::SubmitSideQuestion {
+                session_id,
+                question: "inspect".to_owned(),
+                new_thread: false,
+            },
             SessionCommandKind::ResolveWorkspace => SessionCommand::ResolveWorkspace {
                 path: "/tmp".to_owned(),
             },

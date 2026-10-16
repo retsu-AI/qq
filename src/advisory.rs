@@ -1,5 +1,4 @@
 //! Explicit post-commit Jev observation; never part of authoritative execution.
-use qq_auth::CredentialDiagnosticSink;
 use qq_client::{
     SessionClient,
     observer::{EventSink, ObserverStep, SinkFuture},
@@ -111,12 +110,6 @@ struct Journal {
     echo: bool,
 }
 
-impl Drop for Journal {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
 fn tokens(usage: Option<TokenUsage>) -> Option<u64> {
     let usage = usage?;
     usage
@@ -141,29 +134,29 @@ impl Journal {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        let file = options.open(path)?;
+        let mut file = options.open(path)?;
         file.try_lock().map_err(|_| {
             AdvisoryError::Journal("receipt file is already locked by another observer")
         })?;
-        let mut journal = Self {
-            file,
-            cursor,
-            limits,
-            records: BTreeMap::new(),
-            bytes: 0,
-            echo,
-        };
-        journal.bytes = journal.file.metadata()?.len();
-        if journal.bytes > JOURNAL_LIMIT {
+        let bytes = file.metadata()?.len();
+        if bytes > JOURNAL_LIMIT {
             return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
         }
         let mut contents = String::new();
-        (&mut journal.file)
+        (&mut file)
             .take(JOURNAL_LIMIT + 1)
             .read_to_string(&mut contents)?;
         if contents.len() as u64 > JOURNAL_LIMIT {
             return Err(AdvisoryError::Journal("receipt file exceeds 4 MiB"));
         }
+        let mut journal = Self {
+            file,
+            cursor,
+            limits,
+            records: BTreeMap::new(),
+            bytes,
+            echo,
+        };
         if contents.is_empty() {
             journal.write_row(&Row::Header {
                 version: 1,
@@ -603,10 +596,7 @@ impl EventSink for AdvisorySink {
     }
 }
 
-pub async fn run(
-    args: crate::cli::JevObserveArgs,
-    diagnostic: Option<Arc<dyn CredentialDiagnosticSink>>,
-) -> Result<(), AdvisoryError> {
+pub async fn run(args: crate::cli::JevObserveArgs) -> Result<(), AdvisoryError> {
     let cost = args.max_cost_usd * 1e9;
     if !cost.is_finite()
         || cost < 1.0
@@ -648,10 +638,9 @@ pub async fn run(
         return Err(AdvisoryError::Budget);
     }
     let cursor = journal.cursor;
-    let reviewer =
-        tokio::task::spawn_blocking(move || crate::runtime::advisory_reviewer(diagnostic))
-            .await
-            .map_err(|_| AdvisoryError::WorkerStopped)??;
+    let reviewer = tokio::task::spawn_blocking(crate::runtime::advisory_reviewer)
+        .await
+        .map_err(|_| AdvisoryError::WorkerStopped)??;
     let mut sink = AdvisorySink {
         client: client.clone(),
         reviewer,
@@ -765,11 +754,8 @@ mod tests {
             Journal::open(&path, cursor(), None, limits(), false).is_err(),
             "second writer must not open the journal"
         );
-        let retained_descriptor = journal.file.try_clone().unwrap();
         drop(journal);
-        let mut recovered = Journal::open(&path, cursor(), None, limits(), false)
-            .expect("owner drop must release the journal lock");
-        drop(retained_descriptor);
+        let mut recovered = Journal::open(&path, cursor(), None, limits(), false).unwrap();
         assert_eq!(recovered.records.len(), 1);
         assert!(
             !recovered.can_dispatch(Some(42)),
@@ -848,6 +834,7 @@ mod tests {
             created_at_ms: u64::from(id),
         };
         SessionSnapshot {
+            side_questions: Vec::new(),
             summary,
             messages: vec![
                 message(1, MessageRole::User, "inspect PASSWORD=secret-value"),

@@ -543,6 +543,7 @@ impl TranscriptCache {
         let workspace_rows = match view {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
+            View::SideQuestions(session_id) => Some(side_questions_body(app, session_id, width)),
             View::Transcript(_) => None,
         };
         if let Some(rows) = workspace_rows {

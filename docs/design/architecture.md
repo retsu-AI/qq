@@ -3,7 +3,7 @@
 ## Purpose
 
 QQ is a local-first agent harness for querying LLMs and using them to inspect,
-modify, build, and test software. It will support interactive terminal use,
+modify, build, and test software. It supports interactive terminal use,
 non-interactive automation, and long-running remote sessions without splitting
 those use cases into separate products.
 
@@ -15,7 +15,7 @@ The architecture is ordered by two product priorities:
 Correctness, durability, and safe tool execution are baseline constraints. A
 faster system that loses history or corrupts a workspace is not useful.
 
-## Initial System Shape
+## System Shape
 
 QQ ships as one Rust binary named `qq`.
 
@@ -48,9 +48,9 @@ The binary has multiple process modes:
   evidence for a real provider or reviewer integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
-- `qq ask PROMPT` is the initial direct, automation-oriented path. It streams
-  one model response to stdout through the same core runtime that the server
-  will use.
+- `qq ask PROMPT` streams one model response to stdout through the same core
+  runtime the server uses. `qq run PROMPT` is the durable headless path (see
+  [`headless-contract.md`](headless-contract.md)).
 - Additional direct CLI commands must reuse the same runtime rather than create
   another agent implementation.
 
@@ -83,21 +83,28 @@ leaves no metadata behind.
 
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
-`qq-harness` owns the bounded plan cache and configured MCP bridge; the binary
-re-exports them while runtime/model loading and headless outcome driving are
-still being extracted. Core does not depend on harness or application configuration.
+`qq-harness` owns the bounded compiled-plan cache (`qq_harness::plan`), the
+configured MCP bridge (`qq_harness::mcp`), and secret-free endpoint
+descriptions; the binary re-exports the first two, and runtime/model loading
+and headless outcome driving live in the root package. Core does not depend on
+harness or application configuration.
 
 The workspace is:
 
 ```text
 Cargo.toml
 src/
-  main.rs
-  cli.rs
-  catalog.rs
-  mcp.rs
-  output.rs
-  runtime.rs
+  main.rs        process entry and mode dispatch
+  cli.rs         argument parsing and command dispatch
+  runtime.rs     configuration-to-runtime composition (runtime/approval.rs, runtime/routing.rs)
+  headless.rs    `qq run` durable non-interactive execution
+  catalog.rs     authenticated model discovery
+  advisory.rs    `qq jev observe` post-commit observer
+  doctor.rs      `qq doctor`
+  init.rs        `qq init`
+  output.rs      plain-text command output
+  mcp.rs, plan.rs  re-exports of the qq-harness MCP bridge and plan cache
+  docs_truth.rs  code/docs consistency tests
 crates/
   qq-auth/
     Cargo.toml
@@ -181,7 +188,25 @@ xtask/
   attention, refocus, snapshot request, draft submission, session removed)
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
-  the network, the clock, or rendering state. Surfaces supply a
+  the network, the clock, or rendering state.
+  Views retain the observed foreground run identity across idle summaries,
+  keeping late identified internal completions out of attention and draft
+  handoff. Body snapshots preserve observed timing and priced-turn ordinals;
+  replay charges each ordinal once. Cancelling the last queued prompt releases
+  an idle draft even when that prompt never started. Terminal run cost comes
+  from the run snapshot, not the session total that also includes compaction
+  spend. Snapshot admission reserves metadata for the active run and every
+  displayed message's run, charging each new receipt with its first message.
+  Bounded newer internal rows fill remaining slots; an empty body may load the
+  last visible terminal receipt. Row or byte pressure drops older messages with
+  their unadmitted receipts rather than displaying an answer without its cost. Focused completion requests a body refresh; warm background completion
+  requests an included body without changing focus. Included-body refreshes
+  replay newer retained events just as focused refreshes do, preserving unread
+  badges and drafts without repeating notices, attention or draft submission.
+  Replayed deletions apply removal cleanup, refocus and any needed replacement body fetch. If replay warms a previously
+  cold body, it requests one fresh terminal receipt for missing run pricing. Late responses do not
+  replace a body or its summary already loaded through a newer cursor. Terminal cost
+  remains unknown until the authoritative run receipt loads. Surfaces supply a
   `TextSanitizer` for the live tail; the default drops controls and bidi
   overrides. A fixture-replay golden (`tests/fixtures/state_replay_v17.json`)
   pins the projection of every `event_*` wire fixture, natively and on
@@ -232,15 +257,9 @@ xtask/
   session picker. It communicates through `qq-client` and the protocol; its
   one `qq-core` dependency is `qq_core::mentions`, which resolves `@`
   references through the same contained walk and bounded read the tools use
-  (T12). It does not depend on application configuration. Rendering is retained:
-  one `TranscriptCache` holds laid-out messages keyed by width for the shown
-  session, streaming messages lay out only their open block,
-  syntax highlighting runs off the render tick, and frames are diffed by row
-  against the previous frame with hand-rolled style primitives rather than a
-  widget framework. The terminal's width selects a layout tier and the panes
-  it shows (`docs/design/layout.md`); every pane paints inside a `Rect` from
-  one pure `compute_layout` per frame. One command registry drives keybindings, slash commands,
-  and pickers; colors come from a resolved theme the root passes in.
+  (T12). It does not depend on application configuration. Layout tiers are
+  specified in [`layout.md`](layout.md), transcript rendering in
+  [`transcript.md`](transcript.md), and colors in [`theme.md`](theme.md).
 - `xtask` contains repository maintenance tasks and is not shipped as part of
   QQ.
 
@@ -248,8 +267,9 @@ The direct workspace dependency graph is:
 
 ```text
 qq (composition root)
+qq-harness   -> qq-auth, qq-config, qq-core, qq-mcp, qq-protocol, qq-provider
 qq-server    -> qq-core, qq-protocol
-qq-tui       -> qq-client, qq-protocol
+qq-tui       -> qq-client, qq-core, qq-protocol
 qq-client    -> qq-protocol
 qq-config    -> qq-provider
 qq-auth      -> qq-provider
@@ -435,12 +455,23 @@ The plan also carries the plan-constant part of the system prompt (ADR-0024):
 the header with the tool list, the progressive-exposure index, the skill
 index, the workspace instructions, and the pack persona, as a `PromptPrefix`
 per capability set (which optional static tools the run may use, whether it
-may load guidance, and whether it is a model-spawned child with read or write
-authority) together with the SHA-256 state of those bytes. The common set is
-built at compile; other sets on first use, bounded by the 198 possible keys. A run appends only its suffix — the selected command or skill document,
+may load guidance, strict read-only or unattended authority, and whether it is
+a model-spawned child with read or write authority) together with the SHA-256 state of those bytes. The common set is
+built at compile; other sets on first use, bounded by the 390 possible keys. A run appends only its suffix — the selected command or skill document,
 context-source blocks, the output contract — and finalizes a clone of the
 prefix hasher over that suffix, so `system_prompt_hash` equals a digest of the
 whole prompt and the prompt body is neither rebuilt nor rehashed per run.
+
+Tool visibility follows immutable run authority. Strict read-only runs omit
+mutating, shell, network and all external schemas; external read-only hints
+never grant permission. Unattended direct runs omit questions and retain
+read-only builtins plus configuration-granted external tools. The compiler
+captures grants once; direct gates use that same snapshot. The declaration
+predicate also filters recovered pins, progressive indexes and selector
+reports. Read-only roots receive exact caller-applied changes instead of an
+implementation obligation; unattended roots use declared tools and return
+caller-applied changes when those tools cannot act. Mutable approval modes
+are absent from cached prompt wording (ADR-0059).
 
 Per-request work is likewise kept off the transcript. The run holds its
 messages as `Arc<Vec<Message>>`, hands the same allocation to each turn's
@@ -510,22 +541,12 @@ and Jev routing candidates admit a provider when its credential is *present*
 `NoAuth`, or a configured AWS source) without reading the secret; a child or
 routed choice whose credential then fails to resolve fails at its own load,
 where the router already falls back to the configured choice. The isolated
-TUI QA profile offers only its fixture route. The attached TUI keeps its
-bootstrap model list empty until the server's authoritative `Models` response;
-credential-index presence remains presentation-only and cannot create a
-selectable or authenticated model.
-Client remedies treat unreadable credential metadata and unresolved AWS profile
-or default-chain sources as unknown. The client does not inspect AWS credential
-files; plan route admission retains the server's configured AWS-source checks.
-Trust refresh clears local rows and keeps the configured route as request
-metadata until the server returns authoritative options and selection.
-The optional model-discovery
+TUI QA profile offers only its fixture route. The optional model-discovery
 cache lookup uses a cached result only when the cache scope can be derived
 without secure-store I/O: Codex, XAI, stored secret references, and a
 built-in API-key fallback without an explicit non-stored reference skip the
-cache probe and use the configured reasoning ladder. The server's model catalog
-continues to resolve credentials through its existing path; an attached client
-does not resolve them locally before the authoritative response. HTTP MCP servers with a stored bearer
+cache probe and use the configured reasoning ladder. Model catalogs shown to a
+client still resolve each credential. HTTP MCP servers with a stored bearer
 resolve it when their registry entry is built (once per registry-cache miss,
 not per compile); live discovery and provider requests resolve credentials
 through their existing paths.
@@ -873,11 +894,43 @@ One durable run follows a guarded loop:
    the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
-   with the next turns. Each in-run step counts against the same
-   `MAX_COMPACTION_STEPS` as between-run steps. A rejected or stalled
-   summarizer settles its run failed/cancelled, writes no marker, and the
-   prompt run fails closed with the reason — the overflowing request is
-   never sent. Cancelling the prompt run cascades to its in-run compaction.
+   with the next turns. Each in-run compaction opens a new *window* for the
+   run's harness bounds (ADR-0048 § 1): the marker's transaction re-bases
+   the run's 4 MiB context reservation to the retained request plus the
+   framed summary (the loop sends the retained weight in
+   `InRunCompactionRequest`), and the loop zeroes its streamed-text count
+   (`MAX_RUN_MODEL_TEXT_BYTES`, 16 MiB per window). The marker's
+   `turn_cutoff` is the stored ordinal of the last replaced turn, which the
+   loop tracks per live assistant message, so a faulted attempt or a
+   reactive overflow that used an ordinal without adding a live message
+   cannot shift replay off the live splice (ENG-991). In-run steps do not
+   draw on `MAX_COMPACTION_STEPS`, which bounds one between-run fold; each
+   must still shrink the context and is charged to the caller's token and
+   cost limits like any turn. Each summarizer subrequest checks the current
+   caller remainder and original deadline before sending. Completed and
+   usage-bearing truncated subturns persist their actual assistant/replay
+   data and individual usage/cost before another request. Summarizer tool
+   calls remain evidence and never execute. An admitted request marks the
+   internal run's aggregate spend unknown until its receipt commits; a
+   later fault, cancellation or restart retains the measured prefix rows
+   without claiming that prefix is the whole attempt. Internal settlement
+   charges session cost once without releasing the prompt's active slot;
+   child-spend receipts include compactions belonging to the exact owned
+   runs without counting them as children. Terminal internal runs refuse
+   later request-start and model-turn writes. Empty-output cap raises
+   (`MAX_EMPTY_OUTPUT_RETRIES`) are per streak of truncated turns: any
+   completed turn restores the allowance. The summarizer is under the same
+   turn recovery as a model turn (ADR-0048 § 2): a transient provider fault
+   settles that compaction run failed and the loop re-issues the step after
+   the `TurnRecoveryPolicy` backoff (`run_turn_retrying`); once
+   `MAX_TURN_RETRIES` are spent the prompt run settles `paused` with every
+   earlier turn durable. Token or cost caps stop with `budget_exhausted`
+   when a failed attempt's spend is unknown; retry does not renew the
+   allowance or deadline. A rejected summary settles its internal run failed,
+   writes no marker, and fails the prompt with the reason; the overflowing
+   work request is never sent. A pending summary stops with the caller's
+   cancellation or original deadline, yielding Cancelled or BudgetExhausted
+   respectively. Cancelling the prompt cascades to its in-run compaction.
    Direct `qq ask` runs have no compactor and fail as before. The prompt
    run reports `RunActivity::Compacting` before it asks and
    `WaitingForProvider` at its next turn; every compaction run, between-run
@@ -1021,9 +1074,6 @@ name]`); every other codec sends them as tool blocks, which those APIs accept
 (checked live on Bedrock Mantle's Anthropic Messages path).
 These are observed-spend limits: a provider turn or reserved final response can
 still overshoot; there is no prepaid reservation or estimated audit minimum.
-For a bounded tool-call run, each ordinary turn receives the minimum of the
-requested per-turn calls and the run's unspent allowance; dispatch applies that
-same allowance, and only executable, nonrejected calls charge the run.
 
 Children share the parent's absolute deadline. Preflight and queueing consume
 that clock; expiry cancels the owned work and waits for cleanup, which can finish
@@ -1034,9 +1084,18 @@ sessions. Unknown usage or cost stays unknown and refuses a new child when the
 corresponding bound is imposed. Descendant history cannot be deleted until every
 owning ancestor run settles. Auditors store their direct spend on their own run;
 the parent meter and inclusive accounting each include that spend once.
-A read-only session is not offered the mutating, shell, or non-read external
-schemas its policy would deny, and a spawned child's approval mode can be
-lowered but never raised by a client command.
+A read-only session exposes built-in inspection and permitted read-child
+delegation. It omits mutation, shell, and all external tool schemas; external
+effect labels do not grant read-only authority. A spawned child's approval mode
+can be lowered but never raised by a client command.
+
+Base prompt identity 22 includes the authority wording for read-only,
+unattended and inspection-only tool sets. Ordinary actionable interactive
+wording is unchanged from version 20, but the version distinguishes the
+changed restricted prompts in otherwise identical plan descriptors. A read-only
+root retains read-only delegation, with a cached restricted spawn schema that
+omits write authority even when the configured roster permits write children.
+Injected write requests remain denied by policy.
 
 A run may cross multiple bounded internal execution slices. The strict
 256-tool-call ceiling is a runaway-loop backstop for one slice, not a
@@ -1048,8 +1107,9 @@ conversation, and the first turn of the next slice carries a continuation
 notice the same way. The system prompt never changes, so the provider's
 cached prefix survives the seam. Each notice is stored on the first turn
 row whose request carried it, as `model_turns.notice` (`report`,
-`stall_report`, `continuation`, or `final_answer`), and replayed before that
-turn, so a later run assembles
+`stall_report`, `root_stall_report`, `continuation`, or `final_answer`), and replayed before that
+turn. New root stalls use `root_stall_report`; children retain `stall_report`,
+and historical root `stall_report` notices replay unchanged. A later run assembles
 exactly the messages the live run sent (ADR-0054 § 2). The column records
 where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and
@@ -1336,6 +1396,14 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
 
+After cancellation, deadline teardown or panic, a started prompt's terminal
+transaction settles its abandoned in-run summary first. This preserves the
+summary's durable measured prefix and unknown pending-send aggregate, and
+makes the owned child receipt readable when the prompt's terminal event arrives.
+Delayed drop cleanup observes the terminal row and adds no event or charge. The
+visible session last outcome excludes owned compaction steps, so their newer
+row or equal timestamp cannot hide the owning prompt's terminal reason.
+
 Compaction is a property of that projection, not an edit to the transcript: a
 validated summary row and cutoff marker commit atomically with the internal
 summarization run (a bounded step carries its own cutoff, the unit boundary it
@@ -1367,19 +1435,13 @@ Clients issue versioned HTTP requests with JSON bodies. The server streams
 ordered events using Server-Sent Events (SSE). HTTP keep-alive and one
 long-lived SSE connection per attached client avoid repeated connection setup.
 
-The initial protocol needs operations equivalent to:
-
-```text
-POST /v1/sessions
-GET  /v1/sessions/{session_id}
-POST /v1/sessions/{session_id}/messages
-POST /v1/runs/{run_id}/cancel
-POST /v1/approvals/{approval_id}
-GET  /v1/sessions/{session_id}/events
-```
-
-The final resource names belong in a protocol specification. These routes only
-establish the required behaviors.
+Session commands are `POST /v1/<resource>/<verb>` routes (for example
+`/v1/sessions/prompts`, `/v1/runs/cancel`, `/v1/tools/approvals`) generated
+from the protocol's `COMMAND_ROUTES` table, so client and server agree by
+construction. The remaining routes are fixed: `GET /v1/health`,
+`POST /v1/capabilities`, `POST /v1/workspaces/snapshot`, `POST /v1/models`,
+and the SSE stream `GET /v1/workspaces/{workspace_id}/events`.
+[`protocol.md`](protocol.md) § HTTP Routes specifies each one.
 
 Every streamed event has:
 
@@ -1394,14 +1456,14 @@ detectable. Mutating requests carry request IDs or idempotency keys so retries
 cannot accidentally duplicate work.
 
 SSE is intentionally server-to-client. Client commands, approvals, and input
-remain normal HTTP requests. Do not add GraphQL, raw TCP, gRPC, WebRTC, or
-WebSocket initially. WebRTC is especially unnecessary because Tailscale
-already provides private connectivity and NAT traversal. WebSocket may be
-considered later only if an implemented feature, such as a full interactive
-PTY, cannot be expressed cleanly through HTTP and SSE.
+remain normal HTTP requests. There is no GraphQL, raw TCP, gRPC, WebRTC, or
+WebSocket transport. WebRTC is unnecessary because Tailscale already provides
+private connectivity and NAT traversal. WebSocket is warranted only if an
+implemented feature, such as a full interactive PTY, cannot be expressed
+cleanly through HTTP and SSE.
 
-JSON is the initial wire format. Binary serialization should replace it only
-after profiling demonstrates that serialization or bandwidth is material.
+The wire format is JSON. Binary serialization replaces it only after profiling
+demonstrates that serialization or bandwidth is material.
 
 Compatibility is decided by integer contract versions, not by the product
 version. `PROTOCOL_VERSION` must match exactly between client and server; the
@@ -1416,7 +1478,7 @@ server came from. `qq version` prints the product version and every contract.
 
 ## Persistence
 
-SQLite is the initial and default store. It provides fast local durability,
+SQLite is the store. It provides fast local durability,
 transactions, simple deployment, and no external service. Use WAL mode and
 keep blocking database work off Tokio executor threads, preferably behind a
 small storage module using a dedicated thread or bounded blocking work.
@@ -1457,44 +1519,71 @@ the workspace defaults to the canonical current working directory. Tool paths
 must remain within the selected workspace unless the user explicitly grants
 wider access.
 
-The built-in tool set is deliberately small and is specified in `tools.md`
-§ Built-In Tools: `read_file`, `tree`, `search`, `edit_file`, `write_file`,
-`shell`, `exec`, plus `read_tool_result` over spilled outputs and the durable
-`search_history`. Every result passes one bounding boundary (bytes, lines,
-per-turn budget; anything cut is stored under a content-addressed handle,
-ADR-0019). The per-turn budget is a deterministic projection over the
-persisted per-call results that live execution and context assembly share,
-so replay reproduces the model-facing request byte for byte; shell and
-`exec` commands are classified by a CST parser into
-`Allow`/`Prompt`/`Forbidden` before policy (ADR-0020).
+The built-in tool set is deliberately small and is specified in
+[`tools.md` § Built-In Tools](tools.md#built-in-tools).
 
 Tool calls and results are persisted and streamed so the user can understand
 what the agent did. Destructive or externally visible operations require an
 approval policy; the exact policy is defined in `tools.md`.
 
-A remote server can initially operate only on workspaces available on that
-server. A hosted coordinator plus outbound-connected desktop workers is a
-possible later architecture, but it is not part of the initial implementation.
+A remote server operates only on workspaces available on that server. A hosted
+coordinator with outbound-connected desktop workers is outside QQ (see
+"Hosting Boundary").
+
+Process progress accounting uses executor-produced context receipts (ADR-0060).
+A prepared launch captures the cleared child environment once, holds the cwd,
+and keeps any verified image alive through reap. Environment values stay
+private; receipts carry opaque identities and limited facts. Executed processes
+count as Work unless a trusted host explicitly approves their read behavior and
+binding is verified. Failures and timeouts of Work still trigger heuristic
+process audits; rejected and never-started calls have no receipt.
+
+Hosts may repeat `--approve-self-contained-read-image FAMILY:SHA256` when
+starting ask, run, serve or interactive execution. Approvals remain immutable
+in the runtime factory and core plan, outside workspace/configuration/session
+inputs; existing-server attachment rejects nonempty approvals. Descriptor 14
+records their public digest. Initial verification supports literal Linux exec
+calls to a bounded set of read families, a C/POSIX/unset locale, no requested
+environment names, a held contained cwd and at most 16 MiB of approved static
+native ELF bytes. A sealed memfd binds hashing and execution; scripts, dynamic
+images, shell compounds and unsupported platforms count as Work under ordinary
+approval. Image approval is a behavioral trust decision, not inferred from a
+hash, pathname ownership or ELF format.
+
+Store schema 47 saves bounded nullable process receipts atomically with their
+results, file state, spills and finished events. Historical rows remain NULL;
+saved command shape alone cannot qualify execution effects. These internal
+receipts do not change protocol envelopes or model-facing tool output.
+
+Session tool-turn replay persists the exact model-facing projection (ADR-0061).
+The core emits an internal barrier after budgeting and checkpoint annotations;
+session execution awaits its durable store acknowledgement before polling the
+runtime for another provider request. A failed projection write stops/drains the
+run and settles a persistence failure. Direct execution retains its live
+projection. Per-call rows remain authoritative for actual outcomes and effects;
+the projection preserves the ordered text, flags and correction notice seen by
+the next request. Descriptor15 identifies the strict policy for partial turns,
+and schema49 stores the bounded projection independently of those per-call rows.
+An unresolved historical projection settles only its queued reservation before
+runtime loading or provider polling. Missing projections in checkpoint-enabled
+tool turns also refuse reconstruction, including final-only reviewers, to preserve
+potentially durable verdict consequences without archive scans. It preserves that history, releases the
+preparation slot, and leaves fresh sessions usable; other store faults remain fatal.
 
 ## Concurrency And Multiple Agents
 
 Parallel model requests are mechanically simple; useful parallel agents are
-not. The server must eventually account for rate limits, token budgets,
-cancellation, duplicate work, context exchange, and conflicting changes.
+not: they must account for rate limits, token budgets, cancellation, duplicate
+work, context exchange, and conflicting changes.
 
-Initial concurrency should therefore be bounded and session-aware. Multiple
-independent sessions may run concurrently, but two writing agents must not
-modify the same checkout concurrently. When *parallel* editing subagents are
-introduced, each receives an isolated Git worktree or sandbox and returns a
-patch for central review and integration. A single serialized `Supervised`
-write child shares its parent's checkout: the parent is blocked while it runs,
-sibling writers serialize on a per-run permit retained through local execution
-teardown, and every mutating call it makes
-is adjudicated before it executes. Read-only research agents may be
-parallelized earlier.
-
-Do not build an agent swarm, distributed scheduler, or worktree coordinator in
-the initial version.
+Concurrency is therefore bounded and session-aware. Multiple independent
+sessions run concurrently, but two writing agents never modify the same
+checkout concurrently. A single serialized `Supervised` write child shares its
+parent's checkout: the parent is blocked while it runs, sibling writers
+serialize on a per-run permit retained through local execution teardown, and
+every mutating call it makes is adjudicated before it executes. Read-only
+research agents run in parallel. QQ has no agent swarm, distributed scheduler,
+or worktree coordinator.
 
 ## Local And Remote Networking
 
@@ -1513,33 +1602,15 @@ does not require transferring in-memory client state.
 QQ is designed to be run by a **supervisor**: a batch runner, CI job,
 evaluation harness, or hosted service that launches `qq run` inside an
 environment it controls and consumes the JSONL record stream and exit code.
-[`headless-contract.md`](./headless-contract.md) fixes that contract and the
-division of responsibility.
-
-The division is: QQ owns everything that must work on one machine for one
-user with no network other than the model endpoint — the agent loop,
-providers, tools, approvals, run limits, the durable session store, events,
-and the typed outcome. The supervisor owns everything that needs more than one
-tenant, more than one worker, or an authoritative record of money — isolation,
-repository checkout, patch extraction, spend authority, attempts and leases,
-independent verification, artifacts, identity, and billing.
-
-Three rules follow:
-
-- A supervisor consumes QQ as a binary through argv, environment, inline
-  configuration, and stdout. It never links `qq-core` into a process that
-  also executes untrusted repository code.
-- QQ has no supervisor-only mode and no product vocabulary. A capability a
-  supervisor needs is added only in a form a local user, a CI job, and an
-  evaluation harness could also use. CLI plumbing and compilation stay off
-  the run hot path; generic opt-in completion validation and bounded repair
-  belong in core, preserve default behavior when disabled, and require
-  cancellation, budget, and performance acceptance.
-- The headless contract is public and pinned by fixtures in this repository so
-  a supervisor can test against it without reading QQ source: the record
-  shapes are `qq-protocol` types and
-  `crates/qq-protocol/tests/fixtures/headless/` holds a golden stream per
-  exit status for every retained `PROTOCOL_VERSION` (ADR-0023).
+QQ owns what must work on one machine for one user (the agent loop, providers,
+tools, approvals, run limits, the durable store, events, and the typed
+outcome); the supervisor owns everything that needs more than one tenant, more
+than one worker, or an authoritative record of money. A supervisor consumes QQ
+as a binary, never by linking `qq-core`; QQ has no supervisor-only mode; and
+the record stream is pinned by golden fixtures under
+`crates/qq-protocol/tests/fixtures/headless/` (ADR-0009, ADR-0023).
+[`headless-contract.md`](./headless-contract.md) fixes the contract and the
+full division of responsibility.
 
 ## Extension Contract
 
@@ -1627,14 +1698,14 @@ chunked bodies). Final claims may be corrected using existing evidence within
 the same finite repair allowance; no extra tool call is forced merely to revise
 wording. Existing run cancellation and deadlines drop inference futures.
 
-A verdict is evidence, not the run's outcome. The reviewer's repair policy
-selects which typed outcomes redirect the run while a correction attempt
-remains; once both are spent, later verdicts stay on record
-(`checkpoint_reviewed` events and the typed marker on retained tool results)
-and the run completes with the candidate. A review the harness could not
-obtain (reviewer timeout, malformed reply, oversized task or evidence) is
-recorded as `unavailable` and the run continues. The reviewer's request limit
-and cost admission remain run failures because they are harness bounds.
+A verdict is evidence, not the run's outcome. A RED verdict redirects the run
+while a correction attempt remains; once both are spent, later RED verdicts
+stay on record (`checkpoint_reviewed` events and the `[JEV RED …]` marker on
+retained tool results) and the run completes with the candidate. A review the
+harness could not obtain (reviewer timeout, malformed reply, oversized task or
+evidence) is recorded as `unavailable` and the run continues. The reviewer's
+request limit and cost admission remain run failures because they are harness
+bounds.
 
 `checkpoint_started` commits before dispatch and marks the in-flight charge
 unknown in durable totals. `checkpoint_reviewed.spend` carries typed usage and
@@ -1674,67 +1745,6 @@ Invariants every lane keeps:
   live registry under the run loop; active runs never wait for an unrelated
   addon reload.
 - All runtime traces identify the exact plan and addon generations.
-
-## Performance Discipline
-
-Optimize end-to-end time to a useful result, not isolated microbenchmarks.
-Measure at least startup time, command acknowledgement, time to first model
-token, tool execution, persistence latency, reconnect/replay time, memory, and
-render responsiveness.
-
-Keep hot paths direct, queues bounded, and interfaces small. Avoid speculative
-abstractions and serialization layers. Any complexity introduced for speed
-must be supported by a benchmark and must not make routine development hostile.
-
-Method: fake providers and temporary stores for deterministic runtime latency;
-provider network latency separated from QQ latency; fixed-model live runs only
-for outcome and cache qualification. Every change records the pre-change
-baseline for its own new behavior before enforcing a regression gate. The
-reproducible protocol is [`benchmarks/perf/README.md`](../../benchmarks/perf/README.md);
-executable budgets are `benchmarks/perf/budgets-v1.json`. Tail gates on a
-loaded host are not repeatable (same-binary A/A pairs fail the same gates as
-A/B pairs); tail acceptance requires a quiet host, and failures are retained,
-never waived.
-
-Targets the executable budgets and benchmarks enforce or approach:
-
-| Gate | Target |
-| --- | ---: |
-| Command acknowledgement p95 | `<= 10 ms` |
-| Warm claimed run to provider send p95 | `<= 25 ms` |
-| Semantic delta to durable commit | `<= 15 ms` p95; `<= 40 ms` p99 |
-| Durable delta to TUI | `<= 25 ms` p95; `<= 60 ms` p99 |
-| Cancellation | `<= 100 ms` |
-| Output starvation with eight active streams | None longer than `50 ms` (executable); `20 ms` target pending a quiet-host recording |
-| One MiB request plus 32 schemas | `<= 10 ms` encode; heap `<= 2x` payload |
-| One MiB stream scaling | `<= 2.2x` the half-size work after fixed cost |
-| Context overflow sent to a provider | Zero |
-| Compaction reduction when required | At least `8x` |
-| Stable-prefix provider cache use | At least `80%` where supported |
-| Core retry amplification | `< 1.05` provider stream entries per logical turn on completed turns; a turn that recovers from a transient fault costs at most `MAX_TURN_RETRIES + 1` (ADR-0040); transport attempts obey `AttemptPolicy` |
-| Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
-| Harness-attributable evaluation failures | `< 0.5%` |
-
-## Intentionally Deferred
-
-The initial repository is pure Rust. Do not create or scaffold any of the
-following yet:
-
-- Web and mobile client surfaces beyond `qq-client`'s transport and state
-  (the WASM client crate and shared reducer exist). Their plan is
-  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md);
-  a browser client waits on remote enrollment and exposure (ADR-0015, S4).
-- JavaScript/TypeScript packages or package workspace.
-- Separate server executable.
-- Distributed workers or cloud control plane. These belong to a supervisor
-  above the headless contract; see "Hosting Boundary".
-- Plugin marketplace or public extension interface.
-- Multi-user tenancy. Same boundary.
-- Multi-agent editing orchestration.
-
-The HTTP/SSE server and client crates are designed to permit future surfaces,
-but future client code must not add placeholder crates or speculative
-extension points before it exists.
 
 ### Optional task routing during session preparation
 
@@ -1785,3 +1795,63 @@ Owned children inherit enabled/disabled routing from the parent's persisted
 plan; user followups resolve current configuration. Direct `ask` uses the same
 router and loader before its existing core run and prints pending/outcome/spend
 to stderr; its execution remains ephemeral. No live speed benefit is asserted.
+
+## Performance Discipline
+
+Optimize end-to-end time to a useful result, not isolated microbenchmarks.
+Measure at least startup time, command acknowledgement, time to first model
+token, tool execution, persistence latency, reconnect/replay time, memory, and
+render responsiveness.
+
+Keep hot paths direct, queues bounded, and interfaces small. Avoid speculative
+abstractions and serialization layers. Any complexity introduced for speed
+must be supported by a benchmark and must not make routine development hostile.
+
+Method: fake providers and temporary stores for deterministic runtime latency;
+provider network latency separated from QQ latency; fixed-model live runs only
+for outcome and cache qualification. Every change records the pre-change
+baseline for its own new behavior before enforcing a regression gate. The
+reproducible protocol is [`benchmarks/perf/README.md`](../../benchmarks/perf/README.md);
+executable budgets are `benchmarks/perf/budgets-v1.json`. Tail gates on a
+loaded host are not repeatable (same-binary A/A pairs fail the same gates as
+A/B pairs); tail acceptance requires a quiet host, and failures are retained,
+never waived.
+
+Targets the executable budgets and benchmarks enforce or approach:
+
+| Gate | Target |
+| --- | ---: |
+| Command acknowledgement p95 | `<= 10 ms` |
+| Warm claimed run to provider send p95 | `<= 25 ms` |
+| Semantic delta to durable commit | `<= 15 ms` p95; `<= 40 ms` p99 |
+| Durable delta to TUI | `<= 25 ms` p95; `<= 60 ms` p99 |
+| Cancellation | `<= 100 ms` |
+| Output starvation with eight active streams | None longer than `50 ms` (executable gate); `20 ms` target |
+| One MiB request plus 32 schemas | `<= 10 ms` encode; heap `<= 2x` payload |
+| One MiB stream scaling | `<= 2.2x` the half-size work after fixed cost |
+| Context overflow sent to a provider | Zero |
+| Compaction reduction when required | At least `8x` |
+| Stable-prefix provider cache use | At least `80%` where supported |
+| Core retry amplification | `< 1.05` provider stream entries per logical turn on completed turns; a turn that recovers from a transient fault costs at most `MAX_TURN_RETRIES + 1` (ADR-0040); transport attempts obey `AttemptPolicy` |
+| Release binary / minimal binary | `<= 48,000,000` / `<= 41,000,000` bytes |
+| Harness-attributable evaluation failures | `< 0.5%` |
+
+## Intentionally Deferred
+
+The repository is pure Rust. It contains none of the following, and none is
+scaffolded:
+
+- Web and mobile client surfaces beyond `qq-client`'s transport and state
+  (the WASM client crate and shared reducer exist); see
+  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md)
+  and ADR-0015.
+- JavaScript/TypeScript packages or package workspace.
+- Separate server executable.
+- Distributed workers or cloud control plane. These belong to a supervisor
+  above the headless contract; see "Hosting Boundary".
+- Plugin marketplace or public extension interface.
+- Multi-user tenancy. Same boundary.
+- Multi-agent editing orchestration.
+
+The HTTP/SSE server and client crates permit additional surfaces without
+placeholder crates or speculative extension points.

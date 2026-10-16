@@ -6,7 +6,7 @@
 stack GitHub #163 / #165 / #171
 **Implements:** [`tools.md` § MCP](../design/tools.md#mcp);
 [`architecture.md` § compiled plan identity](../design/architecture.md);
-ledger [`progress/mcp-pinning.md`](../plans/progress/mcp-pinning.md)
+ledger `progress/mcp-pinning.md` (deleted after it shipped in #194; see Git history)
 
 ## Context
 

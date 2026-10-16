@@ -1,0 +1,66 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID b3c2a1f6-e9fc-40b1-8c73-34612a4c3a8b with nextest profile: def
+    Starting 5 tests across 1 binary
+        FAIL [   0.003s] (1/5) nx tests::bad
+        FAIL [   0.003s] (3/5) nx tests::flaky
+     SIGABRT [   0.074s] (4/5) nx tests::seg
+ TERMINATING [>  2.000s] (───) nx tests::slow
+     TIMEOUT [   2.003s] (5/5) nx tests::slow
+────────────
+     Summary [   2.003s] 5 tests run: 1 passed, 3 failed, 1 timed out, 0 skipped
+        FAIL [   0.003s] (1/5) nx tests::bad
+  stdout ───
+
+    running 1 test
+    test tests::bad ... FAILED
+
+    failures:
+
+    failures:
+        tests::bad
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::bad' (1505113) panicked at src/lib.rs:4:24:
+    assertion `left == right` failed: boom
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.003s] (3/5) nx tests::flaky
+  stdout ───
+
+    running 1 test
+    test tests::flaky ... FAILED
+
+    failures:
+
+    failures:
+        tests::flaky
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::flaky' (1505115) panicked at src/lib.rs:7:166:
+    first try
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+     SIGABRT [   0.074s] (4/5) nx tests::seg
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 6: SIGABRT)
+
+     TIMEOUT [   2.003s] (5/5) nx tests::slow
+  stdout ───
+
+    running 1 test
+
+    (test timed out)
+
+error: test run failed

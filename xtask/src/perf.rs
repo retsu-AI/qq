@@ -52,7 +52,7 @@ use tokio::{
 };
 
 const REPORT_SCHEMA_VERSION: u16 = 1;
-const FIXTURE_VERSION: u16 = 4;
+const FIXTURE_VERSION: u16 = 5;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(45);
 const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -642,6 +642,7 @@ async fn record_baseline(args: BaselineArgs) -> Result<(), PerfError> {
     let (mut metrics, mut checks, unsupported) =
         run_workloads(&binary, args.samples, args.warmups).await?;
     verify_artifact_unchanged(&binary, &artifact)?;
+    eprintln!("[perf] minimal-profile startup and memory");
     let (minimal_metrics, minimal_checks) = minimal_profile_workloads(
         &minimal_binary,
         &minimal_artifact,
@@ -1550,6 +1551,8 @@ async fn run_status_bounded(
     timeout: Duration,
     command: &mut TokioCommand,
 ) -> Result<(), PerfError> {
+    let started = Instant::now();
+    eprintln!("[perf] starting {case}");
     let display = format!("{command:?}");
     command
         .stdin(Stdio::null())
@@ -1577,6 +1580,7 @@ async fn run_status_bounded(
         }
     };
     terminate_process_group(process_group);
+    eprintln!("[perf +{:?}] finished {case}: {status}", started.elapsed());
     if status.success() {
         Ok(())
     } else {
@@ -2519,62 +2523,85 @@ async fn run_workloads(
     samples: u16,
     warmups: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>, Vec<String>), PerfError> {
+    let started = Instant::now();
     let mut metrics = Vec::new();
     let mut checks = Vec::new();
     let mut unsupported = Vec::new();
 
+    eprintln!("[perf +{:?}] process startup and memory", started.elapsed());
     let (process_metrics, process_checks, process_unsupported) =
         process_workloads(binary, samples, warmups).await?;
     metrics.extend(process_metrics);
     checks.extend(process_checks);
     unsupported.extend(process_unsupported);
 
+    eprintln!(
+        "[perf +{:?}] SQLite runtime startup and shutdown",
+        started.elapsed()
+    );
     let (startup_metrics, startup_checks) = runtime_startup_workloads(samples, warmups).await?;
     metrics.extend(startup_metrics);
     checks.extend(startup_checks);
 
+    eprintln!("[perf +{:?}] direct prompt pipeline", started.elapsed());
     let (pipeline_metrics, pipeline_checks) = direct_pipeline_workloads(samples, warmups).await?;
     metrics.extend(pipeline_metrics);
     checks.extend(pipeline_checks);
 
+    eprintln!("[perf +{:?}] HTTP/SSE pipeline", started.elapsed());
     let (http_metrics, http_checks) = http_pipeline_workloads(samples, warmups).await?;
     metrics.extend(http_metrics);
     checks.extend(http_checks);
 
+    eprintln!("[perf +{:?}] file and shell tools", started.elapsed());
     let (tool_metrics, tool_checks) = tool_workloads(samples, warmups).await?;
     metrics.extend(tool_metrics);
     checks.extend(tool_checks);
 
+    eprintln!("[perf +{:?}] cancellation", started.elapsed());
     let (cancellation_metrics, cancellation_checks) =
         cancellation_workloads(samples, warmups).await?;
     metrics.extend(cancellation_metrics);
     checks.extend(cancellation_checks);
 
+    eprintln!("[perf +{:?}] retry amplification", started.elapsed());
     let (amplification_metrics, amplification_checks) =
         retry_amplification_workloads(samples).await?;
     metrics.extend(amplification_metrics);
     checks.extend(amplification_checks);
 
+    eprintln!("[perf +{:?}] subscriber fan-out", started.elapsed());
     let (fan_out_metrics, fan_out_checks) = subscriber_fan_out_workloads(samples).await?;
     metrics.extend(fan_out_metrics);
     checks.extend(fan_out_checks);
 
+    eprintln!(
+        "[perf +{:?}] busy-workspace acknowledgements",
+        started.elapsed()
+    );
     let (busy_metrics, busy_checks) = busy_workspace_ack_workloads(samples).await?;
     metrics.extend(busy_metrics);
     checks.extend(busy_checks);
 
+    eprintln!("[perf +{:?}] stream scaling", started.elapsed());
     let (stream_metrics, stream_checks) = long_stream_workloads(samples).await?;
     metrics.extend(stream_metrics);
     checks.extend(stream_checks);
 
+    eprintln!(
+        "[perf +{:?}] large outputs and restart/replay",
+        started.elapsed()
+    );
     let (r4_metrics, r4_checks) = r4_workloads(samples).await?;
     metrics.extend(r4_metrics);
     checks.extend(r4_checks);
 
+    eprintln!("[perf +{:?}] concurrent session loads", started.elapsed());
     let (load_metrics, load_checks) = load_workloads(samples).await?;
     metrics.extend(load_metrics);
     checks.extend(load_checks);
 
+    eprintln!("[perf +{:?}] default workloads complete", started.elapsed());
     unsupported.extend([
         "true page-cache-cold startup requires a fresh machine or privileged cache control; the report records first and repeated fresh-process startup instead".to_owned(),
         "the recorder refuses non-Linux hosts until native path isolation and RSS samplers are implemented".to_owned(),
@@ -3708,14 +3735,12 @@ async fn cancellation_workloads(
 /// stream before its first event, the number of provider entries per paused
 /// run is the number of sends the runtime issued for one logical turn. Under
 /// ADR-0040 the run owns turn recovery, so the expected value is exactly
-/// `MAX_TURN_RETRIES + 1` and the gate is 5 % above it; anything more means
-/// a second retry owner crept in above the loop.
+/// `MAX_TURN_RETRIES + 1`. The metric retains its cross-run average, while
+/// correctness requires every sampled run to exhaust recovery exactly.
 async fn retry_amplification_workloads(
     samples: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
     let runs = samples.clamp(5, 20);
-    let expected_milli = (u64::from(qq_core::MAX_TURN_RETRIES) + 1) * 1_000;
-    let gate_milli = expected_milli + expected_milli / 20;
     let mut fixture = RuntimeFixture::open(ProviderMode::Faulting).await?;
     let operation = async {
         let mut entries_per_run = Vec::with_capacity(usize::from(runs));
@@ -3752,26 +3777,42 @@ async fn retry_amplification_workloads(
             }
             entries_per_run.push(entries);
         }
-        let total: u64 = entries_per_run.iter().sum();
-        let ratio_milli = total.saturating_mul(1_000) / u64::from(runs);
-        Ok((
-            vec![MetricResult::scalar(
-                "provider_retry_amplification_milli",
-                "ratio_milli",
-                "provider stream entries per logical turn when every stream fails before its first event; the run owns turn recovery (ADR-0040) so this is one send plus MAX_TURN_RETRIES and nothing above it",
-                ratio_milli,
-            )?],
-            vec![CorrectnessCheck {
-                name: "retry_amplification_bounded".to_owned(),
-                passed: ratio_milli <= gate_milli,
-                detail: format!(
-                    "{total} provider entries across {runs} paused runs ({ratio_milli} milli); expected {expected_milli}, gate is at most {gate_milli}"
-                ),
-            }],
-        ))
+        let (metric, check) = retry_amplification_result(&entries_per_run)?;
+        Ok((vec![metric], vec![check]))
     }
     .await;
     finish_runtime_fixture(&fixture, "shut down amplification runtime", operation).await
+}
+
+fn retry_amplification_result(
+    entries_per_run: &[u64],
+) -> Result<(MetricResult, CorrectnessCheck), PerfError> {
+    if entries_per_run.is_empty() {
+        return Err(PerfError::Fixture(
+            "retry amplification requires at least one paused run".to_owned(),
+        ));
+    }
+    let expected_entries = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
+    let runs = entries_per_run.len();
+    let total: u64 = entries_per_run.iter().sum();
+    let ratio_milli = total.saturating_mul(1_000) / runs as u64;
+    Ok((
+        MetricResult::scalar(
+            "provider_retry_amplification_milli",
+            "ratio_milli",
+            "provider stream entries per logical turn when every stream fails before its first event; the run owns turn recovery (ADR-0040) so this is one send plus MAX_TURN_RETRIES and nothing above it",
+            ratio_milli,
+        )?,
+        CorrectnessCheck {
+            name: "retry_amplification_bounded".to_owned(),
+            passed: entries_per_run
+                .iter()
+                .all(|&entries| entries == expected_entries),
+            detail: format!(
+                "{total} provider entries across {runs} paused runs ({ratio_milli} milli); entries per run {entries_per_run:?}, exactly {expected_entries} each"
+            ),
+        },
+    ))
 }
 
 async fn feed_churn_workload(
@@ -5393,6 +5434,25 @@ async fn measure_load_profile(
 mod tests {
     use super::*;
 
+    #[test]
+    fn retry_amplification_requires_exact_recovery_in_every_run() {
+        let expected = u64::from(qq_core::MAX_TURN_RETRIES) + 1;
+        let mut entries = vec![expected; 20];
+        let (metric, check) = retry_amplification_result(&entries).unwrap();
+        assert_eq!(metric.summary.p95, expected * 1_000);
+        assert!(check.passed, "{}", check.detail);
+
+        for observed in [expected - 1, expected + 1] {
+            entries[19] = observed;
+            let (metric, check) = retry_amplification_result(&entries).unwrap();
+            assert_eq!(metric.summary.p95, (expected * 19 + observed) * 50);
+            assert!(!check.passed, "{}", check.detail);
+        }
+        let (_, check) = retry_amplification_result(&[expected - 1; 20]).unwrap();
+        assert!(!check.passed, "{}", check.detail);
+        assert!(retry_amplification_result(&[]).is_err());
+    }
+
     /// The fixture's amplification counter must observe exactly one send plus
     /// `MAX_TURN_RETRIES` provider entries per paused run: the run owns turn
     /// recovery (ADR-0040) and nothing above it resends.
@@ -5872,6 +5932,26 @@ mod tests {
     #[test]
     fn cargo_executable_override_is_part_of_native_build_identity() {
         assert!(is_native_build_environment_key(OsStr::new("CARGO")));
+    }
+
+    #[test]
+    fn report_compatibility_rejects_aggregate_retry_receipts() {
+        let mut baseline = compatible_report();
+        baseline.fixture_version = 4;
+        baseline.metrics = vec![metric("provider_retry_amplification_milli", 5_950)];
+        let candidate = baseline.clone();
+        let budgets: BudgetFile =
+            serde_json::from_str(include_str!("../../benchmarks/perf/budgets-v1.json")).unwrap();
+
+        let error = validate_compatibility(&baseline, &candidate, &budgets).unwrap_err();
+        assert!(matches!(
+            error,
+            PerfError::Incompatible(reason) if reason == "fixture versions differ"
+        ));
+
+        baseline.fixture_version = FIXTURE_VERSION;
+        let candidate = baseline.clone();
+        validate_compatibility(&baseline, &candidate, &budgets).unwrap();
     }
 
     #[test]

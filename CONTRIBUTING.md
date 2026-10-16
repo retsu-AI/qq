@@ -41,7 +41,9 @@ cargo test --workspace
 cargo test -p qq-provider --no-default-features --features test-support   # if you touched qq-provider
 ```
 
-CI runs the same plus a Windows job and exact-test coverage guards. Run the
+CI (`.github/workflows/ci.yml`) runs the first three plus the exact-test
+coverage guard, the install-script test, the minimal `qq-core`
+profile, a wasm32 `qq-client` build, and a Windows job. Run the
 narrowest test while iterating; run everything before pushing. Do not push
 red.
 

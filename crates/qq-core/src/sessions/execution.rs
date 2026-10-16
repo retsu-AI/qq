@@ -88,6 +88,7 @@ fn session_prompt_prefix_key(
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
+            unattended: false,
         }),
         guidance: user,
         subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
@@ -831,6 +832,23 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
+    if let Some(run) = claimed.unresolved_tool_projection {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: SessionRuntimeError::ToolProjectionUnavailable {
+                        run: run.to_string(),
+                    }
+                    .to_string(),
+                },
+            },
+        )
+        .await;
+        return;
+    }
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
@@ -848,6 +866,8 @@ pub(super) async fn execute_run(
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
+            // The loader owns construction until it returns, even after expiry.
+            let _ = load.await;
             let mut exhaustion = deadline.expect("only a finite deadline wakes").exhaustion();
             exhaustion.message.push_str("; runtime preparation was still ");
             exhaustion.message.push_str(unfinished_stage.description());
@@ -855,7 +875,6 @@ pub(super) async fn execute_run(
             finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
                 exhaustion: Box::new(exhaustion),
             }).await;
-            let _ = load.await;
             return;
         }
         result = &mut load => match result {
@@ -1366,7 +1385,7 @@ async fn admit_with_summary_only_history(
 /// not fully summarized, no step for this prompt has failed, and the step
 /// cap is not reached. Any of those exhausts the fold; the reason names
 /// which so the failure is actionable.
-fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
+pub(super) fn compaction_disposition(claimed: &ClaimedRun) -> context::CompactionDisposition {
     if let Some(bytes) = claimed.context_compaction_oversized_unit_bytes {
         return context::CompactionDisposition::Exhausted(
             context::CompactionExhaustion::OversizedUnit { bytes },
@@ -2881,6 +2900,32 @@ async fn execute_started_run(
                     flush_at = None;
                 }
             }
+            RunInput::Event(Some(RuntimeEvent::ToolResultsProjected {
+                turn_ordinal,
+                projection,
+            })) => {
+                if internal {
+                    continue;
+                }
+                if let Err(error) = inner
+                    .store
+                    .persist_tool_projection(&claimed, turn_ordinal, projection)
+                    .await
+                {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist projected tool results", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {
                 id,
                 result,
@@ -2888,6 +2933,7 @@ async fn execute_started_run(
                 file_states,
                 display,
                 spill,
+                execution_context,
             })) => {
                 if internal {
                     continue;
@@ -2923,7 +2969,16 @@ async fn execute_started_run(
                 }
                 match inner
                     .store
-                    .finish_tool_call(&claimed, id, result, is_error, file_states, display, spill)
+                    .finish_tool_call(
+                        &claimed,
+                        id,
+                        result,
+                        is_error,
+                        file_states,
+                        display,
+                        spill,
+                        execution_context,
+                    )
                     .await
                 {
                     Ok(_) => {}
