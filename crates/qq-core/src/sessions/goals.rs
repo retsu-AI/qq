@@ -1346,6 +1346,20 @@ pub(super) fn admit_run(
     if model_audit {
         limits.max_model_turns = Some(1);
     }
+
+    // Prompt limits are caller-owned, but managed ceilings apply to every
+    // execution claim and again after policy refresh at start.
+    let (policy, _) = goal_policy::load(connection, current.goal_id)?;
+    macro_rules! clamp {
+        ($($field:ident),+ $(,)?) => { $(
+            if let Some(cap) = policy.per_run.$field {
+                limits.$field = Some(limits.$field.map_or(cap, |requested| requested.min(cap)));
+            }
+        )+ };
+    }
+    clamp!(max_duration_ms, max_model_turns, max_tool_calls, max_total_tokens,
+        max_cost_usd_nanos, max_input_tokens, max_output_tokens, max_tool_output_bytes,
+        max_children, max_concurrent_children);
     if final_slot {
         let cap = current
             .budget
