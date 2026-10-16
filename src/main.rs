@@ -219,12 +219,15 @@ fn headless_close_exit(
     goal: bool,
     result: Result<(), qq_core::SessionRuntimeError>,
 ) -> ExitCode {
-    let _ = goal;
     match result {
         Ok(()) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: could not close the session runtime: {error}");
-            headless::exit_code(headless::HeadlessStatus::HarnessFailure)
+            if goal {
+                ExitCode::from(code)
+            } else {
+                headless::exit_code(headless::HeadlessStatus::HarnessFailure)
+            }
         }
     }
 }
