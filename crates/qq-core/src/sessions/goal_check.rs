@@ -612,6 +612,9 @@ fn try_start(
     {
         return Ok(Start::Stop);
     }
+    if goals::goal_driver_exhaustion(&goal, now).is_some() {
+        return Ok(Start::Stop);
+    }
     if !matches!(
         goal.check_authorization,
         Some(
@@ -762,10 +765,8 @@ fn finish(
             && goal.audit_pending
             && goal.audit_revision == Some(goal.revision)
         {
-            if now >= goal.budget.deadline_ms {
-                goal.status = qq_protocol::GoalStatus::BudgetExhausted {
-                    reason: qq_protocol::GoalExhaustion::Deadline,
-                };
+            if let Some(reason) = goals::goal_driver_exhaustion(&goal, now) {
+                goal.status = qq_protocol::GoalStatus::BudgetExhausted { reason };
             } else if cancelled
                 || matches!(
                     &completion,

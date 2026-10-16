@@ -580,28 +580,7 @@ fn ensure_activation(goal: &GoalSnapshot, now: u64) -> Result<(), SessionRuntime
     if goal.pending_run_id.is_some() {
         return Err(SessionRuntimeError::GoalCancellationPending);
     }
-    if goal.budget.deadline_ms <= now || goal.counters.runs >= goal.budget.max_goal_runs {
-        return Err(SessionRuntimeError::GoalBudgetSpent);
-    }
-    if let Some(limit) = goal.budget.max_total_tokens {
-        let Some(usage) = goal.counters.usage else {
-            return Err(SessionRuntimeError::GoalBudgetSpent);
-        };
-        let spent = usage
-            .input_tokens
-            .checked_add(usage.cache_read_input_tokens)
-            .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
-            .and_then(|value| value.checked_add(usage.output_tokens));
-        if spent.is_none_or(|spent| spent >= limit) {
-            return Err(SessionRuntimeError::GoalBudgetSpent);
-        }
-    }
-    if let Some(limit) = goal.budget.max_cost_usd_nanos
-        && goal
-            .counters
-            .estimated_cost_usd_nanos
-            .is_none_or(|spent| spent >= limit)
-    {
+    if goal_driver_exhaustion(goal, now).is_some() {
         return Err(SessionRuntimeError::GoalBudgetSpent);
     }
     Ok(())
@@ -1249,7 +1228,7 @@ fn apply_terminal_outcome(
             }
         },
         RunOutcome::BudgetExhausted { .. } => {
-            if let Some(reason) = goal_exhaustion(goal, now) {
+            if let Some(reason) = goal_driver_exhaustion(goal, now) {
                 goal.status = GoalStatus::BudgetExhausted { reason };
             } else {
                 if !committed {
@@ -1272,7 +1251,7 @@ fn apply_terminal_outcome(
                 .max(wait.until_ms)
                 .min(goal.budget.deadline_ms);
         }
-        if let Some(reason) = goal_exhaustion(goal, now) {
+        if let Some(reason) = goal_driver_exhaustion(goal, now) {
             goal.status = GoalStatus::BudgetExhausted { reason };
         }
     }
@@ -1487,10 +1466,28 @@ pub(super) fn goal_exhaustion(
     goal: &GoalSnapshot,
     now: u64,
 ) -> Option<qq_protocol::GoalExhaustion> {
+    exhaustion(goal, now, false)
+}
+
+pub(super) fn goal_driver_exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+) -> Option<qq_protocol::GoalExhaustion> {
+    // Native verification commits no model run. It may use the final work
+    // run's claim, but never bypass its deadline or token/cost ceilings.
+    exhaustion(goal, now, goal.check.is_some() && goal.audit_pending
+        && goal.audit_revision == Some(goal.revision))
+}
+
+fn exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+    native_check_pending: bool,
+) -> Option<qq_protocol::GoalExhaustion> {
     if now >= goal.budget.deadline_ms {
         return Some(qq_protocol::GoalExhaustion::Deadline);
     }
-    if goal.counters.runs >= goal.budget.max_goal_runs {
+    if !native_check_pending && goal.counters.runs >= goal.budget.max_goal_runs {
         return Some(qq_protocol::GoalExhaustion::Runs);
     }
     if let Some(limit) = goal.budget.max_total_tokens {
@@ -1612,7 +1609,7 @@ pub(super) fn queue_due_goals(
                 .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
                 .and_then(|value| value.checked_add(usage.output_tokens))
         });
-        let exhaustion = goal_exhaustion(&goal, now);
+        let exhaustion = goal_driver_exhaustion(&goal, now);
         if let Some(reason) = exhaustion {
             goal.status = GoalStatus::BudgetExhausted { reason };
             save(&transaction, &goal)?;

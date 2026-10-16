@@ -233,6 +233,48 @@ async fn once_check(success: bool) {
         Some(qq_protocol::GoalCheckAuthorization::Consumed)
     );
     assert_eq!(achieved.counters.audits, 1);
+    if success {
+        use crate::sessions::goals::{goal_driver_exhaustion, goal_exhaustion};
+        use qq_protocol::GoalExhaustion;
+        let mut pending = achieved.clone();
+        pending.audit_pending = true;
+        pending.audit_revision = Some(pending.revision);
+        let now = now_ms();
+        assert_eq!(goal_driver_exhaustion(&pending, now), None);
+        assert_eq!(goal_exhaustion(&pending, now), Some(GoalExhaustion::Runs));
+        for reason in [GoalExhaustion::Deadline, GoalExhaustion::Tokens,
+            GoalExhaustion::TokensUnknown, GoalExhaustion::Cost, GoalExhaustion::CostUnknown] {
+            let mut bounded = pending.clone();
+            match reason {
+                GoalExhaustion::Deadline => bounded.budget.deadline_ms = now,
+                GoalExhaustion::Tokens => bounded.budget.max_total_tokens = Some(1),
+                GoalExhaustion::TokensUnknown => {
+                    bounded.budget.max_total_tokens = Some(1);
+                    bounded.counters.usage = None;
+                }
+                GoalExhaustion::Cost => {
+                    bounded.budget.max_cost_usd_nanos = Some(1);
+                    bounded.counters.estimated_cost_usd_nanos = Some(1);
+                }
+                GoalExhaustion::CostUnknown => {
+                    bounded.budget.max_cost_usd_nanos = Some(1);
+                    bounded.counters.estimated_cost_usd_nanos = None;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(goal_driver_exhaustion(&bounded, now), Some(reason));
+        }
+        for invalid in 0..3 {
+            let mut invalidated = pending.clone();
+            match invalid {
+                0 => invalidated.audit_pending = false,
+                1 => invalidated.audit_revision = None,
+                _ => invalidated.check = None,
+            }
+            assert_eq!(goal_driver_exhaustion(&invalidated, now), Some(GoalExhaustion::Runs));
+        }
+    }
+
     assert_eq!(
         achieved.counters.runs,
         if success { 1 } else { 2 },
@@ -249,8 +291,8 @@ async fn once_check(success: bool) {
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        if success { 2 } else { 4 },
-        "only the work run may call the model"
+        if success { 3 } else { 4 },
+        "only the work run and its final-slot wrap-up may call the model"
     );
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(
