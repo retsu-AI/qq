@@ -8556,3 +8556,244 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
         .unwrap();
     reopened.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
+    struct Model(Arc<StdMutex<Vec<ModelRequest>>>);
+    impl Provider for Model {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.0.lock().unwrap().push(request);
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "child work".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]))
+        }
+    }
+    struct Loader {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(loaded_runtime(
+                    Runtime::new(Model(requests), "test-model", 1024).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(Loader {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
+    let child_held = Arc::clone(&runtime.inner.child_permits[0])
+        .acquire_many_owned(runtime.inner.child_permits[0].available_permits() as u32)
+        .await
+        .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated {
+        session_id: parent_session,
+    } = created.outcome
+    else {
+        panic!("session")
+    };
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":parent_session,"objective":"original objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let parent_run = queue_prompt(&runtime, parent_session, "parent work".to_owned()).await;
+    let store = runtime.inner.store.clone();
+    let parent = store.reserve_next_run(false).await.unwrap().unwrap();
+    assert_eq!(parent.identity.run_id, parent_run);
+    store
+        .start_reserved_run(&parent, test_prepared_audit(&parent), None)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let captured = parent.goal.as_ref().unwrap().clone();
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::generate().unwrap(),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "detached bounded child".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, move |connection| {
+            let mut goal = crate::sessions::goals::load_live(connection, parent_session)?.unwrap();
+            goal.next_run_at_ms = now_ms() + 60_000;
+            crate::sessions::goals::save(connection, &goal)
+        })
+        .await
+        .unwrap();
+    drop(child_held);
+    runtime.inner.schedule.send(()).await.unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: parent.identity.workspace_id,
+            after: EventCursor {
+                store_id: runtime.store_id(),
+                workspace_id: parent.identity.workspace_id,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let claim: Option<String> = connection.query_row(
+                "SELECT preparing_run_id FROM sessions WHERE id=?1",
+                [child.session_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(claim.as_deref(), Some(child.run_id.to_string().as_str()));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":parent_session,"objective":"original objective",
+                "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000,"max_total_tokens":100}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("goal")
+    };
+    assert_eq!(goal.goal_id, captured.goal_id);
+    runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let cancelled: bool = connection.query_row(
+                "SELECT cancel_requested FROM runs WHERE id=?1",
+                [child.run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert!(
+                !cancelled,
+                "editing the active ancestor budget must not confound admission with cancellation"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    release.notify_one();
+    let finished = collect_until_run_finished(&mut events, child.run_id).await;
+    let shutdown = runtime.shutdown();
+    tokio::pin!(shutdown);
+    let first = futures_util::poll!(&mut shutdown);
+    drop(held);
+    match first {
+        std::task::Poll::Ready(result) => result.unwrap(),
+        std::task::Poll::Pending => shutdown.await.unwrap(),
+    };
+    assert!(matches!(
+        finished_outcome(&finished, child.run_id),
+        Some(RunOutcome::Completed)
+    ));
+    let connection = rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let (ancestor, authority, origin): (Option<String>, Option<String>, String) = connection
+        .query_row(
+            "SELECT goal_paid_owner_run_id,goal_id,origin_json FROM runs WHERE id=?1",
+            [child.run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(ancestor, Some(parent.identity.run_id.to_string()));
+    assert!(authority.is_none());
+    assert!(
+        matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::Delegated {owner_run_id,..} if owner_run_id==parent.identity.run_id)
+    );
+    let goal = crate::sessions::goals::load_live(&connection, parent_session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        goal.counters.runs, 0,
+        "a sponsored child does not consume another ancestor run slot"
+    );
+    assert_eq!(goal.counters.usage, Some(usage(1, 1)));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .tools()
+            .iter()
+            .any(|tool| tool.name() == "update_goal")
+    );
+    assert!(
+        requests[0].max_output_tokens() <= 100,
+        "the settled parent's current ancestor allowance must shape child dispatch: {}",
+        requests[0].max_output_tokens()
+    );
+}
