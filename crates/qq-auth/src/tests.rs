@@ -2776,6 +2776,148 @@ fn xai_resolution_refreshes_once_and_persists_the_rotated_token() {
     assert_eq!(persisted["access_token"], "refreshed-access-token");
 }
 
+/// Blocks inside the first refresh until the test releases it, so the test
+/// can observe what the refreshing store holds meanwhile.
+struct CoordinatedXaiRefreshClient {
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+    refreshed: xai::TokenSet,
+}
+
+impl xai::XaiTokenClient for CoordinatedXaiRefreshClient {
+    fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
+        unreachable!("the refresh-coordination fixture never starts a login")
+    }
+
+    fn poll_device(&self, _device_code: &str) -> Result<xai::DevicePoll, xai::XaiAuthError> {
+        unreachable!("the refresh-coordination fixture never polls")
+    }
+
+    fn refresh(&self, _refresh_token: &str) -> Result<xai::TokenSet, xai::XaiAuthError> {
+        self.entered.wait();
+        self.release.wait();
+        Ok(self.refreshed.clone())
+    }
+}
+
+#[test]
+fn oauth_operations_lock_the_published_per_provider_files() {
+    for (name, provider) in [
+        ("openai-codex/default", Some(OAuthProvider::OpenAiCodex)),
+        ("xai/work", Some(OAuthProvider::XAi)),
+        ("xai", None),
+        ("xaii/work", None),
+        ("openai/default", None),
+        ("gateway/xai/work", None),
+    ] {
+        assert_eq!(OAuthProvider::for_credential(name), provider, "{name}");
+    }
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    // Concurrently running QQ versions coordinate through these exact names.
+    assert_eq!(
+        paths.oauth_lock_file(OAuthProvider::OpenAiCodex),
+        directory.path().join("openai-codex.lock")
+    );
+    assert_eq!(
+        paths.oauth_lock_file(OAuthProvider::XAi),
+        directory.path().join("xai.lock")
+    );
+}
+
+#[test]
+fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(FakeKeyring::default());
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let mut refreshing =
+        CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
+    let rotating = CredentialStore::with_backends(paths.clone(), keyring.clone(), protected);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    refreshing.xai_client = Arc::new(CoordinatedXaiRefreshClient {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        refreshed: xai::TokenSet {
+            access_token: "refreshed-access-token".to_owned(),
+            refresh_token: Some("rotated-refresh-token".to_owned()),
+            expires_in: Some(3_600),
+        },
+    });
+    let stored = |access_token: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "access_token": access_token,
+            "refresh_token": "refresh-token",
+            "expires_at": 1
+        }))
+        .unwrap()
+    };
+    refreshing
+        .set_with_metadata(
+            "xai/work",
+            stored("expired-access-token"),
+            false,
+            Some("xai-oauth"),
+            Some("https://api.x.ai"),
+        )
+        .unwrap();
+
+    let refresh = thread::spawn(move || refreshing.resolve_xai_oauth("work"));
+    entered.wait();
+
+    // The refreshing store holds `xai.lock` itself, as another process would
+    // see it; the Codex lock stays free.
+    let xai_lock = File::open(directory.path().join("xai.lock")).unwrap();
+    assert!(matches!(
+        xai_lock.try_lock(),
+        Err(fs::TryLockError::WouldBlock)
+    ));
+    let codex_lock = File::create(directory.path().join("openai-codex.lock")).unwrap();
+    codex_lock.try_lock().unwrap();
+    drop(codex_lock);
+
+    let (rotated, rotation_done) = std::sync::mpsc::sync_channel(1);
+    let rotation = thread::spawn(move || {
+        let result = rotating.set_with_metadata(
+            "xai/work",
+            stored("rotated-by-second-store"),
+            false,
+            Some("xai-oauth"),
+            Some("https://api.x.ai"),
+        );
+        rotated.send(()).unwrap();
+        result
+    });
+    // The rotation must still be waiting on `xai.lock`. This can only pass
+    // spuriously, never fail spuriously: correct code never sends while the
+    // refresh is paused.
+    assert_eq!(
+        rotation_done.recv_timeout(Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "a second store rotated an xAI credential during its refresh"
+    );
+    release.wait();
+
+    assert_eq!(
+        refresh
+            .join()
+            .unwrap()
+            .unwrap()
+            .expose_secret_str()
+            .unwrap(),
+        "refreshed-access-token"
+    );
+    rotation.join().unwrap().unwrap();
+    // Never the refreshed token: a rotation that reached the keyring while the
+    // refresh was paused would have been overwritten by the refresh write.
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&keyring.value("xai/work").unwrap()).unwrap();
+    assert_eq!(persisted["access_token"], "rotated-by-second-store");
+    xai_lock.try_lock().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_refresh_preserves_an_explicit_private_file_backend() {
