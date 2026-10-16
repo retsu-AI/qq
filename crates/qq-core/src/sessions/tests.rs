@@ -3234,6 +3234,13 @@ enum AutoCompactScript {
         text: String,
         summary: String,
     },
+
+    /// Grows the transcript with native writes instead of spawning shell processes.
+    WritesRepeatedlyWithSummaries {
+        turns: usize,
+        text: String,
+        summary: String,
+    },
     /// `ShellRepeatedlyWithSummaries` whose provider rejects the request as
     /// exceeding its window once the transcript holds `overflow_at` results,
     /// unless the request carries an in-run summary: a provider whose
@@ -3635,6 +3642,11 @@ impl Provider for AutoCompactProvider {
                 turns,
                 text,
                 summary,
+            }
+            | AutoCompactScript::WritesRepeatedlyWithSummaries {
+                turns,
+                text,
+                summary,
             } => {
                 if last_text.contains("Summarize this conversation") {
                     if summary == "__STALL__" {
@@ -3661,13 +3673,27 @@ impl Provider for AutoCompactProvider {
                     Box::pin(stream::iter([
                         Ok(qq_provider::ProviderEvent::ToolCallStarted {
                             id: id.clone(),
-                            name: "shell".to_owned(),
+                            name: if matches!(
+                                self.script,
+                                AutoCompactScript::WritesRepeatedlyWithSummaries { .. }
+                            ) {
+                                "write_file".to_owned()
+                            } else {
+                                "shell".to_owned()
+                            },
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: format!(
-                                r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
-                            ),
+                            json: if matches!(
+                                self.script,
+                                AutoCompactScript::WritesRepeatedlyWithSummaries { .. }
+                            ) {
+                                serde_json::json!({"path": format!("step-{done}.txt"), "content": "x".repeat(2000)}).to_string()
+                            } else {
+                                format!(
+                                    r#"{{"command":"echo step {done}; head -c 6000 /dev/zero | tr '\\0' x"}}"#
+                                )
+                            },
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
