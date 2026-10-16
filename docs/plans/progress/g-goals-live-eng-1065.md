@@ -1,6 +1,6 @@
 # G5 — subscription-only live goal evaluation
 
-Status: both trials settled; G5 acceptance is not established. ENG-1065 / ENG-809.
+Status: all three trials settled; G5 acceptance is not established. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
 
@@ -173,3 +173,48 @@ This was useful real subscription-backed implementation work and reached a
 verified terminal state. It still does **not** meet the multi-hour requirement
 or the at-least-three-compactions requirement. G5 remains open; no delay or
 artificial work was added to change that outcome.
+
+## Third trial: captured review repairs
+
+Started 2026-10-16T07:26:25.461415+00:00 on runtime source
+`f0fff5aa6881b8b485a7369e0cac03179e18b01a`, binary SHA256
+`007ba4cef4625720ac64369c945aa26d187ed100fdfeefb9405df8504607e774`.
+The useful task reproduced and repaired twelve captured review findings, with
+local test-first commits separated by originating PR and a supported final report.
+It used the same exact subscription route, with no paid API fallback, external
+writes or delegation. Limits remained finite: 10081 seconds within the original
+evaluation window, eight goal runs, and 64 turns/3000000 total tokens/30 minutes
+per run; context 65536 and maximum output 8192 tokens.
+
+Finished 2026-10-16T08:22:40.907001+00:00 after **3375.446 seconds
+(56 minutes)**. The supervisor captured process exit **0** and an actual final
+foreground goal record with status **achieved**. All **21 checklist items** were
+done, with **6 charged runs**, **1 independent audit**, and **256 completed model
+turns**. One earlier compaction failure consumed a run; normal continuation
+recovered without extending the goal budget or deadline.
+
+- **Four successful real compactions** retained all 21 checklist item IDs and
+  texts. Every captured checklist digest was
+  `4bc7cf5dae038f9dae75b56c39aab2c1c9e02f7de28add6abd6493be1892e5a6`.
+- Authoritative counters match the completed-turn usage sum: **8997361 fresh
+  input +1946624 cache-read input +71060 output tokens**, cache-write input0.
+  Estimated dollar cost is `null`. **Paid API spend: USD0**;
+  subscription-amortized dollar value is unknown.
+- The local affected-package gate on task source `16a1381b` independently records
+  **2202/2202 passed,14 intentional skips**, formatting/lint/Clippy green.
+  Its only dirty path was the private task specification. The real task binary
+  passed **8/8 loopback smoke scenarios**. This is task evidence, not a full
+  workspace gate or qualification of the final outer PR heads.
+
+The outer reviewer found limits in the initial proposed repairs and strengthened
+them before integration: actual execution-start managed-policy revalidation,
+monotonic sponsor expiry across held preparation, interruptible caller close,
+and excluding owned compactions from preempting-prompt detection. Those fixes,
+regression tests and final-head gates belong to #330/#331. The task's achieved
+status and report do not independently establish those later corrections.
+
+This trial demonstrates natural continuation through at least three compactions,
+checklist preservation and a real terminal foreground record. It **does not meet
+the multi-hour requirement**. Durations of separate trials are not combined into
+one qualifying goal run. No delay, repeated work or manufactured compaction was
+added; G5 remains unqualified and #332 remains a draft.

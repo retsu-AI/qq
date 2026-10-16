@@ -1088,3 +1088,18 @@ publication and thread resolution remain pending.
 - Second useful subscription-only goal finished achieved after1508.908seconds,5charged runs and1independent audit; all5checklist items done,69completed model turns,2real compactions. The initial32k context configuration failed three runs; restored64k and resumed the same goal, retaining spent caps and original deadline. No paid API fallback.
 - Demonstrated external-pause foreground hang; independently reproduced and repaired in originating #331 with13foreground regressions passing and read-only review approved. Curated trial evidence records actual token totals, unknown estimated/subscription dollar value, zero paid API spend and explicit HTTP/SSE terminal proof.
 - Both trials remain short of multi-hour/at-least-three-compaction G5 qualification. #332 remains draft/In Progress; no artificial delay or work used to meet duration. Raw transcripts, private homes and session stores remain outside Git.
+
+### 2026-10-16 — G5 third live result
+
+- Third useful subscription-only goal reached achieved/exit0 after3375.446seconds
+  (56minutes),6charged runs,256model turns and1audit;21/21checklist done.
+  Four actual compactions retained the same item IDs/texts. Exact route remained
+  openai-codex/gpt-6.1-sol; paid API spendUSD0, estimated/subscription dollar
+  value unknown. Affected-package2202/2202 and smoke8/8 independently reconciled.
+- The task supplied twelve captured review repairs. Outer review strengthened
+  execution-start caps, sponsor deadline handling, caller close interruption and
+  owned-compaction adoption before integration in #330/#331. The task's achieved
+  report is not qualification of the later final heads.
+- G5 still lacks one real multi-hour run. Separate trial durations are not added;
+  no padding or artificial work. #332 stays draft/In Progress. Curated receipt
+  is g-goals-live-eng-1065.md; raw content and private stores stay outside Git.
