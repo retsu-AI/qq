@@ -5945,6 +5945,7 @@ impl Provider for MutateThenScriptProvider {
 /// no tools) stream a final status line.
 struct BudgetLoopLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    entered: Option<Arc<tokio::sync::Notify>>,
     usage: Option<TokenUsage>,
     pricing: Option<ModelPricing>,
     hang: bool,
@@ -5954,6 +5955,7 @@ impl RuntimeLoader for BudgetLoopLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let provider = BudgetLoopProvider {
             requests: Arc::clone(&self.requests),
+            entered: self.entered.clone(),
             usage: self.usage,
             hang: self.hang,
             turn: AtomicUsize::new(0),
@@ -6130,6 +6132,7 @@ async fn submit_child_budget_prompt(harness: &SpawnHarness, limits: RunLimits) -
 
 struct BudgetLoopProvider {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    entered: Option<Arc<tokio::sync::Notify>>,
     usage: Option<TokenUsage>,
     hang: bool,
     turn: AtomicUsize,
@@ -6139,6 +6142,9 @@ impl Provider for BudgetLoopProvider {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let has_tools = request.tool_choice() == qq_provider::ToolChoice::Auto;
         self.requests.lock().unwrap().push(request);
+        if let Some(entered) = &self.entered {
+            entered.notify_one();
+        }
         if self.hang {
             return Box::pin(stream::pending());
         }
