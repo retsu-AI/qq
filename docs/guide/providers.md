@@ -56,6 +56,17 @@ If no keyring is available (a container, a headless server), pass
 `--allow-file` to store a user-only plaintext file under the data
 directory. Prefer environment variables in CI.
 
+
+Within one running process, credential-store clones coalesce concurrent reads
+of the same keyring entry and reuse successful reads for up to five minutes
+(at most 64 cached entries). QQ credential changes invalidate reuse through
+the durable credential index. Changes made directly in the OS keychain may
+not be observed until that reuse window expires; restart QQ to discard its
+in-process memo immediately. Registration and endpoint binding are checked
+before reuse. File-backed credentials are not memoized, and OAuth refresh
+paths reread the durable value. This reduces repeated keychain reads; it does
+not change macOS signing or Keychain authorization across binary updates.
+
 ### Profiles
 
 `PROVIDER/PROFILE`. `default` is what the built-in providers use unless you
