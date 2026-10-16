@@ -206,3 +206,8 @@ runtime/provider work ran and no slice is marked shipped by this entry.
   file links resolved; conflict-marker scan and `git diff --check` passed.
   No runtime smoke or live-provider quality evaluation was needed or claimed
   for this docs-only change. The affected-package gate remains red as above.
+
+### 2026-10-16 — Clean stack rebuild and Codex repairs
+
+- Rebuilt docs-only on current main after main history changed; removed accidental integration of the no-longer-ancestral Jev source commit. Retained current main retirements, repaired new plan indexes and kept old Jev plan/ledger deleted.
+- Addressed expanded calibration identity, shared deployment admission, Clef slice ownership, immediate Off ownership/races, DM2 migration acceptance, DM6 qualification dependency, batched question IDs, advisory-only reuse and owner-gated recommendation. Runtime findings on the accidentally integrated commit are removed from this PR scope, not represented as fixed.
