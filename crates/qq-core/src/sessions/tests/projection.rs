@@ -973,5 +973,48 @@ async fn reviewed_run_ended_while_awaiting_tool_approval(restart: bool) {
         "ending a held reviewed run must not make the conversation unusable: {continued:?}"
     );
     assert_eq!(requests.lock().unwrap().len(), before + 1);
+    {
+        let requests = requests.lock().unwrap();
+        let messages = requests[before].messages();
+        let original_prompt = messages
+            .iter()
+            .position(|message| message == &Message::user("edit the note"))
+            .expect("continuation must retain the original user prompt");
+        let call = messages
+            .iter()
+            .position(|message| {
+                message.role() == Role::Assistant
+                    && message.content().iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::ToolCall { id, name, .. }
+                                if id == "call_0" && name == "write_file"
+                        )
+                    })
+            })
+            .expect("continuation must retain the assistant's write_file call_0");
+        let result = messages
+            .iter()
+            .position(|message| {
+                message.role() == Role::User
+                    && message.content().iter().any(|block| matches!(
+                        block,
+                        ContentBlock::ToolResult { call_id, content, is_error: true }
+                            if call_id == "call_0"
+                                && matches!(content.as_str(),
+                                    "Tool execution did not start before the run was cancelled."
+                                    | "Tool execution did not start before the run was interrupted.")
+                    ))
+            })
+            .expect("continuation must retain call_0's explicit cancelled/interrupted error result");
+        let continuation = messages
+            .iter()
+            .position(|message| message == &Message::user("continue"))
+            .expect("continuation must include the new user prompt");
+        assert!(
+            original_prompt < call && call < result && result < continuation,
+            "continuation must preserve prompt, call, interrupted result, then new prompt: {messages:?}"
+        );
+    }
     runtime.close().await.unwrap();
 }
