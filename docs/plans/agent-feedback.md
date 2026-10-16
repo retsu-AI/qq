@@ -4,8 +4,9 @@
 
 AF0–AF4, AF7, AF8 and the first part of AF9 merged in #282
 (`192c9879`, ENG-1028). AF6.1's cancellation-module audit merged in #311
-(`3b763ea1`). AF5, the remaining AF6 modules, AF9 lesson mining and AF10
-remain open. AF7's CI implementation is shipped; enabling the merge queue
+(`3b763ea1`). AF9.1's gate-integrity follow-up merged in #317 (`0b4f29e3`).
+AF6.2 audits delegation fixtures next. AF5, the remaining AF6 modules, AF9
+lesson mining and AF10 remain open. AF7's CI implementation is shipped; enabling the merge queue
 in branch protection remains an operator task, not an observed setting.
 
 ## Goal
