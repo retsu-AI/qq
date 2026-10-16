@@ -440,10 +440,12 @@ pub async fn run_goal(
                     match &envelope.event {
                         SessionEvent::GoalUpdated { goal: updated }
                             if updated.session_id == handle.session_id
-                            && goal_identity(updated) == expected => {
+                            && updated.goal_id == expected.goal_id
+                            && updated.revision >= expected.revision => {
                             if updated.status != qq_protocol::GoalStatus::Active && final_goal.is_none() {
                                 interrupt_armed = false;
-                                let (goal, through) = settle_goal(sessions, &handle, expected).await?;
+                                guard.expected = goal_identity(updated);
+                                let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
                                 final_goal = Some((goal, through.sequence, None));
                             }
                         }

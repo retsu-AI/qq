@@ -965,3 +965,9 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 
 - Hosted Linux, Windows and wasm checks pass for #330/#331. #331 website build exposed one bad headless-guide link to #qq-goal-; reproduced locally with the unchanged rendered-site checker and inspected actual CLI heading id #qq-goal. Corrected the guide source only.
 - Full local nub site build now succeeds:15pages and550resolved internal links. Existing check-links gate catches the regression; no gate or generated site output changed. Resulting-head repository/push gate follows.
+
+### 2026-10-16 — G4 external-pause foreground regression
+
+- Subscription-only live concurrency task demonstrated that an external Pause advances goal revision while the foreground event guard accepted only the original exact revision, hanging after paid-family drain. Independently ported tests first: nextest f96d48c8 fails with `pause: held-family acceptance hung` against original production code.
+- Accept newer stopped revisions only for the same goal ID, then settle and clean up using that observed exact identity; direct-run records retain original execution correlation and replacement IDs remain fenced. Repaired foreground suite13/13 passes (4c1fd710). Independent source/test review approved.
+- Seven reachable held-preparation rows prove cancellation/drain retention, child-before-parent finish, unrelated-run isolation and terminal-record ordering. Clear/replace are races during interrupt drain; output/drop prove retained asynchronous cleanup, not terminal output. No new sleep sites:73 remain. Full resulting-head gate and smoke follow.
