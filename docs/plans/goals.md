@@ -5,7 +5,7 @@
 | | |
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
-| Now | Not shipped on main. G0/AC4 foundation is in review in #308 (ENG-1045); the G2 driver/accounting checkpoint is stacked in #309 (ENG-1053). Neither PR establishes complete G2 or whole-plan acceptance. G3–G5 remain open. The decision record is [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md), still Proposed |
+| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 driver/accounting checkpoint merged in #309 (`ffa46942`). Remaining G2 acceptance and G3 completion are in progress under ENG-1063, followed by G4 (ENG-1064) and G5 (ENG-1065). Neither merged checkpoint establishes whole-plan acceptance. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |

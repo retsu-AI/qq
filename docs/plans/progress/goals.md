@@ -4,13 +4,13 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation checkpoint; not on main, full goal acceptance incomplete |
+| G0 | Foundation: durable goals and AC4 loop guard | Shipped (87d3ed1a) | ENG-1045 | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation merged; whole-plan acceptance remains open |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | The driver | In review | [ENG-1053](https://linear.app/retsu-ai/issue/ENG-1053) | [#309](https://github.com/retsu-AI/qq/pull/309), stacked on #308 | Implemented checkpoint only; full G2 acceptance remains open; not shipped |
-| G2.1 | Bounded idle driver, historical spend and direct-goal admission checkpoint | In review | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Implemented subset; current local socket-dependent qualification blocked; full G2 acceptance remains open |
-| G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
-| G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
-| G5 | Evidence | Planned | | | ENG-809 |
+| G2 | Driver closeout | In progress | ENG-1053 / ENG-1063 | feat/eng-1063-goal-completion | G2.1 merged; full G2 acceptance belongs to this closeout |
+| G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
+| G3 | Completion checks and crash-safe recovery | In progress | ENG-1063 | feat/eng-1063-goal-completion | First new PR combines G2 closeout and G3 |
+| G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
+| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Model selected; spend/fallback authorization pending |
 
 ## Entries
 
@@ -812,3 +812,9 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 - Reconfirmed published308f078ccaa/3090b15c8c7 exclude PR319: runtime/manifests match pre-Jev baselines, removed files/provenance and ancestry absent; clean main73ff0647 retained. Both hosted CI runs passed.308received genuine Codex thumbs-up;309received4new findings, all reproduced before implementation.
 - Regression commitsab8d1dd6/21942446 reproduce lost cancellation replay wake, generic automatic routing input, expired sponsored-child admission and request cap256against inherited60. Fix retains replay receipts, routes captured objectives only for Goal-origin work, intersects all paid-ancestor absolute deadlines at claim/routing/main start, and shapes child provider output including routing spend. Independent reviews approve both scheduling/routing and revised ancestry admission; no ancestor goal authority granted.
 - Focused goal_review7/7pass (2.39s), including own-goal child deadline variants. Final repository gate and hosted review follow. PR308 remains unmerged: normal async merge failed last-pusher approval and active github-pages deployment requirements. No protection bypass, fabricated review or deployment. Four309threads remain open until fixing commits are published.
+
+### 2026-10-16 — post-merge G2/G3, G4 and G5 stack
+
+- User requests three reviewable PRs: G2 closeout+G3 (ENG-1063), G4 surfaces (ENG-1064), G5 evidence (ENG-1065), parent ENG-1011. Start clean isolated worktree `/tmp/qq-goal-delivery-20261015/g3` on exact main3d58b3d3; root is sole writer. Preserve #293 cooperative preparation drain and all #309 review fixes; exclude removed PR319.
+- Pre-change optimized turn_overhead diagnostic:3iterations×1000executed/durable calls,9compactions each, all assertions pass. Median gaps at10/100/1000 are92.690/102.274/57.591ms; broad sample variation is not quiet-host/tail qualification. Exact source/binary/fixture/raw samples: `/tmp/qq-goal-delivery-20261015/baseline.json` and `g3-baseline-turn-overhead.log`. Candidate comparison and acceptance follow.
+- Reuse prepared test-first runtime/check/surface work rather than replay old merge history. Independent static G2/G3 review confirms principal Unix acceptance paths; add literal simulated20-minute permit-wait coverage and resolve/document platform boundaries. G5 provider selected:openai-codex/gpt-6.1-sol; no paid allowance inferred.
