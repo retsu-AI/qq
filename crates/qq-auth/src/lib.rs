@@ -21,8 +21,6 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use thiserror::Error;
 
 use qq_protocol::CredentialEpoch;
@@ -345,6 +343,9 @@ pub struct CredentialStore {
     xai_refresh: Arc<Mutex<()>>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
     stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+
+    #[cfg(test)]
+    resolution_time: Arc<Mutex<std::time::Instant>>,
 }
 
 #[derive(Default)]
@@ -367,19 +368,41 @@ struct StoredResolutionKey {
     epoch: CredentialEpoch,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct TestSignal {
+    count: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl TestSignal {
+    fn notify(&self) {
+        *self.count.lock().unwrap() += 1;
+        self.changed.notify_all();
+    }
+
+    fn wait_for(&self, count: usize) {
+        let mut observed = self.count.lock().unwrap();
+        while *observed < count {
+            observed = self.changed.wait(observed).unwrap();
+        }
+    }
+}
+
 #[derive(Default)]
 struct StoredResolutionCoordinator {
     cache: StoredResolutionCache,
     flights: HashMap<StoredResolutionKey, Arc<StoredResolutionFlight>>,
     #[cfg(test)]
-    capacity_waiters: AtomicUsize,
+    capacity_waiters: Arc<TestSignal>,
 }
 
 struct StoredResolutionFlight {
     result: Mutex<Option<Result<Secret, StoredResolutionFailure>>>,
     ready: std::sync::Condvar,
     #[cfg(test)]
-    followers: AtomicUsize,
+    followers: TestSignal,
 }
 
 struct StoredResolutionOwnerGuard {
@@ -876,6 +899,19 @@ impl CredentialStore {
                 Mutex::new(StoredResolutionCoordinator::default()),
                 std::sync::Condvar::new(),
             )),
+            #[cfg(test)]
+            resolution_time: Arc::new(Mutex::new(std::time::Instant::now())),
+        }
+    }
+
+    fn resolution_now(&self) -> std::time::Instant {
+        #[cfg(test)]
+        {
+            *self.resolution_time.lock().unwrap()
+        }
+        #[cfg(not(test))]
+        {
+            std::time::Instant::now()
         }
     }
 
@@ -1040,7 +1076,7 @@ impl CredentialStore {
                 .map_err(|_| AuthError::CredentialCoordinator {
                     operation: "lock_poisoned",
                 })?;
-            let now = std::time::Instant::now();
+            let now = self.resolution_now();
             state
                 .cache
                 .entries
@@ -1069,7 +1105,7 @@ impl CredentialStore {
                     result: Mutex::new(None),
                     ready: std::sync::Condvar::new(),
                     #[cfg(test)]
-                    followers: AtomicUsize::new(0),
+                    followers: TestSignal::default(),
                 });
                 state.flights.insert(key.clone(), Arc::clone(&flight));
                 (flight, true)
@@ -1085,7 +1121,7 @@ impl CredentialStore {
                         operation: "lock_poisoned",
                     })?;
             #[cfg(test)]
-            flight.followers.fetch_add(1, Ordering::SeqCst);
+            flight.followers.notify();
             while result.is_none() {
                 result =
                     flight
@@ -1139,7 +1175,7 @@ impl CredentialStore {
                 name: name.to_owned(),
                 endpoint: key.endpoint.clone(),
                 epoch,
-                expires_at: std::time::Instant::now() + STORED_RESOLUTION_CACHE_TTL,
+                expires_at: self.resolution_now() + STORED_RESOLUTION_CACHE_TTL,
                 secret: secret.clone(),
             });
             while state.cache.entries.len() > MAX_STORED_RESOLUTION_CACHE_ENTRIES {
@@ -1163,14 +1199,12 @@ impl CredentialStore {
             })?;
         while state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
             #[cfg(test)]
-            state.capacity_waiters.fetch_add(1, Ordering::SeqCst);
+            state.capacity_waiters.notify();
             state = wake
                 .wait(state)
                 .map_err(|_| AuthError::CredentialCoordinator {
                     operation: "lock_poisoned",
                 })?;
-            #[cfg(test)]
-            state.capacity_waiters.fetch_sub(1, Ordering::SeqCst);
         }
         Ok(())
     }

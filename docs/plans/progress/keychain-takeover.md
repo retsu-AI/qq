@@ -46,3 +46,17 @@ Keychain ACL persistence across upgrades, or eliminate all OS prompts.
 - Initial narrowed implementation: 74/74 auth tests passed. Added deterministic
   expiry/external deletion and cross-store mutation/endpoint/index regressions.
   Independent review requested. Full gate and smoke pending.
+
+
+## Codex review follow-up
+
+- Initial head `97bc28cd`: full workspace 2,655/2,655, minimal provider
+  211/211, six smoke scenarios and hosted checks passed.
+- Addressed Codex's three findings: signal-driven concurrency tests without
+  polling deadlines; a clone-shared controllable test clock exercising the
+  production five-minute expiry calculation at 299/300 seconds; cached initial
+  xAI OAuth reads with uncached refresh-lock rereads.
+- xAI regression failed before the fix (`left: 6, right: 1` backend reads),
+  then all 77 auth tests passed. Signal-driven concurrency tests passed twenty
+  stress iterations. The xAI request memo shares ordinary stored-resolution
+  expiry; only the authoritative refresh-lock reread bypasses it.
