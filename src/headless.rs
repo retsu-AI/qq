@@ -4043,6 +4043,63 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn closing_goal_host_drains_accepted_work_without_admitting_successors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ReleasedRun {
+            calls: Arc<AtomicUsize>,
+            release: Arc<tokio::sync::Semaphore>,
+            started: tokio::sync::mpsc::Sender<usize>,
+        }
+        impl Provider for ReleasedRun {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                self.started.try_send(call).unwrap();
+                let release = self.release.clone();
+                if call == 0 {
+                    Box::pin(stream::once(async move {
+                        release.acquire().await.unwrap().forget();
+                        Ok(ProviderEvent::Completed { usage: Some(ProviderUsage {
+                            input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0, reasoning_tokens: None,
+                        }) })
+                    }))
+                } else { Box::pin(stream::pending()) }
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for _ in 0..16 {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let release = Arc::new(tokio::sync::Semaphore::new(0));
+                let (started, mut starts) = tokio::sync::mpsc::channel(8);
+                let fixture = fixture({
+                    let calls = calls.clone(); let release = release.clone();
+                    move || ReleasedRun { calls: calls.clone(), release: release.clone(), started: started.clone() }
+                }).await;
+                let opts = options(&fixture.workspace);
+                let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+                let request = goal_request();
+                let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
+                send(&fixture.sessions, command).await.unwrap();
+                assert_eq!(starts.recv().await, Some(0));
+                let closing = fixture.sessions.close_when_idle(std::future::pending());
+                tokio::pin!(closing);
+                assert!(futures_util::poll!(closing.as_mut()).is_pending());
+                tokio::select! {
+                    result = &mut closing => panic!("closed before accepted work settled: {result:?}"),
+                    snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)) => { snapshot.unwrap(); }
+                }
+                release.add_permits(1);
+                tokio::select! {
+                    biased;
+                    call = starts.recv() => panic!("close admitted successor call {call:?}"),
+                    result = &mut closing => result.unwrap(),
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }).await.expect("close must drain accepted work without autonomous refill");
+    }
+
     #[derive(Clone, Default)]
     struct ForegroundOutput {
         bytes: Arc<Mutex<Vec<u8>>>,
