@@ -160,6 +160,7 @@ it. When the same correction happens twice, encode it
 | Minimal provider profile builds and passes without the AWS SDK | `cargo xtask check` (minimal-clippy and minimal-test gates on any `qq-provider` change) |
 | Doctests pass | `cargo xtask check --full` (doctest gate) |
 | Tests assert behavior, not implementation | prose only: `principles` skill |
+| Cooperative preparation expiry is triggered only after entry before cancellation | bounded entry receipt in `deadlines::preparation_cooperates_with_deadline_and_explicit_cancel` |
 | No lock across `.await`, no blocking on Tokio workers | Clippy `await_holding_lock`; otherwise review |
 | Persist before publish | review; `crates/qq-core` session tests |
 | Managed goal checks refuse uninspectable execution when managed denies are present | `approval::classify::tests::goal_check_denies_refuse_uninspectable_execution_sources` and transparent-control regressions |

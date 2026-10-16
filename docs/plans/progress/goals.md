@@ -840,3 +840,8 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 
 - Opened #330 (G2/G3) and #331 (G4 on #330), both non-draft with ci:full. Final old-base gates passed2687/2687 and2733/2733 respectively, plus doctests/Clippy/minimal profiles. Publication revealed bare-repository fetches had left origin/main stale; fixed the owned remote fetch mapping and refreshed explicitly to3e34eea2.
 - Rebased #330 onto current main, preserving #325 fixture stabilization and #299 auth changes. Only conflict was legacy sleep locations: retain main's73 sites and lowered ceiling, then refresh positions against integrated source. Main auth source is unchanged by this PR. Resulting-head qualification follows; previous reports remain evidence for their exact old heads.
+
+### 2026-10-16 — preparation fixture entry fence
+
+- Rebased full gate exposed #293's preparation test expecting a checkpoint stage after its real100ms setup deadline could already expire. Narrow and8concurrent diagnostic copies pass; source review confirms an expired first poll can emit entered only during cancellation drain. Production snapshots the stage before cancellation correctly.
+- Replace the ambiguous Notify with a bounded entry receipt proving not-yet-cancelled, establish that stage before explicit virtual expiry, and retain exact stage/no-request/cooperative-drain assertions. Narrow corrected regression1/1 passes in1.74s; independent review approved. No production bounds changed. The entry receipt encodes the fixture ordering rather than loosening the verdict. Final-head gates follow.
