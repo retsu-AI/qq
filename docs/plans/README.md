@@ -45,6 +45,7 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [Jev](jev.md) | Remaining JV3–JV13 precision, hold lifecycle, receipts, UX and qualification |
 | [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W/S/U/D/M work |
 | [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
+| [v0.1.7 publication](release-0.1.7.md) | Remaining tag/assets/checksum/install/Homebrew verification receipt; bump and guide pins shipped |
 | [LSP diagnostics](lsp-diagnostics.md) | Unscheduled proposal; no active delivery inferred |
 
 Linear project `qq`, team `ENG`, tracks live assignments and issue status.
@@ -59,9 +60,10 @@ in [root](progress/root.md); do not rewrite accepted ADRs during cleanup.
 - `agent-feedback`, `guide-expansion` → **developer experience**.
 - `supervised-delegation` → **Terminal-Bench R7/D6b**; continuation and
   supervised-write contracts already live in design.
-- v0.1.7 preparation is complete: bump #318 and guide-pin follow-up #321
-  are on main. The temporary plan/ledger are removed. Release procedure is
-  [the runbook](../runbooks/release.md), release notes are in `CHANGELOG.md`.
+- v0.1.7 preparation is reduced to [publication verification](release-0.1.7.md):
+  #318 and #321 are merged, but remote asset/install completion needs a receipt.
+  The release procedure remains [the runbook](../runbooks/release.md).
+
 
 Existing slice IDs and issues survive consolidation. Old ledgers are marked
 historical and retained where ADRs/research depend on their evidence; new

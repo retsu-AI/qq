@@ -210,18 +210,12 @@ Continuation T1 requires no pass-rate loss. No delegation win is assumed.
 
 Priority: P1.
 
-Complete the pending sub-agent work (the read-only sub-agent plan's Phases
-A–C shipped; that plan was removed 2026-09-04):
-
-- Add a configured worker-model selection with parent fallback.
-- Persist the child's resolved model independently.
-- Roll child usage and cost into parent totals without double-counting the
-  child session display.
-- Include child trajectories in headless and ATIF output.
-- Record child queue wait and concurrency.
-- Depth is configurable up to a ceiling of three, default one until the A3
-  arm in D6b above wins; write authority is limited to
-  serialized `Supervised` depth-one children (amended 2026-09-03).
+Shipped baseline (D2–D6a): worker-model selection with parent fallback,
+independently persisted child models, parent roll-up without double-counting,
+and child headless/ATIF trajectories. Do not reimplement these as R7 tasks.
+Remaining: D6b default decisions and child queue-wait/concurrency recording.
+Depth is configurable to three, default one pending A3; writes remain one
+serialized Supervised depth-one child.
 
 Evaluate delegation by task shape:
 
