@@ -3499,10 +3499,13 @@ mod tests {
         let closing = crate::close_headless(&fixture.sessions, true);
         tokio::pin!(closing);
         assert!(futures_util::poll!(closing.as_mut()).is_pending());
-        assert_eq!(fixture.sessions.run_snapshot(owner.workspace_id, other.session_id, foreign_id)
-            .await.unwrap().status, qq_protocol::RunStatus::Running);
-        request_cancel(&fixture.sessions, foreign_id).await.unwrap();
-        closing.await.unwrap();
+        let inspect_and_finish = async {
+            assert_eq!(fixture.sessions.run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+                .await.unwrap().status, qq_protocol::RunStatus::Running);
+            request_cancel(&fixture.sessions, foreign_id).await.unwrap();
+        };
+        let (closed, ()) = tokio::join!(closing, inspect_and_finish);
+        closed.unwrap();
     }
 
     #[derive(Clone, Default)]

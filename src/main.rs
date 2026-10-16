@@ -192,8 +192,8 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 /// maps every failure to a distinguishable exit code: 0 success, 1 task or
 /// model failure, 2 invalid configuration, 3 timeout or budget exhaustion,
 /// 4 harness or persistence failure, 130 interrupted.
-async fn close_headless(sessions: &qq_core::SessionRuntime, _goal: bool) -> Result<(), qq_core::SessionRuntimeError> {
-    sessions.close().await
+async fn close_headless(sessions: &qq_core::SessionRuntime, goal: bool) -> Result<(), qq_core::SessionRuntimeError> {
+    if goal { sessions.close_when_idle().await } else { sessions.close().await }
 }
 
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
@@ -223,6 +223,7 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             let mut stdout = io::stdout().lock();
             let mut stderr = io::stderr().lock();
+            let is_goal = goal.is_some();
             let code = match goal {
                 Some(goal) => {
                     headless::run_goal(
@@ -248,7 +249,7 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             drop(stdout);
             drop(stderr);
-            match sessions.close().await {
+            match close_headless(&sessions, is_goal).await {
                 Ok(()) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("error: could not close the session runtime: {error}");

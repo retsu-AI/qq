@@ -1411,6 +1411,25 @@ impl SessionRuntime {
         self.inner.store.close().await
     }
 
+    /// Retains ownership until accepted runs settle naturally, then closes
+    /// without cancelling unrelated recovered work.
+    pub async fn close_when_idle(&self) -> Result<(), SessionRuntimeError> {
+        let mut settlements = self.inner.settlements.subscribe();
+        loop {
+            let lifecycle = self.inner.lifecycle.write().await;
+            if *self.inner.failed.borrow() {
+                return Err(SessionRuntimeError::Unavailable);
+            }
+            if self.inner.store.unfinished_run_ids().await?.is_empty() {
+                self.inner.shutdown.send_replace(true);
+                drop(lifecycle);
+                return self.close().await;
+            }
+            drop(lifecycle);
+            settlements.changed().await.map_err(|_| SessionRuntimeError::Unavailable)?;
+        }
+    }
+
     /// Abandons the store without settling anything: the worker thread is
     /// stopped and joined, every later store call fails as unavailable, and
     /// runs still executing are left exactly as a crashed process would leave
