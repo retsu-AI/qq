@@ -1470,3 +1470,20 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn goal_check_process_accepts_non_utf8_process_names() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    let directory = TempDir::new().unwrap();
+    let result = run_process(
+        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        "printf '\\377' > /proc/self/comm; printf checked".to_owned(),
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        RunCancellation::new(),
+        Arc::new(crate::ProcessProducer::new("test")),
+        execution::RunResources::default(),
+    ).await.unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
+    assert_eq!(result.tail, "checked");
+}
