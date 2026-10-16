@@ -49,3 +49,12 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Resume: reduce tracing dependency/size cost or otherwise fix absolute gates; investigate relative failures with same-binary A/A, not retries-as-proof. Strengthen ancestry/cancellation/error redaction tests; review log limits/usability and portability.
 - Then rerun focused tests, all smoke (new total 7), full CI-profile gate, website checks for guide edit, qualifying perf comparison, independent review; open PR per playbook, request Codex and explicitly resolve findings. Require current-tip Codex actual 👍 before declaring merge-ready.
 - User requested immediate local checkpoint to restart machine. No passing final gate, completed AF5, open PR, or merge readiness claimed.
+
+
+## AF5 resumed verification
+
+- Added unique process-local run ordinals, instrumented outer stream polling, and retained store span ownership through worker settlement. Shifted seven legacy sleep line keys by +2 only; ceiling stays 73.
+- Full CI-profile gate initially failed seven retried-pass fixtures under concurrent host load; focused checkpoint rerun passed. Subsequent complete gate passed (428.0s), including doctests and minimal provider checks. All seven real-binary smoke scenarios passed.
+- Clean baseline minimal artifact already exceeds absolute size budget: 42288944 > 41000000 bytes; baseline dependency count 300. Initial AF5 adds 749664 bytes and five crates. This is not an unchanged-budget pass; reducing cost remains required.
+- Attempted post-restart recording timed out at 600s and is partial, not A/A evidence. Other test jobs and desktop load were observed on host; no unrelated processes terminated.
+- Still blocked on qualifying performance, Windows no-reparse path behavior and expanded cancellation/correlation coverage. Open only as draft until these and current-tip Codex review are complete.

@@ -78,11 +78,11 @@ fn main() -> ExitCode {
     };
     // Runtime teardown drops remaining task spans before draining diagnostics.
     drop(executor);
-    if let Some(logger) = logging {
-        if let Err(error) = logger.finish() {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
+    if let Some(logger) = logging
+        && let Err(error) = logger.finish()
+    {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
     }
     code
 }

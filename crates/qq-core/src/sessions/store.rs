@@ -479,12 +479,13 @@ impl Store {
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
         let (reply, response) = oneshot::channel();
+        let span = tracing::Span::current();
         let job: worker::DatabaseJob = Box::new(move |connection| {
-            let result = operation(connection);
+            let result = span.in_scope(|| operation(connection));
             worker::JobOutcome {
                 ok: result.is_ok(),
                 settle: Box::new(move |commit| {
-                    let _ = reply.send(commit.and(result));
+                    let _ = span.in_scope(|| reply.send(commit.and(result)));
                 }),
             }
         });
@@ -536,8 +537,9 @@ impl Store {
         // run in one shared body so ~60 call sites do not each carry a copy
         // of the hot path.
         let (reply, response) = oneshot::channel();
+        let span = tracing::Span::current();
         let job: worker::DatabaseJob = Box::new(move |connection| {
-            let result = operation(connection);
+            let result = span.in_scope(|| operation(connection));
             // The worker settles this after the enclosing commit: the
             // reply and the staged events wait for durability. A commit
             // failure replaces the result so no caller is told a write
@@ -545,7 +547,7 @@ impl Store {
             worker::JobOutcome {
                 ok: result.is_ok(),
                 settle: Box::new(move |commit| {
-                    let _ = reply.send(commit.and(result));
+                    let _ = span.in_scope(|| reply.send(commit.and(result)));
                 }),
             }
         });

@@ -4,6 +4,8 @@ use crate::*;
 
 use tracing::Instrument as _;
 
+static NEXT_DIAGNOSTIC_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
 /// these counters (ADR-0048 § 1: harness bounds reset at their seams, so none
 /// of these is a lifetime bound on output). Stall and checkpoint state retain
@@ -286,9 +288,10 @@ impl plan::CompiledAgentPlan {
             )
         });
         let plan = Arc::clone(self);
+        let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = NEXT_DIAGNOSTIC_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let run_parent = run_span.clone();
         let events: RuntimeStream = Box::pin(stream! {
 
-            let run_span = tracing::info_span!(target: "qq::diagnostic", "run");
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             let mut state = {
                 let initialization = plan.initialize(messages, cancelled, gate, file_state, capabilities, (started, deadline));
@@ -304,7 +307,7 @@ impl plan::CompiledAgentPlan {
             };
             'turns: for turn_ordinal in 1..=u32::MAX {
 
-                let turn_span = tracing::info_span!(target: "qq::diagnostic", parent: &run_span, "turn", turn_ordinal);
+                let turn_span = tracing::info_span!(target: "qq::diagnostic", parent: &run_parent, "turn", turn_ordinal);
                 let turn = {
                     let phase = state.prepare_turn(turn_ordinal);
                     tokio::pin!(phase);
@@ -433,6 +436,10 @@ impl plan::CompiledAgentPlan {
                 message: "run exhausted the durable u32 model-turn ordinal space".to_owned(),
             };
         });
+        let mut events = events;
+        let events: RuntimeStream = Box::pin(futures_util::stream::poll_fn(move |cx| {
+            run_span.in_scope(|| events.as_mut().poll_next(cx))
+        }));
         match (deadline, deadline_resources) {
             (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {
                 deadline.enforce(events, cancelled, tools, spawner, audit_hook)
