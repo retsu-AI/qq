@@ -369,13 +369,18 @@ pub async fn run_goal(
         } else {
             current.ok_or_else(|| Failure::invalid("session has no stored goal"))?
         };
-        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
-        let guard = cleanup.as_mut().unwrap();
-        if let Some(scope) = request.check_approval {
+        if let Some(_scope) = request.check_approval {
             let check = goal.check.as_ref().ok_or_else(|| Failure::invalid("goal has no check"))?;
             if request.check.as_deref() != Some(check.command.as_str()) {
                 return Err(Failure::invalid("check consent requires --check with the exact stored command"));
             }
+        } else if !creating && request.check.is_some() {
+            return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
+        }
+        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
+        let guard = cleanup.as_mut().unwrap();
+        if let Some(scope) = request.check_approval {
+            let check = goal.check.as_ref().unwrap();
             goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
                 session_id: handle.session_id, expected: goal_identity(&goal),
                 action: qq_protocol::GoalControl::ApproveCheck { scope, command: check.command.clone() },
@@ -383,8 +388,6 @@ pub async fn run_goal(
             guard.expected = goal_identity(&goal);
             guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
                 .then(|| (sessions.clone(), goal.session_id));
-        } else if !creating && request.check.is_some() {
-            return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
         }
         // Missing consent is a durable result, not an unreachable human wait.
         let needs_check = matches!(goal.status, qq_protocol::GoalStatus::Paused {
