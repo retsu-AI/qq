@@ -116,7 +116,8 @@ client: resume while cancellation still drains → typed cancellation_pending, n
 client: replace or clear ──► old goal becomes history; cancel its work, still charge committed spend
 restart: recovery finalizes interrupted runs and re-queues an unstarted check/audit.
   A running check → paused{needs_user: check_interrupted}, never re-run automatically.
-  Explicit resume acknowledges uncertainty; consumed once authorization needs fresh approval.
+  Exact workspace/run acknowledgment releases the independent interruption hold.
+  Resume the goal separately; consumed once authorization needs fresh approval.
   ContinueRun and AutoContinue never touch runs with a goal snapshot.
 ```
 
