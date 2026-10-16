@@ -469,15 +469,21 @@ pub async fn run_goal(
                         }
                         SessionEvent::RunFinished { origin: Some(origin), run_id, .. }
                             if envelope.session_id == handle.session_id && matches!(origin,
-                                qq_protocol::RunOrigin::Goal { goal_id, revision }
-                                | qq_protocol::RunOrigin::GoalCheck { goal_id, revision }
-                                if *goal_id == expected.goal_id && *revision == expected.revision) => {
+                                qq_protocol::RunOrigin::Goal { goal_id, .. }
+                                | qq_protocol::RunOrigin::GoalCheck { goal_id, .. }
+                                if *goal_id == expected.goal_id) => {
                             let run = sessions.run_snapshot(handle.workspace_id,
                                 handle.session_id, *run_id).await
                                 .map_err(|error| Failure::harness(error.to_string()))?;
+                            let identity = match &run.origin {
+                                Some(qq_protocol::RunOrigin::Goal { goal_id, revision }
+                                    | qq_protocol::RunOrigin::GoalCheck { goal_id, revision }) =>
+                                    qq_protocol::GoalIdentity { goal_id: *goal_id, revision: *revision },
+                                _ => return Err(Failure::harness("goal run has no durable goal origin")),
+                            };
                             let record = qq_protocol::HeadlessGoalRun {
                                 workspace_id: handle.workspace_id, session_id: handle.session_id,
-                                goal: expected, run: Box::new(run),
+                                goal: identity, run: Box::new(run),
                             };
                             sink.record(stdout, HeadlessRecordRef::GoalRun(&record))
                                 .map_err(|error| Failure::harness(error.to_string()))?;
@@ -3583,6 +3589,9 @@ mod tests {
                     .count(),
                 1
             );
+            let adopted = records.iter().find(|record| record["type"] == "goal_run").unwrap();
+            assert_eq!(adopted["goal"]["revision"], goal.revision - 1);
+            assert_eq!(adopted["goal"]["goal_id"], serde_json::to_value(goal.goal_id).unwrap());
             assert_eq!(
                 fixture
                     .sessions
