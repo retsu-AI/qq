@@ -235,22 +235,43 @@ impl RuntimeLoadStage {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeLoadProgress(Arc<AtomicU8>);
+pub struct RuntimeLoadProgress {
+    stage: Arc<AtomicU8>,
+    cancellation: crate::RunCancellation,
+}
 
 impl Default for RuntimeLoadProgress {
     fn default() -> Self {
-        Self(Arc::new(AtomicU8::new(RuntimeLoadStage::Starting as u8)))
+        Self {
+            stage: Arc::new(AtomicU8::new(RuntimeLoadStage::Starting as u8)),
+            cancellation: crate::RunCancellation::new(),
+        }
     }
 }
 
 impl RuntimeLoadProgress {
+    /// Requests cooperative cancellation; the owner must still await the loader.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Waits for cancellation without polling or abandoning owned work.
+    pub async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+
     pub fn set(&self, stage: RuntimeLoadStage) {
-        self.0.store(stage as u8, Ordering::Release);
+        self.stage.store(stage as u8, Ordering::Release);
     }
 
     #[must_use]
     pub fn stage(&self) -> RuntimeLoadStage {
-        match self.0.load(Ordering::Acquire) {
+        match self.stage.load(Ordering::Acquire) {
             value if value == RuntimeLoadStage::CanonicalizingWorkspace as u8 => {
                 RuntimeLoadStage::CanonicalizingWorkspace
             }

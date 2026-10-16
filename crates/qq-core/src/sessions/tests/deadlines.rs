@@ -680,6 +680,80 @@ async fn duration_cancels_automatic_compaction_and_settles_the_original_prompt()
     );
 }
 
+struct CooperativePreparationLoader {
+    entered: Arc<tokio::sync::Notify>,
+    drained: Arc<tokio::sync::Notify>,
+    signalled: Arc<AtomicUsize>,
+}
+
+impl RuntimeLoader for CooperativePreparationLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        _request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
+        let entered = Arc::clone(&self.entered);
+        let drained = Arc::clone(&self.drained);
+        let signalled = Arc::clone(&self.signalled);
+        Box::pin(async move {
+            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            entered.notify_one();
+            // The timeout bounds the red reproduction, not the production contract.
+            if tokio::time::timeout(Duration::from_secs(1), progress.cancelled()).await.is_ok() {
+                signalled.fetch_add(1, Ordering::SeqCst);
+            }
+            progress.set(RuntimeLoadStage::Complete);
+            drained.notify_one();
+            Err(RuntimeLoadError {
+                kind: RunFailureKind::Server,
+                message: "preparation stopped".to_owned(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
+    for cancel in [false, true] {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let drained = Arc::new(tokio::sync::Notify::new());
+        let signalled = Arc::new(AtomicUsize::new(0));
+        let mut harness = DeadlineSession::open(
+            Arc::new(CooperativePreparationLoader {
+                entered: Arc::clone(&entered),
+                drained: Arc::clone(&drained),
+                signalled: Arc::clone(&signalled),
+            }),
+            ApprovalMode::Full,
+        ).await;
+        let run_id = harness.submit("prepare", if cancel { 10_000 } else { 100 }).await;
+        entered.notified().await;
+        tokio::time::pause();
+        if cancel {
+            harness.runtime.command(
+                CommandId::generate().unwrap(), SessionCommand::CancelRun { run_id },
+            ).await.unwrap();
+        } else {
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        drained.notified().await;
+        tokio::time::resume();
+        let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
+        harness.runtime.shutdown().await.unwrap();
+        assert_eq!(signalled.load(Ordering::SeqCst), 1, "loader must receive cooperative cancellation");
+        if cancel {
+            assert!(matches!(finished_outcome(&observed, run_id), Some(RunOutcome::Cancelled)));
+        } else {
+            assert!(matches!(finished_outcome(&observed, run_id), Some(RunOutcome::BudgetExhausted { exhaustion })
+                if exhaustion.message.contains("resolving checkpoint reviewer credentials")));
+        }
+    }
+}
+
 impl RuntimeLoader for HeldDeadlineLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         self.load_with_progress(request, RuntimeLoadProgress::default())
