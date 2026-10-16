@@ -541,6 +541,33 @@ async fn goal_check_process_kills_background_descendants_before_success() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn goal_check_noisy_descendants_cannot_starve_leader_exit() {
+    use super::super::goal_check::{ProcessOutcome, run_process};
+    use super::goal_driver_soak::{check_ready, observe_pid, signal_pipe};
+    for redirect in ["", " >&2"] {
+        let directory = TempDir::new().unwrap();
+        let ready = signal_pipe(directory.path(), "ready");
+        let release = signal_pipe(directory.path(), "release");
+        let command = format!("i=0; while [ \"$i\" -lt 32 ]; do yes flood{redirect} & i=$((i+1)); done; printf '%s' \"$!\" > descendant; printf r > ready; read -r signal < release; exit 0");
+        let task = tokio::spawn(run_process(
+            crate::workspace::Workspace::open(directory.path()).unwrap(), command,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            RunCancellation::new(), Arc::new(crate::ProcessProducer::new("test")), execution::RunResources::default(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), check_ready(&ready)).await.unwrap();
+        let pid: u32 = tokio::fs::read_to_string(directory.path().join("descendant")).await.unwrap().parse().unwrap();
+        let exited = observe_pid(pid);
+        rustix::io::write(release.get_ref(), b"release\n").unwrap();
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) }, "redirect={redirect}");
+        assert!(result.tail.len() <= 4096);
+        let mut readiness = exited.0.readable().await.unwrap();
+        readiness.retain_ready();
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_process_timeout_and_binary_output_stay_bounded() {
