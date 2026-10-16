@@ -2740,6 +2740,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_invalid_resume_does_not_pause_active_goal() {
+        for approval in [None, Some(qq_protocol::GoalCheckScope::Once)] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
+            let mut args = goal_request();
+            let command = crate::goals::prepare_set(&crate::cli::GoalSetArgs {
+                target: crate::cli::GoalTarget { session: handle.session_id, workspace: None, json: true },
+                objective: "keep working".into(), replace: false, check: None, clear_check: false,
+                goal_deadline: None, goal_max_runs: Some(2), max_cost_usd_nanos: None,
+            }, None, &args.defaults, u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap()).unwrap();
+            let goal = goal_receipt(send(&fixture.sessions, command).await.unwrap()).unwrap();
+            args.objective = None;
+            args.check = Some("new check".into());
+            args.check_approval = approval;
+            let mut opts = base;
+            opts.session = Some(handle.session_id);
+            let code = run_goal(&fixture.sessions, opts, args, std::future::pending(), &mut Vec::new(), &mut Vec::new()).await;
+            assert_eq!(code, 2);
+            let snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)).await.unwrap();
+            let current = snapshot.focused.unwrap().goal.unwrap();
+            assert_eq!(current.status, qq_protocol::GoalStatus::Active);
+            assert_eq!(current.revision, goal.revision);
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn foreground_goal_without_check_consent_returns_paused_without_model_work() {
         let fixture = fixture(|| TextProvider).await;
         let mut request = goal_request();
