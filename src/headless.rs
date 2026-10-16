@@ -3333,6 +3333,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_invalid_new_invocations_do_not_create_sessions() {
+        for case in ["replace", "runs", "objective", "missing"] {
+            let fixture = fixture(|| HangingProvider).await;
+            let opts = options(&fixture.workspace);
+            let CommandOutcome::WorkspaceResolved { workspace_id } = send(&fixture.sessions,
+                SessionCommand::ResolveWorkspace { path: fixture.workspace.display().to_string() }).await.unwrap().outcome else { panic!("workspace"); };
+            let mut request = goal_request();
+            match case {
+                "replace" => request.replace = true,
+                "runs" => request.max_runs = Some(request.defaults.max_runs + 1),
+                "objective" => request.objective = Some(String::new()),
+                _ => request.objective = None,
+            }
+            assert_eq!(run_goal(&fixture.sessions, opts, request, std::future::pending(),
+                &mut Vec::new(), &mut Vec::new()).await, 2, "{case}");
+            let snapshot = fixture.sessions.snapshot(SnapshotRequest::new(workspace_id, None, 16, 16)).await.unwrap();
+            assert!(snapshot.sessions.is_empty(), "{case}: invalid invocation created a visible session");
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_goal_text_trace_failure_preserves_summary_and_exit() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut opts = options(&fixture.workspace);
+        opts.format = HeadlessFormat::Text;
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        let mut request = goal_request();
+        request.check = Some("printf checked".into());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(&fixture.sessions, opts, request, std::future::pending(),
+            &mut stdout, &mut stderr).await;
+        assert_eq!(code, 6);
+        let summary = String::from_utf8(stdout).unwrap();
+        assert_eq!(summary.lines().count(), 1);
+        assert!(summary.starts_with("goal "), "{summary}");
+        assert!(!stderr.is_empty());
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn foreground_goal_without_check_consent_returns_paused_without_model_work() {
         let fixture = fixture(|| TextProvider).await;
         let mut request = goal_request();
