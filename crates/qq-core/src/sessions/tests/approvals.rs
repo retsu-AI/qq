@@ -4032,77 +4032,100 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
-    for run_duration in [false, true] {
-    struct Loader {
-        inner: DepthLoader,
-        root_loads: AtomicUsize,
-    }
-    impl RuntimeLoader for Loader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            if request.model.model.as_deref() != Some("test/child")
-                && self.root_loads.fetch_add(1, Ordering::SeqCst) > 0
-            {
-                return Box::pin(std::future::pending());
-            }
-            self.inner.load(request)
+    for (run_duration, preparation_ms) in [(false, 0), (true, 0), (true, 1_200_000)] {
+        struct Loader {
+            inner: DepthLoader,
+            root_loads: AtomicUsize,
+            held: StdMutex<
+                Option<(
+                    tokio::sync::oneshot::Sender<()>,
+                    tokio::sync::oneshot::Receiver<()>,
+                )>,
+            >,
         }
-    }
-    let directory = TempDir::new().unwrap();
-    let start = now_ms();
-    let epoch = super::goal_driver_soak::Epoch::new(start);
-    let parent_requests = Arc::new(StdMutex::new(Vec::new()));
-    let child_requests = Arc::new(StdMutex::new(Vec::new()));
-    let parent: Arc<dyn Provider> = Arc::new(MeteredDelegationProvider {
-        inner: ScriptedRunProvider {
-            requests: parent_requests.clone(),
-            script: vec![(
-                "spawn_agent",
-                r#"{"task":"ask the operator before proceeding","model":"test/child"}"#.to_owned(),
-            )],
-            turn: StdMutex::new(0),
-        },
-        usage: vec![Some(usage(1, 1))],
-        turn: AtomicUsize::new(0),
-    });
-    let child: Arc<dyn Provider> = Arc::new(ApprovalProvider {
-        requests: child_requests.clone(),
-        turn: StdMutex::new(0),
-        tool: "ask_user",
-        arguments: r#"{"questions":[{"prompt":"May the sponsored child proceed?"}]}"#,
-        tool_turns: 1,
-        usage: Some(provider_usage_of(usage(1, 1))),
-    });
-    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    options.approval_timeout = None;
-    let runtime = SessionRuntime::open(
-        options,
-        Arc::new(Loader {
-            inner: DepthLoader {
-                inner: QueueLoader {
-                    routed: vec![("test/child", child)],
-                    queue: StdMutex::new(vec![parent]),
-                },
-                max_depth: 2,
-                write_children: false,
-                pricing: None,
+        impl RuntimeLoader for Loader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                if request.model.model.as_deref() != Some("test/child")
+                    && self.root_loads.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    return Box::pin(std::future::pending());
+                }
+                let root = request.model.model.as_deref() != Some("test/child");
+                let loaded = self.inner.load(request);
+                let held = if root {
+                    self.held.lock().unwrap().take()
+                } else {
+                    None
+                };
+                Box::pin(async move {
+                    if let Some((entered, release)) = held {
+                        entered.send(()).unwrap();
+                        release.await.unwrap();
+                    }
+                    loaded.await
+                })
+            }
+        }
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let directory = TempDir::new().unwrap();
+        let start = now_ms();
+        let epoch = super::goal_driver_soak::Epoch::new(start);
+        let parent_requests = Arc::new(StdMutex::new(Vec::new()));
+        let child_requests = Arc::new(StdMutex::new(Vec::new()));
+        let parent: Arc<dyn Provider> = Arc::new(MeteredDelegationProvider {
+            inner: ScriptedRunProvider {
+                requests: parent_requests.clone(),
+                script: vec![(
+                    "spawn_agent",
+                    r#"{"task":"ask the operator before proceeding","model":"test/child"}"#
+                        .to_owned(),
+                )],
+                turn: StdMutex::new(0),
             },
-            root_loads: AtomicUsize::new(0),
-        }),
-    )
-    .await
-    .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace, None).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: created.committed_through,
-        })
+            usage: vec![Some(usage(1, 1))],
+            turn: AtomicUsize::new(0),
+        });
+        let child: Arc<dyn Provider> = Arc::new(ApprovalProvider {
+            requests: child_requests.clone(),
+            turn: StdMutex::new(0),
+            tool: "ask_user",
+            arguments: r#"{"questions":[{"prompt":"May the sponsored child proceed?"}]}"#,
+            tool_turns: 1,
+            usage: Some(provider_usage_of(usage(1, 1))),
+        });
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.approval_timeout = None;
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(Loader {
+                inner: DepthLoader {
+                    inner: QueueLoader {
+                        routed: vec![("test/child", child)],
+                        queue: StdMutex::new(vec![parent]),
+                    },
+                    max_depth: 2,
+                    write_children: false,
+                    pricing: None,
+                },
+                root_loads: AtomicUsize::new(0),
+                held: StdMutex::new((preparation_ms > 0).then_some((entered, released))),
+            }),
+        )
+        .await
         .unwrap();
-    runtime
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: created.committed_through,
+            })
+            .unwrap();
+        runtime
         .command(
             CommandId::generate().unwrap(),
             serde_json::from_value(serde_json::json!({
@@ -4116,86 +4139,94 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         )
         .await
         .unwrap();
-    let (observed, call) = collect_until_approval_requested(&mut events).await;
-    assert_eq!(call.name, "ask_user");
-    assert_ne!(call.session_id, session_id);
-    let parent = observed
-        .iter()
-        .find_map(|event| match event.event {
-            SessionEvent::RunStarted { run_id, .. } if event.session_id == session_id => {
-                Some(run_id)
-            }
-            _ => None,
-        })
-        .expect("the parent started before the child asked");
-    let child = call.run_id;
-    let owner: String = runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
-                [child.to_string()],
-                |row| row.get(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(owner, parent.to_string());
-    assert_eq!(parent_requests.lock().unwrap().len(), 1);
-    assert_eq!(child_requests.lock().unwrap().len(), 1);
-    // The finite token allowance keeps the read child blocking. Both model
-    // requests and the actual held call precede the only time advance.
-    tokio::time::pause();
-    epoch.advance(start + 3_600_001);
-    tokio::time::advance(Duration::from_millis(3_600_001)).await;
-    tokio::time::resume();
-    let completed = collect_until_run_finished(&mut events, parent).await;
-    runtime.shutdown().await.unwrap();
-    let snapshot = runtime
-        .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 16))
-        .await
-        .unwrap();
-    let child_snapshot = runtime
-        .snapshot(SnapshotRequest::new(
-            workspace,
-            Some(call.session_id),
-            8,
-            16,
-        ))
-        .await
-        .unwrap()
-        .focused
-        .unwrap();
-    assert_eq!(
-        child_snapshot
-            .runs
+        if preparation_ms > 0 {
+            entry.await.unwrap();
+            tokio::time::pause();
+            epoch.advance(start + preparation_ms);
+            tokio::time::advance(Duration::from_millis(preparation_ms)).await;
+            tokio::time::resume();
+            release.send(()).unwrap();
+        }
+        let (observed, call) = collect_until_approval_requested(&mut events).await;
+        assert_eq!(call.name, "ask_user");
+        assert_ne!(call.session_id, session_id);
+        let parent = observed
             .iter()
-            .find(|run| run.id == child)
-            .unwrap()
-            .outcome,
-        Some(RunOutcome::Cancelled),
-        "the regression requires parent teardown to cancel the held child"
-    );
-    assert!(
-        completed.iter().any(|event| matches!(
-            event.event, SessionEvent::RunFinished { run_id, .. } if run_id == child
-        )),
-        "the child must settle before its parent's terminal event"
-    );
-    let goal = snapshot.focused.unwrap().goal.unwrap();
-    assert!(
-        matches!(goal.status,
-            qq_protocol::GoalStatus::Paused {
-                reason: qq_protocol::GoalPauseReason::NeedsUser {
-                    cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+            .find_map(|event| match event.event {
+                SessionEvent::RunStarted { run_id, .. } if event.session_id == session_id => {
+                    Some(run_id)
                 }
-            } if tool_call_id == call.id
-        ),
-        "the sponsored held approval must outrank the owner's deadline: {:?}",
-        goal.status
-    );
-    assert_eq!(parent_requests.lock().unwrap().len(), 1);
-    assert_eq!(child_requests.lock().unwrap().len(), 1);
+                _ => None,
+            })
+            .expect("the parent started before the child asked");
+        let child = call.run_id;
+        let owner: String = runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
+                    [child.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(owner, parent.to_string());
+        assert_eq!(parent_requests.lock().unwrap().len(), 1);
+        assert_eq!(child_requests.lock().unwrap().len(), 1);
+        // The finite token allowance keeps the read child blocking. Both model
+        // requests and the actual held call precede the only time advance.
+        tokio::time::pause();
+        epoch.advance(start + 3_600_001);
+        tokio::time::advance(Duration::from_millis(3_600_001 - preparation_ms)).await;
+        tokio::time::resume();
+        let completed = collect_until_run_finished(&mut events, parent).await;
+        runtime.shutdown().await.unwrap();
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 16))
+            .await
+            .unwrap();
+        let child_snapshot = runtime
+            .snapshot(SnapshotRequest::new(
+                workspace,
+                Some(call.session_id),
+                8,
+                16,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(
+            child_snapshot
+                .runs
+                .iter()
+                .find(|run| run.id == child)
+                .unwrap()
+                .outcome,
+            Some(RunOutcome::Cancelled),
+            "the regression requires parent teardown to cancel the held child"
+        );
+        assert!(
+            completed.iter().any(|event| matches!(
+                event.event, SessionEvent::RunFinished { run_id, .. } if run_id == child
+            )),
+            "the child must settle before its parent's terminal event"
+        );
+        let goal = snapshot.focused.unwrap().goal.unwrap();
+        assert!(
+            matches!(goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+                    }
+                } if tool_call_id == call.id
+            ),
+            "the sponsored held approval must outrank the owner's deadline (preparation_ms={preparation_ms}): {:?}",
+            goal.status
+        );
+        assert_eq!(parent_requests.lock().unwrap().len(), 1);
+        assert_eq!(child_requests.lock().unwrap().len(), 1);
     }
 }
