@@ -2751,6 +2751,22 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
     harness.runtime.shutdown().await.unwrap();
 }
 
+async fn await_frozen_setup<T>(future: impl std::future::Future<Output = T>) -> T {
+    let (finished, waiting) = std::sync::mpsc::sync_channel::<()>(1);
+    let mut watchdog =
+        tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_secs(2)));
+    let result = tokio::select! {
+        result = future => result,
+        _ = &mut watchdog => panic!("frozen-clock setup did not reach its signal within two real seconds"),
+    };
+    drop(finished);
+    assert!(matches!(
+        watchdog.await.unwrap(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    result
+}
+
 #[tokio::test]
 async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() {
     for interruption in [0, 1, 2, 3, 4] {
@@ -2820,10 +2836,7 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         } else {
             submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
         };
-        tokio::time::timeout(Duration::from_secs(2), applying)
-            .await
-            .unwrap()
-            .unwrap();
+        await_frozen_setup(applying).await.unwrap();
         let mut observed = Vec::new();
         let child_run = loop {
             let event = harness.events.next().await.unwrap().unwrap();
@@ -5692,9 +5705,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             },
         )
         .await;
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
+        await_frozen_setup(entered.notified()).await;
         tokio::time::advance(Duration::from_millis(if expires_during_preflight {
             600
         } else {
