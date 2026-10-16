@@ -146,6 +146,25 @@ fn session_prompt_prefix_key(
     }
 }
 
+// Kept through child drain; removed on completion, panic or owner abort.
+struct GoalDeadlineRegistration {
+    inner: Arc<SessionRuntimeInner>,
+    run: RunId,
+}
+
+impl Drop for GoalDeadlineRegistration {
+    fn drop(&mut self) {
+        match self.inner.goal_deadlines.lock() {
+            Ok(mut deadlines) => {
+                deadlines.remove(&self.run);
+            }
+            Err(_) => {
+                self.inner.failed.send_replace(true);
+            }
+        }
+    }
+}
+
 struct PreparedExecution {
     goal_paid: Option<super::GoalPaidInput>,
     events: crate::RuntimeStream,
@@ -275,6 +294,17 @@ async fn prepare_execution(
     ));
     claimed.approval_delegate = Some(ApprovalDelegateSelection::from_identity(delegate_identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
+    if let Some(deadline) = deadline
+        && claimed.identity.kind == RunKind::Prompt
+        && (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
+    {
+        match inner.goal_deadlines.lock() {
+            Ok(mut deadlines) => {
+                deadlines.insert(claimed.identity.run_id, deadline);
+            }
+            Err(_) => return Err(internal_failure("goal deadline registry is unavailable")),
+        }
+    }
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
             exhaustion: Box::new(deadline.exhaustion()),
@@ -1032,6 +1062,13 @@ pub(super) async fn execute_run(
         return;
     }
 
+    let _goal_deadline =
+        (claimed.goal.is_some() || claimed.goal_spend_owner.is_some()).then(|| {
+            GoalDeadlineRegistration {
+                inner: Arc::clone(&inner),
+                run: claimed.identity.run_id,
+            }
+        });
     let execution_started = tokio::time::Instant::now();
     if let Some(admission) = claimed.goal_admission {
         let refusal = match admission {

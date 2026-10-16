@@ -2272,10 +2272,15 @@ fn apply_denial_capacity_path(
             CommandOrigin::Client,
         )
         .map(|_| ()),
-        DenialCapacityPath::Timeout => {
-            conclude_tool_approval(connection, store_id, claimed.identity, tool_call_id, true)
-                .map(|_| ())
-        }
+        DenialCapacityPath::Timeout => conclude_tool_approval(
+            connection,
+            store_id,
+            claimed.identity,
+            tool_call_id,
+            true,
+            &[],
+        )
+        .map(|_| ()),
     }
 }
 

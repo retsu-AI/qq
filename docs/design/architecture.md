@@ -1748,7 +1748,12 @@ denies the call, pauses the goal for approval, and requests family cancellation
 before another model request. This approval pause takes precedence over goal
 exhaustion, including when the absolute deadline ends the hold. A client resolution
 that committed first retains precedence. Escalation does not restart the goal
-clock; ordinary goal-less approval behavior is unchanged.
+clock; ordinary goal-less approval behavior is unchanged. Sponsored approval
+cancellation also checks live monotonic owner deadlines, retained through child
+drain and removed with the execution owner. Preparation counts toward expiry;
+the later durable RunStarted timestamp is not a replacement clock. Expiry is
+captured on the executor before a store transaction rechecks current goal
+identity, active state and explicit owner cancellation.
 
 Provider-retry pauses keep the goal active with a1-minute exponential backoff,
 capped by the persisted workspace policy (30minutes by default) and the goal deadline. The retry streak comes from at most

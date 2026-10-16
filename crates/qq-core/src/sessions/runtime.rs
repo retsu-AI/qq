@@ -724,6 +724,8 @@ pub(super) struct SessionRuntimeInner {
     pub(super) max_active_runs: usize,
     pub(super) schedule: mpsc::Sender<()>,
     pub(super) cancellations: Mutex<HashMap<RunId, watch::Sender<bool>>>,
+    // Only executing paid prompt runs; their scoped registration removes entries after drain.
+    pub(super) goal_deadlines: Mutex<HashMap<RunId, crate::runtime::RunDeadline>>,
     /// Live steering channels for executing prompt runs, registered when the
     /// run loop starts and removed when it settles.
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
@@ -896,6 +898,7 @@ impl SessionRuntime {
             max_active_runs: options.max_active_runs,
             schedule,
             cancellations: Mutex::new(HashMap::new()),
+            goal_deadlines: Mutex::new(HashMap::new()),
             steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             approval_timeout: options.approval_timeout,

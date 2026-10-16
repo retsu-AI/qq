@@ -398,27 +398,25 @@ pub(super) fn approval_timeout(
 pub(super) fn expired_approval_owner(
     connection: &Connection,
     identity: RunIdentity,
+    expired_owners: &[RunId],
 ) -> Result<bool, SessionRuntimeError> {
     for (owner, session, id) in bound_goal_owners(connection, identity)? {
         let Some(id) = id else { continue };
         let Some(goal) = goals::load_live(connection, session)? else {
             continue;
         };
-        if goal.goal_id != id || goal.status != qq_protocol::GoalStatus::Active {
+        if goal.goal_id != id
+            || goal.status != qq_protocol::GoalStatus::Active
+            || (goal.budget.deadline_ms > now_ms() && !expired_owners.contains(&owner))
+        {
             continue;
         }
-        let (cancelled, started, json): (bool, Option<u64>, String) = connection.query_row(
-            "SELECT cancel_requested, started_at_ms, limits_json FROM runs WHERE id=?1",
-            [owner.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let cancelled: bool = connection.query_row(
+            "SELECT cancel_requested FROM runs WHERE id=?1",
+            [owner.to_string()],
+            |row| row.get(0),
         )?;
-        let (policy, _) = load(connection, id)?;
-        let requested = serde_json::from_str::<RunLimits>(&json)?.max_duration_ms;
-        let duration = match (policy.per_run.max_duration_ms, requested) {
-            (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
-        };
-        let duration_expired = started.zip(duration)
-            .is_some_and(|(start, cap)| now_ms().saturating_sub(start) >= cap);
-        if !cancelled && (goal.budget.deadline_ms <= now_ms() || duration_expired) {
+        if !cancelled {
             return Ok(true);
         }
     }
@@ -432,13 +430,14 @@ pub(super) fn pause_for_approval(
     identity: RunIdentity,
     call: ToolCallId,
     now: u64,
+    expired_owners: &[RunId],
 ) -> Result<Vec<RunId>, SessionRuntimeError> {
     let cancelled: bool = connection.query_row(
         "SELECT cancel_requested OR outcome_json IS NOT NULL FROM runs WHERE id=?1",
         [identity.run_id.to_string()],
         |row| row.get(0),
     )?;
-    if cancelled && !expired_approval_owner(connection, identity)? {
+    if cancelled && !expired_approval_owner(connection, identity, expired_owners)? {
         return Ok(Vec::new());
     }
     let mut signals = Vec::new();

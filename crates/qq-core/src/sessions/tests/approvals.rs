@@ -4032,7 +4032,12 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
-    for (run_duration, preparation_ms) in [(false, 0), (true, 0), (true, 1_200_000)] {
+    for (run_duration, preparation_ms, wall_clock_lags) in [
+        (false, 0, false),
+        (true, 0, false),
+        (true, 1_200_000, false),
+        (true, 0, true),
+    ] {
         struct Loader {
             inner: DepthLoader,
             root_loads: AtomicUsize,
@@ -4178,7 +4183,9 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         // The finite token allowance keeps the read child blocking. Both model
         // requests and the actual held call precede the only time advance.
         tokio::time::pause();
-        epoch.advance(start + 3_600_001);
+        if !wall_clock_lags {
+            epoch.advance(start + 3_600_001);
+        }
         tokio::time::advance(Duration::from_millis(3_600_001 - preparation_ms)).await;
         tokio::time::resume();
         let completed = collect_until_run_finished(&mut events, parent).await;
@@ -4223,7 +4230,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
                     }
                 } if tool_call_id == call.id
             ),
-            "the sponsored held approval must outrank the owner's deadline (preparation_ms={preparation_ms}): {:?}",
+            "the sponsored held approval must outrank the owner's deadline (preparation_ms={preparation_ms}, wall_clock_lags={wall_clock_lags}): {:?}",
             goal.status
         );
         assert_eq!(parent_requests.lock().unwrap().len(), 1);

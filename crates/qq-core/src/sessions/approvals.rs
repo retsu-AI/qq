@@ -579,17 +579,25 @@ pub(super) async fn expire_goal_hold(
     if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
         return Ok(());
     }
+    // Capture on the executor: Tokio's simulated clock is runtime-local.
+    let expired_owners = inner
+        .goal_deadlines
+        .lock()
+        .map_err(|_| SessionRuntimeError::Unavailable)?
+        .iter()
+        .filter_map(|(run, deadline)| deadline.expired().then_some(*run))
+        .collect::<Vec<_>>();
     let identity = claimed.identity;
     let store_id = inner.store.store_id();
     let concluded = inner.store.call(store::Priority::Output, move |connection| {
-        if expired_only && !goal_policy::expired_approval_owner(connection, identity)? {
+        if expired_only && !goal_policy::expired_approval_owner(connection, identity, &expired_owners)? {
             return Ok(None);
         }
         let call: Option<String> = connection.query_row(
             "SELECT id FROM tool_calls WHERE run_id=?1 AND state='awaiting_approval' ORDER BY turn_ordinal,call_ordinal LIMIT 1",
             [identity.run_id.to_string()], |row| row.get(0)).optional()?;
         match call {
-            Some(call) => tool_calls::conclude_tool_approval(connection, store_id, identity, parse_id(&call)?, true).map(Some),
+            Some(call) => tool_calls::conclude_tool_approval(connection, store_id, identity, parse_id(&call)?, true, &expired_owners).map(Some),
             None => Ok(None),
         }
     }).await?;
