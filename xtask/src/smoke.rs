@@ -659,9 +659,27 @@ async fn run_goal_budget(home: &Home) -> Result<(), String> {
             && runs[0]["goal"]["goal_id"] == final_record["goal"]["goal_id"],
         "missing settled goal run or incorrect binding: {runs:?}"
     );
+    let requests = provider.requests()?;
     ensure!(
-        provider.requests()?.len() == 1,
-        "one-run goal issued extra model requests"
+        requests.len() == 2,
+        "expected work and final-slot handoff in the single run, saw {} requests",
+        requests.len()
+    );
+    let handoff: serde_json::Value = serde_json::from_str(
+        requests[1]
+            .split_once("\r\n\r\n")
+            .ok_or("handoff request has no HTTP body")?
+            .1,
+    )
+    .map_err(|error| format!("decode handoff request: {error}"))?;
+    ensure!(
+        handoff["tool_choice"] == "none"
+            && handoff["input"]
+                .as_array()
+                .and_then(|input| input.last())
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|text| text.contains("Give a concise handoff")),
+        "the final request did not enforce a tool-free handoff"
     );
     Ok(())
 }
