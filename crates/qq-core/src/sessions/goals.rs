@@ -1357,9 +1357,18 @@ pub(super) fn admit_run(
             }
         )+ };
     }
-    clamp!(max_duration_ms, max_model_turns, max_tool_calls, max_total_tokens,
-        max_cost_usd_nanos, max_input_tokens, max_output_tokens, max_tool_output_bytes,
-        max_children, max_concurrent_children);
+    clamp!(
+        max_duration_ms,
+        max_model_turns,
+        max_tool_calls,
+        max_total_tokens,
+        max_cost_usd_nanos,
+        max_input_tokens,
+        max_output_tokens,
+        max_tool_output_bytes,
+        max_children,
+        max_concurrent_children
+    );
     if final_slot {
         let cap = current
             .budget

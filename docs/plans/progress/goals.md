@@ -845,3 +845,9 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 
 - Rebased full gate exposed #293's preparation test expecting a checkpoint stage after its real100ms setup deadline could already expire. Narrow and8concurrent diagnostic copies pass; source review confirms an expired first poll can emit entered only during cancellation drain. Production snapshots the stage before cancellation correctly.
 - Replace the ambiguous Notify with a bounded entry receipt proving not-yet-cancelled, establish that stage before explicit virtual expiry, and retain exact stage/no-request/cooperative-drain assertions. Narrow corrected regression1/1 passes in1.74s; independent review approved. No production bounds changed. The entry receipt encodes the fixture ordering rather than loosening the verdict. Final-head gates follow.
+
+### 2026-10-16 — G3 managed prompt ceilings review repair
+
+- New Codex finding330/f1 reproduced independently on originating #330: unmanaged prompt claim lacks managed per-run limits (g3-managed-caps-red.log). Ported test-first792e2d95/ba072461 from the isolated subscription-only review task as a51fef7e/978c3d3a.
+- Intersect all ten execution-limit fields with current managed policy at claim and refreshed admission, retaining stricter caller limits and final-slot/audit bounds. Independent fixed-snapshot review found no source defect; identified that initial regression only proved claim.
+- Extended the regression to tighten policy after reservation, require Reprepare, retry actual start and inspect durably persisted limits. Narrow test passes1/1 (9448918a); broader/final-head gate follows after remaining related findings are integrated. Nothing from this repair is published yet.

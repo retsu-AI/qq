@@ -1,38 +1,142 @@
 use super::*;
 
-
 #[tokio::test]
 async fn managed_goal_prompt_limits_are_clamped_at_claim_and_start() {
     for explicit in [false, true] {
         let (_directory, store, initial) = super::goals::model_goal_claim(true).await;
         let session = initial.identity.session_id;
-        store.finish_run(&initial, RunOutcome::Completed, None, TeardownComplete::nothing_ran()).await.unwrap();
+        store
+            .finish_run(
+                &initial,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
         let caps = RunLimits {
-            max_duration_ms: Some(30_000), max_model_turns: Some(3), max_tool_calls: Some(4),
-            max_total_tokens: Some(50_000), max_cost_usd_nanos: Some(60_000),
-            max_input_tokens: Some(40_000), max_output_tokens: Some(10_000),
-            max_tool_output_bytes: Some(2048), max_children: Some(2), max_concurrent_children: Some(1),
+            max_duration_ms: Some(30_000),
+            max_model_turns: Some(3),
+            max_tool_calls: Some(4),
+            max_total_tokens: Some(50_000),
+            max_cost_usd_nanos: Some(60_000),
+            max_input_tokens: Some(40_000),
+            max_output_tokens: Some(10_000),
+            max_tool_output_bytes: Some(2048),
+            max_children: Some(2),
+            max_concurrent_children: Some(1),
         };
-        store.call(Priority::Control, move |connection| {
-            let goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
-            let (_, at) = goal_policy::load(connection, goal.goal_id)?;
-            goal_policy::save(connection, goal.goal_id, GoalPolicy { per_run: caps, ..GoalPolicy::default() }, at)
-        }).await.unwrap();
+        store
+            .call(Priority::Control, move |connection| {
+                let goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+                goal_policy::save(
+                    connection,
+                    goal.goal_id,
+                    GoalPolicy {
+                        per_run: caps,
+                        ..GoalPolicy::default()
+                    },
+                    at,
+                )
+            })
+            .await
+            .unwrap();
         let mut requested = RunLimits::default();
         if explicit {
             requested = caps;
             requested.max_model_turns = Some(100);
             requested.max_output_tokens = Some(2); // A stricter caller limit survives.
         }
-        store.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
-            session_id: session, input: vec![InputPart::text("manual goal work")], limits: requested,
-            correlation: Correlation::default(), output: None,
-        }).await.unwrap();
-        let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: session,
+                    input: vec![InputPart::text("manual goal work")],
+                    limits: requested,
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut claim = store.reserve_next_run(false).await.unwrap().unwrap();
         let mut expected = caps;
-        if explicit { expected.max_output_tokens = Some(2); }
+        if explicit {
+            expected.max_output_tokens = Some(2);
+        }
         assert_eq!(claim.limits, expected, "explicit={explicit}");
-        store.finish_reserved_run(&claim, RunOutcome::Cancelled).await.unwrap();
+        let mut tightened = caps;
+        tightened.max_model_turns = Some(2);
+        tightened.max_tool_calls = Some(3);
+        tightened.max_output_tokens = Some(8_000);
+        store
+            .call(Priority::Control, move |connection| {
+                let goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+                goal_policy::save(
+                    connection,
+                    goal.goal_id,
+                    GoalPolicy {
+                        per_run: tightened,
+                        ..GoalPolicy::default()
+                    },
+                    at,
+                )
+            })
+            .await
+            .unwrap();
+        if explicit {
+            tightened.max_output_tokens = Some(2);
+        }
+        let refused = store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap();
+        let Err(claim::GoalStartRefusal::Reprepare { limits, final_slot }) = refused else {
+            panic!("a tighter policy must require reassembly before start: {refused:?}");
+        };
+        assert_eq!(*limits, tightened);
+        claim.limits = *limits;
+        if let Some(crate::sessions::goals::GoalAdmission::Allowed {
+            final_slot: admitted,
+            ..
+        }) = &mut claim.goal_admission
+        {
+            *admitted = final_slot;
+        }
+        store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let durable = store
+            .snapshot(SnapshotRequest::new(
+                claim.identity.workspace_id,
+                Some(session),
+                1,
+                16,
+            ))
+            .await
+            .unwrap();
+        let focused = durable.focused.unwrap();
+        let run = focused
+            .runs
+            .iter()
+            .find(|run| run.id == claim.identity.run_id)
+            .unwrap();
+        assert_eq!(run.limits.as_deref(), Some(&tightened));
+        store
+            .finish_run(
+                &claim,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
         store.close().await.unwrap();
     }
 }
