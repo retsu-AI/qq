@@ -1893,7 +1893,10 @@ is executing. The store belongs on a local filesystem, which SQLite's WAL
 mode already requires.
 
 Authorized goal checks use a distinct persisted `goal_check` run kind (store
-schema56) and bypass model loading. Reservation fixes one acquisition/process
+schema56) and bypass model loading. A current pending native audit may verify the
+last permitted model run because the check consumes no model run. Deadline,
+token and cost ceilings, including unknown accounting, still stop verification;
+a no-check model audit requires another available model run. Reservation fixes one acquisition/process
 deadline, bounded by the goal deadline. Waiting checks hold their own session
 reservation but do not exclude each other or the descendants needed by active
 work. The start transaction waits for active/preparing model work and running

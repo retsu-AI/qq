@@ -910,3 +910,14 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
   Independent source review finds no blocker. Linux exercises the portable
   signal-zero primitive; actual macOS execution remains unverified locally.
   Full gate, stack integration/publication and review resolution remain pending.
+
+### 2026-10-16 — G3 final-slot verification and noisy descendants
+
+- Reproduced a cap-1 achievement claim losing its native audit and 32 noisy
+  descendants starving leader exit until timeout. Red commits precede fixes.
+- Native checks bypass only the model-run ceiling for a current pending audit;
+  strict paid admission and all deadline/token/cost/unknown limits remain.
+  Exit observation precedes pipe reads, below cancellation and deadline.
+- Focused completion tests:29/29 pass. Independent review approves b75b3419.
+  Full workspace gate passes (111.1s); final docs/evidence, smoke, stack
+  publication and hosted review-thread resolution remain pending.
