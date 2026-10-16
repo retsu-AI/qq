@@ -491,7 +491,7 @@ pub async fn run_goal(
             guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
                 .then(|| (sessions.clone(), goal.session_id));
         }
-        let expected = goal_identity(&goal);
+        let mut expected = goal_identity(&goal);
         let stopped = if goal.status != qq_protocol::GoalStatus::Active {
             Some(settle_goal(sessions, &handle, expected).await?)
         } else { None };
@@ -543,6 +543,8 @@ pub async fn run_goal(
                             && updated.goal_id == expected.goal_id
                             && updated.revision >= expected.revision => {
                             accepted = Some((handle.workspace_id, updated.clone()));
+                            expected = goal_identity(updated);
+                            guard.expected = expected;
                             if updated.status != qq_protocol::GoalStatus::Active && final_goal.is_none() {
                                 interrupt_armed = false;
                                 guard.expected = goal_identity(updated);
