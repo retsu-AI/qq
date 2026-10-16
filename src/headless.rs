@@ -3235,6 +3235,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_interrupt_reconciles_durable_achievement() {
+        let fixture = fixture(|| GoalVerdictProvider { blocked: false, turns: Mutex::new(0) }).await;
+        let base = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
+        let mut observer = fixture.sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after: handle.subscribe_after,
+        }).unwrap();
+        let interrupt = async move {
+            loop {
+                let event = observer.next().await.unwrap().unwrap();
+                if matches!(event.event, SessionEvent::GoalUpdated { goal }
+                    if goal.status == qq_protocol::GoalStatus::Achieved) { break; }
+            }
+        };
+        let mut opts = base;
+        opts.session = Some(handle.session_id);
+        let mut request = goal_request();
+        request.max_runs = Some(3);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(&fixture.sessions, opts, request, interrupt, &mut stdout, &mut stderr).await;
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(records.last().unwrap()["status"], "achieved");
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn foreground_goal_interrupt_with_queued_question_replays_to_final_record() {
         let fixture = fixture(|| AskingProvider {
             turn: Mutex::new(0),
