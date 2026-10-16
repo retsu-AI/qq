@@ -192,6 +192,10 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 /// maps every failure to a distinguishable exit code: 0 success, 1 task or
 /// model failure, 2 invalid configuration, 3 timeout or budget exhaustion,
 /// 4 harness or persistence failure, 130 interrupted.
+async fn close_headless(sessions: &qq_core::SessionRuntime, _goal: bool) -> Result<(), qq_core::SessionRuntimeError> {
+    sessions.close().await
+}
+
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
     let steer_stdin = args.steer_stdin;
     match prepare_headless(args, overrides).await {

@@ -3496,7 +3496,13 @@ mod tests {
                 .status,
             qq_protocol::RunStatus::Running
         );
-        fixture.sessions.close().await.unwrap();
+        let closing = crate::close_headless(&fixture.sessions, true);
+        tokio::pin!(closing);
+        assert!(futures_util::poll!(closing.as_mut()).is_pending());
+        assert_eq!(fixture.sessions.run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+            .await.unwrap().status, qq_protocol::RunStatus::Running);
+        request_cancel(&fixture.sessions, foreign_id).await.unwrap();
+        closing.await.unwrap();
     }
 
     #[derive(Clone, Default)]
