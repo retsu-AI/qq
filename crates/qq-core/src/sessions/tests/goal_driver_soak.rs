@@ -572,6 +572,7 @@ async fn multi_day_driver_survives_real_process_kills_waits_and_outages() {
     multi_day(false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn multi_day_checked_goal_achieves_after_forty_runs_and_real_process_kills() {
     multi_day(true).await;

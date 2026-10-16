@@ -1,5 +1,6 @@
 use super::store::Priority;
 use super::*;
+#[cfg(unix)]
 use crate::tools::process_context;
 #[cfg(unix)]
 use crate::tools::{ProcessGroupGuard, ToolCancellation};
@@ -11,16 +12,16 @@ use tokio::io::AsyncReadExt;
 
 const OUTPUT_BYTES: usize = 4096;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct ResultHold {
     session: SessionId,
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static RESULT_HOLDS: Mutex<Vec<ResultHold>> = Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn hold_result(
     session: SessionId,
 ) -> (
@@ -37,7 +38,7 @@ pub(super) fn hold_result(
     (entered_rx, release)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_result(session: SessionId) {
     let hold = {
         let mut holds = RESULT_HOLDS.lock().unwrap();
@@ -71,22 +72,31 @@ pub(super) enum ProcessError {
     #[cfg(not(unix))]
     #[error("completion-check process supervision is unavailable on this platform")]
     UnsupportedPlatform,
+    #[cfg(unix)]
     #[error("check preparation failed: {0}")]
     Preparation(#[source] process_context::PreparationError),
+    #[cfg(unix)]
     #[error("check preparation task stopped: {0}")]
     PreparationTask(#[source] tokio::task::JoinError),
+    #[cfg(unix)]
     #[error("check blocking executor is closed")]
     ExecutorClosed,
+    #[cfg(unix)]
     #[error("check process could not start: {0}")]
     Spawn(#[source] std::io::Error),
+    #[cfg(unix)]
     #[error("check output could not be read: {0}")]
     Read(#[source] std::io::Error),
+    #[cfg(unix)]
     #[error("check process group could not be terminated: {0}")]
     Kill(#[source] std::io::Error),
+    #[cfg(unix)]
     #[error("check exit observation failed: {0}")]
     Observe(#[source] std::io::Error),
+    #[cfg(unix)]
     #[error("check exit observer stopped: {0}")]
     ObserverTask(#[source] tokio::task::JoinError),
+    #[cfg(unix)]
     #[error(
         "check process cleanup failed (original: {original:?}; group: {group:?}; leader: {leader:?}; reap: {reap:?})"
     )]
@@ -96,6 +106,7 @@ pub(super) enum ProcessError {
         leader: Option<std::io::Error>,
         reap: Option<std::io::Error>,
     },
+    #[cfg(unix)]
     #[error("check process exit could not be confirmed: {0}")]
     Reap(#[source] std::io::Error),
 }
@@ -756,6 +767,7 @@ pub(super) async fn execute(
                 };
                 match result {
                     Ok(result) => break Completion::Process(result),
+                    #[cfg(unix)]
                     Err(ProcessError::Cleanup { .. }) => {
                         inner.failed.send_replace(true);
                         return;
@@ -781,7 +793,7 @@ pub(super) async fn execute(
             return;
         }
     };
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pause_result(claimed.identity.session_id).await;
     let claim = claimed.clone();
     match inner

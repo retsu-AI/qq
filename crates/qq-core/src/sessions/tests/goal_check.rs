@@ -17,13 +17,21 @@ impl Provider for Model {
             assert!(
                 request_texts(&request)
                     .iter()
-                    .any(|text| text.contains("exit 7")),
+                    .any(|text| text.contains(if cfg!(unix) {
+                        "exit 7"
+                    } else {
+                        "check execution failed"
+                    })),
                 "failed check exit status must reach the next goal run"
             );
             assert_eq!(
                 request_texts(&request)
                     .join("\n")
-                    .matches("check-output-unique")
+                    .matches(if cfg!(unix) {
+                        "check-output-unique"
+                    } else {
+                        "completion-check process supervision is unavailable on this platform"
+                    })
                     .count(),
                 1,
                 "check-only result messages must not leak into model context alongside the goal notice"
@@ -98,13 +106,21 @@ impl WorkspaceGrantAuthority for Authority {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
     once_check(true).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue_loop() {
+    once_check(false).await;
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn goal_check_unavailable_supervision_consumes_once_and_fails_closed_durably() {
     once_check(false).await;
 }
 
@@ -205,6 +221,9 @@ async fn once_check(success: bool) {
     })
     .await
     .expect("authorized exit-zero check must execute and achieve the goal");
+    #[cfg(not(unix))]
+    assert!(!directory.path().join("goal-check-marker").exists());
+    #[cfg(unix)]
     assert_eq!(
         std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
         "checked"
@@ -486,6 +505,7 @@ async fn goal_check_process_timeout_and_binary_output_stay_bounded() {
     assert!(result.tail.contains('\u{fffd}'));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
     struct CoordinatedAuthority {
@@ -811,6 +831,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_historical_result_survives_edit_replace_and_clear() {
     const COMMAND: &str = "printf '%05000d' 0; printf historical-check-result; exit 7";
@@ -1048,6 +1069,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evidence() {
     const COMMAND: &str = "printf checked >> three-checks; printf failure-evidence; exit 7";
