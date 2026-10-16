@@ -4401,15 +4401,21 @@ mod tests {
         struct ObservedRevision {
             output: ForegroundOutput,
             seen: Option<tokio::sync::oneshot::Sender<()>>,
+            fail_edit: bool,
         }
         impl Write for ObservedRevision {
             fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let edited =
+                    serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|record| {
+                        record["envelope"]["event"]["type"] == "goal_updated"
+                            && record["envelope"]["event"]["goal"]["revision"].as_u64() == Some(2)
+                    });
+                if edited && self.fail_edit {
+                    self.fail_edit = false;
+                    return Err(io::Error::other("injected edit-event output failure"));
+                }
                 let count = self.output.write(bytes)?;
-                if let Ok(record) = serde_json::from_slice::<serde_json::Value>(bytes)
-                    && record["envelope"]["event"]["type"] == "goal_updated"
-                    && record["envelope"]["event"]["goal"]["revision"].as_u64() == Some(2)
-                    && let Some(seen) = self.seen.take()
-                {
+                if edited && let Some(seen) = self.seen.take() {
                     let _ = seen.send(());
                 }
                 Ok(count)
@@ -4418,7 +4424,7 @@ mod tests {
                 self.output.flush()
             }
         }
-        for drop_owner in [false, true] {
+        for action in ["interrupt", "drop", "output"] {
             let fixture = fixture(|| HangingProvider).await;
             let mut opts = options(&fixture.workspace);
             let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
@@ -4437,6 +4443,7 @@ mod tests {
             let mut writer = ObservedRevision {
                 output: ForegroundOutput::default(),
                 seen: Some(seen),
+                fail_edit: action == "output",
             };
             let mut stderr = Vec::new();
             let mut foreground = Box::pin(run_goal(
@@ -4485,20 +4492,52 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::select! { result = observed => result.unwrap(),
-                code = &mut foreground => panic!("returned while observing edit: {code}") }
-            })
-            .await
-            .unwrap();
-            if drop_owner {
-                drop(foreground);
-            } else {
-                interrupt.send(()).unwrap();
+            if action == "output" {
                 let code = tokio::time::timeout(Duration::from_secs(5), foreground)
                     .await
                     .unwrap();
-                assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+                assert_eq!(code, 4, "{}", String::from_utf8_lossy(&stderr));
+                let stopped = fixture
+                    .sessions
+                    .snapshot(SnapshotRequest::new(
+                        handle.workspace_id,
+                        Some(handle.session_id),
+                        1,
+                        1,
+                    ))
+                    .await
+                    .unwrap()
+                    .focused
+                    .unwrap()
+                    .goal
+                    .unwrap();
+                assert!(
+                    matches!(
+                        stopped.status,
+                        qq_protocol::GoalStatus::Paused {
+                            reason: qq_protocol::GoalPauseReason::User,
+                        }
+                    ),
+                    "edit-event output failure left adopted goal running: {stopped:?}; {}",
+                    String::from_utf8_lossy(&stderr)
+                );
+                assert!(stopped.pending_run_id.is_none());
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::select! { result = observed => result.unwrap(),
+                    code = &mut foreground => panic!("returned while observing edit: {code}") }
+                })
+                .await
+                .unwrap();
+                if action == "drop" {
+                    drop(foreground);
+                } else {
+                    interrupt.send(()).unwrap();
+                    let code = tokio::time::timeout(Duration::from_secs(5), foreground)
+                        .await
+                        .unwrap();
+                    assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+                }
             }
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
