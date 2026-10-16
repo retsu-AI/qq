@@ -404,18 +404,21 @@ pub(super) fn expired_approval_owner(
         let Some(goal) = goals::load_live(connection, session)? else {
             continue;
         };
-        if goal.goal_id != id
-            || goal.status != qq_protocol::GoalStatus::Active
-            || goal.budget.deadline_ms > now_ms()
-        {
+        if goal.goal_id != id || goal.status != qq_protocol::GoalStatus::Active {
             continue;
         }
-        let cancelled: bool = connection.query_row(
-            "SELECT cancel_requested FROM runs WHERE id=?1",
-            [owner.to_string()],
-            |row| row.get(0),
+        let (cancelled, started, json): (bool, Option<u64>, String) = connection.query_row(
+            "SELECT cancel_requested, started_at_ms, limits_json FROM runs WHERE id=?1",
+            [owner.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if !cancelled {
+        let (policy, _) = load(connection, id)?;
+        let requested = serde_json::from_str::<RunLimits>(&json)?.max_duration_ms;
+        let duration = match (policy.per_run.max_duration_ms, requested) {
+            (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
+        };
+        let duration_expired = started.zip(duration)
+            .is_some_and(|(start, cap)| now_ms().saturating_sub(start) >= cap);
+        if !cancelled && (goal.budget.deadline_ms <= now_ms() || duration_expired) {
             return Ok(true);
         }
     }
