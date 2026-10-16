@@ -607,7 +607,12 @@ mod tests {
             Err(GoalError::Achieved)
         ));
         assert!(matches!(
-            prepare_command(&command(&["set", "new", "--replace"]), None, Some(&defaults), NOW),
+            prepare_command(
+                &command(&["set", "new", "--replace"]),
+                None,
+                Some(&defaults),
+                NOW
+            ),
             Err(GoalError::GoalMissing)
         ));
         let replacement = prepare_command(

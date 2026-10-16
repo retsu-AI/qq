@@ -3174,6 +3174,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_goal_missing_specification_rejects_before_settings_change() {
+        for replace in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut opts = base;
+            opts.session = Some(handle.session_id);
+            opts.model.model = Some("test/changed-model".into());
+            opts.profile = qq_protocol::AgentProfileId::new("reviewer").unwrap();
+            opts.approval = HeadlessApproval::Full;
+            let mut request = goal_request();
+            request.replace = replace;
+            if !replace {
+                request.objective = None;
+            }
+            let mut stdout = Vec::new();
+            assert_eq!(
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    request,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut Vec::new()
+                )
+                .await,
+                2
+            );
+            assert!(stdout.is_empty());
+            let focused = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap();
+            assert!(focused.goal.is_none());
+            assert_eq!(
+                focused.summary.approval_mode,
+                qq_protocol::ApprovalMode::ReadOnly
+            );
+            assert_eq!(
+                focused.summary.profile,
+                qq_protocol::AgentProfileId::default()
+            );
+            assert_eq!(focused.summary.model.as_deref(), Some("test/model"));
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn foreground_goal_without_check_consent_returns_paused_without_model_work() {
         let fixture = fixture(|| TextProvider).await;
         let mut request = goal_request();
