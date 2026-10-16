@@ -9,6 +9,10 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP2 | One provider refresh lock | Planned | | |
 | AP3 | Audiences defined once | Planned | | |
 | AP4 | Store split out of `lib.rs` | Planned | | |
+| AP5 | One request-credential provider + bench | Planned | | |
+| AP6 | Header-set request credentials | Planned | | |
+| AP7 | Table-driven built-in providers (ADR) | Planned | | |
+| AP8 | Provider-neutral OAuth grants | Planned | | |
 
 ## Log
 
