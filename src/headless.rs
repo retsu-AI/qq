@@ -172,6 +172,16 @@ impl RecordSink {
             return Ok(());
         }
         let line = serde_json::to_string(&record).map_err(io::Error::other)?;
+        let final_code = match &record {
+            HeadlessRecordRef::Goal(goal) => Some(goal.exit_code),
+            _ => None,
+        };
+        if self.to_stdout && let Some(code) = final_code {
+            stdout.write_all(line.as_bytes())?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+            self.goal_record = GoalRecordState::Emitted(code);
+        }
         if let Some(trace) = &mut self.trace {
             let result = trace
                 .write_all(line.as_bytes())
@@ -183,7 +193,7 @@ impl RecordSink {
                 return Err(error);
             }
         }
-        if self.to_stdout {
+        if self.to_stdout && final_code.is_none() {
             stdout.write_all(line.as_bytes())?;
             stdout.write_all(b"\n")?;
             stdout.flush()?;
