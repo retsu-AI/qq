@@ -3543,6 +3543,11 @@ mod tests {
             })
             .await
             .unwrap();
+            let goal = goal_receipt(send(&fixture.sessions, SessionCommand::SetGoal {
+                session_id: owner.session_id, objective: "edited while running".into(),
+                check: goal.check.clone(), budget: Box::new(goal.budget.clone()),
+                expected: Some(goal_identity(&goal)), replace: false,
+            }).await.unwrap()).unwrap();
             let mut options = base;
             options.session = Some(owner.session_id);
             let mut request = goal_request();
