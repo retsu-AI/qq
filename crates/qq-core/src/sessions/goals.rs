@@ -1475,8 +1475,11 @@ pub(super) fn goal_driver_exhaustion(
 ) -> Option<qq_protocol::GoalExhaustion> {
     // Native verification commits no model run. It may use the final work
     // run's claim, but never bypass its deadline or token/cost ceilings.
-    exhaustion(goal, now, goal.check.is_some() && goal.audit_pending
-        && goal.audit_revision == Some(goal.revision))
+    exhaustion(
+        goal,
+        now,
+        goal.check.is_some() && goal.audit_pending && goal.audit_revision == Some(goal.revision),
+    )
 }
 
 fn exhaustion(
