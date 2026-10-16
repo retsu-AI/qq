@@ -46,6 +46,12 @@ pub enum GoalError {
     Output(#[source] io::Error),
 }
 
+impl GoalError {
+    pub(crate) fn exit_code(&self) -> std::process::ExitCode {
+        std::process::ExitCode::FAILURE
+    }
+}
+
 pub async fn run(command: GoalCommand, overrides: &crate::CliOverrides) -> Result<(), GoalError> {
     let requested = command.target().workspace.clone();
     let workspace = tokio::task::spawn_blocking(move || {
@@ -671,5 +677,24 @@ mod tests {
         for input in ["", "h", "0s", "8d", "18446744073709551615d", "é"] {
             assert!(crate::cli::parse_goal_duration(input).is_err(), "{input}");
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn goal_cli_distinguishes_argument_errors_from_runtime_failures() {
+    use std::process::ExitCode;
+    for error in [
+        GoalError::Invalid("objective must contain 1 to 2048 bytes"),
+        GoalError::SessionMissing,
+        GoalError::GoalMissing,
+        GoalError::Achieved,
+        GoalError::CheckMissing,
+        GoalError::CheckChanged,
+    ] {
+        assert_eq!(error.exit_code(), ExitCode::from(2), "{error}");
+    }
+    for error in [GoalError::NoServer, GoalError::PreparationStopped, GoalError::IdentityUnavailable] {
+        assert_eq!(error.exit_code(), ExitCode::FAILURE, "{error}");
     }
 }
