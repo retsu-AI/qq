@@ -1052,3 +1052,14 @@ publication and thread resolution remain pending.
   stdout precedes optional trace work, retaining its selected status.
 - Focused foreground/close tests:26/26 pass. Final integration/full gate, smoke,
   independent review, publication and three-thread resolution remain pending.
+
+
+### 2026-10-16 — G4 edit-event publication failure
+
+- A new row reproduces output failing on the active edit event itself: the
+  foreground exits4, but stale cleanup conflicts and leaves revision2 running.
+- Reconcile the observed same-goal durable identity before fallible publication,
+  so output failure still pauses and drains that revision. Normal interrupt and
+  owner-drop rows remain covered; all26foreground/close tests pass.
+- Exact unchanged legacy sleep locations move; ceiling73 stays fixed. Final
+  full gate, smoke, independent review and published thread resolution follow.

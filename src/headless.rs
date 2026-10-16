@@ -534,6 +534,16 @@ pub async fn run_goal(
                 event = events.next() => {
                     let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
                         .map_err(|error| Failure::harness(error.to_string()))?;
+                    // Cleanup owns this durable revision even if its output fails.
+                    if let SessionEvent::GoalUpdated { goal: updated } = &envelope.event
+                        && updated.session_id == handle.session_id
+                        && updated.goal_id == expected.goal_id
+                        && updated.revision >= expected.revision
+                    {
+                        accepted = Some((handle.workspace_id, updated.clone()));
+                        expected = goal_identity(updated);
+                        guard.expected = expected;
+                    }
                     sink.record(stdout, HeadlessRecordRef::Event { envelope: &envelope })
                         .map_err(|error| Failure::harness(error.to_string()))?;
                     observed = envelope.cursor.sequence;
@@ -542,9 +552,6 @@ pub async fn run_goal(
                             if updated.session_id == handle.session_id
                             && updated.goal_id == expected.goal_id
                             && updated.revision >= expected.revision => {
-                            accepted = Some((handle.workspace_id, updated.clone()));
-                            expected = goal_identity(updated);
-                            guard.expected = expected;
                             if updated.status != qq_protocol::GoalStatus::Active && final_goal.is_none() {
                                 interrupt_armed = false;
                                 guard.expected = goal_identity(updated);
