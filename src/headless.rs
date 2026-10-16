@@ -4357,6 +4357,70 @@ mod tests {
         }).await.expect("close must drain accepted work without autonomous refill");
     }
 
+    #[tokio::test]
+    async fn foreground_goal_adopts_active_edits_for_interrupt_and_cleanup() {
+        struct ObservedRevision {
+            output: ForegroundOutput,
+            seen: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Write for ObservedRevision {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let count = self.output.write(bytes)?;
+                if let Ok(record) = serde_json::from_slice::<serde_json::Value>(bytes)
+                    && record["envelope"]["event"]["type"] == "goal_updated"
+                    && record["envelope"]["event"]["goal"]["revision"].as_u64() == Some(2)
+                    && let Some(seen) = self.seen.take()
+                { let _ = seen.send(()); }
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> { self.output.flush() }
+        }
+        for drop_owner in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+            opts.session = Some(handle.session_id);
+            let mut events = fixture.sessions.subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id, after: handle.subscribe_after,
+            }).unwrap();
+            let (seen, observed) = tokio::sync::oneshot::channel();
+            let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+            let mut writer = ObservedRevision { output: ForegroundOutput::default(), seen: Some(seen) };
+            let mut stderr = Vec::new();
+            let mut foreground = Box::pin(run_goal(&fixture.sessions, opts, goal_request(),
+                async { interrupted.await.unwrap(); }, &mut writer, &mut stderr));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop { tokio::select! {
+                    code = &mut foreground => panic!("returned before edit: {code}"),
+                    event = events.next() => if matches!(event.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; },
+                } }
+            }).await.unwrap();
+            let current = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id,
+                Some(handle.session_id), 1, 1)).await.unwrap().focused.unwrap().goal.unwrap();
+            let edited = goal_receipt(send(&fixture.sessions, SessionCommand::SetGoal {
+                session_id: handle.session_id, objective: "edited while adopted".into(), check: None,
+                budget: Box::new(current.budget.clone()), expected: Some(goal_identity(&current)), replace: false,
+            }).await.unwrap()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! { result = observed => result.unwrap(),
+                    code = &mut foreground => panic!("returned while observing edit: {code}") }
+            }).await.unwrap();
+            if drop_owner { drop(foreground); } else {
+                interrupt.send(()).unwrap();
+                let code = tokio::time::timeout(Duration::from_secs(5), foreground).await.unwrap();
+                assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionEvent::GoalUpdated { goal } = events.next().await.unwrap().unwrap().event
+                        && goal.goal_id == edited.goal_id && goal.revision > edited.revision
+                        && matches!(goal.status, qq_protocol::GoalStatus::Paused { reason: qq_protocol::GoalPauseReason::User }) { break; }
+                }
+            }).await.expect("edited adopted goal must be paused by its owner");
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
     #[derive(Clone, Default)]
     struct ForegroundOutput {
         bytes: Arc<Mutex<Vec<u8>>>,
