@@ -1,3 +1,5 @@
+> Historical evidence ledger. New work and current acceptance: [successor](../reliability.md). Existing slice IDs and dated receipts are retained; old status tables are not current assignments.
+
 # Ledger — Autonomous core
 
 ## 2026-10-05 — AC12.1 extraction (ENG-1009)
@@ -71,7 +73,7 @@ were qualification work at this initial receipt; superseded by AC10/AC11 review 
 - Merge current main f15a4d24 (shipped AP4.2) to fix stack's effective-main ledger conflict; retain all AP4.2 work unchanged. Updated-head gates recorded after execution.
 
 
-Plan: [`../autonomous-core.md`](../autonomous-core.md). Only the agent
+Predecessor plan: [snapshot before consolidation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md). Only the agent
 working this plan edits this file. Current state on top; dated entries
 appended below, newest last.
 

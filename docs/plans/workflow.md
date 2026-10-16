@@ -100,7 +100,7 @@ evidence committed.
 
 ## 3. Ledgers
 
-`docs/plans/progress/` holds one ledger per plan plus `root.md`,
+`docs/plans/progress/` holds one ledger per active plan plus `root.md`,
 `decisions-needed.md`, and gate evidence files.
 
 Rules:
@@ -123,6 +123,17 @@ Rules:
    lead resolves. Reference an entry in code as `TODO(decision:<n>)`.
 7. Gate files (`g-<name>.md`) record a phase gate run: date, exact `main`
    SHA, commands, counts, pass/fail, and what was not tested.
+
+### 3.1 Consolidating or retiring plans
+
+Keep existing slice IDs, unresolved acceptance and failed gates under one
+current owner. Remove shipped implementation detail; link design instead.
+A user-requested consolidation may mark predecessor ledgers historical and
+link their successor without rewriting dated entries. Retain such ledgers
+only for named ADR/research evidence consumers; new work appends to the
+successor ledger. Completed release checklists and redundant plans are
+deleted, with receipts recoverable in Git. Update navigation and current
+links; do not rewrite accepted ADRs or dated research to erase history.
 
 ## 4. Review
 

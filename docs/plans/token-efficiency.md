@@ -25,9 +25,9 @@ lossy history deletion, or paid evaluation is authorized by this plan PR.
 | Concern | Existing owner | Relationship |
 | --- | --- | --- |
 | Paid evaluation budget and scheduling | [ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | All live trials require its explicit spend/credential approval |
-| D6b delegation arms and default decisions | [ENG-812](https://linear.app/retsu-ai/issue/ENG-812), [delegation plan](supervised-delegation.md) | TE3 consumes results; does not recreate this work |
+| D6b delegation arms and default decisions | [ENG-812](https://linear.app/retsu-ai/issue/ENG-812), [R7/D6b](terminal-bench.md#d6b--paired-delegation-evaluation-eng-812) | TE3 consumes results; does not recreate this work |
 | T13 tool ablations | [ENG-813](https://linear.app/retsu-ai/issue/ENG-813), [tool-layer plan](tool-layer.md) | Reuse fixtures/reports for TE1, TE2 and TE4 |
-| AC17 tolerant argument decode | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872), [autonomous-core AC17](autonomous-core.md) | TE2 owns only additional schema ergonomics after reconciliation |
+| AC17 tolerant argument decode | [ENG-872](https://linear.app/retsu-ai/issue/ENG-872), [shipped AC17 baseline](reliability.md) | TE2 owns only additional schema ergonomics after reconciliation |
 | Cache determinism and affinity controls | [ENG-833](https://linear.app/retsu-ai/issue/ENG-833), [ENG-800](https://linear.app/retsu-ai/issue/ENG-800) | TE7 synthesizes their evidence; no duplicate cache implementation |
 | T14 tool selection | [ENG-818](https://linear.app/retsu-ai/issue/ENG-818) | TE7 compares stable exposure against progressive selection |
 | Live context and summary quality | [ENG-810](https://linear.app/retsu-ai/issue/ENG-810), [ENG-807](https://linear.app/retsu-ai/issue/ENG-807) | TE6 requires retention evidence, not just shrinkage |
