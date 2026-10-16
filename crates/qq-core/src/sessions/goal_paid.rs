@@ -1,4 +1,5 @@
 //! Current paid-request allowances; this input carries no goal-writing authority.
+use super::store::Priority;
 use super::*;
 
 #[derive(Clone)]

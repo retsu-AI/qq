@@ -18,6 +18,7 @@ mod delegation;
 mod execution_context;
 mod feeds;
 mod goal_admission;
+mod goal_paid_limits;
 mod goal_review;
 mod goal_upgrade;
 mod goals;
