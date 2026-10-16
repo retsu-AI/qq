@@ -1026,3 +1026,17 @@ publication and thread resolution remain pending.
   including reopened-store achievement and already-held question. Independent
   reviewer approves28235006 with no correctness blocker. Full gate, final
   upstream restack/publication and review-thread resolution remain pending.
+
+### 2026-10-16 — G4 admission, drain and output review corrections
+
+- Active branch ownership moved to `/tmp/qq-goal-delivery-20261015/g4-smoke`;
+  original detached `g4` retains the still-running G5 trial binary untouched.
+- Red regressions reproduce missing replacement errors, rejected resume widening
+  approval, host-close autonomous refill, early/final trace loss, and error
+  return before paid-family drain. Settings validate first; close fences new
+  autonomous admissions while accepted work/children drain naturally.
+- Error cleanup uses the atomic pause receipt and bounded exact-family drain,
+  then replays missing direct-run metadata through the settled cursor. Final
+  stdout precedes optional trace and uncertain stdout writes are never retried.
+  Focused foreground/close tests:23/23 pass; final independent review, stack
+  integration, full gate/smoke/site and publication remain pending.

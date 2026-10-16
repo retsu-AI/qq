@@ -148,6 +148,7 @@ enum GoalRecordState {
 /// stdout. Text format still traces when a trace path is given.
 struct RecordSink {
     goal_record: GoalRecordState,
+    stdout_failed: bool,
     trace: Option<BufWriter<std::fs::File>>,
     to_stdout: bool,
 }
@@ -162,6 +163,7 @@ impl RecordSink {
             .map(BufWriter::new);
         Ok(Self {
             goal_record: GoalRecordState::Pending,
+            stdout_failed: false,
             trace,
             to_stdout: options.format == HeadlessFormat::Jsonl,
         })
@@ -176,10 +178,17 @@ impl RecordSink {
             HeadlessRecordRef::Goal(goal) => Some(goal.exit_code),
             _ => None,
         };
-        if self.to_stdout && let Some(code) = final_code {
-            stdout.write_all(line.as_bytes())?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+        if self.to_stdout
+            && let Some(code) = final_code
+        {
+            if let Err(error) = stdout
+                .write_all(line.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+                .and_then(|()| stdout.flush())
+            {
+                self.stdout_failed = true;
+                return Err(error);
+            }
             self.goal_record = GoalRecordState::Emitted(code);
         }
         if let Some(trace) = &mut self.trace {
@@ -194,9 +203,14 @@ impl RecordSink {
             }
         }
         if self.to_stdout && final_code.is_none() {
-            stdout.write_all(line.as_bytes())?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+            if let Err(error) = stdout
+                .write_all(line.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+                .and_then(|()| stdout.flush())
+            {
+                self.stdout_failed = true;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -433,10 +447,12 @@ pub async fn run_goal(
     let mut cleanup = None;
     let mut accepted: Option<(WorkspaceId, Box<qq_protocol::GoalSnapshot>)> = None;
     let mut record_sink = None;
+    let mut direct_record_cursor = None;
     let result: Result<u8, Failure> = async {
         let sink = record_sink.insert(RecordSink::open(&options)
             .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
         let handle = prepare_session(sessions, &options, SessionIntent::Goal(&request)).await?;
+        direct_record_cursor = Some(handle.subscribe_after);
         let snapshot = sessions.snapshot(SnapshotRequest::new(
             handle.workspace_id, Some(handle.session_id), 1, 1,
         )).await.map_err(|error| Failure::harness(error.to_string()))?;
@@ -539,21 +555,8 @@ pub async fn run_goal(
                                 qq_protocol::RunOrigin::Goal { goal_id, .. }
                                 | qq_protocol::RunOrigin::GoalCheck { goal_id, .. }
                                 if *goal_id == expected.goal_id) => {
-                            let run = sessions.run_snapshot(handle.workspace_id,
-                                handle.session_id, *run_id).await
-                                .map_err(|error| Failure::harness(error.to_string()))?;
-                            let identity = match &run.origin {
-                                Some(qq_protocol::RunOrigin::Goal { goal_id, revision }
-                                    | qq_protocol::RunOrigin::GoalCheck { goal_id, revision }) =>
-                                    qq_protocol::GoalIdentity { goal_id: *goal_id, revision: *revision },
-                                _ => return Err(Failure::harness("goal run has no durable goal origin")),
-                            };
-                            let record = qq_protocol::HeadlessGoalRun {
-                                workspace_id: handle.workspace_id, session_id: handle.session_id,
-                                goal: identity, run: Box::new(run),
-                            };
-                            sink.record(stdout, HeadlessRecordRef::GoalRun(&record))
-                                .map_err(|error| Failure::harness(error.to_string()))?;
+                            record_settled_goal_run(sessions, sink, stdout, &handle, *run_id).await?;
+                            direct_record_cursor = Some(envelope.cursor);
                         }
                         SessionEvent::ToolApprovalRequested { .. } if final_goal.is_some() => {}
                         SessionEvent::ToolApprovalRequested { .. }
@@ -602,7 +605,30 @@ pub async fn run_goal(
             let mut code = failure.status.code();
             if let Some(guard) = &mut cleanup {
                 match guard.settle().await {
-                    Ok(Some(goal)) => accepted = Some((guard.handle.workspace_id, goal)),
+                    Ok(Some((goal, through))) => {
+                        if let Some(sink) = record_sink.as_mut()
+                            && matches!(sink.goal_record, GoalRecordState::Pending)
+                            && !sink.stdout_failed
+                            && let Some(after) = direct_record_cursor
+                            && let Err(error) = replay_settled_goal_runs(
+                                sessions,
+                                sink,
+                                stdout,
+                                &guard.handle,
+                                goal_identity(&goal),
+                                after,
+                                through,
+                            )
+                            .await
+                        {
+                            let _ = writeln!(
+                                stderr,
+                                "error: goal result replay failed: {}",
+                                error.message
+                            );
+                        }
+                        accepted = Some((guard.handle.workspace_id, goal));
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
@@ -621,6 +647,7 @@ pub async fn run_goal(
                 && let Some((workspace, mut goal)) = accepted
                 && let Some(sink) = record_sink.as_mut()
                 && matches!(sink.goal_record, GoalRecordState::Pending)
+                && !sink.stdout_failed
             {
                 // Prefer authoritative state when readable; otherwise retain
                 // the last observed goal without inventing a durable outcome.
@@ -646,6 +673,68 @@ pub async fn run_goal(
             code
         }
     }
+}
+
+async fn record_settled_goal_run(
+    sessions: &SessionRuntime,
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    handle: &SessionHandle,
+    run_id: RunId,
+) -> Result<(), Failure> {
+    let run = sessions
+        .run_snapshot(handle.workspace_id, handle.session_id, run_id)
+        .await
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    let goal = match &run.origin {
+        Some(
+            qq_protocol::RunOrigin::Goal { goal_id, revision }
+            | qq_protocol::RunOrigin::GoalCheck { goal_id, revision },
+        ) => qq_protocol::GoalIdentity {
+            goal_id: *goal_id,
+            revision: *revision,
+        },
+        _ => return Err(Failure::harness("goal run has no durable goal origin")),
+    };
+    let record = qq_protocol::HeadlessGoalRun {
+        workspace_id: handle.workspace_id,
+        session_id: handle.session_id,
+        goal,
+        run: Box::new(run),
+    };
+    sink.record(stdout, HeadlessRecordRef::GoalRun(&record))
+        .map_err(|error| Failure::harness(error.to_string()))
+}
+
+async fn replay_settled_goal_runs(
+    sessions: &SessionRuntime,
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    handle: &SessionHandle,
+    expected: qq_protocol::GoalIdentity,
+    after: qq_protocol::EventCursor,
+    through: qq_protocol::EventCursor,
+) -> Result<(), Failure> {
+    tokio::time::timeout(SHUTDOWN_GRACE, async {
+        if after.sequence >= through.sequence { return Ok(()); }
+        let mut events = sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after,
+        }).map_err(|error| Failure::harness(error.to_string()))?;
+        loop {
+            let envelope = events.next().await
+                .ok_or_else(|| Failure::harness("goal result replay ended early"))?
+                .map_err(|error| Failure::harness(error.to_string()))?;
+            if envelope.cursor.sequence > through.sequence { return Err(Failure::harness("goal result replay skipped its boundary")); }
+            if let SessionEvent::RunFinished { origin: Some(origin), run_id, .. } = &envelope.event
+                && envelope.session_id == handle.session_id
+                && matches!(origin, qq_protocol::RunOrigin::Goal { goal_id, .. }
+                    | qq_protocol::RunOrigin::GoalCheck { goal_id, .. } if *goal_id == expected.goal_id)
+            {
+                record_settled_goal_run(sessions, sink, stdout, handle, *run_id).await?;
+            }
+            if envelope.cursor.sequence == through.sequence { return Ok(()); }
+        }
+    }).await.map_err(|_| Failure::harness("goal result replay exceeded the shutdown period"))?
 }
 
 /// Once stopped, cancel and drain only this goal's paid family. The single
@@ -784,7 +873,9 @@ impl AcceptedGoalGuard {
             expected: goal_identity(goal),
         }
     }
-    async fn settle(&mut self) -> Result<Option<Box<qq_protocol::GoalSnapshot>>, Failure> {
+    async fn settle(
+        &mut self,
+    ) -> Result<Option<(Box<qq_protocol::GoalSnapshot>, qq_protocol::EventCursor)>, Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
             let receipt = sessions
                 .pause_goal_if_active(*session_id, self.expected)
@@ -792,9 +883,9 @@ impl AcceptedGoalGuard {
                 .map_err(|error| Failure::harness(error.to_string()))?;
             let goal = goal_receipt(receipt)?;
             self.expected = goal_identity(&goal);
-            let (goal, _) = settle_goal(sessions, &self.handle, self.expected).await?;
+            let (goal, through) = settle_goal(sessions, &self.handle, self.expected).await?;
             self.disarm();
-            return Ok(Some(goal));
+            return Ok(Some((goal, through)));
         }
         Ok(None)
     }
@@ -4525,19 +4616,34 @@ mod tests {
         }
         let fixture = fixture(|| LargeText).await;
         let mut opts = options(&fixture.workspace);
-        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
-        let mut events = fixture.sessions.subscribe(SubscribeRequest {
-            workspace_id: handle.workspace_id, after: handle.subscribe_after,
-        }).unwrap();
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
         let mut request = goal_request();
         request.objective = Some("x".repeat(2048));
-        let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
+        let command = prepare_goal_request(&request, &opts, handle.session_id, None)
+            .unwrap()
+            .unwrap();
         send(&fixture.sessions, command).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if matches!(events.next().await.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; }
+                if matches!(
+                    events.next().await.unwrap().unwrap().event,
+                    SessionEvent::RunStarted { .. }
+                ) {
+                    break;
+                }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         opts.session = Some(handle.session_id);
         opts.trace = Some(PathBuf::from("/dev/full"));
         request.objective = None;
@@ -4571,13 +4677,35 @@ mod tests {
         assert_eq!(finals[0]["status"], "harness_failure");
         assert_eq!(finals[0]["exit_code"], 4);
         assert!(!stderr.is_empty());
-        let runs: Vec<_> = records.iter().filter(|record| record["type"] == "goal_run").collect();
-        assert_eq!(runs.len(), 1, "error cleanup must emit the settled direct run");
+        let runs: Vec<_> = records
+            .iter()
+            .filter(|record| record["type"] == "goal_run")
+            .collect();
+        assert_eq!(
+            runs.len(),
+            1,
+            "error cleanup must emit the settled direct run"
+        );
         assert!(runs[0]["run"]["outcome"].is_object());
         assert!(finals[0]["goal"]["pending_run_id"].is_null());
-        let durable = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id,
-            Some(handle.session_id), 1, 1)).await.unwrap().focused.unwrap().goal.unwrap();
-        assert_eq!(finals[0]["goal"]["counters"], serde_json::to_value(durable.counters).unwrap());
+        let durable = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                1,
+                1,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(
+            finals[0]["goal"]["counters"],
+            serde_json::to_value(durable.counters).unwrap()
+        );
         fixture.sessions.close().await.unwrap();
     }
 
@@ -4616,16 +4744,35 @@ mod tests {
             !stderr.is_empty(),
             "the trace failure must still be reported"
         );
-        let goal: Box<qq_protocol::GoalSnapshot> = serde_json::from_value(finals[0]["goal"].clone()).unwrap();
+        let goal: Box<qq_protocol::GoalSnapshot> =
+            serde_json::from_value(finals[0]["goal"].clone()).unwrap();
         let workspace = serde_json::from_value(finals[0]["workspace_id"].clone()).unwrap();
         let mut trace = BufWriter::with_capacity(8192, std::fs::File::create("/dev/full").unwrap());
         trace.write_all(&vec![b' '; 8191]).unwrap();
-        let mut sink = RecordSink { goal_record: GoalRecordState::Pending,
-            trace: Some(trace), to_stdout: true };
+        let mut sink = RecordSink {
+            goal_record: GoalRecordState::Pending,
+            stdout_failed: false,
+            trace: Some(trace),
+            to_stdout: true,
+        };
         let mut final_stdout = Vec::new();
-        assert!(finish_goal(&mut sink, &mut final_stdout, &options(&fixture.workspace), workspace, goal, None).is_err());
+        assert!(
+            finish_goal(
+                &mut sink,
+                &mut final_stdout,
+                &options(&fixture.workspace),
+                workspace,
+                goal,
+                None
+            )
+            .is_err()
+        );
         let records = parse_records(&String::from_utf8(final_stdout).unwrap());
-        assert_eq!(records.len(), 1, "final stdout must survive an implicit trace-buffer flush failure");
+        assert_eq!(
+            records.len(),
+            1,
+            "final stdout must survive an implicit trace-buffer flush failure"
+        );
         assert_eq!(records[0]["exit_code"], 6);
         assert!(matches!(sink.goal_record, GoalRecordState::Emitted(6)));
         fixture.sessions.close().await.unwrap();
