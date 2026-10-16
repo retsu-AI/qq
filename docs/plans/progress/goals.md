@@ -1113,3 +1113,17 @@ publication and thread resolution remain pending.
   result is asserted. Original task sources and all prior trial receipts remain.
 - #332 remains draft. Rebased-head gate/publication follows; current live
   acceptance and reviews of the newly published runtime heads remain pending.
+
+
+### 2026-10-16 — fourth G5 terminal result and current review fixes
+
+- Fourth subscription-only trial settled blocked/exit7 after6309.158seconds,
+  303model turns,8charged runs and19real compactions;11checklist identities
+  preserved,9done/2dropped. Exact usage reconciled; paid APIUSD0, estimated and
+  subscription dollar value unknown. It remains below7200seconds: G5 unqualified.
+- Local pinned continuation integration passed2817/2817 plus minimal211 and
+  smoke8/8; actual-outage loopback task passed2000turns/5000unique effects.
+  Resource/performance acceptance remains blocked; no fourth PR was opened.
+- G3 725dabe8 and G4 4851fc2e pass full workspace gates; independent source
+  review approves all six current Codex repairs. Final smoke/parity/publication
+  and hosted CI follow. G5 remains two evidence Markdown files above G4.

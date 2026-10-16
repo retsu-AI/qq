@@ -1,6 +1,6 @@
 # G5 — subscription-only live goal evaluation
 
-Status: three trials settled; a fourth continuation task is active.
+Status: four trials settled; none meets the single multi-hour requirement.
 G5 acceptance is not established. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
@@ -244,3 +244,40 @@ added; G5 remains unqualified and #332 remains a draft.
 The task is still running. No terminal outcome or multi-hour qualification is
 claimed. Later fixes in outer #330/#331 do not retroactively change the runtime
 source under this evaluation. #332 stays draft pending actual evidence.
+
+
+## Fourth trial — terminal outcome and qualification limits
+
+Finished 2026-10-16T10:43:37.007571Z after **6309.158 seconds
+(105 minutes)**. The supervisor captured process exit **7**, with exactly one
+final foreground record, last in valid complete JSONL, status **blocked**.
+The goal used **8 charged runs**, **303 completed model turns** and **19 real
+compactions**. All 11 checklist identities survived every compaction; final
+states were **9 done,2 dropped**. Admission bounds and the original deadline
+were unchanged; the runner did not resume the goal.
+
+- Completed-turn accounting exactly matches authoritative goal usage:
+  **12237984 fresh input +1857792 cache-read input +131690 output tokens**,
+  cache-write input0. Estimated cost is `null`; **paid API spend USD0**,
+  subscription-amortized value unknown. The sole route remained
+  `openai-codex/gpt-6.1-sol`, subscription only, without a paid fallback.
+- The useful task delivered local integration merge `0a3dec71` of the pinned
+  continuation candidate and runtime; final documentation head `ab8eca3a`.
+  Its pre-commit integrated-source full receipt records **2817/2817 tests**,
+  **16 deliberate skips**, minimal-provider **211/211**, and smoke **8/8**.
+  These qualify the pinned integration, not later outer #330/#331 repairs.
+- The task's actual-outage test passed after **3225.279761 seconds**, with
+  **2000 work turns,5000 unique effects,425 in-run compactions**, three actual
+  600-second outages and two process kills. The earlier failed attempt remains
+  retained. The separate soak is loopback task evidence, not another live
+  subscription goal trial.
+- The task correctly left whole resource/performance acceptance blocked:
+  no relevant pre-integration RSS baseline, incomplete early process-tree
+  sampling, unmatched performance fixtures and absent registered resource/fsync
+  budgets. Descriptive measurements do not satisfy those acceptance gates.
+
+The terminal audit passes every recorded check except the required **7200-second
+single-trial duration**. This useful trial therefore **does not qualify G5**.
+Separate trial durations are not combined; no padding or cap extension was used.
+#332 remains draft. Raw transcripts, credentials, session stores and detailed
+receipts stay outside Git under the private evaluation directory.
