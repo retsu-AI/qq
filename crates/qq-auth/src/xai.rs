@@ -90,11 +90,11 @@ impl TryFrom<DeviceResponse> for DeviceAuthorization {
             || response
                 .interval
                 .is_some_and(|interval| interval > MAX_POLL_INTERVAL)
-            || !is_https_url(&response.verification_uri)
+            || !oauth::is_https_url(&response.verification_uri)
             || response
                 .verification_uri_complete
                 .as_deref()
-                .is_some_and(|url| !is_https_url(url))
+                .is_some_and(|url| !oauth::is_https_url(url))
         {
             return Err(XaiAuthError::DeviceResponseInvalid);
         }
@@ -235,10 +235,6 @@ fn decode_bounded<T: DeserializeOwned>(
     error: XaiAuthError,
 ) -> Result<T, XaiAuthError> {
     oauth::read_json(response, MAX_RESPONSE_BYTES).ok_or(error)
-}
-
-fn is_https_url(value: &str) -> bool {
-    reqwest::Url::parse(value).is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
 }
 
 pub struct XaiLogin {

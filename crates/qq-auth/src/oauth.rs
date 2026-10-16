@@ -39,6 +39,13 @@ pub(super) fn read_json<T: DeserializeOwned>(response: &mut Response, limit: usi
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Whether `value` is an absolute HTTPS URL with a host. Verification URLs
+/// shown to the user come from the authorization server's response; only
+/// HTTPS ones are opened or printed.
+pub(super) fn is_https_url(value: &str) -> bool {
+    reqwest::Url::parse(value).is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
+}
+
 /// Seconds since the Unix epoch.
 pub(super) fn unix_time() -> Result<u64, SystemTimeError> {
     SystemTime::now()
