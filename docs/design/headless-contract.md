@@ -338,7 +338,13 @@ adapter cancels and drains that exact goal's unsettled paid family under one
 30-second cleanup bound, including late admitted descendants. It replays the
 committed terminal prefix so settled direct-run records precede the final
 snapshot with its final counters. It leaves unrelated runs and the shared
-runtime open. If cleanup fails the invocation reports harness failure. New records do not change the
+runtime open. The CLI retains ownership until other accepted runs settle
+naturally before closing. A fresh close-phase Ctrl-C listener can request
+ordinary shutdown, cancelling and draining the remaining accepted work while
+preserving the already-emitted selected goal result and exit status. The
+lifecycle admission guard is released before that shutdown; a settlement
+subscription precedes each idle check. If cleanup fails the invocation reports
+harness failure. New records do not change the
 ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
 requires an existing session and resumes its specification. Separate
 `--goal-check-approval` plus the exact reviewed `--check` authorizes checks.

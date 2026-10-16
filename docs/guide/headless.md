@@ -51,7 +51,10 @@ interrupted130; setup and harness failures retain2/4. JSONL includes workspace
 events, `goal_run` records for settled direct runs, then a final `goal` snapshot
 with the state/reason and exit code. A stopped goal drains its remaining work
 before that final record, bounded by the shutdown grace period; unrelated runs
-stay running. Helpers remain event records. Refused verification attempts also
+stay running. After the final goal record, the process retains ownership until
+other accepted runs settle naturally before closing. A further Ctrl-C cancels
+and drains that remaining work; it preserves the selected goal's final record
+and exit status. A failure to close still exits4. Helpers remain event records. Refused verification attempts also
 have run records; the audit counter and check result distinguish them from
 executed checks. A paused goal persists for subsequent resume. Goal mode has no steering pipe or typed
 answer schema; those flags apply to ordinary prompt runs.

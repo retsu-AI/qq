@@ -195,10 +195,15 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 async fn close_headless(
     sessions: &qq_core::SessionRuntime,
     goal: bool,
-    _interrupt: impl std::future::Future<Output = ()>,
+    interrupt: impl std::future::Future<Output = ()>,
 ) -> Result<(), qq_core::SessionRuntimeError> {
     if goal {
-        sessions.close_when_idle().await
+        sessions
+            .close_when_idle(async {
+                interrupt.await;
+                eprintln!("goal settled; interrupt cancels remaining accepted work before closing");
+            })
+            .await
     } else {
         sessions.close().await
     }
@@ -258,6 +263,7 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             drop(stdout);
             drop(stderr);
             match close_headless(&sessions, is_goal, async {
+                // Losing signal control also requests cleanup of this owned runtime.
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await

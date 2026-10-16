@@ -1411,25 +1411,40 @@ impl SessionRuntime {
         self.inner.store.close().await
     }
 
-    /// Retains ownership until accepted runs settle naturally, then closes
-    /// without cancelling unrelated recovered work.
-    pub async fn close_when_idle(&self) -> Result<(), SessionRuntimeError> {
+    /// Retains accepted runs until they settle naturally. An explicit interrupt
+    /// requests ordinary shutdown, cancelling and draining the remaining work.
+    pub async fn close_when_idle(
+        &self,
+        interrupt: impl std::future::Future<Output = ()>,
+    ) -> Result<(), SessionRuntimeError> {
+        tokio::pin!(interrupt);
         let mut settlements = self.inner.settlements.subscribe();
         loop {
             let lifecycle = self.inner.lifecycle.write().await;
             if *self.inner.failed.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
-            if self.inner.store.unfinished_run_ids().await?.is_empty() {
+            let unfinished = tokio::select! {
+                biased;
+                () = interrupt.as_mut() => {
+                    drop(lifecycle);
+                    return self.close().await;
+                }
+                result = self.inner.store.unfinished_run_ids() => result?,
+            };
+            if unfinished.is_empty() {
                 self.inner.shutdown.send_replace(true);
                 drop(lifecycle);
                 return self.close().await;
             }
             drop(lifecycle);
-            settlements
-                .changed()
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
+            tokio::select! {
+                biased;
+                () = interrupt.as_mut() => return self.close().await,
+                changed = settlements.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+            }
         }
     }
 
