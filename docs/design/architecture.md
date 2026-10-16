@@ -1826,7 +1826,8 @@ without changing their original durable receipts.
 
 After acquiring a scheduler permit, reservation derives paid-work admission
 from the captured goal's current durable budget. Goal-origin runs use current
-per-run limits; user prompts keep their own stricter limits. Token, cost and
+per-run limits; user prompts keep their own stricter limits. Both intersect
+all current managed per-run ceilings at reservation and refreshed start. Token, cost and
 duration bounds intersect with known remaining allowance. Expired or unknown
 capped spending refuses execution before runtime loading; stale inactive goal
 ownership cancels it. Sponsored descendants also intersect every historical
