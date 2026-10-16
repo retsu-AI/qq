@@ -3482,7 +3482,8 @@ impl RunState {
                             started_calls[usize::from(call.call_ordinal - 1)] = true;
                             yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: call.id });
                             if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::SelectTools) {
-                                let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools"));
+                                let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
+                                let (result, changed) = tool_span.in_scope(|| select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools")));
                                 run.stall.settled(false);
                                 let retained = RetainedResult::retain(&result, &call.name, call.id);
                                 run.observe_tool(&call, &retained, network_policy, catalog.lookup(&call.name));
@@ -3499,6 +3500,8 @@ impl RunState {
                                 // workspace approval. Keep their position among
                                 // ordinary reads and mutations in this batch.
                                 if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::UpdateGoal) {
+
+                                    let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
                                     let index = usize::from(call.call_ordinal - 1);
                                     // An atomic store write already admitted stays
                                     // owned. At the next call boundary, stop before
@@ -3526,7 +3529,7 @@ impl RunState {
                                                 yield TurnStep::Stop; return;
                                             },
                                             () = interrupt => None,
-                                            receipt = goal.admit_update(arguments) => Some(receipt),
+                                            receipt = goal.admit_update(arguments).instrument(tool_span.clone()) => Some(receipt),
                                         };
                                         match admitted {
                                             None => {
@@ -3538,7 +3541,7 @@ impl RunState {
                                                 // durability even if steering arrives now.
                                                 let updated = match admitted {
                                                     Err(error) => Err(error),
-                                                    Ok(receipt) => match receipt.await {
+                                                    Ok(receipt) => match receipt.instrument(tool_span.clone()).await {
                                                         Ok(updated) => updated,
                                                         Err(_) => Err(sessions::SessionRuntimeError::Unavailable),
                                                     },

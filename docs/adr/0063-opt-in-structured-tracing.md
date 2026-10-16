@@ -25,6 +25,11 @@ records. Each file stops accepting bytes at 8 MiB. Sixteen create-new slots in
 logging when full; users explicitly remove old files. QQ never deletes an active
 process's diagnostic log. Normal shutdown drains the queue off the executor.
 Unix directories/files are private; existing symlink components are rejected.
+
+This initial implementation refuses enabled logging on non-Unix platforms before
+creating files: secure handle-relative traversal there is not yet implemented.
+Off-by-default operation is unchanged. Enabled logging with `--tui-qa-root` is
+explicitly refused before creating files, preserving its fresh-root contract.
 These are diagnostics, not authoritative durable events or complete audit logs.
 
 ## Consequences

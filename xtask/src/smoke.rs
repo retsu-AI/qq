@@ -491,6 +491,20 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
     ensure!(off.status == Some(0), "version failed: {}", off.stderr);
     let directory = home.root.join("state/qq/logs");
     ensure!(!directory.exists(), "logging created state without opt-in");
+
+    let qa_root = home.root.join("qa-fixture");
+    let mut qa = home.command(&provider);
+    qa.env("QQ_LOG", "info").arg("--tui-qa-root").arg(&qa_root);
+    let refused = qa.output().await.map_err(|error| error.to_string())?;
+    ensure!(
+        !refused.status.success()
+            && String::from_utf8_lossy(&refused.stderr).contains("unset QQ_LOG"),
+        "QA tracing was not explicitly refused"
+    );
+    ensure!(
+        !qa_root.exists() && !directory.exists(),
+        "QA tracing escaped or modified fixture root"
+    );
     let mut command = home.command(&provider);
     command
         .env("QQ_LOG", "info")

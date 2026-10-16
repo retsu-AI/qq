@@ -7,10 +7,10 @@ use std::{
     thread,
 };
 
-use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
+mod subscriber;
 
 #[cfg(not(unix))]
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 
 const MAX_RECORD: usize = 4096;
 const MAX_FILE: usize = 8 * 1024 * 1024;
@@ -22,6 +22,8 @@ pub(crate) enum LogError {
     Value,
     #[error("cannot initialize diagnostic log")]
     Io(#[from] io::Error),
+    #[error("QQ_LOG is not supported with --tui-qa-root; unset QQ_LOG")]
+    QaRoot,
     #[error("a tracing subscriber is already installed")]
     Subscriber,
     #[error("diagnostic writer failed")]
@@ -67,21 +69,8 @@ impl LogGuard {
         let worker = thread::Builder::new()
             .name("qq-log".into())
             .spawn(move || write_records(file, receiver))?;
-        let layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_ansi(false)
-            .with_target(false)
-            .with_file(false)
-            .with_line_number(false)
-            .with_span_events(
-                tracing_subscriber::fmt::format::FmtSpan::NEW
-                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-            )
-            .with_writer(RecordWriter(sender.clone()))
-            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-                metadata.target() == "qq::diagnostic"
-            }));
-        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
+        let dispatch =
+            tracing::Dispatch::new(subscriber::DiagnosticSubscriber::new(sender.clone()));
         Ok(Self {
             dispatch: Some(dispatch),
             stop: sender,
@@ -147,14 +136,11 @@ fn create_log(directory: &File, slot: usize) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_log_directory(path: &Path) -> io::Result<std::path::PathBuf> {
-    fs::create_dir_all(path)?;
-    for ancestor in path.ancestors() {
-        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
-            return Err(io::Error::other("symlinked log directory"));
-        }
-    }
-    Ok(path.to_owned())
+fn open_log_directory(_path: &Path) -> io::Result<std::path::PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "QQ_LOG requires Unix no-follow directory traversal on this build",
+    ))
 }
 
 #[cfg(not(unix))]
@@ -179,18 +165,20 @@ fn write_records(mut file: File, receiver: mpsc::Receiver<Vec<u8>>) -> io::Resul
     file.flush()
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 struct RecordWriter(SyncSender<Vec<u8>>);
 
+#[cfg(test)]
 struct Record {
     sender: SyncSender<Vec<u8>>,
     bytes: Vec<u8>,
     overflow: bool,
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RecordWriter {
-    type Writer = Record;
-    fn make_writer(&'a self) -> Record {
+#[cfg(test)]
+impl RecordWriter {
+    fn make_writer(&self) -> Record {
         Record {
             sender: self.0.clone(),
             bytes: Vec::new(),
@@ -199,6 +187,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RecordWriter {
     }
 }
 
+#[cfg(test)]
 impl Write for Record {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.bytes.len() + bytes.len() <= MAX_RECORD && !self.overflow {
@@ -213,6 +202,7 @@ impl Write for Record {
     }
 }
 
+#[cfg(test)]
 impl Drop for Record {
     fn drop(&mut self) {
         if !self.overflow && !self.bytes.is_empty() {
@@ -226,8 +216,7 @@ impl Drop for Record {
 mod tests {
     use super::*;
 
-    use tracing_subscriber::fmt::MakeWriter as _;
-
+    #[cfg(unix)]
     #[test]
     fn dependency_secrets_are_rejected_and_span_metadata_survives() {
         let home = tempfile::tempdir().unwrap();
@@ -265,6 +254,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn exclusive_slots_and_io_errors_are_explicit() {
         let home = tempfile::tempdir().unwrap();

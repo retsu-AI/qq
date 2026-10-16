@@ -58,3 +58,12 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Clean baseline minimal artifact already exceeds absolute size budget: 42288944 > 41000000 bytes; baseline dependency count 300. Initial AF5 adds 749664 bytes and five crates. This is not an unchanged-budget pass; reducing cost remains required.
 - Attempted post-restart recording timed out at 600s and is partial, not A/A evidence. Other test jobs and desktop load were observed on host; no unrelated processes terminated.
 - Still blocked on qualifying performance, Windows no-reparse path behavior and expanded cancellation/correlation coverage. Open only as draft until these and current-tip Codex review are complete.
+
+
+## AF5 Codex follow-through, PR #329
+
+- Codex reviewed `832edb25`: special-tool span coverage, side-write store spans, QA-root isolation. Local fixes instrument both special branches and retain explicit side-write spans through settlement. QA-root plus logging is explicitly refused before creating files, preserving fixture freshness/isolation.
+- Enabled logging is explicitly unsupported on non-Unix rather than following reparse points. Default behavior unchanged; platform scope documented.
+- Replaced tracing-subscriber with a bounded numeric-only local subscriber to remove five added closure crates. Six focused logging tests pass; 7/7 real-binary smoke pass including QA refusal. Full gate passed before the final typed QA diagnostic fix (273.7s); final gate rerun required.
+- Independent subscriber review corrected cross-dispatch TLS isolation, saturating reference counts and serialization/send outside the span-state lock. Further concurrency/bounds coverage remains.
+- `control-final.json` completed 77 metrics after restart; pre-restart comparison refuses different memory capacity. `lean-complete.json` restores dependency budget but minimal artifact still 43039856 > 41000000 bytes and relative tails fail versus control. This is NOT qualifying A/A or a budget pass. No budgets widened. User requests merge only after merge readiness plus current-tip Codex actual 👍.

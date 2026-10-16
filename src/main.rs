@@ -30,9 +30,13 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    let cli = cli::Cli::parse();
     let logging = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
         Ok(false) => None,
         Ok(true) => match (|| {
+            if cli.tui_qa_root.is_some() {
+                return Err(logging::LogError::QaRoot);
+            }
             let project = directories::ProjectDirs::from("dev", "qq", "qq")
                 .ok_or_else(|| io::Error::other("system directories unavailable"))?;
             logging::LogGuard::start(
@@ -69,7 +73,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = match executor.block_on(run()) {
+    let code = match executor.block_on(run(cli)) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
@@ -87,8 +91,7 @@ fn main() -> ExitCode {
     code
 }
 
-async fn run() -> Result<ExitCode, Box<dyn Error>> {
-    let cli = cli::Cli::parse();
+async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
     validate_tui_qa_invocation(&cli.tui_qa_root, cli.command.is_some())?;
     if !cli.approved_read_images.is_empty()
         && !matches!(

@@ -29,6 +29,11 @@ sources`, `qq auth list` for the detail behind any one line
 
 ## Diagnostic tracing
 
+`QQ_LOG=info` is currently supported on Unix platforms only. On other platforms,
+explicit activation fails without creating files; unset it to run normally.
+`QQ_LOG=info` combined with `--tui-qa-root` is explicitly refused before file
+creation; unset `QQ_LOG` for that isolated fixture.
+
 Run `QQ_LOG=info qq run "your task"` (or start `qq serve` with the variable)
 for JSON-line boundary timings. Logging is off by default; `QQ_LOG=off` or an
 empty value also disables it. Other values are errors. Logs are separate from

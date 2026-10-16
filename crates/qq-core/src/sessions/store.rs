@@ -479,7 +479,7 @@ impl Store {
         F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
     {
         let (reply, response) = oneshot::channel();
-        let span = tracing::Span::current();
+        let span = tracing::info_span!(target: "qq::diagnostic", "store");
         let job: worker::DatabaseJob = Box::new(move |connection| {
             let result = span.in_scope(|| operation(connection));
             worker::JobOutcome {
