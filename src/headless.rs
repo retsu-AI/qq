@@ -225,6 +225,7 @@ enum SessionIntent<'a> {
     Goal(&'a GoalInvocation),
 }
 
+#[derive(Clone)]
 struct SessionHandle {
     workspace_id: WorkspaceId,
     session_id: SessionId,
@@ -411,7 +412,7 @@ pub async fn run_goal(
             None => current.ok_or_else(|| Failure::invalid("session has no stored goal"))?,
         };
         accepted = Some((handle.workspace_id, goal.clone()));
-        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
+        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal, &handle));
         let guard = cleanup.as_mut().unwrap();
         if let Some(scope) = request.check_approval {
             let check = goal.check.as_ref().unwrap();
@@ -564,11 +565,15 @@ pub async fn run_goal(
         Err(failure) => {
             let _ = writeln!(stderr, "error: {}", failure.message);
             let mut code = failure.status.code();
-            if let Some(guard) = &mut cleanup
-                && let Err(error) = guard.settle().await
-            {
-                let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
-                code = HeadlessStatus::HarnessFailure.code();
+            if let Some(guard) = &mut cleanup {
+                match guard.settle().await {
+                    Ok(Some(goal)) => accepted = Some((guard.handle.workspace_id, goal)),
+                    Ok(None) => {},
+                    Err(error) => {
+                        let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
+                        code = HeadlessStatus::HarnessFailure.code();
+                    }
+                }
             }
             if let Some(RecordSink {
                 goal_record: GoalRecordState::Emitted(emitted),
@@ -727,26 +732,30 @@ fn finish_goal(
 }
 
 struct AcceptedGoalGuard {
+    handle: SessionHandle,
     cleanup: Option<(SessionRuntime, SessionId)>,
     expected: qq_protocol::GoalIdentity,
 }
 impl AcceptedGoalGuard {
-    fn new(sessions: SessionRuntime, goal: &qq_protocol::GoalSnapshot) -> Self {
+    fn new(sessions: SessionRuntime, goal: &qq_protocol::GoalSnapshot, handle: &SessionHandle) -> Self {
         Self {
+            handle: handle.clone(),
             cleanup: (goal.status == qq_protocol::GoalStatus::Active)
                 .then_some((sessions, goal.session_id)),
             expected: goal_identity(goal),
         }
     }
-    async fn settle(&mut self) -> Result<(), Failure> {
+    async fn settle(&mut self) -> Result<Option<Box<qq_protocol::GoalSnapshot>>, Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
-            sessions
-                .pause_goal_if_active(*session_id, self.expected)
-                .await
+            let receipt = sessions.pause_goal_if_active(*session_id, self.expected).await
                 .map_err(|error| Failure::harness(error.to_string()))?;
+            let goal = goal_receipt(receipt)?;
+            self.expected = goal_identity(&goal);
+            let (goal, _) = settle_goal(sessions, &self.handle, self.expected).await?;
             self.disarm();
+            return Ok(Some(goal));
         }
-        Ok(())
+        Ok(None)
     }
     fn disarm(&mut self) {
         self.cleanup = None;
@@ -3330,7 +3339,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let mut guard = AcceptedGoalGuard::new(fixture.sessions.clone(), &goal);
+        let mut guard = AcceptedGoalGuard::new(fixture.sessions.clone(), &goal, &handle);
         let call = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let SessionEvent::ToolApprovalRequested {

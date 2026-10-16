@@ -972,7 +972,7 @@ impl SessionRuntime {
         &self,
         session_id: SessionId,
         expected: qq_protocol::GoalIdentity,
-    ) -> Result<(), SessionRuntimeError> {
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
         let id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
         self.command_with_pause_condition(
             id,
@@ -984,7 +984,6 @@ impl SessionRuntime {
             true,
         )
         .await
-        .map(|_| ())
     }
 
     async fn command_with_pause_condition(
