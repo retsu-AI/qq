@@ -1026,6 +1026,13 @@ async fn prepare_session(
                 .goal
                 .as_ref()
                 .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active);
+            if intent == SessionIntent::Goal
+                && let Some(goal) = &focused.goal
+                && sessions.has_preempting_goal_work(session_id, goal.goal_id).await
+                    .map_err(|error| Failure::harness(error.to_string()))?
+            {
+                return Err(Failure::invalid("session has preempting user work; settle it with an interactive client before resuming the goal"));
+            }
             let summary = focused.summary;
             if summary.parent_id.is_some() {
                 return Err(Failure::invalid(format!(
@@ -2744,7 +2751,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_goal_rejects_preempting_user_work_before_adoption() {
-        let fixture = fixture(|| AskingProvider { turn: Mutex::new(0) }).await;
+        let fixture = fixture(|| HangingProvider).await;
         let base = options(&fixture.workspace);
         let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
         send(&fixture.sessions, SessionCommand::SubmitPrompt {

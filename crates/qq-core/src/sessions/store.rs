@@ -672,6 +672,13 @@ impl Store {
         .await
     }
 
+    pub(super) async fn has_preempting_goal_work(&self, session: SessionId, goal: qq_protocol::GoalId) -> Result<bool, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE session_id=?1 AND status IN ('queued','running') AND (json_extract(origin_json,'$.type') NOT IN ('goal','goal_check') OR origin_json IS NULL OR json_extract(origin_json,'$.goal_id') != ?2))",
+                [session.to_string(), goal.to_string()], |row| row.get(0)).map_err(Into::into)
+        }).await
+    }
+
     pub(super) async fn unfinished_run_ids(&self) -> Result<Vec<RunId>, SessionRuntimeError> {
         self.call(Priority::Control, |connection| {
             let mut statement = connection.prepare(

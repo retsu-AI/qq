@@ -1411,6 +1411,11 @@ impl SessionRuntime {
         self.inner.store.close().await
     }
 
+    /// Whether unfinished work in this session is outside the selected goal.
+    pub async fn has_preempting_goal_work(&self, session_id: SessionId, goal: qq_protocol::GoalId) -> Result<bool, SessionRuntimeError> {
+        self.inner.store.has_preempting_goal_work(session_id, goal).await
+    }
+
     /// Retains accepted runs until they settle naturally. An explicit interrupt
     /// requests ordinary shutdown, cancelling and draining the remaining work.
     pub async fn close_when_idle(
