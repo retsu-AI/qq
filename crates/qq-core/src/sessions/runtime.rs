@@ -4,7 +4,7 @@ use super::*;
 use crate::plan::{
     AgentProfile, CompiledAgentPlan, HostSnapshot, PlanCompileError, ProviderDescriptor,
 };
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub type RuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<LoadedRuntime, RuntimeLoadError>> + Send + 'static>>;
@@ -748,6 +748,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) grant_promotions: mpsc::Sender<()>,
     grant_promotion_stopped: watch::Sender<bool>,
     pub(super) lifecycle: RwLock<()>,
+    pub(super) draining: AtomicBool,
 }
 
 struct PendingApproval {
@@ -919,6 +920,7 @@ impl SessionRuntime {
             grant_promotions,
             grant_promotion_stopped,
             lifecycle: RwLock::new(()),
+            draining: AtomicBool::new(false),
         });
         for cursor in recovered {
             inner.notify(cursor);
@@ -1470,6 +1472,10 @@ impl SessionRuntime {
         interrupt: impl std::future::Future<Output = ()>,
     ) -> Result<(), SessionRuntimeError> {
         tokio::pin!(interrupt);
+        {
+            let _lifecycle = self.inner.lifecycle.write().await;
+            self.inner.draining.store(true, Ordering::Release);
+        }
         let mut settlements = self.inner.settlements.subscribe();
         loop {
             let lifecycle = self.inner.lifecycle.write().await;

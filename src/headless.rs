@@ -173,7 +173,9 @@ impl RecordSink {
         }
         let line = serde_json::to_string(&record).map_err(io::Error::other)?;
         if let Some(trace) = &mut self.trace {
-            let result = trace.write_all(line.as_bytes()).and_then(|()| trace.write_all(b"\n"));
+            let result = trace
+                .write_all(line.as_bytes())
+                .and_then(|()| trace.write_all(b"\n"));
             if let Err(error) = result {
                 // Keep a failed optional trace from blocking the final stdout
                 // record after an earlier event could not be traced.
@@ -346,28 +348,47 @@ fn prepare_goal_request(
     current: Option<&qq_protocol::GoalSnapshot>,
 ) -> Result<Option<SessionCommand>, Failure> {
     let command = if let Some(objective) = &request.objective {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| Failure::invalid(error.to_string()))?;
         let args = crate::cli::GoalSetArgs {
-            target: crate::cli::GoalTarget { session: session_id, workspace: None, json: true },
-            objective: objective.clone(), replace: request.replace, check: request.check.clone(), clear_check: false,
-            goal_deadline: request.deadline, goal_max_runs: request.max_runs,
+            target: crate::cli::GoalTarget {
+                session: session_id,
+                workspace: None,
+                json: true,
+            },
+            objective: objective.clone(),
+            replace: request.replace,
+            check: request.check.clone(),
+            clear_check: false,
+            goal_deadline: request.deadline,
+            goal_max_runs: request.max_runs,
             max_cost_usd_nanos: options.max_cost_usd_nanos,
         };
-        let mut command = crate::goals::prepare_set(&args, current,
-            &request.defaults, u64::try_from(now.as_millis())
-                .map_err(|_| Failure::invalid("system clock exceeds supported range"))?)
-            .map_err(|error| Failure::invalid(error.to_string()))?;
+        let mut command = crate::goals::prepare_set(
+            &args,
+            current,
+            &request.defaults,
+            u64::try_from(now.as_millis())
+                .map_err(|_| Failure::invalid("system clock exceeds supported range"))?,
+        )
+        .map_err(|error| Failure::invalid(error.to_string()))?;
         if let SessionCommand::SetGoal { budget, .. } = &mut command {
             if let Some(timeout) = options.timeout {
-                budget.per_run.max_duration_ms = Some(u64::try_from(timeout.as_millis())
-                    .map_err(|_| Failure::invalid("per-run timeout is too large"))?);
+                budget.per_run.max_duration_ms = Some(
+                    u64::try_from(timeout.as_millis())
+                        .map_err(|_| Failure::invalid("per-run timeout is too large"))?,
+                );
             }
-            if let Some(turns) = options.max_turns { budget.per_run.max_model_turns = Some(turns); }
+            if let Some(turns) = options.max_turns {
+                budget.per_run.max_model_turns = Some(turns);
+            }
         }
         Some(command)
     } else {
-        if current.is_none() { return Err(Failure::invalid("session has no stored goal")); }
+        if current.is_none() {
+            return Err(Failure::invalid("session has no stored goal"));
+        }
         None
     };
     let check = match &command {
@@ -377,10 +398,14 @@ fn prepare_goal_request(
     if request.check_approval.is_some() {
         let check = check.ok_or_else(|| Failure::invalid("goal has no check"))?;
         if request.check.as_deref() != Some(check.command.as_str()) {
-            return Err(Failure::invalid("check consent requires --check with the exact stored command"));
+            return Err(Failure::invalid(
+                "check consent requires --check with the exact stored command",
+            ));
         }
     } else if request.objective.is_none() && request.check.is_some() {
-        return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
+        return Err(Failure::invalid(
+            "stored check changes require --goal OBJECTIVE",
+        ));
     }
     Ok(command)
 }
@@ -568,7 +593,7 @@ pub async fn run_goal(
             if let Some(guard) = &mut cleanup {
                 match guard.settle().await {
                     Ok(Some(goal)) => accepted = Some((guard.handle.workspace_id, goal)),
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(error) => {
                         let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
                         code = HeadlessStatus::HarnessFailure.code();
@@ -737,7 +762,11 @@ struct AcceptedGoalGuard {
     expected: qq_protocol::GoalIdentity,
 }
 impl AcceptedGoalGuard {
-    fn new(sessions: SessionRuntime, goal: &qq_protocol::GoalSnapshot, handle: &SessionHandle) -> Self {
+    fn new(
+        sessions: SessionRuntime,
+        goal: &qq_protocol::GoalSnapshot,
+        handle: &SessionHandle,
+    ) -> Self {
         Self {
             handle: handle.clone(),
             cleanup: (goal.status == qq_protocol::GoalStatus::Active)
@@ -747,7 +776,9 @@ impl AcceptedGoalGuard {
     }
     async fn settle(&mut self) -> Result<Option<Box<qq_protocol::GoalSnapshot>>, Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
-            let receipt = sessions.pause_goal_if_active(*session_id, self.expected).await
+            let receipt = sessions
+                .pause_goal_if_active(*session_id, self.expected)
+                .await
                 .map_err(|error| Failure::harness(error.to_string()))?;
             let goal = goal_receipt(receipt)?;
             self.expected = goal_identity(&goal);
@@ -3126,8 +3157,14 @@ mod tests {
                 .await
                 .unwrap();
             let focused = snapshot.focused.unwrap();
-            assert_eq!(focused.summary.approval_mode, qq_protocol::ApprovalMode::ReadOnly);
-            assert_eq!(focused.summary.profile, qq_protocol::AgentProfileId::default());
+            assert_eq!(
+                focused.summary.approval_mode,
+                qq_protocol::ApprovalMode::ReadOnly
+            );
+            assert_eq!(
+                focused.summary.profile,
+                qq_protocol::AgentProfileId::default()
+            );
             assert_eq!(focused.summary.model.as_deref(), Some("test/model"));
             let current = focused.goal.unwrap();
             assert_eq!(current.status, qq_protocol::GoalStatus::Active);
@@ -4057,14 +4094,26 @@ mod tests {
                 self.started.try_send(call).unwrap();
                 let release = self.release.clone();
                 if call == 0 {
-                    Box::pin(stream::once(async move {
-                        release.acquire().await.unwrap().forget();
-                        Ok(ProviderEvent::Completed { usage: Some(ProviderUsage {
-                            input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0, reasoning_tokens: None,
-                        }) })
-                    }))
-                } else { Box::pin(stream::pending()) }
+                    Box::pin(
+                        stream::iter([Ok(ProviderEvent::OutputTextDelta {
+                            text: "accepted work finished".into(),
+                        })])
+                        .chain(stream::once(async move {
+                            release.acquire().await.unwrap().forget();
+                            Ok(ProviderEvent::Completed {
+                                usage: Some(ProviderUsage {
+                                    input_tokens: 1,
+                                    output_tokens: 0,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                }),
+                            })
+                        })),
+                    )
+                } else {
+                    Box::pin(stream::pending())
+                }
             }
         }
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -4078,7 +4127,8 @@ mod tests {
                 }).await;
                 let opts = options(&fixture.workspace);
                 let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
-                let request = goal_request();
+                let mut request = goal_request();
+                request.max_runs = Some(3);
                 let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
                 send(&fixture.sessions, command).await.unwrap();
                 assert_eq!(starts.recv().await, Some(0));
@@ -4397,9 +4447,12 @@ mod tests {
         struct LargeText;
         impl Provider for LargeText {
             fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([Ok(ProviderEvent::OutputTextDelta {
-                    text: "x".repeat(16384),
-                })]).chain(stream::pending()))
+                Box::pin(
+                    stream::iter([Ok(ProviderEvent::OutputTextDelta {
+                        text: "x".repeat(16384),
+                    })])
+                    .chain(stream::pending()),
+                )
             }
         }
         let fixture = fixture(|| LargeText).await;
@@ -4409,14 +4462,30 @@ mod tests {
         request.objective = Some("x".repeat(2048));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = tokio::time::timeout(Duration::from_secs(10), run_goal(
-            &fixture.sessions, opts, request, std::future::pending(),
-            &mut stdout, &mut stderr,
-        )).await.expect("trace failure cleanup must finish");
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_goal(
+                &fixture.sessions,
+                opts,
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .expect("trace failure cleanup must finish");
         assert_eq!(code, 4);
         let records = parse_records(&String::from_utf8(stdout).unwrap());
-        let finals: Vec<_> = records.iter().filter(|record| record["type"] == "goal").collect();
-        assert_eq!(finals.len(), 1, "usable stdout needs a final harness result");
+        let finals: Vec<_> = records
+            .iter()
+            .filter(|record| record["type"] == "goal")
+            .collect();
+        assert_eq!(
+            finals.len(),
+            1,
+            "usable stdout needs a final harness result"
+        );
         assert_eq!(records.last().unwrap()["type"], "goal");
         assert_eq!(finals[0]["status"], "harness_failure");
         assert_eq!(finals[0]["exit_code"], 4);
