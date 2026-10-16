@@ -8,7 +8,7 @@
 | Now | Not shipped on main. G0/AC4 foundation is in review in #308 (ENG-1045); the G2 driver/accounting checkpoint is stacked in #309 (ENG-1053). Neither PR establishes complete G2 or whole-plan acceptance. G3–G5 remain open. The decision record is [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md), still Proposed |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
-| Parent | [`autonomous-core.md`](./autonomous-core.md). This plan replaces its AC7–AC9. AC4 (the loop guard) stays there and lands with G0 |
+| Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
 
 ## Delivery stack
 
@@ -232,7 +232,7 @@ not merely as ordinary grant filters (ADR-0049 § 5).
 
 ## Slices
 
-| ID | Goal | Area (starting point; see autonomous-core § Task index for the ownership rule) | Acceptance |
+| ID | Goal | Area (starting point; include all forced consumers per reliability § Constraints and completion) | Acceptance |
 | --- | --- | --- | --- |
 | G0 | **The goal PR, one PR with one `PROTOCOL_VERSION` bump:** protocol and store (`session_goals` with history and one live goal per session, `runs.goal_*`, exact-CAS `set_goal`/`goal_control`, the events, `SessionSnapshot.goal`, `RunOrigin`, reason-tagged `RunPause`, check authorization `once`/`for_goal` state/action) plus the goal in runs (claim snapshot, goal notices, serial `update_goal`) plus autonomous-core AC4. There is no driver/check runner yet | `qq-protocol`, `sessions/{commands,store,snapshots,claim,transcript,compaction}`, schema, `qq-client::state`, `tools/goal.rs`, `catalog.rs` include flag, `plan/descriptor.rs`, `runtime/loop_guard.rs` | Set/edit/replace/control round-trip. Stale id **or** revision conflicts even with `replace: true`; a replacement uses the expected live identity, never a mismatched new id. Achieved is immutable; stopped-goal edits clear old waits/audit claims but do not reactivate it. Clear/replace keep history. Authorization scope/state and stale-command rejection round-trip without execution. Snapshot/reconnect show state. Rendered-size rejection at the boundary; a maximum goal with check tail appears verbatim after ≥ 3 compactions. A queued prompt sees a goal only if active at claim. **Stale claim:** clear/replace/stopped goals accept no writes; after a client edit only model data merges, stale `status`/`wait` cannot change state. Two serial calls in one turn both apply. User-prompt `status` is rejected. AC4 acceptance, protocol fixtures, byte-identical goal-less request golden |
 | G1 | *(dropped: combined into G0)* | — | — |

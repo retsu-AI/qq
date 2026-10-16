@@ -472,7 +472,7 @@ the paid evaluations or all work in order 4.
 
 Existing owners: [speed-first](../plans/speed-first.md),
 [tools](../plans/tool-layer.md), [readiness](../plans/terminal-bench.md),
-[delegation](../plans/supervised-delegation.md),
+[delegation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md),
 [clients](../plans/multi-surface-clients.md),
 [snapshots](../plans/run-snapshots.md), and
 [LSP](../plans/lsp-diagnostics.md). H22.2 and T8 are in the inspected Git history;

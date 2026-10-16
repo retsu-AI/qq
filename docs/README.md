@@ -49,7 +49,7 @@ date and the plan that acts on it.
   adapter placement, acceptance criteria.
 - [`run-reliability.md`](research/run-reliability.md) (2026-09-21) — why
   sessions do not finish: failure taxonomy from the live session store,
-  findings R01–R12. Acted on by [`plans/autonomous-core.md`](plans/autonomous-core.md).
+  findings R01–R12. Acted on by [runtime reliability](plans/reliability.md).
 - [`onboarding.md`](research/onboarding.md) (2026-09-22) — first-run and
   configuration UX, findings O01–O20. The onboarding plan that acted on it
   has closed.
@@ -58,14 +58,14 @@ date and the plan that acts on it.
   [`plans/token-efficiency.md`](plans/token-efficiency.md).
 - [`core-autonomy.md`](research/core-autonomy.md) (2026-09-28) — what stops
   `qq-core` from running one task unattended for hours and from being
-  embedded. Acted on by [`plans/autonomous-core.md`](plans/autonomous-core.md).
+  embedded. Acted on by [runtime reliability](plans/reliability.md).
 - [`goal-pursuit.md`](research/goal-pursuit.md) (2026-09-28) — how the
   reference harnesses pursue one objective over time, and the positions
   QQ's `/goal` takes. Acted on by [`plans/goals.md`](plans/goals.md).
 - [`action-bias.md`](research/action-bias.md) (2026-10-13) — why runs read
   instead of finishing: shell reads counted as work, re-reads, delegation
   wall time, and what the reference harnesses do instead. Acted on by
-  [`plans/action-bias.md`](plans/action-bias.md).
+  [runtime reliability](plans/reliability.md).
 
 ## Decisions — `adr/`
 
@@ -108,8 +108,6 @@ phase-gate evidence.
   routing, approval, and the advisory observer.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
-- [v0.1.7 preparation](plans/release-0.1.7.md) — candidate scope, open gates
-  and the separate bump/tag/documentation handoff.
 - [`website.md`](runbooks/website.md) — how the docs site is generated from
   `guide/`, built, checked, and deployed to GitHub Pages.
 
@@ -126,8 +124,9 @@ these files at build time ([`runbooks/website.md`](runbooks/website.md)).
    Amend them in the commit that changes behavior.
 2. ADRs are one decision, one page, immutable once accepted.
 3. Plans are mortal: phases collapse to one row when they close; a fully
-   shipped plan moves its durable content to `design/` and is deleted, along
-   with its ledger. Receipts stay in Git history.
+   shipped plan moves its durable content to `design/` and is deleted,
+   with navigation updated. Historical evidence ledgers may remain when ADRs
+   or research require them; mark them historical and link their successor.
 4. Ledgers are append-only evidence with one writer each; raw measurements
    stay under `target/qq-perf/` and out of Git.
 5. Research that motivated a plan lives in `research/`, not in the plan or in

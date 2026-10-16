@@ -185,6 +185,29 @@ that decides all three is `tool-layer.md` T13, run with this section's method.
 
 ## Phase 7: Sub-Agent Economics And Provider-Aware Scheduling
 
+### D6b — paired delegation evaluation (ENG-812)
+
+Sole remaining owner of former supervised-delegation work. D1–D6a shipped;
+contracts are in design, receipts in [the historical ledger](progress/supervised-delegation.md).
+TE3 consumes these results; paid work requires ENG-809 authorization.
+
+Use `benchmarks/arms/README.md`: pin 30–40 shape-stratified tasks and a
+long-output subset, routes and identical model/limits/host. Deterministic
+accounting/event/ATIF prechecks pass before spend. Run A0/A1/A2/A3/B1/C1
+with three attempts/seeds, classify every failure; compare each with A0 and
+A3 with A2. T1 compares pre-e074f89 and current main, both A0 on long output.
+Record paired JSON outputs. The shipped compare tool refuses mismatched
+model/organization/output/context/approval/limits/prompt/instruction/workspace/
+machine/Harbor identity or identical arm labels; tolerated revision/schema/
+prompt changes remain listed. Use its McNemar and seeded bootstrap, with
+reasoning-token costs included.
+
+Promotion requires cost_per_pass_ratio_ci95_high <0.80 with no meaningful
+pass-rate loss. Depth >1 stays opt-in unless A3 beats A2. Audit stays off;
+B1 may promote heuristic only on meaningful pass-rate or dollars/pass benefit.
+Continuation T1 requires no pass-rate loss. No delegation win is assumed.
+
+
 Priority: P1.
 
 Complete the pending sub-agent work (the read-only sub-agent plan's Phases
@@ -197,7 +220,7 @@ A–C shipped; that plan was removed 2026-09-04):
 - Include child trajectories in headless and ATIF output.
 - Record child queue wait and concurrency.
 - Depth is configurable up to a ceiling of three, default one until the A3
-  arm in `supervised-delegation.md` wins; write authority is limited to
+  arm in D6b above wins; write authority is limited to
   serialized `Supervised` depth-one children (amended 2026-09-03).
 
 Evaluate delegation by task shape:
@@ -221,40 +244,18 @@ Add provider-aware scheduling only after telemetry shows pressure:
 
 Do not add automatic swarms or worktree orchestration in this plan. Editing
 sub-agents are permitted only as one serialized `Supervised` child per run
-(`supervised-delegation.md` D4, amended 2026-09-03).
+(the shipped D4 contract in design/architecture.md).
 
 ## Phase 8: Warm-Path Runtime And Request Efficiency
 
 Priority: P2. Start only after end-to-end measurements identify the cost.
 
-Hand-off recorded 2026-09-04: the retry-exposure, shared-message-storage, and
-request-encoding-benchmark candidates below are implemented by H14 (D3) and
-H18 (D5) in
-[`speed-first.md`](./speed-first.md)
-after its audit confirmed nested provider/core retries (up to 24 sends per
-turn) and a full history clone per attempt. This phase keeps the remaining
-candidates.
-
-Candidate work:
-
-- Cache effective configuration and compiled runtimes by validated generation
-  or digest so each claimed run does not repeat unchanged resolution work.
-- Cache valid credential leases in memory with expiry and single-flight
-  refresh; never log or persist secret material in cache keys.
-- Invalidate runtimes when configuration, credentials, MCP declarations, or
-  organization selection changes.
-- Share immutable message/tool storage where ownership is genuinely shared.
-- Bound total MCP tool count and schema bytes.
-- Select only concretely relevant tools when a measured use case justifies
-  selection; do not introduce a generic tool router in advance.
-- Keep serialized stable prefixes deterministic for provider caching.
-- Benchmark realistic request encoding and temporary allocation.
-- Expose retries and distinguish safe pre-stream retries from ambiguous
-  failures that could duplicate spend. Use provider idempotency support where
-  available.
-
-Acceptance requires end-to-end improvement. Provider-recipe nanoseconds alone
-do not justify complexity.
+Remaining R8 work is provider prompt-cache determinism (ENG-833), with
+end-to-end evidence and stable serialized prefixes. H14/H18/H22.2/PlanCache
+already delivered retry exposure, shared storage, request encoding and the
+other warm-path candidates; do not rebuild them from the old candidate list.
+TE7 consumes the existing cache/MCP/credential receipts. Any new cache or
+scheduler requires measured pressure and explicit invalidation/bounds.
 
 ## Benchmark Program
 

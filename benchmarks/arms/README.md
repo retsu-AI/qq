@@ -1,7 +1,7 @@
 # Delegation Experiment Arms
 
 Configuration overlays for the paired evaluation in
-`docs/plans/supervised-delegation.md` §D6. Each file is a complete RON
+`docs/plans/terminal-bench.md` § D6b. Each file is a complete RON
 document applied through `QQ_CONFIG_CONTENT` on top of the operator's normal
 layers, so every arm shares the same providers, credentials, primary model,
 and policy and differs only in the section it names. Routes below are
@@ -56,11 +56,11 @@ cargo xtask eval compare \
   --output target/qq-eval/a0-vs-a2.json
 ```
 
-Decisions follow the gates in `supervised-delegation.md` §D6: delegation
+Decisions follow the gates in `terminal-bench.md` § D6b: delegation
 defaults per task class need a `cost_per_pass_ratio_ci95_high` below 0.80
 with no meaningful pass-rate loss (`mcnemar_p_value` and `delta.pass_rate`);
-`audit.mode` stays `heuristic` only if B1 raises pass rate or lowers $/pass,
-otherwise the config default flips to `off`; depth above one stays opt-in
+`audit.mode` stays `off`; B1 may promote `heuristic` only if it meaningfully
+raises pass rate or lowers $/pass; depth above one stays opt-in
 unless A3 beats A2.
 
 ## Before spending

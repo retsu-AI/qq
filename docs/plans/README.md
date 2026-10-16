@@ -1,127 +1,76 @@
-# Plans
+# Plans: remaining work
 
-Active plans only. Shipped plans are deleted with their ledgers; their
-receipts live in Git history and their durable contracts in
-[`../design/`](../design/). Read
-[`../design/architecture.md`](../design/architecture.md) before changing
-system boundaries and [`workflow.md`](./workflow.md) before starting a slice.
+Product direction is defined once in [product](../design/product.md): fast,
+responsive useful work and a developer-friendly local experience, with safety,
+durability and bounded resources as constraints. Plans specify unfinished
+outcomes and acceptance, not a second description of shipped behavior.
 
-## Tracker
+## Work order
 
-Release preparation for v0.1.7 is tracked in
-[`release-0.1.7.md`](./release-0.1.7.md). It separates merged behavior from
-unqualified performance/live targets and does not authorize a version bump or tag.
+1. **Finish and qualify the core loop.** [Reliability](reliability.md) owns
+   recovery, useful progress, compaction and their outstanding live/resource
+   gates. Shipped instrumentation is not a passing qualification result.
+2. **Make it easy to use and change.** [Developer experience](developer-experience.md)
+   owns missing guide references, contributor feedback and remaining test audits.
+   This can run alongside runtime work on disjoint paths.
+3. **Deliver bounded durable goals.** [Goals](goals.md) owns G0/AC4 → G2 →
+   G3 → G4 → G5. Preserve check authority, budget and recovery acceptance;
+   an implementation checkpoint is not whole-plan delivery.
+4. **Optimize from evidence.** [Terminal-Bench](terminal-bench.md) owns
+   paid tool/delegation evaluations and their default decisions;
+   [token efficiency](token-efficiency.md) owns cross-cutting accounting and
+   experiments without recreating those evaluations. Paid runs need ENG-809
+   approval and a spend cap. [Performance receipts](progress/performance-gates.md)
+   retain failed/unqualified H0 results; release acceptance is not a pass.
+5. **Expand only behind demonstrated need.** TUI, Jev and remote clients
+   keep their specific gates below. Sandbox/compatibility adapters require
+   a threat model/real consumer, not speculative framework work.
 
-Open work is tracked in Linear project `qq` (team `ENG`), one milestone per
-plan below plus `Harness Audit`, `Evaluation Program`, and `Decisions`.
-Ledgers in [`progress/`](./progress/) hold receipts and gate evidence; when
-they disagree with Linear on status, Linear is current. Reserve ADR numbers
-in [`progress/root.md`](./progress/root.md).
+This is ordering by outcome, not a command to serialize independent work.
+A changed priority must name the acceptance it unlocks. No calendar date,
+merged PR or closed tracker issue substitutes for a missing measurement.
 
-## How to use this directory
+## Owners and boundaries
 
-| If you are… | Read, in order |
+| Plan | Remaining scope |
 | --- | --- |
-| deciding what to work on | this file § Priority, then the plan's status block |
-| picking up a slice | [`workflow.md`](./workflow.md), the plan's task index and phase section, [`templates/slice.md`](./templates/slice.md), the plan's ledger in [`progress/`](./progress/) |
-| reviewing a PR | [`templates/review-checklist.md`](./templates/review-checklist.md), the slice section, the ledger receipt |
-| checking what is in flight | [`progress/README.md`](./progress/README.md) and the plan's ledger |
-| recording a decision | [`../adr/README.md`](../adr/README.md); reserve the number in [`progress/root.md`](./progress/root.md) |
+| [reliability](reliability.md) | AC/AP recovery and embedding residuals, AP5 productivity, AB6 action bias, CX5 compaction, integrated seven-day reliability |
+| [developer experience](developer-experience.md) | GE1–GE9 guide work; AF5 tracing, remaining AF6 audits, AF9 lessons, AF10 evaluation; merge-queue operator follow-up |
+| [goals](goals.md) | Detailed durable goal/loop-guard/check-authority specification and G0/G2–G5 delivery |
+| [tool layer](tool-layer.md) | T13 tool ablations, T14 selective index, T11 images; T10 terminal only on trajectory evidence |
+| [Terminal-Bench](terminal-bench.md) | R6 tool experiment method, R7/D6b delegation economics/defaults, remaining R8, TB-pilot and benchmark integrity |
+| [token efficiency](token-efficiency.md) | Remaining TE1 accounting and TE2–TE8 experiments; consumes D6b/T13/cache receipts |
+| [speed first](speed-first.md) | Residual backend performance gates, H22 deferrals and gated H10–H12; shipped backend design is in architecture |
+| [TUI](tui-redesign.md) | L4 split transcripts, U8 chrome |
+| [Jev](jev.md) | Remaining JV3–JV13 precision, hold lifecycle, receipts, UX and qualification |
+| [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W/S/U/D/M work |
+| [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
+| [LSP diagnostics](lsp-diagnostics.md) | Unscheduled proposal; no active delivery inferred |
 
-## Files
+Linear project `qq`, team `ENG`, tracks live assignments and issue status.
+Query it when starting work; this cleanup does not close issues or assert
+remote PR state. [Progress](progress/README.md) records local receipts and
+[workflow](workflow.md) defines slice/review procedure. Reserve ADR numbers
+in [root](progress/root.md); do not rewrite accepted ADRs during cleanup.
 
-Each plan's ledger has the same name under [`progress/`](./progress/).
+## Consolidation and lifecycle
 
-| Plan | Scope and what is open |
-| --- | --- |
-| [`autonomous-core.md`](./autonomous-core.md) | AP0–AP4.2, AC0.1, AC1–AC3, AC10/AC11, AC12.1 and AC17 merged. AP5, integrated reliability and named performance evidence remain open; AC4 is in the unmerged goals stack; AC5/AC6, AC18/AC19 and remaining embedding/resource slices stay open |
-| [`goals.md`](./goals.md) | Durable session goals: G0/AC4 (#308) and the G2 driver checkpoint (#309) in review, not on main; full G2 and G3–G5 acceptance remain open. ADR-0049 Proposed |
-| [`action-bias.md`](./action-bias.md) | AB1–AB5 and AB6.1 export/recount tooling merged (#301–#306). Matched performance and AB6's pinned seven-day live qualification remain open; no measured productivity improvement claimed |
-| [`compaction.md`](./compaction.md) | Fast, exact, cache-aligned compaction (ADR-0056). CX0–CX4 shipped; CX5 live qualification open |
-| [`tool-layer.md`](./tool-layer.md) | Slim, safe, token-efficient built-ins. T1–T9, T12 and T15–T20 shipped; open: T13 ablations, T14 `select_tools` index, T11 `view_image`; T10 `terminal` gated |
-| [`token-efficiency.md`](./token-efficiency.md) | More verified work per token: task-tree economics, tools, selective discovery, evidence reuse and context experiments. TE0 and TE1.1 shipped; the rest of TE1 and TE2–TE8 planned |
-| [`guide-expansion.md`](./guide-expansion.md) | The user guide's missing pages, each guarded by docs-truth. GE0 and GE10 shipped; GE1–GE9 planned |
-| [`agent-feedback.md`](./agent-feedback.md) | AF0–AF4, AF7, AF8 and AF9's first rules merged in #282; AF6.1 cancellation audit merged in #311. AF5 tracing, remaining AF6 audit, AF9 lesson mining and AF10 evaluation stay open; merge-queue activation is an operator task |
-| [`tui-redesign.md`](./tui-redesign.md) | Responsive layout and a legible transcript. U0–U7, U9 and L1–L3 shipped; open: L4 split transcripts, U8 chrome |
-| [`jev.md`](./jev.md) | The only Jev plan. JV0, JV1's activation fix and JV2 shipped; JV3–JV13 (precision, context, hold lifecycle, receipts, shadow and pilot, UX, speed, qualification) planned. Proposed |
-| [`multi-surface-clients.md`](./multi-surface-clients.md) | Web, desktop and mobile clients over many headless servers. W1, W2, S1 and S3 shipped; open: S2 enrollment, S4 exposure, W3, then U/D/M |
-| [`supervised-delegation.md`](./supervised-delegation.md) | Continuation, roster, supervised children, audit. D1–D6a shipped; D6b paired evaluation open |
-| [`terminal-bench.md`](./terminal-bench.md) | Harness reliability and the Terminal-Bench evaluation program. Phases 1–5 shipped; open: R6-terminal evidence, R7, R8, `TB-pilot` |
-| [`speed-first.md`](./speed-first.md) | The speed-first backend. Phases 0–6 closed; open: two quiet-host recordings and seven H22 deferrals; Phases 7–9 gated. Shipped design is in `architecture.md` § Extension Contract and § Performance Discipline |
-| [`run-snapshots.md`](./run-snapshots.md) | Proposed: reversible mutating-run state. No ledger until a slice starts |
-| [`lsp-diagnostics.md`](./lsp-diagnostics.md) | Proposed: diagnostics integration. No ledger until a slice starts |
+- `autonomous-core`, `action-bias`, `compaction` → **reliability**.
+- `agent-feedback`, `guide-expansion` → **developer experience**.
+- `supervised-delegation` → **Terminal-Bench R7/D6b**; continuation and
+  supervised-write contracts already live in design.
+- v0.1.7 preparation is complete: bump #318 and guide-pin follow-up #321
+  are on main. The temporary plan/ledger are removed. Release procedure is
+  [the runbook](../runbooks/release.md), release notes are in `CHANGELOG.md`.
 
-| Process file | Purpose |
-| --- | --- |
-| [`workflow.md`](./workflow.md) | Slice protocol, ledger rules, review, escalation, dispatch skeletons |
-| [`templates/`](./templates/) | Slice header, pre-flight, receipt, PR body; review checklist |
-| [`progress/`](./progress/) | One ledger per plan, root ledger, decisions needed, gate evidence |
+Existing slice IDs and issues survive consolidation. Old ledgers are marked
+historical and retained where ADRs/research depend on their evidence; new
+receipts go to the successor. Recover deleted plan detail with
+`git log -- docs/plans/<name>.md`, not a parallel archive of stale plans.
 
-## Priority
-
-| # | Next slice | Plan | Why now |
-| ---: | --- | --- | --- |
-| 0 | AP5 seven-day normal-use evidence (2026-10-06–13) | [`autonomous-core.md`](./autonomous-core.md) § Order | Confirms that long runs and sub-agents now produce output, not only activity (ADR-0054) |
-| 0a | Qualify merged AC3; review goal branch AC4 + G0 → G2, then G3; prompt-continuation branch AC5/AC6 | [`autonomous-core.md`](./autonomous-core.md), then [`goals.md`](./goals.md) | AC1–AC3 merged; named performance and full reliability qualification remain open. Goals #308/#309 are not shipped. Embedding AC12.2–AC13 runs in parallel |
-| 0a′ | Matched performance and AB6 seven-day qualification after merged AB1–AB5/AB6.1 | [`action-bias.md`](./action-bias.md) | Implementation and measurement tooling are on main; deploy and identify one pinned runtime before starting the seven-day window. #315's H0/size qualification is still open |
-| 0b | CX5 seven-day live qualification | [`compaction.md`](./compaction.md) | CX0–CX4 shipped; the speed and cache-read targets are unconfirmed on real sessions |
-| 0c | AC18 truncation recovery (ENG-870) and AC19 stream repair (ENG-874) | [`autonomous-core.md`](./autonomous-core.md) | AC17 argument tolerance is merged (#294); read-hash persistence already exists. AC20 diagnostics require evidence |
-| 1 | GE5 keybindings, GE4 environment, then GE2, GE3, GE1, GE9 | [`guide-expansion.md`](./guide-expansion.md) | The references newcomers look for and cannot find. Small, independent, and each extends the docs-truth net |
-| 2 | Live qualification of the context-usability stack | — (one manual run; record in `progress/root.md`) | C1–C6 shipped (#56–#64) on fixtures only. Confirm on a real long session: `cache_read_input_tokens > 0` on turn 2 of an Anthropic/Bedrock session, and a ~700 KB transcript on a 200k model sends and compacts |
-| 3 | Harness-comparison findings triage | [`../research/harness-comparison.md`](../research/harness-comparison.md) § Proposed work order | F01–F07, F10, F11, F14 and F23–F25 shipped (see `progress/root.md` and Git history). F19 (build profiles) and F20 (retention) are inputs to `autonomous-core.md` AC11 and AC16; the rest are unowned |
-| 4 | T13 ablation harness (A0–A4s arms) | [`tool-layer.md`](./tool-layer.md) | Every tool-layer target (≥25 % fewer calls, ≥35 % fewer tokens) is unmeasured until this runs; it also feeds R6's evidence gate for T10 and H10 |
-| 5 | D6b paired evaluation (paid runs) and the default decisions it feeds | [`supervised-delegation.md`](./supervised-delegation.md) | Decides delegation depth and worker-model defaults with evidence |
-| 6 | Multi-surface S2 enrollment (ADR-0015) and S4 exposure (ADR-0016, reserved); then W3 | [`multi-surface-clients.md`](./multi-surface-clients.md) | A remote client is blocked on authentication |
-| 7 | T14 `select_tools` index; T11 `view_image` | [`tool-layer.md`](./tool-layer.md) | Small; T11 needs the provider image content block |
-| 8 | L4 split transcripts, then U8 chrome | [`tui-redesign.md`](./tui-redesign.md) | Makes concurrent agents visible side by side at the Ultra tier |
-| 9 | Phase 7 — H10 process sandbox; Phase 8 — H11 product adapters; Phase 9 — H12 qualification | [`speed-first.md`](./speed-first.md) | Gated on R6 (T13 evidence, T10 decision), a platform threat model, and a real consumer |
-| — | Quiet-host recordings: Phase 5a H0 tail comparison; H20 eight-stream p95 then the 50→20 ms budget | [`speed-first.md`](./speed-first.md) | Implemented; tails not repeatable on the shared host; retained, not waived |
-| — | Seven H22 deferrals | [`speed-first.md`](./speed-first.md) § Bundled Fixes | Each is its own slice when that code is next opened |
-| — | JV3 precision, then JV4–JV6 | [`jev.md`](./jev.md) | Opted-in users are prompted for most held calls; the design doc's remaining findings are defects. Awaiting plan acceptance |
-| — | The rest of TE1, then TE2/TE4 | [`token-efficiency.md`](./token-efficiency.md) | Measurement first; paid runs remain with ENG-809 |
-| — | Run snapshots, LSP diagnostics | proposed plans | No scheduled slice |
-
-## Ownership
-
-| Concern | Owner |
-| --- | --- |
-| Compiled plan, protocol contract, extension lanes, store/provider hot path, perf gates and budgets | [`speed-first.md`](./speed-first.md) |
-| Tool-contract ablations, terminal, sub-agent economics, Terminal-Bench evaluation program, remaining warm-path candidates | [`terminal-bench.md`](./terminal-bench.md) |
-| Built-in tool contracts, output bounding and spill, shell classification, `exec`/`fetch`/`ask_user`/`terminal`, `@` mentions | [`tool-layer.md`](./tool-layer.md) |
-| Continuation on truncation, delegation roster, supervised write children, final-answer audit, paired evaluation | [`supervised-delegation.md`](./supervised-delegation.md) |
-| Web, desktop, mobile clients; remote server readiness (identity, enrollment, CORS, TLS, workspace catalog) | [`multi-surface-clients.md`](./multi-surface-clients.md) |
-| Long unattended runs and reliability: reset scopes, provider/stream recovery, tolerant tool arguments, continuation, loop guard, soak/live evidence; embedding and `qq-harness` | [`autonomous-core.md`](./autonomous-core.md) |
-| Goals (`/goal`): the session goal, goal driver, `update_goal`, completion check, goal budgets, waits, `qq run --goal` | [`goals.md`](./goals.md) |
-| Root-run action bias: what counts as a read for progress, the root prompt's working conventions, `read_file`'s default window, declared tools versus run authority | [`action-bias.md`](./action-bias.md) |
-| Compaction speed, fidelity and cache alignment | [`compaction.md`](./compaction.md) |
-| TUI layout, transcript rendering, chrome | [`tui-redesign.md`](./tui-redesign.md) |
-| Jev review, routing, approval delegate, observer; their qualification | [`jev.md`](./jev.md) |
-| User guide pages and the docs site's content | [`guide-expansion.md`](./guide-expansion.md) |
-| Cross-cutting efficiency accounting and new evidence/context experiments; D6b/T13/cache retain their owners | [`token-efficiency.md`](./token-efficiency.md) |
-| Reversible mutating-run state | [`run-snapshots.md`](./run-snapshots.md) |
-| Diagnostics integration | [`lsp-diagnostics.md`](./lsp-diagnostics.md) |
-| Shared files, dependency and toolchain bumps, ADR numbering | [`progress/root.md`](./progress/root.md) |
-
-Shipped, and owned by `design/` alone: side questions
-([`side-questions.md`](../design/side-questions.md)), delegated approval
-([`tools.md` § Approval Policy](../design/tools.md#approval-policy),
-ADR-0041), MCP tool-set pinning (ADR-0046), Codex device authorization,
-first-run and onboarding UX, and in-run compaction (ADR-0039).
-
-## Conventions
-
-- Slice IDs come from the plan's task index (`H20`, `HC3`, `R6-search`,
-  `D6b`); split large tasks in the ledger as `H20.1`, `H20.2`.
-- A plan and its ledger share one file name.
-- A plan's status block is derived from its ledger and updated in the same PR
-  that ships the work, or the immediately following docs PR.
-- Record a pre-change baseline for every named performance gate before the
-  change lands ([`../runbooks/perf-recording.md`](../runbooks/perf-recording.md)).
-- Phase sections follow one template: status, tasks, acceptance, receipt of at
-  most about fifteen lines with commit SHAs. When a phase closes, collapse its
-  section to one row in the plan's completed-phases table and write the gate
-  file in `progress/`.
-- Research that motivated a plan belongs in [`../research/`](../research/),
-  not in the plan.
-- When a plan is fully shipped, move any durable contract into `../design/`,
-  delete the plan and its ledger, and update this index.
+A plan owns future acceptance; design owns shipped contracts; research is a
+dated snapshot; ledgers own evidence. Remove completed implementation detail
+rather than maintaining duplicate status tables. On completion, transfer any
+remaining contract to design, delete the plan, and remove navigation links.
+Historical ledgers may remain only when named evidence consumers need them,
+clearly marked with their successor and no active assignment implied.
