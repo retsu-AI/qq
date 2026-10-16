@@ -17,6 +17,11 @@ mod deadlines;
 mod delegation;
 mod execution_context;
 mod feeds;
+mod goal_admission;
+mod goal_review;
+mod goal_upgrade;
+mod goals;
+mod loop_guard;
 mod migrations;
 mod nonblocking;
 mod progress;
@@ -994,7 +999,13 @@ impl Provider for RenewableSliceProvider {
             }));
             events.push(Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                 id: id.clone(),
-                json: json.to_owned(),
+                // Varied page requests keep this a slice/persistence workload,
+                // rather than a proved identical-read execution loop.
+                json: if name == "read_file" && json == r#"{"path":"note.txt"}"# {
+                    serde_json::json!({"path":"note.txt","limit":current*crate::MAX_TOOL_CALLS_PER_TURN+index+1}).to_string()
+                } else {
+                    json.to_owned()
+                },
             }));
             events.push(Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }));
         }
@@ -1788,6 +1799,9 @@ async fn spill_one_call(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -2166,6 +2180,11 @@ fn denial_capacity_fixture(
         )
         .unwrap();
     let claimed = ClaimedRun {
+        goal_spend_owner: None,
+        goal: None,
+        goal_initial_notice: None,
+        goal_admission: None,
+        origin: None,
         checkpoint: None,
         routing: None,
         approval_delegate: None,
@@ -2243,7 +2262,7 @@ fn apply_denial_capacity_path(
                 decision: ApprovalDecision::Deny,
             },
             None,
-            &WorkspaceGrantSeed::default(),
+            &CommandAdmission::default(),
             CommandOrigin::Client,
         )
         .map(|_| ()),
@@ -3844,7 +3863,9 @@ impl Provider for AutoCompactProvider {
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                            // Preserve the complete8KiB result while varying the requested
+                            // page size: this fixture tests pruning, not repeat refusal.
+                            json: serde_json::json!({"path":"note.txt","limit":64+prior_results.len()}).to_string(),
                         }),
                         Ok(qq_provider::ProviderEvent::ToolCallCompleted { id }),
                         Ok(qq_provider::ProviderEvent::Completed { usage: None }),
@@ -4185,6 +4206,9 @@ async fn project_terminal_run_with_tool_boundaries(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -6579,6 +6603,9 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
                 .persist_in_run_summary_turn(
                     &summary,
                     ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
                         turn_ordinal: 1,
                         message: Message::new(
                             Role::Assistant,
@@ -6791,6 +6818,9 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
     let mut receipt = Box::pin(store.persist_in_run_summary_turn(
         &summary,
         ModelTurnCommit {
+            model_work: crate::runtime::ModelWorkDisposition::Committed,
+            goal_notices: Vec::new(),
+            reserved_goal_notices: 0,
             turn_ordinal: 1,
             message: Message::new(
                 Role::Assistant,
@@ -6890,6 +6920,9 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
         .persist_in_run_summary_turn(
             &summary,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -8272,8 +8305,18 @@ async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns() {
+    // Store admission and the native read use real I/O; keep fake time
+    // fixed until the blocking read reaches the phase this test exercises.
+    let keep_clock = tokio::spawn(async {
+        let began = std::time::Instant::now();
+        while began.elapsed() < Duration::from_secs(5) {
+            tokio::task::yield_now().await;
+        }
+    });
+    let cancellation = RunCancellation::new();
+    let deadline_cancelled = cancellation.clone();
     let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
     first.push(side_done());
     let directory = tempfile::tempdir().unwrap();
@@ -8295,7 +8338,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .answer_side_question(session_id, "inspect".to_owned(), RunCancellation::new())
+                .answer_side_question(session_id, "inspect".to_owned(), cancellation)
                 .await
         })
     };
@@ -8304,7 +8347,10 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         .unwrap()
         .unwrap();
     // Past the deadline with the read still blocked, nothing has settled.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::advance(Duration::from_millis(400)).await;
+    tokio::time::timeout(Duration::from_secs(1), deadline_cancelled.cancelled())
+        .await
+        .unwrap();
     assert!(!task.is_finished());
     let state = runtime
         .inner
@@ -8325,6 +8371,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
         Err(SessionRuntimeError::SideQuestionTimedOut)
     ));
     runtime.shutdown().await.unwrap();
+    keep_clock.abort();
 }
 
 #[tokio::test]

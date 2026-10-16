@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 mod capabilities;
+mod goals;
 mod headless;
 mod ids;
 mod input;
@@ -20,11 +21,19 @@ pub use capabilities::{
     PackSummary, ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities,
     ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
+pub use goals::{
+    DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason, GoalBudget, GoalCheck,
+    GoalCheckAuthorization, GoalCheckScope, GoalChecklistItem, GoalChecklistState, GoalControl,
+    GoalCounters, GoalExhaustion, GoalIdentity, GoalNeedsUser, GoalPauseReason, GoalSnapshot,
+    GoalStatus, GoalWait,
+};
 pub use headless::{
     HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
     HeadlessTrial,
 };
-pub use ids::{CommandId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId};
+pub use ids::{
+    CommandId, GoalId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId,
+};
 pub use input::{
     Correlation, CorrelationError, InputError, InputPart, InputPartKind, LineRange,
     MAX_CORRELATION_BYTES, MAX_CORRELATION_ENTRIES, MAX_CORRELATION_KEY_BYTES,
@@ -60,8 +69,8 @@ pub use sessions::{
     ModelPricingTier, ModelSelection, OutputContract, PendingHold, PromptCacheCapabilities,
     PromptVersion, ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question,
     QuestionPreview, ResolvedModel, ResolvedModelVersion, RoutingDecision, RoutingOutcome,
-    RunActivity, RunFailure, RunLimits, RunOutcome, RunPause, RunPromptIdentity, RunSnapshot,
-    RunStatus, SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent,
+    RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome, RunPause, RunPromptIdentity,
+    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent,
     SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
     ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
     SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
@@ -69,7 +78,7 @@ pub use sessions::{
     WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 32;
+pub const PROTOCOL_VERSION: u16 = 33;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles

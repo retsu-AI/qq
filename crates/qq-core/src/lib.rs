@@ -70,7 +70,7 @@ use runtime::{
     ToolGateFuture, TurnBlock, render_history_matches, render_tool_result,
 };
 
-pub use approval::{ApprovalDelegate, shell_prefix_matches};
+pub use approval::{ApprovalDelegate, goal_check_shell_denied, shell_prefix_matches};
 pub use cancellation::RunCancellation;
 pub use context_source::{
     ContextBudget, ContextBundle, ContextCache, ContextFetchFuture, ContextItem, ContextRequest,
@@ -79,8 +79,8 @@ pub use context_source::{
 pub use hosts::{
     EMBEDDED_TOOL_PREFIX, EmbeddedHostError, EmbeddedToolFuture, EmbeddedToolHandler,
     EmbeddedToolHost, EmbeddedToolHostBuilder, ExternalToolHost, HostCallError, HostCallFuture,
-    HostCatalog, HostReadiness, HostShutdownFuture, HostTool, HostToolResult, MCP_TOOL_PREFIX,
-    ToolHints,
+    HostCallObservation, HostCatalog, HostReadiness, HostShutdownFuture, HostTool, HostToolResult,
+    MCP_TOOL_PREFIX, ObservedHostCallFuture, ObservedHostToolResult, ToolHints,
 };
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
@@ -93,7 +93,8 @@ pub use runtime::{
 };
 pub use sessions::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
-    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalValidationError, GrantPromotionFuture,
+    GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING,
     MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT,
     MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES,
     MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN,
@@ -634,22 +635,19 @@ fn select_tools(
 ) -> (tools::ToolOutput, bool) {
     let arguments = match serde_json::from_str::<catalog::SelectToolsArgs>(arguments) {
         Ok(arguments) if arguments.query.trim().is_empty() => {
-            return (
-                tools::bounded_result("query must not be empty".to_owned(), true),
-                false,
-            );
+            return (tools::ToolOutput::refused("query must not be empty"), false);
         }
         Ok(arguments) => arguments,
         Err(error) => {
             return (
-                tools::bounded_result(format!("invalid arguments: {error}"), true),
+                tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                 false,
             );
         }
     };
     if catalog.exposure() != catalog::Exposure::Full && catalog.external_len() == 0 {
         return (
-            tools::bounded_result("no external tools are available".to_owned(), true),
+            tools::ToolOutput::refused("no external tools are available"),
             false,
         );
     }
@@ -762,6 +760,8 @@ pub(crate) struct RunCapabilities {
     /// Full-transcript recall for `search_history`. Session runs install one;
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
+    goal: Option<sessions::GoalRunInput>,
+    goal_spend_tracking: bool,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
     /// install one and keep spills; direct runs keep none, so their markers
     /// say `not stored`.
@@ -814,6 +814,8 @@ impl RunCapabilities {
             execution_started: None,
             pricing: None,
             history: None,
+            goal: None,
+            goal_spend_tracking: false,
             spills: None,
             steering: None,
             compactor: None,
@@ -865,6 +867,16 @@ impl RunCapabilities {
 
     pub(crate) fn with_history(mut self, history: Arc<dyn HistorySearcher>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    pub(crate) fn with_goal_spend_tracking(mut self, enabled: bool) -> Self {
+        self.goal_spend_tracking = enabled;
+        self
+    }
+
+    pub(crate) fn with_goal(mut self, goal: Option<sessions::GoalRunInput>) -> Self {
+        self.goal = goal;
         self
     }
 
@@ -962,6 +974,8 @@ impl RunCapabilities {
             execution_started: None,
             pricing: None,
             history: None,
+            goal: None,
+            goal_spend_tracking: false,
             spills: None,
             steering: None,
             compactor: None,
@@ -1177,6 +1191,7 @@ impl Runtime {
             yield Ok(runtime::SummarizeStep::RequestStarting);
             let mut events = self.provider.stream(request);
             let mut text = String::new();
+            let mut reasoning_seen = false;
             let mut truncated = None;
             let usage;
             // Calls in this turn, in order, and the turn's replay data: a
@@ -1214,7 +1229,7 @@ impl Runtime {
                         ProviderEvent::ReasoningStarted { .. }
                         | ProviderEvent::ReasoningDelta { .. }
                         | ProviderEvent::ReasoningCompleted { .. },
-                    ) => {}
+                    ) => reasoning_seen = true,
                     Ok(ProviderEvent::RefusalDelta { .. }) => {
                         yield Err(runtime::SummarizeError::Rejected(
                             "summarizer refused".to_owned(),
@@ -1271,8 +1286,17 @@ impl Runtime {
                     // is the provider's moment; the run loop retries the
                     // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
+                        let rejected_before_work = matches!(&error,
+                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::Configuration(_)
+                            | qq_provider::ProviderError::CredentialsUnavailable(_))
+                            && text.is_empty() && calls.is_empty() && replay.is_none()
+                            && !reasoning_seen;
                         let kind = run_failure_kind(error.kind());
                         let message = error.to_string();
+                        if rejected_before_work {
+                            yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message });
+                            return;
+                        }
                         yield Err(if recoverable_turn_fault(kind) {
                             runtime::SummarizeError::Transient { kind, message }
                         } else {
@@ -1859,6 +1883,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
+                | RuntimeEvent::GoalRequestRejected
+                | RuntimeEvent::ToolCallUnexecuted { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
                 | RuntimeEvent::ToolCallOutputDelta { .. }
                 | RuntimeEvent::ToolCallFinished { .. }
@@ -1909,17 +1935,16 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     yield RunEvent::Failed { kind, message };
                     return;
                 }
-                // The direct stream has no session to resume from, so the
-                // pause surfaces as the last attempt's failure with the
-                // retries it spent.
+                // Direct streams have no durable session to resume. Preserve
+                // the provider failure kind and expose no-progress separately.
                 RuntimeEvent::Paused { pause } => {
-                    yield RunEvent::Failed {
-                        kind: pause.kind,
-                        message: format!(
-                            "{} (paused after {} turn retries)",
-                            pause.message, pause.attempts
-                        ),
+                    let (kind, message) = match pause.as_ref() {
+                        qq_protocol::RunPause::ProviderRetry { kind, message, attempts, .. } =>
+                            (*kind, format!("{message} (paused after {attempts} turn retries)")),
+                        qq_protocol::RunPause::NoProgress { .. } =>
+                            (RunFailureKind::Policy, pause.to_string()),
                     };
+                    yield RunEvent::Failed { kind, message };
                     return;
                 }
                 // The direct compatibility path imposes no caller limits, so
@@ -1968,6 +1993,10 @@ pub(crate) fn measure_messages(messages: &[Message]) -> u64 {
 /// text, which can be as large as the store keeps) moves into the event.
 #[derive(Debug, Clone)]
 struct RetainedResult {
+    disposition: tools::ResultDisposition,
+    result_digest: [u8; 32],
+    human_input: bool,
+    process_work: bool,
     model_text: String,
     is_error: bool,
     spill_handle: Option<String>,
@@ -1976,6 +2005,13 @@ struct RetainedResult {
 impl RetainedResult {
     fn retain(output: &tools::ToolOutput, tool: &str, call: ToolCallId) -> Self {
         Self {
+            disposition: output.disposition,
+            result_digest: output.result_digest,
+            human_input: false,
+            process_work: output
+                .execution_context
+                .as_ref()
+                .is_some_and(|receipt| receipt.is_work()),
             model_text: output.model_text.clone(),
             is_error: output.is_error,
             spill_handle: output.spill.as_ref().map(|spill| spill.handle(tool, call)),
@@ -1984,16 +2020,30 @@ impl RetainedResult {
 
     const fn error(message: String) -> Self {
         Self {
+            disposition: tools::ResultDisposition::Refused,
+            result_digest: [0; 32],
+            human_input: false,
+            process_work: false,
             model_text: message,
             is_error: true,
             spill_handle: None,
         }
     }
 
+    fn interrupted(message: String) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = tools::ResultDisposition::Interrupted;
+        result
+    }
+
     /// An `ask_user` result the session layer already persisted: kept as-is
     /// so the model reads exactly what the store holds.
     const fn answered(result: String) -> Self {
         Self {
+            disposition: tools::ResultDisposition::Refused,
+            result_digest: [0; 32],
+            human_input: true,
+            process_work: false,
             model_text: result,
             is_error: false,
             spill_handle: None,
@@ -2084,6 +2134,7 @@ pub enum RuntimeConfigError {
 
 #[cfg(test)]
 mod tests {
+    mod loop_guard;
     mod progress;
     mod t20;
 
@@ -2421,6 +2472,7 @@ mod tests {
             &plan.catalog.base_specs(&catalog::StaticFilter {
                 spawn_agent: false,
                 search_history: false,
+                update_goal: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -2678,6 +2730,7 @@ mod tests {
             tools: Some(catalog::StaticFilter {
                 spawn_agent: false,
                 search_history: false,
+                update_goal: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -4266,11 +4319,14 @@ mod tests {
     async fn ab2_deferred_searches_do_not_trigger_a_premature_slice_checkpoint() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("AGENTS.md"), "instructions").unwrap();
-        let arguments = serde_json::json!({"query":"AGENTS.md","mode":"names"}).to_string();
+        // Distinct queries isolate page deferral from the repeated-read guard.
+        let turns = (0..20).map(|turn| (0..16).map(|index| {
+            ("search", serde_json::json!({"query":format!("AGENTS[.]md|^__page_probe_{turn}_{index}$"),"mode":"names","regex":true}).to_string())
+        }).collect()).collect();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TurnScript {
-                turns: vec![vec![("search", arguments); 16]; 20],
+                turns,
                 requests: Arc::clone(&requests),
             },
             "test-model",
@@ -4333,13 +4389,28 @@ mod tests {
                 )
                 .unwrap();
             }
-            let arguments = serde_json::json!({"query":"x","mode":"names"}).to_string();
+            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
+                - count * tools::output::result_reserve_bytes("search"))
+                / tools::output::search_reservation_bytes(false);
+            // Admitted slots use distinct arguments. Deferred slots retry query zero
+            // unchanged, so no deferral spends a repeated-read allowance.
+            let arguments = (0..count)
+                .map(|index| {
+                    let query = if index < admitted { index } else { 0 };
+                    serde_json::json!({"query":format!("x|^__page_probe_{query}$"),"mode":"names","regex":true})
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let runtime = Runtime::new(
                 TurnScript {
                     turns: vec![
-                        vec![("search", arguments.clone()); count],
-                        vec![("search", arguments.clone())],
+                        arguments
+                            .iter()
+                            .cloned()
+                            .map(|arguments| ("search", arguments))
+                            .collect(),
+                        vec![("search", arguments[0].clone())],
                     ],
                     requests: Arc::clone(&requests),
                 },
@@ -4367,12 +4438,10 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
-                - count * tools::output::result_reserve_bytes("search"))
-                / tools::output::search_reservation_bytes(false);
+
             assert_eq!(requested[0].len(), count);
             for (index, call) in requested[0].iter().enumerate() {
-                assert_eq!(call.arguments, arguments);
+                assert_eq!(call.arguments, arguments[index]);
                 if index >= MAX_TOOL_CALLS_PER_TURN {
                     assert!(matches!(
                         call.rejection,
@@ -4386,12 +4455,16 @@ mod tests {
                 }
             }
             assert!(requested[1][0].rejection.is_none());
+            assert_eq!(requested[1][0].arguments, requested[0][admitted].arguments);
             let completed = events
                 .iter()
                 .filter_map(|event| match event {
                     RuntimeEvent::ToolCallFinished {
                         result, is_error, ..
-                    } => Some((result, *is_error)),
+                    } => Some((result.as_str(), *is_error)),
+                    RuntimeEvent::ToolCallUnexecuted { message, .. } => {
+                        Some((message.as_str(), true))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -4402,9 +4475,40 @@ mod tests {
                 .map(|(text, _)| *text)
                 .collect::<Vec<_>>();
             assert_eq!(pages.len(), admitted + 1);
-            assert!(pages[0].len() > 10 * 1024);
-            assert!(pages[0].lines().next().unwrap().contains("next="));
-            assert!(pages.iter().all(|page| *page == pages[0]));
+            let by_id = events
+                .iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::ToolCallFinished {
+                        id,
+                        result,
+                        is_error: false,
+                        ..
+                    } => Some((*id, result.as_str())),
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>();
+            let by_provider = requested
+                .iter()
+                .flat_map(|calls| calls.iter())
+                .filter_map(|call| {
+                    by_id
+                        .get(&call.id)
+                        .map(|page| (call.provider_call_id.as_str(), *page))
+                })
+                .collect::<HashMap<_, _>>();
+            let first_page = by_id[&requested[0][0].id];
+            let retry_page = by_id[&requested[1][0].id];
+            assert!(first_page.len() > 10 * 1024);
+            assert!(first_page.lines().next().unwrap().contains("next="));
+            assert_eq!(
+                retry_page, first_page,
+                "unchanged retry preserves the complete page and cursor"
+            );
+            assert!(
+                pages
+                    .iter()
+                    .all(|page| page.lines().skip(1).eq(first_page.lines().skip(1)))
+            );
             assert!(
                 completed
                     .iter()
@@ -4431,10 +4535,14 @@ mod tests {
                         if let ContentBlock::ToolResult {
                             content,
                             is_error: false,
-                            ..
+                            call_id,
                         } = block
                         {
-                            assert_eq!(content, pages[0], "admitted page must remain whole");
+                            assert_eq!(
+                                content,
+                                by_provider[call_id.as_str()],
+                                "admitted page must remain whole"
+                            );
                         }
                     }
                 }
@@ -5848,7 +5956,7 @@ mod tests {
         ));
         assert!(events.iter().any(|event| matches!(
             event,
-            RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
+            RuntimeEvent::ToolCallUnexecuted { interrupted: false, message: result, .. }
                 if result.contains("not valid JSON")
         )));
         let requests = requests.lock().unwrap();
@@ -6072,7 +6180,7 @@ mod tests {
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            RuntimeEvent::ToolCallFinished { is_error: true, result, .. }
+            RuntimeEvent::ToolCallUnexecuted { interrupted: false, message: result, .. }
                 if result.contains("not valid JSON")
         )));
         assert!(matches!(
@@ -7633,7 +7741,7 @@ mod tests {
         impl Provider for CallsOnCheckpoint {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 self.requests.lock().unwrap().push(request.clone());
-                let read = |id: String| {
+                let read = |id: String, offset: usize| {
                     [
                         Ok(ProviderEvent::ToolCallStarted {
                             id: id.clone(),
@@ -7641,14 +7749,15 @@ mod tests {
                         }),
                         Ok(ProviderEvent::ToolCallArgumentsDelta {
                             id: id.clone(),
-                            json: r#"{"path":"note.txt"}"#.to_owned(),
+                            json: serde_json::json!({"path":"note.txt","offset":offset,"limit":1})
+                                .to_string(),
                         }),
                         Ok(ProviderEvent::ToolCallCompleted { id }),
                     ]
                 };
                 if is_checkpoint_request(&request) {
                     self.checkpoint_seen.store(true, Ordering::SeqCst);
-                    let mut events = Vec::from(read("checkpoint-call".to_owned()));
+                    let mut events = Vec::from(read("checkpoint-call".to_owned(), 1));
                     events.push(Ok(ProviderEvent::Completed { usage: None }));
                     return Box::pin(stream::iter(events));
                 }
@@ -7685,7 +7794,7 @@ mod tests {
                             Ok(ProviderEvent::ToolCallCompleted { id }),
                         ]);
                     } else {
-                        events.extend(read(format!("call-{index}")));
+                        events.extend(read(format!("call-{index}"), index + 1));
                     }
                 }
                 events.push(Ok(ProviderEvent::Completed { usage: None }));
@@ -7694,7 +7803,13 @@ mod tests {
         }
 
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        std::fs::write(
+            directory.path().join("note.txt"),
+            (0..MAX_TOOL_CALLS_PER_SLICE)
+                .map(|index| format!("hello {index}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             CallsOnCheckpoint {
@@ -7742,9 +7857,9 @@ mod tests {
         let rejected: Vec<&String> = events
             .iter()
             .filter_map(|event| match event {
-                RuntimeEvent::ToolCallFinished {
-                    is_error: true,
-                    result,
+                RuntimeEvent::ToolCallUnexecuted {
+                    interrupted: false,
+                    message: result,
                     ..
                 } => Some(result),
                 _ => None,
@@ -7814,7 +7929,8 @@ mod tests {
                     }));
                     events.push(Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: id.clone(),
-                        json: r#"{"path":"note.txt"}"#.to_owned(),
+                        json: serde_json::json!({"path":"note.txt","offset":index+1,"limit":1})
+                            .to_string(),
                     }));
                     events.push(Ok(ProviderEvent::ToolCallCompleted { id }));
                 }
@@ -7824,7 +7940,13 @@ mod tests {
         }
 
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+        std::fs::write(
+            directory.path().join("note.txt"),
+            (0..MAX_TOOL_CALLS_PER_TURN + 4)
+                .map(|index| format!("hello {index}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             TwentyReadsThenAnswer {
@@ -8495,8 +8617,7 @@ mod tests {
                 matches!(
                     events.last(),
                     Some(RuntimeEvent::Paused { pause })
-                        if pause.kind == RunFailureKind::ProviderTransport
-                            && pause.message.contains("no content and no usage")
+                        if matches!(pause.as_ref(), qq_protocol::RunPause::ProviderRetry { kind: RunFailureKind::ProviderTransport, message, .. } if message.contains("no content and no usage"))
                 ),
                 "prelude {prelude:?}: {events:?}"
             );
@@ -8673,8 +8794,7 @@ mod tests {
             matches!(
                 events.last(),
                 Some(RuntimeEvent::Paused { pause })
-                    if pause.kind == RunFailureKind::ProviderTransport
-                        && pause.message.contains("no content and no usage")
+                    if matches!(pause.as_ref(), qq_protocol::RunPause::ProviderRetry { kind: RunFailureKind::ProviderTransport, message, .. } if message.contains("no content and no usage"))
             ),
             "{events:?}"
         );
@@ -9351,7 +9471,7 @@ mod tests {
             .await;
         assert!(events.iter().any(|event| matches!(
             event,
-            RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
+            RuntimeEvent::ToolCallUnexecuted { message: result, interrupted: false, .. }
                 if result.contains("unknown tool")
         )));
         assert!(matches!(
@@ -11143,7 +11263,7 @@ mod tests {
             events
                 .iter()
                 .filter(|event| matches!(event,
-                    RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
+                    RuntimeEvent::ToolCallUnexecuted { message: result, interrupted: false, .. }
                         if result.contains("unknown tool")
                 ))
                 .count(),

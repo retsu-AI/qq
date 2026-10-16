@@ -85,6 +85,28 @@ impl TurnNotice {
     }
 }
 
+/// A framed boundary notice and the number of child deliveries preceding it
+/// since the previous committed turn. Empty reactive retries retain this order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OrderedTurnNotice {
+    #[serde(deserialize_with = "deserialize_notice_text")]
+    pub(crate) text: String,
+    pub(crate) preceding_deliveries: usize,
+}
+
+fn deserialize_notice_text<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<String, D::Error> {
+    let text = <String as serde::Deserialize>::deserialize(decoder)?;
+    if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+        || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
+    {
+        return Err(serde::de::Error::custom("invalid framed boundary notice"));
+    }
+    Ok(text)
+}
+
 /// Identity of the exact immutable prefix placed before the conversation for
 /// one provider turn. Budget-final and compaction turns intentionally differ
 /// from ordinary turns; checkpoint turns do not, because their notice is a
@@ -109,8 +131,16 @@ impl PreparedStaticPrefix {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelWorkDisposition {
+    Committed,
+    RejectedBeforeWork,
+    Uncertain,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RuntimeEvent {
+    GoalRequestRejected,
     Started,
     Prepared {
         turn_ordinal: u32,
@@ -138,6 +168,7 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     AssistantTurnCompleted {
+        model_work: ModelWorkDisposition,
         turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,
@@ -151,6 +182,8 @@ pub(crate) enum RuntimeEvent {
         truncated: bool,
         /// The runtime notice this turn's request was the first to carry.
         notice: Option<TurnNotice>,
+        goal_notices: Vec<OrderedTurnNotice>,
+        reserved_goal_notices: usize,
     },
     ToolCallStarted {
         id: ToolCallId,
@@ -158,6 +191,12 @@ pub(crate) enum RuntimeEvent {
     ToolCallDenied {
         id: ToolCallId,
         message: String,
+    },
+    /// Not-started result whose refusal or interruption needs persistence.
+    ToolCallUnexecuted {
+        id: ToolCallId,
+        message: String,
+        interrupted: bool,
     },
     /// An `ask_user` call the user answered. Like a denial, the session
     /// layer persisted and published the settled call before this fires;

@@ -78,6 +78,7 @@ impl BenchHarness {
         self.apply(
             index,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session_id(index), SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -370,6 +371,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -804,6 +806,7 @@ impl BenchHarness {
             self.apply(
                 index,
                 SessionEvent::RunStarted {
+                    origin: None,
                     session: Box::new(session),
                     run_id: run_id(index),
                     plan: None,
@@ -837,6 +840,7 @@ impl BenchHarness {
         self.apply(
             4,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(titled(4, "Refactor", SessionStatus::Running, None)),
                 run_id: run_id(4),
                 plan: None,
@@ -845,6 +849,7 @@ impl BenchHarness {
         self.apply(
             4,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(finished),
                 run_id: run_id(4),
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -880,6 +885,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -900,6 +906,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Idle)),
                 run_id,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -927,6 +934,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id: run_id(0),
                 plan: None,
@@ -973,6 +981,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -1004,6 +1013,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Idle)),
                 run_id,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -1022,6 +1032,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,

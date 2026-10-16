@@ -91,12 +91,12 @@ pub(super) fn tree(
 ) -> ReadSideOutput {
     let started = Instant::now();
     if arguments.depth == 0 || arguments.depth > MAX_DEPTH {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_depth: depth must be between 1 and {MAX_DEPTH}"
         ));
     }
     if arguments.limit == 0 || arguments.limit > MAX_ENTRIES {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_limit: limit must be between 1 and {MAX_ENTRIES}"
         ));
     }
@@ -105,7 +105,7 @@ pub(super) fn tree(
     let filter = match arguments.glob.as_ref().filter(|glob| !glob.is_empty()) {
         None => PathFilter::new(&[], &[]),
         Some(glob) if glob.len() > MAX_GLOB_BYTES => {
-            return ReadSideOutput::error(format!(
+            return ReadSideOutput::refused(format!(
                 "bad_glob: glob must be 1 to {MAX_GLOB_BYTES} bytes"
             ));
         }
@@ -113,7 +113,7 @@ pub(super) fn tree(
     };
     let filter = match filter {
         Ok(filter) => filter,
-        Err(error) => return ReadSideOutput::error(error.to_string()),
+        Err(error) => return ReadSideOutput::refused(error.to_string()),
     };
     let root = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
@@ -136,7 +136,7 @@ pub(super) fn tree(
     queue.push_back((root.clone(), 1, None));
     while let Some((dir, depth, parent)) = queue.pop_front() {
         if cancelled.is_cancelled() {
-            return ReadSideOutput::error(CANCELLED_MESSAGE);
+            return ReadSideOutput::interrupted(CANCELLED_MESSAGE);
         }
         if stop.is_some() {
             // Never listed: shown as a directory with counts only.

@@ -50,7 +50,7 @@ pub(super) fn write_file(
             && if_hash.starts_with("h:")
             && if_hash[2..].bytes().all(|b| b.is_ascii_hexdigit()))
     {
-        return ToolOutput::error("invalid_if_hash: expected h:<12 hex digits>");
+        return ToolOutput::refused("invalid_if_hash: expected h:<12 hex digits>");
     }
     let (path, missing_parents) = match resolve_write_path(workspace, &arguments.path) {
         Ok(resolved) => resolved,
@@ -63,7 +63,7 @@ pub(super) fn write_file(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ToolOutput::interrupted("tool execution was cancelled");
     }
     let (created, before) = match workspace.root().symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {

@@ -118,6 +118,8 @@ pub fn tool_call(id: ToolCallId, session_id: SessionId, name: &str) -> ToolCallS
 #[must_use]
 pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
     RunSnapshot {
+        origin: None,
+        goal: None,
         id,
         session_id,
         status,
@@ -139,6 +141,7 @@ pub fn run(id: RunId, session_id: SessionId, status: RunStatus) -> RunSnapshot {
 #[must_use]
 pub fn session_snapshot(summary: SessionSummary) -> SessionSnapshot {
     SessionSnapshot {
+        goal: None,
         side_questions: Vec::new(),
         summary,
         messages: Vec::new(),

@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::pin;
 
 use super::{
@@ -81,18 +82,18 @@ pub(super) async fn fetch(
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     if args.url.len() > MAX_URL_BYTES {
-        return ToolOutput::error(format!("url exceeds {MAX_URL_BYTES} bytes"));
+        return ToolOutput::refused(format!("url exceeds {MAX_URL_BYTES} bytes"));
     }
     let mut url = match url::Url::parse(args.url.trim()) {
         Ok(url) => url,
-        Err(error) => return ToolOutput::error(format!("invalid url: {error}")),
+        Err(error) => return ToolOutput::refused(format!("invalid url: {error}")),
     };
     let deadline = tokio::time::Instant::now() + FETCH_TIMEOUT;
     let mut hops = 0_usize;
     loop {
         let host = match check_host_name(&url, &network) {
             Ok(host) => host,
-            Err(refusal) => return ToolOutput::error(format!("fetch refused: {refusal}")),
+            Err(refusal) => return ToolOutput::refused(format!("fetch refused: {refusal}")),
         };
         let port = url.port_or_known_default().unwrap_or(80);
         // Resolve once, judge every address, and pin the client to exactly
@@ -100,11 +101,11 @@ pub(super) async fn fetch(
         let addresses = match resolve_pinned(&host, port, &network, cancelled, deadline).await {
             Ok(addresses) => addresses,
             Err(Resolution::Refused(refusal)) => {
-                return ToolOutput::error(format!("fetch refused: {refusal}"));
+                return ToolOutput::refused(format!("fetch refused: {refusal}"));
             }
-            Err(Resolution::Failed(message)) => return ToolOutput::error(message),
-            Err(Resolution::Cancelled) => return ToolOutput::error("fetch was cancelled"),
-            Err(Resolution::TimedOut) => return ToolOutput::error("fetch timed out"),
+            Err(Resolution::Failed(message)) => return ToolOutput::unobserved(message),
+            Err(Resolution::Cancelled) => return ToolOutput::interrupted("fetch was cancelled"),
+            Err(Resolution::TimedOut) => return ToolOutput::unobserved("fetch timed out"),
         };
         let client = match reqwest::Client::builder()
             .use_rustls_tls()
@@ -117,7 +118,7 @@ pub(super) async fn fetch(
             .build()
         {
             Ok(client) => client,
-            Err(error) => return ToolOutput::error(format!("http client: {error}")),
+            Err(error) => return ToolOutput::unobserved(format!("http client: {error}")),
         };
         let request = match args.method {
             Method::Get => client.get(url.clone()),
@@ -134,11 +135,11 @@ pub(super) async fn fetch(
             pin!(stop);
             tokio::select! {
                 biased;
-                () = &mut stop => return ToolOutput::error("fetch was cancelled"),
-                () = tokio::time::sleep_until(deadline) => return ToolOutput::error("fetch timed out"),
+                () = &mut stop => return ToolOutput::interrupted("fetch was cancelled"),
+                () = tokio::time::sleep_until(deadline) => return ToolOutput::unobserved("fetch timed out"),
                 result = &mut send => match result {
                     Ok(response) => response,
-                    Err(error) => return ToolOutput::error(format!("fetch failed: {}", describe(&error))),
+                    Err(error) => return ToolOutput::unobserved(format!("fetch failed: {}", describe(&error))),
                 },
             }
         };
@@ -219,8 +220,8 @@ pub(super) async fn fetch(
             pin!(stop);
             tokio::select! {
                 biased;
-                () = &mut stop => return ToolOutput::error("fetch was cancelled"),
-                () = tokio::time::sleep_until(deadline) => return ToolOutput::error("fetch timed out"),
+                () = &mut stop => return ToolOutput::interrupted("fetch was cancelled"),
+                () = tokio::time::sleep_until(deadline) => return ToolOutput::unobserved("fetch timed out"),
                 result = &mut read => match result {
                     Ok(body) => body,
                     Err(BodyError::TooLarge) => {
@@ -230,11 +231,23 @@ pub(super) async fn fetch(
                         ));
                     }
                     Err(BodyError::Transport(message)) => {
-                        return ToolOutput::error(format!("fetch failed: {message}"));
+                        return ToolOutput::unobserved(format!("fetch failed: {message}"));
                     }
                 },
             }
         };
+        // Observe the bounded wire body before conversion discards binary,
+        // markup or whitespace bytes. Redirect count is presentation advice.
+        let mut identity = Sha256::new();
+        identity.update(b"qq.fetch-observed-response.v1\0");
+        identity.update((url.as_str().len() as u64).to_le_bytes());
+        identity.update(url.as_str().as_bytes());
+        identity.update(status.as_u16().to_le_bytes());
+        identity.update((media_type.len() as u64).to_le_bytes());
+        identity.update(media_type.as_bytes());
+        identity.update((body.len() as u64).to_le_bytes());
+        identity.update(&body);
+        let result_digest = identity.finalize().into();
         header = header.field("bytes", body.len());
         let rendered = render_body(&media_type, &body);
         let text = match rendered {
@@ -253,7 +266,9 @@ pub(super) async fn fetch(
             }
             Rendered::Binary => header.field("binary", true).into_line(),
         };
-        return ToolOutput::bounded(text, &FETCH_BOUNDS, !status.is_success());
+        let mut result = ToolOutput::bounded(text, &FETCH_BOUNDS, !status.is_success());
+        result.result_digest = result_digest;
+        return result;
     }
 }
 
@@ -571,6 +586,14 @@ mod server_tests {
             .route("/bin", get(|| async {
                 ([(header::CONTENT_TYPE, "application/octet-stream")], vec![0_u8, 1, 2, 3])
             }))
+            .route("/identity-bin", get(|State(hits): State<Hits>| async move {
+                let n = hits.0.fetch_add(1, Ordering::SeqCst) % 2;
+                ([(header::CONTENT_TYPE, "application/octet-stream")], vec![0_u8, n as u8, 2, 3])
+            }))
+            .route("/identity-html", get(|State(hits): State<Hits>| async move {
+                let n = hits.0.fetch_add(1, Ordering::SeqCst) % 2;
+                ([(header::CONTENT_TYPE, "text/html")], format!("<html><script>hidden{n}</script><body>visible</body></html>"))
+            }))
             .route("/big", get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/plain")],
@@ -745,6 +768,75 @@ mod server_tests {
     }
 
     #[tokio::test]
+    async fn fetch_identity_observes_binary_and_conversion_hidden_bytes() {
+        let (address, _) = serve().await;
+        for route in ["identity-bin", "identity-html"] {
+            let url = format!("http://{address}/{route}");
+            let first = run(url.clone(), Method::Get, test_policy()).await;
+            let second = run(url.clone(), Method::Get, test_policy()).await;
+            let third = run(url, Method::Get, test_policy()).await;
+            assert!(!first.is_error);
+            assert!(!second.is_error);
+            assert!(!third.is_error);
+            assert_eq!(first.model_text, second.model_text, "{route}");
+            assert_eq!(first.model_text, third.model_text, "{route}");
+            assert_ne!(
+                first.result_digest, second.result_digest,
+                "{route}: hidden response changes must stay novel"
+            );
+            assert_eq!(
+                first.result_digest, third.result_digest,
+                "{route}: identical observed response must repeat"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_refusal_and_transport_failure_do_not_invent_execution() {
+        use crate::tools::ResultDisposition;
+        let malformed = run("not a URL".to_owned(), Method::Get, test_policy()).await;
+        assert_eq!(malformed.disposition, ResultDisposition::Refused);
+        let excessive = run("x".repeat(MAX_URL_BYTES + 1), Method::Get, test_policy()).await;
+        assert_eq!(excessive.disposition, ResultDisposition::Refused);
+        let refused = run(
+            "http://127.0.0.1/".to_owned(),
+            Method::Get,
+            Arc::new(NetworkPolicy::default()),
+        )
+        .await;
+        assert_eq!(refused.disposition, ResultDisposition::Refused);
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        // Own the port without accepting HTTP: peer EOF is a confirmed incomplete response.
+        let peer = tokio::spawn(async move {
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stream);
+        });
+        let failed = run(format!("http://{address}/"), Method::Get, test_policy()).await;
+        peer.await.unwrap();
+        assert!(failed.is_error);
+        assert_eq!(failed.disposition, ResultDisposition::Unobserved);
+        let (address, _) = serve().await;
+        let missing = run(
+            format!("http://{address}/missing"),
+            Method::Get,
+            test_policy(),
+        )
+        .await;
+        assert!(missing.is_error);
+        assert_eq!(
+            missing.disposition,
+            ResultDisposition::Observed,
+            "complete HTTP404 remains an observed result"
+        );
+    }
+
+    #[tokio::test]
     async fn bodies_over_the_limit_fail_and_long_bodies_spill() {
         let (address, _) = serve().await;
         let base = format!("http://{address}");
@@ -795,6 +887,10 @@ mod server_tests {
         .await;
         assert!(out.is_error);
         assert_eq!(out.model_text, "fetch was cancelled");
+        assert_eq!(
+            out.disposition,
+            crate::tools::ResultDisposition::Interrupted
+        );
         assert_eq!(hits.0.load(Ordering::SeqCst), 0);
     }
 }

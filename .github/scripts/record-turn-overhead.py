@@ -227,6 +227,19 @@ def main():
     record["complete"] = True
     save()
     (args.output / "summary.json").write_text(json.dumps(record["summary"], indent=2) + "\n")
+    for suite, milestones in record["summary"].items():
+        for milestone, summary in milestones.items():
+            baseline, candidate = summary["arms"]
+            print(json.dumps({
+                "suite": suite, "milestone": int(milestone), "unit": "ns/turn",
+                "baseline_p95": baseline["p95"], "candidate_p95": candidate["p95"],
+                "median_change_percent": summary["median_change_percent"],
+            }), flush=True)
+    print(json.dumps({"pressure_samples": [
+        {"suite": run["suite"], "slot": run["slot"],
+         "before": run["pressure_before"], "after": run["pressure_after"]}
+        for run in record["runs"]
+    ]}), flush=True)
     return 0
 
 

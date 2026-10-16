@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::catalog::EffectClass;
 
+pub use classify::goal_check_shell_denied;
 pub(crate) use classify::{Decision, classify_command};
 pub use rules::RuleId;
 

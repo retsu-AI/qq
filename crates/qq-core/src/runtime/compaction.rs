@@ -38,6 +38,7 @@ pub(crate) struct InRunCompactionRequest {
     /// summary it commits and re-bases the run's context reservation to the
     /// total in the marker's transaction (ADR-0048 § 1).
     pub(crate) retained_bytes: u64,
+    pub(crate) goal_notice: Option<Arc<str>>,
     pub(crate) budget: super::ChildBudget,
 }
 
@@ -111,6 +112,12 @@ pub(crate) enum SummarizeStep {
 /// Why one summarizer request produced no summary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SummarizeError {
+    /// A typed provider rejection before output, reasoning, replay or calls.
+    #[error("{message}")]
+    RejectedBeforeWork {
+        kind: RunFailureKind,
+        message: String,
+    },
     /// A provider fault worth re-issuing the request for, as for a model turn.
     #[error("{message}")]
     Transient {

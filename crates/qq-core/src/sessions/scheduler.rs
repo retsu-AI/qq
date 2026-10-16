@@ -19,6 +19,7 @@ pub(super) async fn schedule_runs(
     stopped: watch::Sender<bool>,
 ) {
     let _stopped = SchedulerStopGuard(stopped);
+    let mut next_goal_wake: Option<u64> = None;
     'scheduler: loop {
         let scheduled = tokio::select! {
             biased;
@@ -29,6 +30,12 @@ pub(super) async fn schedule_runs(
                 continue;
             }
             scheduled = receiver.recv() => scheduled,
+            () = async {
+                match next_goal_wake {
+                    Some(at)=>tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms()))).await,
+                    None=>std::future::pending::<()>().await,
+                }
+            } => Some(()),
         };
         if scheduled.is_none() {
             break;
@@ -39,6 +46,22 @@ pub(super) async fn schedule_runs(
         if *shutdown.borrow() || *inner.failed.borrow() {
             break;
         }
+        next_goal_wake = if inner.store.has_goals() {
+            match inner.store.drive_goals(now_ms()).await {
+                Ok(pass) => {
+                    for cursor in pass.cursors {
+                        inner.notify(cursor);
+                    }
+                    pass.next_wake
+                }
+                Err(_) => {
+                    inner.failed.send_replace(true);
+                    break;
+                }
+            }
+        } else {
+            None
+        };
         // Each depth is claimed from its own queue against its own permit
         // pool; see `child_permits` for why sharing a pool between a depth
         // and its parents would deadlock parents awaiting their children.

@@ -146,10 +146,10 @@ pub(super) fn start_auto_compaction(
                  prompt_identity_json,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
                  created_at_ms, started_at_ms, plan_identity_json, plan_descriptor_json,
-                 activity
+                 activity, origin_json
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7,
-                 ?8, ?9, 0, ?10, ?10, ?11, ?12, 'compacting'
+                 ?8, ?9, 0, ?10, ?10, ?11, ?12, 'compacting', ?13
              )",
         params![
             run_id.to_string(),
@@ -164,6 +164,9 @@ pub(super) fn start_auto_compaction(
             now,
             plan_identity,
             audit.plan_descriptor_json.as_ref(),
+            serde_json::to_string(&qq_protocol::RunOrigin::AutoCompaction {
+                owner_run_id: original.identity.run_id
+            })?,
         ],
     )?;
     let session_started = transaction.execute(
@@ -179,6 +182,21 @@ pub(super) fn start_auto_compaction(
     if session_started != 1 {
         return Ok(None);
     }
+    goals::freeze_goal_claim(
+        &transaction,
+        original.identity,
+        original.goal.as_deref(),
+        original.goal_initial_notice.as_deref(),
+    )?;
+    if original.goal.is_some() || original.goal_spend_owner.is_some() {
+        transaction.execute(
+            "UPDATE runs SET usage_json=?2, estimated_cost_usd_nanos=0 WHERE id=?1",
+            params![
+                run_id.to_string(),
+                serde_json::to_string(&TokenUsage::default())?
+            ],
+        )?;
+    }
     let summary = load_session_summary(&transaction, original.identity.session_id)?;
     let started = append_event(
         &transaction,
@@ -191,6 +209,9 @@ pub(super) fn start_auto_compaction(
             now,
         ),
         SessionEvent::RunStarted {
+            origin: Some(qq_protocol::RunOrigin::AutoCompaction {
+                owner_run_id: original.identity.run_id,
+            }),
             session: Box::new(summary),
             run_id,
             plan: Some(Box::new(audit.plan_identity.clone())),
@@ -217,6 +238,15 @@ pub(super) fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
+            goal_spend_owner: original
+                .goal_spend_owner
+                .or_else(|| original.goal.as_ref().map(|goal| goal.goal_id)),
+            goal: None,
+            goal_initial_notice: None,
+            goal_admission: None,
+            origin: Some(qq_protocol::RunOrigin::AutoCompaction {
+                owner_run_id: original.identity.run_id,
+            }),
             checkpoint: None,
             routing: None,
             approval_delegate: None,
@@ -429,7 +459,7 @@ pub(super) fn complete_compaction(
                     ),
                 },
             };
-            events.push(expect_settled(settle_run(
+            events.extend(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 claimed,
@@ -503,7 +533,7 @@ pub(super) fn complete_compaction(
                  WHERE id = ?1",
             [claimed.identity.session_id.to_string()],
         )?;
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
@@ -523,7 +553,7 @@ pub(super) fn complete_compaction(
             },
         )?);
     } else {
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
@@ -582,6 +612,7 @@ pub(super) fn latest_compaction(
 pub(super) struct InRunCompaction {
     pub(super) summary: String,
     pub(super) turn_cutoff: u32,
+    pub(super) goal_notice: Option<String>,
 }
 
 /// The newest in-run marker of each run whose prompt is retained. Keyed by
@@ -592,9 +623,10 @@ pub(super) fn in_run_compactions(
     session: &str,
     through_ordinal: u64,
     cutoff_ordinal: u64,
+    remaining_notice_bytes: &mut usize,
 ) -> Result<HashMap<String, InRunCompaction>, SessionRuntimeError> {
     let mut statement = connection.prepare_cached(
-        "SELECT c.scope_run_id, c.summary, c.turn_cutoff
+        "SELECT c.scope_run_id, c.summary, c.turn_cutoff, c.goal_notice
          FROM messages m
          JOIN session_compactions c ON c.scope_run_id = m.run_id
          WHERE m.session_id = ?1 AND m.ordinal <= ?2 AND m.ordinal > ?3
@@ -607,16 +639,18 @@ pub(super) fn in_run_compactions(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, u32>(2)?,
+            goals::read_notice_with_budget(row, 3, remaining_notice_bytes)?,
         ))
     })?;
     let mut markers = HashMap::new();
     for row in rows {
-        let (run_id, summary, turn_cutoff) = row?;
+        let (run_id, summary, turn_cutoff, goal_notice) = row?;
         markers.insert(
             run_id,
             InRunCompaction {
                 summary,
                 turn_cutoff,
+                goal_notice,
             },
         );
     }
@@ -668,10 +702,10 @@ pub(super) fn start_in_run_compaction(
                  id, session_id, command_id, user_message_id, assistant_message_id,
                  status, kind, auto_compaction, auto_compaction_for_run_id,
                  resolved_model_json, context_base_bytes, context_increment_bytes,
-                 created_at_ms, started_at_ms, activity, usage_json, estimated_cost_usd_nanos
+                 created_at_ms, started_at_ms, activity, usage_json, estimated_cost_usd_nanos, origin_json
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, 'running', 'compaction', 1, ?6, ?7, 0, 0, ?8, ?8,
-                 'compacting', ?9, 0
+                 'compacting', ?9, 0, ?10
              )",
         params![
             run_id.to_string(),
@@ -683,6 +717,7 @@ pub(super) fn start_in_run_compaction(
             resolved_model_json,
             now,
             serde_json::to_string(&TokenUsage::default())?,
+            serde_json::to_string(&qq_protocol::RunOrigin::InRunCompaction { owner_run_id: prompt_run.identity.run_id })?,
         ],
     )?;
     let summary = load_session_summary(&transaction, prompt_run.identity.session_id)?;
@@ -697,6 +732,9 @@ pub(super) fn start_in_run_compaction(
             now,
         ),
         SessionEvent::RunStarted {
+            origin: Some(qq_protocol::RunOrigin::InRunCompaction {
+                owner_run_id: prompt_run.identity.run_id,
+            }),
             session: Box::new(summary),
             run_id,
             plan: None,
@@ -720,9 +758,16 @@ pub(super) fn start_in_run_compaction(
     )?;
     transaction.commit()?;
     let mut claimed = prompt_run.panic_settlement_claim();
+    claimed.origin = Some(qq_protocol::RunOrigin::InRunCompaction {
+        owner_run_id: prompt_run.identity.run_id,
+    });
     claimed.identity.run_id = run_id;
     claimed.identity.command_id = command_id;
     claimed.identity.kind = RunKind::Compaction;
+    claimed.goal = None;
+    claimed.goal_spend_owner = prompt_run
+        .goal_spend_owner
+        .or_else(|| prompt_run.goal.as_ref().map(|goal| goal.goal_id));
     claimed.compaction_cutoff_ordinal = None;
     claimed.in_run_turn_cutoff = Some((prompt_run.identity.run_id, turn_cutoff));
     Ok(Some((claimed, started)))
@@ -733,19 +778,39 @@ pub(super) fn start_in_run_compaction(
 /// shrank, settles the compaction run, and publishes `SessionCompacted`.
 /// Returns the events and, when the marker stands, the stored summary the
 /// live splice must use. All in one transaction, like `complete_compaction`.
+pub(super) struct InRunSummaryCommit<'a> {
+    pub(super) summary: String,
+    pub(super) accounting: Option<RunAccounting>,
+    pub(super) record_budget: usize,
+    pub(super) retained_bytes: u64,
+    pub(super) goal_notice: Option<&'a str>,
+}
+
 pub(super) fn complete_in_run_compaction(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
-    summary: String,
-    accounting: Option<RunAccounting>,
-    record_budget: usize,
-    retained_bytes: u64,
+    commit: InRunSummaryCommit<'_>,
 ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
+    let InRunSummaryCommit {
+        summary,
+        accounting,
+        record_budget,
+        retained_bytes,
+        goal_notice,
+    } = commit;
     let Some((scope_run_id, turn_cutoff)) = claimed.in_run_turn_cutoff else {
         return Err(SessionRuntimeError::CONSTRAINT);
     };
     let summary = narrative_of(summary);
+    if goal_notice.is_some_and(|text| {
+        text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+            || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
+    }) {
+        return Err(SessionRuntimeError::InvalidGoal(
+            goals::GoalValidationError::Notice,
+        ));
+    }
     let transaction = store::begin_unit(connection)?;
     if run_is_settled(&transaction, claimed.identity.run_id)? {
         return Ok((Vec::new(), None));
@@ -784,8 +849,8 @@ pub(super) fn complete_in_run_compaction(
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
-                     before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff
-                 ) VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?7)",
+                     before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff, goal_notice
+                 ) VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?7, ?8)",
             params![
                 session.to_string(),
                 claimed.identity.run_id.to_string(),
@@ -794,6 +859,7 @@ pub(super) fn complete_in_run_compaction(
                 now,
                 scope_run_id.to_string(),
                 turn_cutoff,
+                goal_notice,
             ],
         )?;
         let after_bytes = assembled_context_bytes(&transaction, session)?;
@@ -860,7 +926,7 @@ pub(super) fn complete_in_run_compaction(
                      WHERE id = ?1 AND status = 'running'",
                 params![scope_run_id.to_string(), context_base_bytes],
             )?;
-            events.push(expect_settled(settle_run(
+            events.extend(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 claimed,
@@ -891,7 +957,7 @@ pub(super) fn complete_in_run_compaction(
         }
     }
     if committed.is_none() {
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,

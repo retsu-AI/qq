@@ -535,8 +535,8 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values: 2⁶ tool filters plus none, times
-    /// guidance, times three sub-agent states (390). In practice a plan sees a
+    /// number of `PromptPrefixKey` values: 2⁷ tool filters plus none, times
+    /// guidance, times three sub-agent states (774). In practice a plan sees a
     /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
@@ -877,6 +877,11 @@ impl CompiledAgentPlan {
             EffectClass::ReadOnly,
         ));
         static_tools.push(StaticTool::new(
+            tools::goal::spec(),
+            ToolHost::UpdateGoal,
+            EffectClass::ReadOnly,
+        ));
+        static_tools.push(StaticTool::new(
             read_tool_result_spec(),
             ToolHost::ReadToolResult,
             EffectClass::ReadOnly,
@@ -1077,6 +1082,7 @@ impl CompiledAgentPlan {
             tools: Some(crate::catalog::StaticFilter {
                 spawn_agent: true,
                 search_history: true,
+                update_goal: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
@@ -1433,7 +1439,16 @@ mod tests {
         for result in results {
             assert_eq!(result.unwrap().digest(), expected);
         }
-        assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+        // Other tests compile against this same semaphore. Wait fairly for
+        // all slots instead of assuming they stayed idle after our joins.
+        let released = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            COMPILE_SLOTS.acquire_many(4),
+        )
+        .await
+        .expect("cancelled and completed compiles must release their slots")
+        .unwrap();
+        drop(released);
     }
 
     #[tokio::test]

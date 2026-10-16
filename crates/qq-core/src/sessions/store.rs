@@ -283,6 +283,7 @@ struct StoreInner {
     shutdown: Sender<()>,
     closed: watch::Receiver<bool>,
     closing: AtomicBool,
+    goals_present: Arc<AtomicBool>,
     admission: Mutex<()>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -312,7 +313,7 @@ impl Store {
             .ready
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)??;
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
@@ -324,15 +325,37 @@ impl Store {
                 shutdown: started.shutdown,
                 closed: started.closed,
                 closing: AtomicBool::new(false),
+                goals_present: Arc::new(AtomicBool::new(false)),
                 admission: Mutex::new(()),
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
-        })
+        };
+        let present = Arc::clone(&store.inner.goals_present);
+        store
+            .call(Priority::Control, move |connection| {
+                let enabled: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                present.store(enabled, Ordering::Release);
+                Ok(())
+            })
+            .await?;
+        Ok(store)
     }
 
     pub(super) const fn store_id(&self) -> StoreId {
         self.store_id
+    }
+
+    #[cfg(test)]
+    pub(super) async fn hold_control_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.inner.control_slots)
+            .acquire_many_owned(CONTROL_QUEUE_CAPACITY as u32)
+            .await
+            .expect("test store must remain open")
     }
 
     #[cfg(test)]
@@ -675,21 +698,21 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_seed(command_id, command, WorkspaceGrantSeed::default(), None)
+        self.command_with_admission(command_id, command, CommandAdmission::default(), None)
             .await
     }
 
-    pub(super) async fn command_with_seed(
+    pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         self.command_from(
             command_id,
             command,
-            seed,
+            admission,
             promotion_wakeup,
             CommandOrigin::Client,
         )
@@ -706,7 +729,7 @@ impl Store {
         self.command_from(
             command_id,
             SessionCommand::CancelRun { run_id },
-            WorkspaceGrantSeed::default(),
+            CommandAdmission::default(),
             None,
             CommandOrigin::RuntimeSettlement,
         )
@@ -717,7 +740,7 @@ impl Store {
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
@@ -753,16 +776,23 @@ impl Store {
             }
             _ => None,
         };
+        let creates_goal = matches!(&command, SessionCommand::SetGoal { .. });
+        let present = Arc::clone(&self.inner.goals_present);
         self.call_write(Priority::Control, move |connection| {
+            let mut admission = admission;
+            admission.goal_work_present = present.load(Ordering::Acquire);
             let applied = execute_command(
                 connection,
                 store_id,
                 command_id,
                 command,
                 canonical_workspace,
-                &seed,
+                &admission,
                 origin,
             )?;
+            if creates_goal {
+                present.store(true, Ordering::Release);
+            }
             if applied.grant_promotion_pending
                 && let Some(wakeup) = promotion_wakeup
             {
@@ -801,7 +831,7 @@ impl Store {
                 command_id,
                 SessionCommand::CancelRun { run_id },
                 None,
-                &WorkspaceGrantSeed::default(),
+                &CommandAdmission::default(),
                 CommandOrigin::RuntimeSettlement,
             )
         })
@@ -914,6 +944,32 @@ impl Store {
     /// Reserves the next queued run whose session sits at exactly `depth`
     /// (0 = roots). The scheduler reserves per depth so each permit pool
     /// stays independent.
+    pub(super) fn has_goals(&self) -> bool {
+        self.inner.goals_present.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn drive_goals(
+        &self,
+        now: u64,
+    ) -> Result<goals::GoalSchedule, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let present = Arc::clone(&self.inner.goals_present);
+        self.call_after_group(Priority::AwaitControl, move |connection| {
+            let result = goals::queue_due_goals(connection, store_id, now)?;
+            present.store(result.has_goals, Ordering::Release);
+            Ok(result)
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn queue_due_goals(
+        &self,
+        now: u64,
+    ) -> Result<Option<u64>, SessionRuntimeError> {
+        Ok(self.drive_goals(now).await?.next_wake)
+    }
+
     pub(super) async fn reserve_next_run_at_depth(
         &self,
         depth: u16,
@@ -946,6 +1002,7 @@ impl Store {
         if self
             .start_reserved_run(&claimed, audit, None)
             .await?
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)?
             .is_none()
         {
             return Err(SessionRuntimeError::CONSTRAINT);
@@ -984,7 +1041,7 @@ impl Store {
         claimed: &ClaimedRun,
         audit: PreparedRunAudit,
         resolved_input: Option<Arc<crate::input::ResolvedInput>>,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    ) -> Result<claim::RunStart, SessionRuntimeError> {
         #[cfg(test)]
         if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
             let _ = hook.entered.send(());
@@ -993,12 +1050,26 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        let limits = claimed.limits;
+        let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(
                 connection,
                 store_id,
                 identity,
                 &audit,
+                claim::RunStartMetadata {
+                    goal_spend_owner,
+                    goal: goal.as_deref(),
+                    goal_initial_notice: goal_initial_notice.as_deref(),
+                    origin,
+                    limits,
+                    admission,
+                },
                 resolved_input.as_deref(),
             )
         })
@@ -1263,8 +1334,17 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(connection, store_id, identity, outcome)
+            finish_reserved_run(
+                connection,
+                store_id,
+                identity,
+                outcome,
+                goal.as_deref(),
+                goal_initial_notice.as_deref(),
+            )
         })
         .await
     }
@@ -1407,7 +1487,17 @@ impl Store {
         let run_id = claimed.identity.run_id.to_string();
         self.call(Priority::Output, move |connection| {
             let updated = connection.execute(
-                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL
+                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL,
+                     goal_request_pending = CASE WHEN EXISTS (
+                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
+                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
+                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
+                     ) THEN 1 ELSE goal_request_pending END,
+                     goal_helper_admitted = CASE WHEN EXISTS (
+                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
+                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
+                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
+                     ) THEN 1 ELSE goal_helper_admitted END
                  WHERE id = ?1 AND status = 'running' AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL",
                 [run_id],
             )?;
@@ -1448,11 +1538,13 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         activity: RunActivity,
+        rejected: bool,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         self.call(Priority::Output, move |connection| {
-            append_run_activity(connection, store_id, identity, activity)
+            append_run_activity(connection, store_id, identity, activity, goal, rejected)
         })
         .await
     }
@@ -1707,6 +1799,27 @@ impl Store {
         .await
     }
 
+    pub(super) async fn interrupt_unstarted_tool_call(
+        &self,
+        claimed: &ClaimedRun,
+        tool_call_id: ToolCallId,
+        message: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            super::tool_calls::settle_unstarted_tool_call(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                &message,
+                true,
+            )
+        })
+        .await
+    }
+
     pub(super) async fn request_tool_approval(
         &self,
         claimed: &ClaimedRun,
@@ -1774,14 +1887,61 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
+    pub(super) async fn update_model_goal(
+        &self,
+        claimed: &ClaimedRun,
+        arguments: crate::tools::goal::UpdateGoalArgs,
+    ) -> Result<crate::tools::goal::UpdateGoalResult, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            goals::update_model(
+                connection,
+                store_id,
+                identity,
+                goal.as_deref(),
+                origin,
+                arguments,
+            )
+        })
+        .await
+    }
+
     pub(super) async fn record_routing_started(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        paid: bool,
+        maximum_cost: Option<u64>,
+    ) -> Result<claim::RunStart, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        let limits = claimed.limits;
+        let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
+        let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
-            streaming::record_routing_started(connection, store_id, identity)
+            streaming::record_routing_started(
+                connection,
+                store_id,
+                identity,
+                claim::RunStartMetadata {
+                    goal_spend_owner,
+                    goal: goal.as_deref(),
+                    goal_initial_notice: goal_initial_notice.as_deref(),
+                    origin,
+                    limits,
+                    admission,
+                },
+                paid,
+                tracked,
+                maximum_cost,
+            )
         })
         .await
     }
@@ -1959,6 +2119,7 @@ impl Store {
         accounting: Option<RunAccounting>,
         record_budget: usize,
         retained_bytes: u64,
+        goal_notice: Option<Arc<str>>,
     ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1967,10 +2128,13 @@ impl Store {
                 connection,
                 store_id,
                 &claimed,
-                summary,
-                accounting,
-                record_budget,
-                retained_bytes,
+                compaction::InRunSummaryCommit {
+                    summary,
+                    accounting,
+                    record_budget,
+                    retained_bytes,
+                    goal_notice: goal_notice.as_deref(),
+                },
             )
         })
         .await
@@ -2002,6 +2166,7 @@ impl Store {
                 .map(|json| serde_json::from_str(&json))
                 .transpose()?;
             let accounting = RunAccounting {
+                goal_request_rejected: false,
                 usage,
                 estimated_cost_usd_nanos,
                 context_tokens,
@@ -2016,6 +2181,26 @@ impl Store {
                 ),
                 final_output: None,
             };
+            complete_run(connection, store_id, &claimed, outcome, Some(accounting))
+        })
+        .await
+    }
+
+    /// Typed pre-work rejection restores the exact prefix under the same
+    /// terminal guard that charges the helper's historical owner.
+    pub(super) async fn finish_rejected_in_run_compaction(
+        &self,
+        claimed: &ClaimedRun,
+        outcome: RunOutcome,
+        mut accounting: RunAccounting,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        if claimed.identity.kind != RunKind::Compaction || claimed.in_run_turn_cutoff.is_none() {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        accounting.goal_request_rejected = true;
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
             complete_run(connection, store_id, &claimed, outcome, Some(accounting))
         })
         .await

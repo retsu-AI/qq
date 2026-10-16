@@ -1425,6 +1425,25 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 
 - Independent review requires admission to bind actual binaries and production commits to verified build receipts. Implemented mandatory receipts, full source-manifest digest validation, effective closure equality and binary SHA matching before launch; receipts are retained in raw output. Sixteen recorder and four source/overlay tests pass. Actual optimized benchmark builds and compiler dep-info contains exactly both declared fixture sources; emitted digest validation runs next. CI runs both suites on ordinary PRs. Preparation persists unverified original/effective identities before overlay writes.
 
+### 2026-10-13 — AP5 exact-window live-store audit
+
+- Read-only schema44 `/home/zmeyer/.local/share/qq/sessions.sqlite3`, run-start cohort2026-10-06T17:42:25Z→2026-10-13T17:42:25Z:129 runs/122 prompts/4,289 turns/6,591 tool rows. Raw summary `target/qq-perf/ap5-live-window-2026-10-13/metrics.json`; query-only bounded25s. Source revision and normal-use conditions are not attested; prompt18/19 and descriptor13 identify compiled variants only.
+- Goal6: conservative all-call/nonempty-text/successful-mutation upper bound0/32 long children ≥320, maximum73; report text0/23 missing (3 report +20 stall_report). Silent-until-final recipe estimate3/23 includes typed argument errors; started timestamps precede typed decoding. Strict confirmed-execution lower bound1/12 violates:child e80523c111738f86181b7a179983447b has64 valid executions and first nonempty text on final turn60. Goal6's second target fails without calling all three recipe examples proven executions.
+- Visible spawn/wait intervals merge to765.9925/3,173.2047 parent wall minutes=24.14% across14 delegating runs, above<20%;51 spawn +16 wait_agents intervals. This omits implicit tool-free waits, so is a lower bound. One cohort run ends after the endpoint; retain the runbook's start-window definition. Calendar activity exists, but does not prove normal-use/deployed revision. AP5 and Goal7 remain open.
+- Current stall scope resets on actual work, so productive children can exceed64 total calls without owing a report; the counterexample's no-progress upper bound61 cannot trigger its64-call threshold. [ENG-1052](https://linear.app/retsu-ai/issue/ENG-1052) tracks a separately bounded child communication cadence, preserving stall/final-answer behavior and Goal6; no acceptance weakened or default policy change shipped.
+
+### 2026-10-13 — G0 paid preparation claim durability
+
+- Test-first8bacdae5 reproduces paid auto-compaction admission leaving the optional goal uncaptured before main start. Freeze the owner claim in existing FULL routing, auto-compaction and main-start transactions; internal steps retain only owner attribution. SQL NULL remains uncaptured, JSON null records captured absence; reservation prefers frozen metadata and inconsistent refreeze refuses. No added transaction or store hop.
+- All10 focused goal tests pass, including routing/compaction × Some/None admission, replacement/new goal, idempotent/inconsistent refreeze, completed compaction then reopen/recovery/re-reservation, and unchanged exact snapshot at main start. Runtime recovery is explicitly invoked as production startup does; the earlier fixture omission and namespace compilation error logs remain preserved. Independent paid-freeze source review Approve.
+- Raw `g0-{red-paid-preparation-freeze,green-paid-preparation-freeze,green-paid-preparation-reclaim-recovery}.log` under root `target/qq-perf/ac3-stack-2026-10-13/`. Local G0 foundation remains incomplete: event origin propagation, model capability/notices/loop guard, consumers and whole-slice workspace/performance qualification remain; no G0 PR or completion claim. Historical spend finalization and unknown-spend retry policy remain G2.
+
+### 2026-10-13 — G0 lifecycle origin propagation
+
+- Test-first79c6b9d9 reproduces lifecycle wire origin being dropped; a916c615 reproduces fresh idle summary-only internal completion raising attention/submitting a draft. Claims/start/finish events now retain stored origins, including panic/recovery and queued cancellation, using existing reservation/settlement queries without another store hop. Legacy absence stays unknown. Client snapshots/events retain origin metadata.
+- Independent review adds real failures:63b64282 automatic-compaction owner cancellation loses draft handoff;9352a1f1 malformed origin commits a stranded reservation. Only in-run steps receive sticky suppression, while auto success with owner queued does not advance drafts. Claim origin validates before reservation commit. Final independent source review Approve.
+- All-target workspace compile, protocol60/client36/core12 focused goal tests, server command-table19-kind routing case and TUI351 unit+6 integration pass. Typed v33 in-run start/finish goldens added; older fixtures unchanged. Raw `g0-origin-qualified-{all-consumers,wire-fixture-generation,wire-client,core,server,tui}.log` under root `target/qq-perf/ac3-stack-2026-10-13/`; original red and mechanical compile logs retained.
+- G0 remains local/incomplete: model goal tool/notices/render bounds, AC4 loop guard, whole-slice qualification and final integration remain. No driver/check runner or G0 PR claimed. Latest qualified AC3/recorder parent still needs integration; current local TUI count reflects the older parent.
 ### 2026-10-13 — AC3 outcome and retained-summary review repairs
 
 - Codex reproduces owned-compaction terminal timestamp ties hiding the prompt outcome, and older headers overwriting a newer retained body. Test-first6f63289b reproduces both; summaries exclude owned compaction outcomes and snapshot admission respects each retained cursor. Store normal/panic no-send/pending matrix and TUI focused regressions pass.
@@ -1502,6 +1521,287 @@ Merged AC11 and main f15a4d24 forward without rewriting history. Resolved only a
 - Recorder16 and fixture4 tests pass. Unfiltered actionlint reports only existingSC2129 repeated-redirection style inCI/release; the previously documented focusedCI check with that exclusion passes (`ci-main46-qualified-parent-actionlint-focused.log`). Full workspace remains running; no timeout/performance exemption or push. AC3e8 parent fresh Codex review reports no major issues, opening+1 reaction566977703 at2026-10-14T07:51:14Z, all13 threads resolved.
 
 - Current-main recorder sourceaac4b95b qualifies: serial workspace2309 passed/0failed/14ignored (nested embedding child excluded), formatting, all-target/all-feature Clippy `-D warnings`, workspace build (`ci-main46-qualified-parent-*`). Recorder16/fixture4 and focused actionlint pass. Publish and request fresh review of this integrated head; earlier common-fixture diagnostic does not measure latest parent, and full H0/performance/live gates remain open.
+
+### 2026-10-14 — G0 reactive boundary replay regression
+
+- Real 256-write checkpoint, revision A before its request, empty provider overflow, revision B before forced compaction: completed live run and reopened context differ in goal/static/goal notice order (`g0-red-reactive-notice-order.log`, 1 failed). Regression committed before the repair.
+- Independent read-only review also identifies child delivery interleavings across reactive retry and wait completion. Pending atoms need delivery positions; a static-text-only repair is insufficient. G0 remains local and incomplete.
+
+### 2026-10-14 — G0 descriptor and concurrent qualification fixtures
+
+- Broad core qualification exposed the remaining descriptor14/version13 golden mismatch; the descriptor14 domain/golden repair uses deterministic digest `2c1b29cca0fda17b842ac4698b949ddb0e0d6e91dd37593122cf2f6617b6883b`. Independent read-only review approves the metadata correction.
+- One later concurrent run fails `async_compilation_bounds_waiters_and_releases_cancelled_requests`: other tests can reacquire shared compile slots before its `try_acquire_many(4)` assertion. The test now awaits all four slots fairly with a30s deadline, retaining the cancellation/release requirement. Failed logs remain in raw evidence; final tests and request-body capture are in progress.
+
+### 2026-10-14 — G0 exact durable notice replay qualification
+
+- Initial claim, post-summary marker and pending turn notices now persist exact framed bytes inside existing admission/output/marker transactions. Reads validate schema/text/aggregate bounds before copying; side-question budgets include notice bytes. Failed turn commit rolls back atoms, events and capacity; initial/compaction reserved prefixes avoid duplicate debits.
+- Ordered goal-bound notice atoms retain preceding child-delivery counts, including static checkpoint/continuation text; live reactive retry and child-wait ordering replay unchanged. Real256-write/two-revision checkpoint-overflow regression and wait/retry merge fixtures pass. Independent session/store and final metadata/domain reviews Approve.
+- Final core qualification:1026 top-level tests passed/0failed/11explicit skips (raw1027 includes the nested embedding child); all-target/all-feature core Clippy-Dwarnings, fmt and diff check pass. Maximum goal/check/checklist/notes/check-tail72-turn fixture with≥3 real compactions passes full live/reopened Message equality. Malformed atoms, exhausted read allowance, schema refusal and turn rollback tested.
+- All8 production encoder goal-less bodies byte-identical to26b14b81 (15710–17095B); exact-notice receipt/logs under root `target/qq-perf/ac3-stack-2026-10-13/`. The earlier descriptor and shared-semaphore failures are retained alongside the passing final logs.
+- Parent recording38532450201 independently verifies120logs/360rows; AB median10/100/1000 +2.309%/-3.267%/-2.491%, AA-0.511%/+2.605%/+0.438%, all ABp95 lower. IOavg10 0–13.15% and phase drift prevent quiet-host/performance-gate attribution. PR297 records the evidence and its genuine current-head opening approval.
+- G0 remains local/incomplete: AC4 typed pause/loop guard and consumers, latest recorder integration, workspace/goal-only performance qualification and default-shipping T13 remain open. No G0 PR/push, driver/check runner or whole-plan completion claimed.
+
+### 2026-10-14 — AC4 observation guard test-first slice
+
+- Ten deterministic fixtures specify2error/4triple refusal thresholds, changed arguments/results, alternating stable reads, guard-rejection quiet accounting, mutation/text reset,1500novel reads, bounded two-window retention, and denied/malformed attempts without fabricated executed triples. Test-first compile fails at missing guard/key implementation (`ac4-red-observation-guard.log`).
+- Independent scheduler investigation identifies same-turn duplicate admission as a required barrier: distinct read keys stay concurrent; batches stop before duplicates and observe in request order before admitting the next call. Explicit provenance must exclude interruption and report/final/over-cap refusals while counting denied/malformed attempts. Runtime integration, typed pause consumers, qualification and T13 remain open.
+
+### 2026-10-14 — AC4 reason-tagged pause contract test-first
+
+- Public protocol fixtures require distinct `ProviderRetry` and `NoProgress` pause reasons; no-progress carries turn/slices/calls rather than invented provider failures/retries. Historical untagged provider pauses must still decode from persisted outcomes; new writes use the explicit reason. Unknown/mixed reasons are refused.
+- Test-first protocol compile fails at absent enum variants (`ac4-red-pause-contract.log`). Guard module10tests pass and independent isolated-module review Approve; integration/consumers and whole-slice qualification remain unfinished, with current module dead-code warnings until wiring.
+
+### 2026-10-14 — AC4 no-progress terminal boundary regression
+
+- Public durable settlement/reopen matrix now covers both pause reasons, preserving completed results and interrupting started work. No-progress remaining calls must say they never started before a no-progress pause, and the replay notice must not claim a provider retry.
+- Test-first `terminal_runs_project_exact_tool_boundaries_across_restart` fails because pending-call settlement still labels every pause as a provider fault (`ac4-red-no-progress-terminal-boundaries.log`). That label and terminal checkpoint receipts require exhaustive reason branches.
+
+### 2026-10-14 — AC4 bounded observations and typed pause consumer checkpoint
+
+- Guard implementation passes10 deterministic tests; exact current/preceding256-attempt windows retain≤512hashes, repeat refusal follows2identical errors/4triples, and alternating stable reads reach512quiet attempts after2novel warm-up calls. Independent module review Approve. Runtime scheduling/observation is not wired yet.
+- Reason-tagged `RunPause::{ProviderRetry,NoProgress}` preserves strict historical provider decoding. Protocol55unit+3headless+5wire and client41tests pass; NoProgress warns/clears live state without provider/retry wording. Current33 wire fixtures cover both reasons; two inherited delegated/held cases missing from33 were regenerated, while older directories stay unchanged. Independent contract/consumer review Approve.
+- Workspace all-target check passes; core pause subset5tests and exact terminal/reopen boundary matrix pass. No-progress pending-call/checkpoint labels now branch on actual reason; provider replay/client/child wording is preserved. Source docs explain the typed contract.
+- Clippy attempted for protocol/client pulls core through dev dependencies and correctly fails on7unused guard definitions until production wiring. No suppression/waiver, full Clippy pass, G0/AC4 completion, push or PR claimed. Explicit result provenance, request-order duplicate barriers, eligibility/interruption rules, runtime fixtures, performance/workspace/T13 gates remain next.
+
+### 2026-10-14 — AC4 execution provenance test-first
+
+- Dispatcher regression distinguishes actual missing-file results from malformed/domain-refused read/tree/search/write calls and unknown tools; accepted argument repair preserves observed provenance, and pre-dispatch cancellation is interruption. Compile fails at missing disposition metadata (`ac4-red-tool-result-provenance.log`).
+- This metadata is independent of `is_error`: real failed operations contribute executed triples, refusals consume eligible quiet attempts, and interruption does neither. Runtime observation/scheduling and complete leaf/host validation mapping remain in progress.
+
+### 2026-10-14 — AC4 host result provenance regression
+
+- Typed host failures currently become ordinary observed errors, while no actual tool response exists. Regression fails at timeout (`ac4-red-host-result-provenance.log`). Transport/invalid-result/shutdown outcomes need explicit unknown observation state, without claiming the operation never ran; confirmed admission refusal and cancellation stay separate. A real remote tool error is observed.
+- Repaired-argument fixture uses supported search include-array repair, rather than inventing read-limit numeric coercion. Built-in refusal/observed/interruption metadata remains in implementation.
+
+### 2026-10-14 — AC4 built-in and host provenance checkpoint
+
+- ToolOutput and read-side transfer now carry private Observed/Refused/Unobserved/Interrupted metadata independently of error flags. Parser/selected read/tree/search domain refusal sites are explicit; actual missing-file errors stay observed, accepted search-array repair keeps provenance, and cancellation is interruption. Model-facing strings remain unchanged.
+- Confirmed host refusal/unknown/overload differs from timeout/unavailable/invalid-response/shutdown uncertainty. Unknown host/executor completion does not claim the operation never ran or create a seen triple; real remote tool errors remain observed. No error-text classification.
+- Three provenance-filtered tests and73tool tests pass; fmt/diff check pass; independent implemented-subset review Approve. Test-first7fc0299c/80a8b0de and raw `ac4-{red,green}*-provenance.log`/`ac4-provenance-tool-suite.log` retained.
+- This remains partial local AC4: other leaf/host capability validations, full-output identity, request-order duplicate barriers, exact runtime eligibility/observation and512quiet fixtures, workspace/performance/T13 qualification remain. Unwired guard Clippy failures remain open; no push/PR or whole-slice completion claim.
+
+### 2026-10-14 — AC4 complete output identity test-first
+
+- Result identity must survive equal bounded previews, changed omitted bytes, alternate output bounds and output beyond8MiB spill retention. Fixture pins SHA256 of complete pre-mask/pre-bound bytes, consistent with existing spill identity; compile fails at missing result_digest (`ac4-red-complete-result-identity.log`).
+- The digest remains private execution metadata, not model context. Existing spill digest must reuse it rather than hash complete output twice. Runtime observation and source eligibility remain unfinished.
+
+### 2026-10-14 — AC4 constructor identity checkpoint
+
+- Constructor hashing preserves full pre-mask input identity across identical previews, alternate bounds and discarded >8MiB spills; retained spill hashes reuse the same digest. The corrected fixture preserves omitted line counts and passes. Guard digest-input subset10tests passes.
+- This is a fallback, not complete producer identity: shell captures clip before construction and include volatile elapsed time; read/search/fetch also transform observations earlier. Those producer seams remain open alongside runtime wiring and workspace/performance/T13 qualification. No push or completion claimed.
+
+### 2026-10-14 — AC4 shell producer identity test-first
+
+- Fixtures require hidden middle bytes beyond capture/spill bounds, stream boundaries, chunk/interleaving independence, terminal status and timeout identity, and stable identity across elapsed/hint changes. Stored spill hashes must still describe the actual captured text. Expected compile-red: missing ShellResultIdentity and shell_result producer argument.
+
+### 2026-10-14 — AC4 shell producer identity checkpoint
+
+- Separate incremental stdout/stderr hashes and byte counts precede capture truncation; terminal kind/code/signal are domain-separated. Elapsed time, hints and pipe arrival order do not manufacture novelty. Stored captured-text spill hashes are unchanged. Hash state is constant size beyond retention.
+- Three identity tests and the35-test shell-filtered suite pass, including actual dispatch/capture hidden-byte and stream-boundary regression, timeout, cancellation and session settlement. Independent read-only subset review reports no defect. Raw `ac4-{red,green}-shell-identity.log` and `ac4-shell-producer-suite.log` retained; fmt/diff checks pass.
+- Producer identity for read/search/fetch/host representations, shell refusal/unknown provenance, runtime guard wiring and full workspace/performance/T13 gates remain open. No push, G0 PR or whole-plan completion claimed.
+
+### 2026-10-14 — AC4 shell provenance test-first
+
+- Existing invalid shell argument and saturated-output cancellation regressions now require Refused and Interrupted metadata respectively, independently of error text. Shell leaf domain validation still stamps ordinary Observed errors; the refusal regression must fail before mapping changes.
+
+### 2026-10-14 — AC4 shell provenance checkpoint
+
+- Shell/exec domain validation before spawn is Refused; cancellation is Interrupted; failed exit observation or failed kill/reap confirmation is Unobserved. Genuine spawn/exit/tool failures remain Observed. Display strings remain unchanged.
+- Test-first refusal regression fails with Observed vs Refused, then the35-test shell-filtered suite passes after mapping (`ac4-{red,green}-shell-provenance.log`). fmt/diff checks pass. Shell pipe-read error uncertainty remains to map; other producers, runtime wiring, workspace/performance/T13 gates stay open. No push or completion claimed.
+
+### 2026-10-14 — AC4 read/search producer identity test-first
+
+- Three regressions require raw selected line/row identity before clipping, equal read previews for observed hidden-byte changes, unchanged identity for bytes outside the4MiB read scan, and identical primary search identity despite advisory-only case-insensitive hint changes. No extra scanning is authorized by identity. Constructor-only hashing must fail these cases.
+
+### 2026-10-14 — AC4 read/search producer identity checkpoint
+
+- Private producer digests survive ReadSideOutput transfer, argument notes and final output bounds. Read hashes selected observed raw lines; search hashes contributing raw match/context rows before clipping with file/row framing. Existing scan limits/cursors and spill-content hashes remain unchanged. Primary search identity excludes optional deadline-dependent case-insensitive advice.
+- Three initial regressions fail before implementation, then pass. Additional before/after context regression and independent-review unmatched-file rename reproduction added; unmatched paths now stay outside identity. Independent correction review reports no remaining concrete defect. The final broad tools suite passes155tests/0failures; fmt/diff checks pass. Raw `ac4-{red,green}-read-search-identity.log`, `ac4-red-unmatched-search-identity.log` and `ac4-read-search-tool-suite-fixed.log` retained.
+- Runtime guard integration, remaining leaf/host provenance and representations, full workspace/performance/T13 qualification and the rest of autonomous-core remain open. No push, G0 PR or completion claimed.
+
+### 2026-10-14 — AC4 runtime acceptance test-first
+
+- Production-path fixtures require same-turn third-error/fifth-success refusal before ToolCallStarted, one result per requested call, and NoProgress after513total/512quiet attempts despite runtime-requested prose reports. These use the real runtime/dispatcher rather than private guard methods. Production wiring is absent, so the acceptance suite must fail before integration.
+
+### 2026-10-14 — AC4 runtime acceptance reproduced
+
+- Corrected fixture-only Box pause matching, explicit controlled shell approval, and exact report-notice detection. Continuation notices now keep the model calling tools. Shell appends a byte per actual invocation; read fixture requires four successful results then one explicit not-executed result.
+- All3 runtime fixtures fail for the missing production guard: shell executes3times instead of2, same-turn read admits5instead of4, and the requested-report loop settles Completed rather than NoProgress513total/512quiet. `ac4-red-runtime-admission-observed.log` is the authoritative red receipt; earlier fixture failures remain retained. Independent fixture review findings corrected. fmt/diff checks pass.
+- Next production integration must preserve distinct-read concurrency, observe outcomes in request order behind duplicate-key barriers, stop admissions at exact quiet threshold, and settle remaining calls truthfully. Source guard remains unwired; these red tests are not pushed. Full workspace/performance/T13 and whole-plan work remain open.
+
+### 2026-10-14 — AC4 production observation/admission checkpoint
+
+- Run-lifetime guard now observes private provenance/digests before model projection; eligible admission keys are cached once per ordinary turn. Distinct leading reads run in bounded batches with duplicate-key barriers and request-order observations; the mutation suffix stays serial. Approvals occur at those admission boundaries after guard checks.
+- Third identical error/fifth identical success is refused before ToolCallStarted. Exact quiet capacity stops later admissions at512quiet attempts; remaining requested calls settle as not-executed, then NoProgress carries lifetime eligible calls and slice count. Malformed/denied attempts consume quiet without triples; report/final/over-cap and interruption are excluded. Unknown completion breaks repeat proof. Reports never reset quiet; spontaneous prose, actual checklist changes and applied steering have their specified reset seams. Read-only shell/external hints do not manufacture mutations or authorization.
+- Unstarted refusal/interruption has an explicit internal event and atomic requested→Denied/Interrupted store settlement, keeping one durable result without pretending it started. Running outcomes use their existing path. Typed checklist_changed evidence is off-wire, detects actual changes including mixed rejection, and stays false for same-state edits.
+- Acceptance9tests pass: shell invocation counter2, same-turn success4,513total/512quiet with reports, alternating514total/512quiet, mutation reset, read-only shell,1500novel reads/report cadence, durable live/reopen identity, and real checklist/off-wire evidence. Integrated guard suite19passes; steering16passes; overlap3passes. Core all-target/all-feature Clippy-Dwarnings passes with the guard genuinely wired, without dead-code suppression. fmt/diff pass. Raw `ac4-runtime-integration-unexecuted.log`, `ac4-integrated-guard-suite.log`, `ac4-steering-admission-suite.log`, `ac4-read-overlap-suite.log` and Clippy logs retained.
+- Full core command stopped in its library stage before unstarted-interruption correction:1015passed/16failed/4ignored (`ac4-core-integration-suite-durable.log`). Two steering regressions are corrected and verified; remaining legacy event/cadence/compaction fixtures need reconciliation with actual guard semantics and a complete rerun. Leaf/host provenance/representation tails, further runtime matrix, full workspace checks, performance/T13 and whole-plan work remain open. No push, G0 PR or completion claimed.
+
+### 2026-10-14 — AC4 core fixture reconciliation
+
+- Cadence fixtures now select distinct real rows; cap/checkpoint workloads retain full execution with valid selected rows. Slice/pruning fixtures vary valid requested page sizes while preserving their complete results and original load/byte assertions. Never-started malformed, unknown and report/final calls assert explicit Unexecuted results rather than Finished. Guard acceptance fixtures remain unchanged.
+- Full core command reaches1031passed/1failed/4ignored in the library stage (`ac4-core-fixture-reconciliation.log`). The remaining existing regression is real: interrupting_steer_withdraws_the_pending_approval_and_continues cannot emit RunInterrupted because unstarted interruption settlement accepts Requested but not AwaitingApproval. Fix must withdraw the pending approval atomically and preserve continuation/late-answer refusal. No push or qualification claimed.
+
+### 2026-10-14 — AC4 approval interruption and complete core qualification
+
+- Unstarted interruption atomically accepts Requested or AwaitingApproval, never Running; ordinary denial remains Requested-only. The pending approval notification is removed after durable settlement. Existing interrupting-steer regression verifies Interrupted state, RunInterrupted, continued Completed run and refused late approval.
+- Unbounded runner rerun retained a5s write-hook scheduling timeout; the unchanged atomic-write drain test passes in isolation. Complete `cargo test -p qq-core -- --test-threads=4` passes1058top-level tests/0failures/11explicit skips (raw1059includes the nested embedding child). Test-runner parallelism is bounded; internal concurrency fixtures are unchanged. `ac4-core-fixture-qualified-bounded.log` and earlier failure logs retained.
+- GitHub read confirms settled parent heads remain PR296e8c52db1 and PR297b590823f, both ready/open; G0 has not integrated latest recorder parent yet. Next: integrate that parent, finish producer/provenance/runtime tails and workspace/performance/T13 qualification. Whole autonomous-core remains active; no push or G0 PR claimed.
+
+### 2026-10-14 — G0/AC4 latest parent integration
+
+- Merge ready/open recorder PR297b590823f and its AC3e8c52db1/main7de parent. Preserve both append-only ledger histories and the G0 doctor sample at protocol33/descriptor14/schema47. Parent source/CI/compiled-fixture recording machinery is unchanged.
+- Pre-integration G0/AC4 complete core1058passes/0failures/11explicit skips with4test threads; all-target/all-feature core Clippy-Dwarnings and fmt/diff pass. Parent integration now requires combined workspace qualification; remaining provenance/matrix/performance/T13 and whole-plan tasks remain open. No push or G0 PR claimed.
+
+### 2026-10-14 — G0 integrated root configuration contract
+
+- First combined workspace command stops at root267passed/2failed/2ignored: one assertion still requires descriptor13 despite the reserved14 bump; the static exposure/catalog contract reveals update_goal missing from configuration's fixed known-name vocabulary. Existing tests pin both failures.
+- Update the explicit descriptor expectation and recognize the actual compiled goal builtin in exposed_tools validation. This does not create goal authority or expose the tool without a captured claim; catalog policy remains authoritative. Root/config regression subset and workspace rerun follow. No push or combined qualification claimed.
+
+- Integrated root runtime contracts88passed/0failed/2ignored and configuration117passed/0failed. Recorder16/fixture4 tests and fmt/diff pass after the parent merge. Explicit descriptor14 and static goal exposure now match the compiled catalog; no goal authority or check execution was added. Combined workspace rerun is still required.
+
+### 2026-10-14 — G0 Harbor current-wire fixture qualification
+
+- Integrated workspace rerun passes root269tests/0failures/2explicit skips, then stops at the Harbor fixture protocol assertion. Six explicitly synthetic trace headers still declare32; refresh only their protocol metadata to33. The fixture generator already derives the current protocol constant; event payloads remain identical.
+- Rust Harbor fixture integration test passes. Pinned Harbor0.20.0 Python converter/agent suite passes20tests/0failures (`g0-harbor-current-fixtures-python.log`); the interrupted-trace diagnostic is an asserted fixture outcome. No paid task execution occurred.
+- Full integrated workspace tests, Clippy/build, remaining AC4 provenance and performance gates, and whole-plan acceptance remain open. No push or G0 PR claimed.
+
+### 2026-10-14 — AC4 mutation leaf provenance regressions
+
+- Test-first production/leaf fixtures reproduce invalid hash/edit arguments incorrectly marked Observed, and pre-apply cancellation incorrectly marked Observed instead of Interrupted. Filtered mutation suite8passes/2failures; post-planning edit cancellation separately fails with the same provenance mismatch. Red logs retained as `ac4-red-mutation-provenance.log` and `ac4-red-edit-planned-cancellation.log`.
+- Map malformed write hash, edit count/form/hash and pre-apply cancellation to their truthful provenance without changing output text or actual file lookup/staleness/application results. Files and session file-state must remain untouched. Focused qualification and independent read-only review follow; combined workspace run started at3fcc2bfe remains a pre-change receipt. Remaining provenance/identity/performance and whole-plan gates stay open.
+
+- Final broad tools suite passes158tests/0failures, including all three new provenance regressions and existing actual file-operation tests (`ac4-green-mutation-tool-suite.log`). Independent read-only final diff review finds no blocker; fmt/diff pass. Full workspace Clippy is running; prior workspace tests are still active. No full qualification or push claimed.
+
+### 2026-10-14 — G0 combined workspace and client request storage
+
+- Pre-mutation-fix workspace run at3fcc2bfe completes2388top-level tests/0failures/15explicit skips (raw2389includes nested embedding child), with four outer test threads. Harbor wire fixture failure is resolved. Raw `g0-ac4-integrated-workspace-tests-harbor-fixed.log` retained. This receipt does not qualify later source changes.
+- Full workspace Clippy catches new SetGoal growth making ClientRequest288bytes (next variant64). Box only the goal-specific budget payload rather than allocating all ordinary client commands; Serde wire shape and durable goal specification remain unchanged. Existing command-route/goal/protocol tests and complete workspace gates must qualify the fix. No push, performance acceptance or whole-plan completion claimed.
+
+- Goal-budget-only boxing passes full `cargo clippy --workspace --all-targets --all-features -- -D warnings` (20.39s), fmt/diff checks and independent read-only review. Ordinary client command construction is unchanged; core moves the owned budget without cloning, and Serde preserves its wire object. Fresh final-source workspace tests/build remain active, so no final-head qualification or push claimed.
+
+### 2026-10-14 — AC4 fetch producer identity and provenance
+
+- Real loopback HTTP regressions reproduce equal binary/converted HTML previews hiding changed wire bytes, invalid/policy refusal defaulting to Observed, and cancellation defaulting to Observed. Fetch suite8passes/3failures before implementation (`ac4-red-fetch-identity-provenance.log`). Fixtures require identical first/third response identity, zero cancelled requests, and a completed404 to stay Observed.
+- Hash framed final URL/status/media type/raw bounded body before conversion; existing5MiB reads and spill hashes stay unchanged, and redirect count is excluded. Map request/policy refusal, cancellation and incomplete transport/deadline outcomes to Refused/Interrupted/Unobserved. Completed HTTP/redirect/size observations retain existing semantics. Full goals-source workspace test run at2eb01a86 remains active; build passes50.01s and full Clippy passed20.39s at that source. Fetch changes need fresh qualification. No push or whole-plan completion claimed.
+
+- Broad tools suite160passes/0failures; final bounded-fixture fetch suite11passes/0failures, core all-target/all-feature Clippy-Dwarnings passes17.21s, and fmt/diff pass. Independent final source/fixture review finds no blocker after adding a5s peer-accept bound. Raw `ac4-green-fetch-tool-suite.log`, `ac4-green-fetch-final-fixtures.log` and `ac4-fetch-core-clippy.log` retained.
+- Live GitHub read confirms ready/open parents #296e8c52db1 (main7de994b1) and #297b590823f (base#296); plan status now reflects those qualified parent heads rather than old10f87482. Full workspace run at2eb01a86 remains active, and fetch hashing/performance plus remaining producer/host/runtime and whole-plan qualification remain open. No G0 push/PR claimed.
+
+### 2026-10-14 — G0 mutation and command-storage workspace qualification
+
+- Full workspace test run at2eb01a86 finishes2391top-level passes/0failures/15explicit skips (raw2392includes nested embedding child), with four outer test threads; full workspace build passes50.01s and all-target/all-feature Clippy-Dwarnings passes20.39s. fmt/diff pass. Raw `g0-ac4-integrated-workspace-{tests,build}-budget-boxed.log` and Clippy receipt retained.
+- This proves the integrated mutation provenance and goal-budget storage fixes, not later fetch changes at3c86737d. Fetch has160tools/11fetch passes, core Clippy and independent review; final-source workspace rerun follows. Remaining host/runtime provenance, representations, performance/T13 and whole-plan acceptance remain open. No push or G0 PR claimed.
+
+### 2026-10-14 — AC4 runtime-host refusal and uncertainty
+
+- Production-loop regressions fail before mapping: runtime acceptance8passes/2failures because repeated malformed spawn and unavailable history establish false two-error execution streaks. Raw `ac4-red-runtime-host-provenance.log` retained. Validation matrix also covers wait/cancel IDs and limits, history empty query, malformed/placeholder/foreign spill handles; reader counters distinguish zero backing reads from three actual foreign/unavailable lookups.
+- Static spawn/wait/cancel/history/spill/external-admission refusals now carry Refused metadata; incomplete registry/backing-store outcomes carry Unobserved. Actual missing/evicted spill lookups and completed child outcomes retain Observed. Runtime acceptance10passes/0failures after mapping (`ac4-green-runtime-host-provenance.log`). Independent review finds no source defect; dedicated fixture callbacks now panic on any invalid child invocation to strengthen the zero-dispatch evidence. Final fixture/core qualification follows.
+- Fetch-integrated workspace run atb7ea35c4 has exited successfully; exact totals are recorded next. This does not qualify the newer runtime-host source. Remaining producer/host representations, runtime matrix and performance/T13/whole-plan gates stay open; no push or G0 PR claimed.
+
+- Fetch-integrated workspace atb7ea35c4 passes2393top-level tests/0failures/15explicit skips (raw2394includes nested embedding child), four test threads; raw `g0-ac4-integrated-workspace-tests-fetch-final.log` retained. Final zero-child-dispatch fixture runtime acceptance10passes/0failures, and full workspace all-target/all-feature Clippy-Dwarnings passes19.81s (`ac4-green-runtime-host-final-fixtures.log`, `g0-ac4-workspace-clippy-runtime-host.log`). fmt/diff pass. No actual backing-store/child observations were reclassified as refusals.
+- New runtime-host source still needs full workspace tests/build; shell pipe-error uncertainty, additional producer/host representations and other remaining matrix/performance/T13/whole-plan gates stay open. No push or G0 PR claimed.
+
+### 2026-10-14 — AC4 shell pipe-read uncertainty
+
+- Injected stdout/stderr read-error regression reaches the real process/capture loop after a pipe wake. Before mapping, a fast-exit child returns Observed rather than Unobserved (`ac4-red-shell-pipe-observation.log`:0pass/1fail). Fixture also requires a running sleep30 child to stop/reap within5s on both sides, process_pending false and leader PID gone. Existing process-group tests cover descendants.
+- Read errors now have a distinct typed outcome: kill/reap immediately, preserve bounded partial capture plus stream/read cause and `exit=unobserved`, then report Unobserved. Cleanup failure retains the original read cause and keeps unconfirmed ownership state. EOF, real exit, timeout and cancellation keep their existing meanings. Test-only fault injection is workspace-keyed and absent from production. Narrow/broad shell checks and independent final review follow.
+- Prior8e8bc949 workspace build passes41.63s; its tests remain active. New shell source needs qualification; remaining representations, runtime matrix/performance/T13 and full-plan gates stay open. No push or G0 PR claimed.
+
+- Shell-filtered suite passes37tests/0failures, including all four side/liveness cases, existing timeout/cancellation/process-group settlement and hidden-byte identity tests (`ac4-green-shell-pipe-suite.log`). Core all-target/all-feature Clippy-Dwarnings passes12.95s; fmt/diff and independent final review pass. Cleanup does not claim observation of unread bytes.
+- Prior runtime-host head8e8bc949 completes2395top-level workspace tests/0failures/15explicit skips (raw2396includes nested embedding child), workspace build41.63s and full Clippy19.81s. Raw `g0-ac4-workspace-{tests,build}-runtime-host.log` retained. Shell source has focused qualification only; final full workspace/performance/T13 and remaining representations/matrix/full-plan gates stay open. No push or G0 PR claimed.
+
+### 2026-10-14 — AC4 external observation identity test-first
+
+- MCP hidden image/audio/structured response fixture fails before producer hashing (0pass/1fail; `ac4-red-mcp-observation-fixed-fixture.log`). Runtime fixture presents six identical previews with distinct producer evidence; old rendered-only dispatch executes four and rejects the remainder (0pass/1fail; `ac4-red-external-observation.log`). Initial compile-only fixture failure is retained separately, not counted as behavioral red.
+- Stream canonical typed ordered content/structured/error representation into constant-size SHA state before MCP preview conversion. Carry transient digest through the concrete MCP bridge and runtime. New host-call observation enum keeps legacy HostToolResult literals/call implementations intact and returns their original boxed future, without an adapter allocation; identified hosts have one producer future on runtime dispatch. No digest is serialized into text/events/spills. Full qualification and independent review follow; performance and whole-plan gates stay open. No push or G0 PR claimed.
+
+- Final MCP30/harness22 tests pass52total/0failures, including hidden image/audio/structured content and outer-metadata exclusion. Runtime acceptance11passes/0failures; full workspace all-target/all-feature Clippy-Dwarnings passes17.85s, fmt/diff and independent read-only review pass. Raw `ac4-green-mcp-harness-final-observation.log`, `ac4-green-external-runtime-observation.log`, `ac4-external-observation-workspace-clippy.log` retained.
+- Compatibility is scoped: existing ExternalToolHost implementations and HostToolResult literals remain compatible; new public McpCallOutcome.result_digest requires downstream literals/exhaustive destructuring to change. Legacy direct MCP call uses an unwrap adapter; runtime MCP dispatch retains one producer future. No wire/protocol/schema/descriptor bump or authority change. Full source workspace tests/build, observation hot-path measurement, remaining provenance/matrix/T13 and whole-plan gates remain open.
+
+### 2026-10-14 — G0/AC4 complete external-source qualification and performance arms
+
+- Full workspace atdccf80e2 passes2399top-level tests/0failures/15explicit skips (raw2400includes nested embedding child), four outer test threads; workspace build43.90s and all-target/all-feature Clippy17.85s pass. Raw `g0-ac4-workspace-{tests,build}-external-observation.log` retained.
+- Added1,500 identical call arguments/previews with genuinely changing producer identities; actual callbacks/results all1,500, no pause/refusal, report cadence≥1,500/64. No mutation or spontaneous-prose confounding. Runtime acceptance12passes/0failures, core all-target/all-feature Clippy12.63s, fmt/diff and independent read-only fixture review pass. Only test code changes afterdccf80e2; production remains identical.
+- Prepare immutable detached optimized performance arms: baselineb590823f, candidatedccf80e2, common fixtureb590823f with identical direct source manifests. Baseline bench build completes2m12s, compiled fixture/source closure and saved binary verified; candidate build is active. Raw `target/qq-perf/g0-observation-2026-10-14/`; no timing/gate result claimed. Recording waits until builds/tests stop and uses30A/B+30A/A pairs.
+- Final-source/performance/T13 and remaining provenance/matrix plus the rest of autonomous-core remain active. No push, G0 PR or full-plan completion claimed.
+
+### 2026-10-14 — G0/AC4 complete local A/B and A/A diagnostic
+
+- Recorder exits0 with30A/B+30A/A pairs,120successful invocations/360metric rows. Independent reparse verifies all log metrics, pair slots, sample counts, medians/p95, shared compiled fixture and saved executable hashes. Production baselineb590823f, candidatedccf80e2; common fixturec0adcf1816b7fa4447d6c09b273fe4797d1083ee7917e39aa6b8637f993b6be6.
+- At turns10/100/1000, A/B median changes+0.963%/−0.776%/−2.968%, p95+20.100%/+0.766%/−8.683%. Same-binary A/A medians+0.458%/−1.014%/−1.525%, p95+3.496%/−7.448%/−11.481%. The turn10tail increase is retained for investigation, not dismissed or waived.
+- Recorded I/O some.avg10 spans10.03–69.97% (before55.65%, after33.60%). This is loaded-host diagnostic evidence, not a quiet-host/H0 pass or attribution of the tail increase. All samples retained; quiet-host measurement and producer-identity hot-path qualification remain open.
+- Saved binary SHA256 baseline40fe369cf428c7f5248c9446a0731e4dfee134a22ac5d82f82f1ddd5906eb761; candidatedc58cb41de6475dd8b782f340c308b25cc6799f58ede80af88237012b34d038d. Raw `target/qq-perf/g0-observation-2026-10-14/`, including independent-receipt.json and raw SHA25634ccab4a6d608d9c586515e29c06c7b654be5442e72e749081023185ad1b27ba.
+- Production is unchanged by49283bdf's extra1,500-result acceptance fixture. Final source workspace verification and goal-less golden refresh follow; remaining T13 and whole autonomous-core acceptance stay open. No push, G0 PR or completion claimed.
+
+- Current02f31bf4 manual production capture passes; all8initial/tool-result+finalNone request bodies across Responses/Chat/Anthropic/Google match the preserved26b14b81 baseline byte-for-byte (15,710–17,095bytes), and preserved baseline hashes match the prior exact-notice receipt. Fresh `g0-observation-goal-less-capture.log` and `goal-less-request-observation-byte-parity.json` retained. This proves wire-body compatibility, not provider latency or a live-provider run.
+
+- Final matrix source02f31bf4 completes2,400top-level workspace tests/0failures/15explicit skips (raw2,401includes the nested embedding child), with four outer test threads. `g0-ac4-workspace-tests-final-matrix.log` retained. Subsequenta03fb8a4 changes only this ledger; production remainsdccf80e2. Previously qualified full workspace build/Clippy and test-only core Clippy remain applicable.
+- Independent read-only performance audit verifies all120logs/360rows, fixture manifests, executable hashes, profiles and derived statistics without discrepancy. Turn10p95 rises41.753243→50.145718ms (+8.392475ms); the corresponding A/A increase does not establish that this is noise. The common fixture has no active goal, so enabled-goal notice/refresh costs also remain unmeasured. Quiet-host, enabled-goal and producer-identity qualification remain open; no G0 PR or whole-plan completion claimed.
+
+### 2026-10-14 — G0 enabled-goal measurement fixture
+
+- Test-first enabled-goal fixture initially completes72calls but observes0goal notices (0pass/1fail; `g0-red-enabled-goal-soak.log`). It now durably submits the public SetGoal command before SubmitPrompt and verifies real goal atoms at each work request. Corrected the initial compaction stimulus from256-byte to8,192-byte results; the final72-turn acceptance requires at least3committed compactions,72executed/durable calls and0duplicates.
+- `QQ_BENCH_GOAL=0|1` selects the default goal-less or active-goal mode on the same runtime/fixture. Output carries mode, authenticated-notice request counts, compaction counts and the new compiled fixture digest. Initial full-history notice scanning was rejected by independent review; final observer checks only first blocks of first2messages in both modes. Its bounded cost is explicitly included in the measured gaps. No interleaved edits/prompts or driver/check behavior is claimed.
+- Final soak suite passes21tests/0failures/7explicit skips (`g0-enabled-goal-soak-suite-bounded-observer.log`), core all-target/all-feature Clippy-Dwarnings passes and independent read-only re-review approves. No production source changes. Optimized measurement remains unexecuted; new fixture cannot reuse the old digest/receipts. Quiet-host turn10tail, producer identity, enabled-goal timings, T13 and remaining whole-plan gates stay open.
+
+- Optimizedcf2abd0b benchmark build exits0 in2m23s; immutable Git source bytes and the compiler's exact2-source direct closure verified. Saved executable SHA256117f8e003822320db1e18d68394890bbdf3300a8c30bc5625a7e60fa8d74e7a7, fixture7d9c347af47849026afa2f2c6faad37738668a788ab5fa3be9c101b17614b7f0; optimized3/debug-assertionsfalse, default+tool-fetch features. Raw `target/qq-perf/g0-goal-enabled-2026-10-14/` includes build/profile/toolchain/compiled-fixture receipts. Prepare30same-binary goal-off/on pairs plus30goal-off/off controls; no timing result claimed. Runbook documents the mode and its measurement limits.
+
+- Independent pre-launch review confirms active-goal workload comparison scope, including bounded observer cost. Local recorder now streams a hard1MiB cap, kills/reaps its owned process group on failure, validates fixed source/fixture/receipt identity and records script/helper hashes. Recording is live (session12962), with no concurrent builds/tests; all120samples are planned. Starting I/O some.avg10=45.01% makes this a loaded-host diagnostic, not a quiet-host gate. No complete result or timing qualification claimed.
+
+- Recording12962 exits0: all30goal-off/on pairs and30goal-off/off controls complete (120successful invocations/360metric rows). Independent reparse verifies modes/slots, all raw metrics, medians/p95 and source/binary/script/helper identities. Every goal-on invocation verifies1,000goal-bearing work requests and9compactions; goal-off verifies0goal atoms and8compactions. Different compaction counts are part of the active-goal workload, not discarded.
+- Goal-on median changes at turns10/100/1,000:−1.657%/+0.997%/+8.080%; p95−0.331%/+13.289%/−1.646%. Goal-off/off controls: medians−1.125%/−0.953%/−0.580%; p95−1.917%/+99.916%/−5.868%. Turn1,000medians37.144196→40.145522ms retain a3.001326ms increase for quiet-host investigation. This compares modes on one binary; it does not attribute production-commit changes or isolate core-only observer cost.
+- I/O some.avg10 spans13.18–68.50%; raw SHA25645bd22ff30e86ca81d43e3dea3d87cf99e1187212d2e6793c73f50bf7567c201. All sample logs and `independent-receipt.json` retained beneath `target/qq-perf/g0-goal-enabled-2026-10-14/`. Loaded-host diagnostic only: no quiet-host/H0 pass, waiver or whole-plan completion claimed. Recorder is terminal; source work can resume.
+
+### 2026-10-14 — G0/AC4 foundation published for review
+
+- Draft [PR308](https://github.com/retsu-AI/qq/pull/308), ENG1045, targets main007adcda after parents296/297 merged. Sourceb4f3645b preserves process receipts with goal schema48/descriptor15/protocol33; independent integration and receipt-derived guard reviews Approve.
+- Fresh workspace2431top-level passes/0failures/15skips; fmt, all-target/all-feature Clippy-Dwarnings and workspace build pass. Exact receipts and all red/green logs are linked in goals.md. Codex review requested; hosted CI and reviewer approval not yet proved.
+- Quiet-host/producer identity/current-head parity/T13 and later goal driver/check/surfaces/live evidence remain incomplete. Entire autonomous-core scope remains active; this draft does not waive any gate.
+
+### 2026-10-14 — G0 current-main integration qualification
+
+- Integrated deployed main `62c65930` into #308; source and fixture repairs are committed through `0ee34c6b`, independently reviewed Approve. Goal schema is 51, preserving deployed 47–50 upgrade boundaries and descriptor 15.
+- Formatting, workspace Clippy and build passed (1.46s, 19.03s, 18.37s). First workspace test attempt failed one delegation event-collection timeout; isolated rerun passed. The complete workspace rerun now passes: 2512 raw reported passes including nested subprocess tests, zero failures, 15 skips. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g0-main-workspace-timeout-recheck.log`.
+- No production changes followed these gates. Performance/T13 and the broader autonomous-core acceptance remain open; this receipt qualifies the merge integration, not those remaining gates.
+### 2026-10-14 — G2 preparing prompt cancellation review regression
+
+- Fresh #309 finding 4276954471 reproduced: `paused_goal_fences_preparing_user_prompt_until_cancelled` fails because Pause leaves the preparing user prompt uncancelled and Resume succeeds. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g2-review-preparing-prompt-red.log`.
+- Freeze the existing full active claim and notice in the reservation transaction; goal-less absence still freezes at paid admission. Existing control transactions now see ownership without another query or store hop. Validation and independent review pending; no push claimed.
+- Parent integration full test gate: 1142 core passes, one delegation collection timeout, four skips. The timed-out test passed alone; full gate remains unqualified.
+- New cancellation regression passes (1/0, 0.33s). Goal suite passes 71/0 with one pre-existing skip (27.83s) after updating the former start-only binding expectation to preparing ownership. Independent source review Approve. Workspace qualification and the separate early-failure accounting fix remain pending.
+
+### 2026-10-14 — G2 post-start failure accounting review regression
+
+- Fresh #309 finding 4276954480 reproduced by `goal_failure_after_start_before_provider_poll_preserves_known_zero`: inject the existing cancellation-read failure after the committed start using two scoped read holds. No provider call occurs; public direct/inclusive accounting incorrectly becomes unknown. Evidence: `target/qq-perf/ac3-stack-2026-10-13/g2-review-post-start-hook-zero-red.log`.
+- A valid post-start cancellation control case passed before any patch. Earlier malformed-row trigger attempts failed the runtime instead of isolating this error; those attempts are not correctness evidence. No production patch or publication yet.
+- Fixed post-start accounting seed before cancellation/error/runtime-failure checks, preserving prior routing uncertainty and goal-less behavior. All8 admission regressions pass (4.78s), including pending-dispatch uncertainty and routing crash/recovery controls; independent source review Approve. Updated routing rollback expectation to preserve the already-frozen reservation claim. No push until integrated workspace gates pass.
+
+### 2026-10-14 — G2 review fixes integrated with published foundation
+
+- Branch `fix/eng-1053-driver-main-review` integrates parent #308 `390110c1`, preserved G2 schema54 integration `7a829bfd`, finite-cap rejection proof, preparing ownership fence and post-start zero accounting fixes through `e854b6d9`. Preserved sponsor expected-red branch `c397f48c` remains separate.
+- Merge conflicts joined append-only receipts and retained both deployed migration and new preparing prompt tests. Source formatting and diff checks pass. Integrated workspace gates and independent review follow; no new driver publication claimed.
+
+### 2026-10-14 — G2 integrated gate fixture boundary correction
+
+- Integrated driver fmt1.42s, Clippy17.71s and build13.89s pass. Workspace tests fail only the paid-owner migration rollback fixture (1187core passes, one failure, four skips): its source metadata was correctly moved to52, but its expected unchanged metadata still said49. Change that expectation to52; retain both invalid shape cases and unchanged-version assertion. No production change.
+- #308 published390110c1 remains mergeable; Codex's latest summary marks that head Completed at23:12:24Z and the opening description carries genuine connector +1. No current-head inline finding was returned. Remaining performance/T13 acceptance stays open.
+- Corrected fixture passes1/0 in0.75s; independent review Approve. Current plan/ledger labels now reflect both PRs as open review PRs, retaining full G0/G2 incompleteness. Source unchanged; workspace publication checks repeat.
+
+### 2026-10-14 — G2 second Codex review
+
+- Review5527773322 on publishedc18e831a raises explicit CancelRun restart4278782507, replay/empty-reasoning work evidence4278782514, unresolved legacy sends4278782521, and replayed activation wake4278782526. Work is isolated on `fix/eng-1053-goal-review-outcomes`, `/tmp/qq-autonomous-core-20261014-g32trn1z/review2`, separate from the unqualified sponsored-budget feature.
+- Test-first: replayed goal command schedule false (1failure,0.25s); replay marker before529 charges0runs instead of1 (1failure,0.67s); explicit queued goal cancellation leaves Active instead of Paused(User) (1failure,0.29s). Raw evidence `target/qq-perf/ac3-stack-2026-10-13/g2-review2-*-red.log`. Other matrix cases are not claimed executed after the first failure.
+- Independent read-only investigations confirm command-time user pause can preserve neutral runtime cleanup/preemption without a provenance column; a versioned unfinished-dispatch repair is needed in addition to prior turn backfill. Full plan and sponsored/deadline/performance acceptance remain open.
+
+### 2026-10-14 — synchronize current-main goal PRs
+
+- Local G0parent3d4ea08f integrates main9868038c; driverfd873edb includes that parent plus reviewed explicit-stop, replay wake-up, provider work-evidence, schema55 legacy dispatch repair and drained-owner settlement fixes. Goal-focused92unit+1soak passes/0failures/1skip before this main sync; new helper/router upgrade matrix3/0,28new fixturecases. Source integration independent review Approve; combined Clippy pass.
+- Current published heads390110c1/c18e831a remain stale until atomic parent/child push. Only root ownership ledger conflicted in the source merges. One existing cancellation fixture's early-owner ordering is corrected to verify helper drain before owner settlement, retaining both Cancelled/exactly-once/no-marker/final-idle assertions. Full combined workspace and build are running; socket denial is recorded separately from source/test failures. Full G0/G2/performance and all other autonomous-core work remain unfinished.
+
+- Published synchronization succeeds atomically: #308head3d4ea08f includes main9868038c; #309headbe13240f includes that parent. Both live mergeable/non-draft; new-head CI/Codex are running.
+- Combined workspace2,425/168/15skips comprises163environmental listener failures and5guide/fixture mismatches. Guide schema corrected55; all28settlement tests pass after retaining resources through drain, while the auto-compactor ordering correction independently passes1/0. No production patch or full-workspace success claim for these follow-ups.
+
 
 
 ### 2026-10-15 — release preparation reconciliation (ENG-1054)

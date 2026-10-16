@@ -1130,6 +1130,7 @@ async fn an_answer_waiting_on_a_grandchild_is_delivered_when_it_settles() {
         .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
         .await
         .unwrap()
+        .unwrap()
         .unwrap();
     let delivered = || {
         store.call(Priority::Control, |connection| {
@@ -2409,6 +2410,7 @@ async fn a_report_only_delivery_is_not_an_answer() {
     store
         .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
         .await
+        .unwrap()
         .unwrap()
         .unwrap();
     store

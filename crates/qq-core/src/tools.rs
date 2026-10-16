@@ -3,6 +3,7 @@ mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
+pub(crate) mod goal;
 mod lang;
 mod matching;
 pub(crate) mod network;
@@ -81,7 +82,8 @@ pub mod bench_support {
     }
 }
 pub(crate) use dispatch::{
-    SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result, execute_with_images,
+    ResultDisposition, SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result,
+    execute_with_images,
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
@@ -200,6 +202,207 @@ mod tests {
             arguments,
             &ToolCancellation::new(RunCancellation::new()),
         )
+    }
+
+    #[test]
+    fn tool_result_provenance_separates_execution_from_argument_refusal() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("input.txt"), "one\ntwo\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, args) in [
+            ("read_file", r#"{"path":3}"#),
+            ("read_file", r#"{"path":"input.txt","limit":0}"#),
+            ("tree", r#"{"path":".","depth":0}"#),
+            ("search", r#"{"query":"one","limit":0}"#),
+            ("write_file", r#"{"path":"x","content":3}"#),
+            ("unknown_tool", "{}"),
+        ] {
+            let result = run_tool(&workspace, &state, name, args);
+            assert!(result.is_error, "{name} {args}");
+            assert_eq!(
+                result.disposition,
+                ResultDisposition::Refused,
+                "{name} {args}"
+            );
+        }
+        let missing = run_tool(&workspace, &state, "read_file", r#"{"path":"missing.txt"}"#);
+        assert!(missing.is_error);
+        assert_eq!(missing.disposition, ResultDisposition::Observed);
+        let repaired = run_tool(
+            &workspace,
+            &state,
+            "search",
+            r#"{"query":"one","include":"[\"*.txt\"]"}"#,
+        );
+        assert!(!repaired.is_error);
+        assert_eq!(
+            repaired.disposition,
+            ResultDisposition::Observed,
+            "argument-repair transfer must preserve provenance"
+        );
+        let cancelled = RunCancellation::new();
+        cancelled.cancel();
+        let stopped = execute_blocking(
+            &workspace,
+            &state,
+            "read_file",
+            r#"{"path":"input.txt"}"#,
+            &ToolCancellation::new(cancelled),
+        );
+        assert_eq!(stopped.disposition, ResultDisposition::Interrupted);
+    }
+
+    #[test]
+    fn mutation_argument_refusals_are_not_execution_observations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("a.txt");
+        fs::write(&path, "alpha\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for (name, arguments) in [
+            (
+                "write_file",
+                r#"{"path":"new.txt","content":"x","if_hash":"bad"}"#,
+            ),
+            ("edit_file", r#"{"edits":[]}"#),
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"alpha"}]}"#,
+            ),
+            (
+                "edit_file",
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"beta","if_hash":"bad"}]}"#,
+            ),
+        ] {
+            let result = run_tool(&workspace, &state, name, arguments);
+            assert!(result.is_error, "{name}: {}", result.model_text);
+            assert_eq!(
+                result.disposition,
+                ResultDisposition::Refused,
+                "{name} {arguments}"
+            );
+            assert!(result.file_states.is_empty());
+        }
+        let arguments = serde_json::json!({
+            "edits": vec![serde_json::json!({"path":"a.txt","old":"alpha","new":"beta"}); 33]
+        })
+        .to_string();
+        let result = run_tool(&workspace, &state, "edit_file", &arguments);
+        assert_eq!(result.disposition, ResultDisposition::Refused);
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\n");
+        assert!(!directory.path().join("new.txt").exists());
+        let missing = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"missing.txt","old":"alpha","new":"beta"}]}"#,
+        );
+        assert_eq!(
+            missing.disposition,
+            ResultDisposition::Observed,
+            "a completed missing-file lookup remains an observation"
+        );
+    }
+
+    #[test]
+    fn mutation_leaf_cancellation_is_not_an_execution_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let cancellation = RunCancellation::new();
+        cancellation.cancel();
+        let cancelled = ToolCancellation::new(cancellation);
+        let write_args = serde_json::from_str(r#"{"path":"new.txt","content":"x"}"#).unwrap();
+        let write_result = write::write_file(&workspace, &state, &write_args, &cancelled);
+        assert_eq!(write_result.disposition, ResultDisposition::Interrupted);
+        let edit_args =
+            serde_json::from_str(r#"{"edits":[{"path":"a.txt","old":"alpha","new":"beta"}]}"#)
+                .unwrap();
+        let edit_result = edit::edit_file(&workspace, &state, &edit_args, &cancelled);
+        assert_eq!(edit_result.disposition, ResultDisposition::Interrupted);
+        assert_eq!(
+            fs::read(directory.path().join("a.txt")).unwrap(),
+            b"alpha\n"
+        );
+        assert!(!directory.path().join("new.txt").exists());
+    }
+
+    #[test]
+    fn host_failures_do_not_invent_observed_tool_results() {
+        use crate::hosts::HostCallError;
+        for error in [
+            HostCallError::Timeout,
+            HostCallError::Unavailable("offline".to_owned()),
+            HostCallError::Overloaded,
+            HostCallError::InvalidResult("bad".to_owned()),
+            HostCallError::Refused("policy".to_owned()),
+            HostCallError::UnknownTool("missing".to_owned()),
+            HostCallError::ShutDown,
+        ] {
+            let result = crate::hosts::host_error_result(&error);
+            assert!(result.is_error);
+            let expected = match error {
+                HostCallError::Timeout
+                | HostCallError::Unavailable(_)
+                | HostCallError::InvalidResult(_)
+                | HostCallError::ShutDown => ResultDisposition::Unobserved,
+                HostCallError::Overloaded
+                | HostCallError::Refused(_)
+                | HostCallError::UnknownTool(_) => ResultDisposition::Refused,
+                HostCallError::Cancelled => unreachable!("cancellation checked separately"),
+            };
+            assert_eq!(result.disposition, expected, "{error}");
+        }
+        assert_eq!(
+            crate::hosts::host_error_result(&HostCallError::Cancelled).disposition,
+            ResultDisposition::Interrupted
+        );
+        let response = bounded_result("remote tool ran and reported an error".to_owned(), true);
+        assert_eq!(response.disposition, ResultDisposition::Observed);
+    }
+
+    #[test]
+    fn complete_result_identity_survives_identical_previews_and_discarded_spills() {
+        use sha2::{Digest, Sha256};
+        let bounds = output::Bounds {
+            max_bytes: 128,
+            max_lines: 8,
+            max_line_bytes: 32,
+            head_ratio: 50,
+        };
+        for bytes in [16 * 1024, output::MAX_SPILL_ITEM_BYTES + 1024] {
+            let a = format!("head\n{}tail\n", "x\n".repeat(bytes / 2));
+            let mut b = a.clone();
+            let middle = "head\n".len() + 2 * (bytes / 4);
+            b.replace_range(middle..middle + 1, "y");
+            let first = ToolOutput::bounded(a.clone(), &bounds, false);
+            let second = ToolOutput::bounded(b.clone(), &bounds, false);
+            assert_eq!(
+                first.model_text, second.model_text,
+                "only omitted bytes differ"
+            );
+            assert_ne!(first.result_digest, second.result_digest);
+            assert_eq!(
+                first.result_digest,
+                <[u8; 32]>::from(Sha256::digest(a.as_bytes()))
+            );
+            if bytes > output::MAX_SPILL_ITEM_BYTES {
+                assert!(first.spill.is_none());
+                assert!(second.spill.is_none());
+            } else {
+                assert_eq!(
+                    first.spill.as_ref().unwrap().digest,
+                    format!("{:x}", Sha256::digest(a.as_bytes()))
+                );
+            }
+            let differently_bounded = ToolOutput::bounded(a, &output::Bounds::DEFAULT, false);
+            assert_eq!(
+                first.result_digest, differently_bounded.result_digest,
+                "bounds do not define result identity"
+            );
+        }
     }
 
     #[test]
@@ -676,6 +879,139 @@ mod tests {
         assert_eq!(update.path, "b.txt");
         assert_eq!(update.hash, hash);
         assert_eq!(state.recorded("b.txt"), Some(update.hash));
+    }
+
+    #[test]
+    fn read_search_identity_retains_read_lines_before_clipping_and_respects_scan_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = directory.path().join("large.txt");
+        let mut bytes = vec![b'x'; 5 * 1024 * 1024];
+        fs::write(&path, &bytes).unwrap();
+        let read = || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "read_file",
+                r#"{"path":"large.txt","limit":1}"#,
+            )
+        };
+        let first = read();
+        bytes[100_000] = b'y';
+        fs::write(&path, &bytes).unwrap();
+        let second = read();
+        assert!(!first.is_error && !second.is_error);
+        assert_eq!(first.model_text, second.model_text);
+        assert_ne!(first.result_digest, second.result_digest);
+        bytes[4 * 1024 * 1024 + 100] = b'z';
+        fs::write(&path, &bytes).unwrap();
+        let outside_scan = read();
+        assert_eq!(
+            second.result_digest, outside_scan.result_digest,
+            "unscanned bytes must not be read for identity"
+        );
+    }
+
+    #[test]
+    fn read_search_identity_retains_search_rows_before_clipping() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = directory.path().join("input.txt");
+        let mut bytes = format!("needle {}\n", "x".repeat(10_000)).into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        let search = || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"needle","path":"input.txt"}"#,
+            )
+        };
+        let first = search();
+        bytes[8_000] = b'y';
+        fs::write(&path, &bytes).unwrap();
+        let second = search();
+        assert!(!first.is_error && !second.is_error);
+        assert_eq!(first.model_text, second.model_text);
+        assert_ne!(first.result_digest, second.result_digest);
+    }
+
+    #[test]
+    fn read_search_identity_retains_clipped_search_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = directory.path().join("input.txt");
+        let mut bytes =
+            format!("{}\nneedle\n{}\n", "x".repeat(10_000), "z".repeat(10_000)).into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        let search = || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"needle","path":"input.txt","context":1}"#,
+            )
+        };
+        let first = search();
+        bytes[8_000] = b'y';
+        fs::write(&path, &bytes).unwrap();
+        let second = search();
+        assert_eq!(first.model_text, second.model_text);
+        assert_ne!(first.result_digest, second.result_digest);
+        bytes[18_000] = b'y';
+        fs::write(&path, &bytes).unwrap();
+        let third = search();
+        assert_eq!(second.model_text, third.model_text);
+        assert_ne!(second.result_digest, third.result_digest);
+    }
+
+    #[test]
+    fn read_search_identity_ignores_unmatched_file_renames() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        fs::write(directory.path().join("a.txt"), "NOTHING\n").unwrap();
+        let search = || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"needle"}"#,
+            )
+        };
+        let first = search();
+        fs::rename(
+            directory.path().join("a.txt"),
+            directory.path().join("b.txt"),
+        )
+        .unwrap();
+        let second = search();
+        assert_eq!(first.model_text, second.model_text);
+        assert_eq!(first.result_digest, second.result_digest);
+    }
+
+    #[test]
+    fn read_search_identity_excludes_advisory_only_search_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = directory.path().join("input.txt");
+        fs::write(&path, "NEEDLE\n").unwrap();
+        let search = || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "search",
+                r#"{"query":"needle","case":"sensitive","path":"input.txt"}"#,
+            )
+        };
+        let first = search();
+        assert!(first.model_text.contains("hint=case_insensitive_matches=1"));
+        fs::write(&path, "NOTHING\n").unwrap();
+        let second = search();
+        assert!(!second.model_text.contains("hint="));
+        assert_eq!(
+            first.result_digest, second.result_digest,
+            "primary search result is unchanged"
+        );
     }
 
     #[test]
@@ -3923,7 +4259,7 @@ mod tests {
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
-            r#"{"command":"echo pid:$$; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
+            r#"{"command":"echo pid:$$; while [ ! -e start-output ]; do sleep 0.01; done; while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#.to_owned(),
             cancelled.clone(),
             Some(output),
             tasks.clone(),
@@ -3936,6 +4272,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let pid = parse_marked_pid(&first);
+        // Do not spend the live-output budget before the PID chunk is consumed.
+        fs::write(directory.path().join("start-output"), "go").unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while chunks.capacity() != 0 {
                 tokio::task::yield_now().await;
@@ -4187,6 +4525,11 @@ mod tests {
             let result =
                 run_shell_tool(workspace.clone(), arguments, RunCancellation::new(), None).await;
             assert!(result.is_error, "invalid arguments accepted: {arguments}");
+            assert_eq!(
+                result.disposition,
+                ResultDisposition::Refused,
+                "{arguments}"
+            );
         }
     }
 
@@ -4490,6 +4833,7 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert_eq!(result.model_text, "tool execution was cancelled");
+        assert_eq!(result.disposition, ResultDisposition::Interrupted);
     }
 
     #[cfg(unix)]
@@ -4569,6 +4913,59 @@ mod tests {
                 "partial line kept: {line:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_identity_survives_the_actual_capture_and_dispatch_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let first = run_shell_tool(
+            workspace.clone(),
+            r#"{"command":"printf '%070000dX%070000d' 0 0"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        let second = run_shell_tool(
+            workspace.clone(),
+            r#"{"command":"printf '%070000dY%070000d' 0 0"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert!(!first.is_error && !second.is_error);
+        assert_eq!(
+            first.model_text.split_once('\n').unwrap().1,
+            second.model_text.split_once('\n').unwrap().1
+        );
+        assert_ne!(
+            first.result_digest, second.result_digest,
+            "the changed middle byte was dropped by capture"
+        );
+        let stdout = run_shell_tool(
+            workspace.clone(),
+            r#"{"command":"printf same"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        let stderr = run_shell_tool(
+            workspace.clone(),
+            r#"{"command":"printf same >&2"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        let again = run_shell_tool(
+            workspace,
+            r#"{"command":"printf same"}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+        assert_ne!(stdout.result_digest, stderr.result_digest);
+        assert_eq!(stdout.result_digest, again.result_digest);
     }
 
     #[test]
