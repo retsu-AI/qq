@@ -143,6 +143,7 @@ it. When the same correction happens twice, encode it
 
 | Rule | Enforced by |
 | --- | --- |
+| Pre-push checks cannot leak caller Git metadata into fixture repositories | `xtask::check::tests::pre_push_keeps_fixture_git_operations_out_of_the_caller_repository` (Unix regular/linked local pushes) |
 | rustfmt formatting | `cargo xtask check` (fmt gate), CI |
 | Clippy clean, `-D warnings` | `cargo xtask check` (clippy gate), CI |
 | No `mod.rs` files | `cargo xtask lint` `no-mod-rs` |
