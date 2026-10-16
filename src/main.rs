@@ -214,6 +214,21 @@ async fn close_headless(
     }
 }
 
+fn headless_close_exit(
+    code: u8,
+    goal: bool,
+    result: Result<(), qq_core::SessionRuntimeError>,
+) -> ExitCode {
+    let _ = goal;
+    match result {
+        Ok(()) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("error: could not close the session runtime: {error}");
+            headless::exit_code(headless::HeadlessStatus::HarnessFailure)
+        }
+    }
+}
+
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
     let steer_stdin = args.steer_stdin;
     match prepare_headless(args, overrides).await {
@@ -267,18 +282,12 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             drop(stdout);
             drop(stderr);
-            match close_headless(&sessions, is_goal, async {
+            let closed = close_headless(&sessions, is_goal, async {
                 // Losing signal control also requests cleanup of this owned runtime.
                 let _ = tokio::signal::ctrl_c().await;
             })
-            .await
-            {
-                Ok(()) => ExitCode::from(code),
-                Err(error) => {
-                    eprintln!("error: could not close the session runtime: {error}");
-                    headless::exit_code(headless::HeadlessStatus::HarnessFailure)
-                }
-            }
+            .await;
+            headless_close_exit(code, is_goal, closed)
         }
         Err((status, message)) => {
             eprintln!("error: {message}");
@@ -2059,6 +2068,15 @@ async fn run_blocking_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_close_failure_preserves_selected_goal_exit() {
+        for code in [0, 4, 6, 7, 8, 130] {
+            assert_eq!(headless_close_exit(code, true, Err(qq_core::SessionRuntimeError::Unavailable)), ExitCode::from(code));
+            assert_eq!(headless_close_exit(code, false, Err(qq_core::SessionRuntimeError::Unavailable)), ExitCode::from(4));
+            assert_eq!(headless_close_exit(code, true, Ok(())), ExitCode::from(code));
+        }
+    }
 
     fn private_tempdir() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
