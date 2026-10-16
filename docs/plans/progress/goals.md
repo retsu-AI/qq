@@ -1157,3 +1157,14 @@ publication and thread resolution remain pending.
   and stable-source full verification pending. ENG-1058/H0 are not closed.
 - Curated receipt: g-goals-live-eng-1065.md. Final docs check and publication
   follow; no runtime source, protocol or schema changes in this three-file delta.
+
+
+### 2026-10-16 — final G5 documentation review corrections
+
+- Corrected the receipt's opening status to five settled trials and qualifying
+  fifth live result; made the earlier fifth admission status explicitly historical.
+- Published the exact audit logic in benchmarks/goals/audit_live.py, byte-identical
+  to the measured script, and recorded its invocation and private-input contract.
+  Raw receipts and transcripts stay untracked; no runtime behavior changes.
+- The final delta is three Markdown files plus the evaluation audit script.
+  Fresh real-receipt replay, negative audit probes and final checks follow.

@@ -1,8 +1,8 @@
 # G5 — subscription-only live goal evaluation
 
-Status: four trials settled; a fifth matched-measurement task is active.
-No settled trial meets the single multi-hour requirement.
-G5 acceptance is not established. ENG-1065 / ENG-809.
+Status: five trials settled. The fifth establishes G5 live acceptance: one
+132.5-minute trial,20 real compactions and a verified terminal budget outcome.
+Its useful continuation measurement task remains incomplete. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
 
@@ -309,9 +309,9 @@ outer PR repairs continue.
   outages was caught, stopped and explicitly retained as invalid. The corrected
   baseline uses600-second outages; no result or resource acceptance is claimed.
 
-The supervisor is live. Terminal accounting, actual duration, checklist retention
-and final independent review remain pending. This admission does not establish
-G5 acceptance; #332 remains draft.
+At admission the supervisor was live, with terminal accounting, duration and
+checklist retention pending. The terminal result below supersedes that admission
+status; the admission alone did not establish G5 acceptance.
 
 
 ## Fifth trial — terminal result and live acceptance
@@ -339,13 +339,28 @@ extension, cap reset or artificial duration padding occurred.
 - The independent terminal audit passes every check: actual duration,
   terminal/process agreement, complete JSONL, usage reconciliation, checklist
   identity, finite unchanged bounds, exact route and source/binary binding.
-  Its script SHA256 is
+  The [published audit source](../../../benchmarks/goals/audit_live.py) is
+  byte-identical to the evaluator-local script used for this receipt; SHA256
   `33c1135e24204e07e9dee1bc3477efa5d0944983f0e6488751a9c6f3e2e1a646`.
 
 **G5 / goals acceptance5 passes for this single live trial.** Durations from
 prior trials are not combined. Credentials, transcripts, stores and generated
 receipts remain outside Git. The private terminal receipt is
 `/tmp/qq-goal-delivery-20261015/g5-measurements/g5-terminal-audit.json`.
+Reproduce the audit from the repository root on the evaluation host:
+
+```sh
+python3 benchmarks/goals/audit_live.py \
+  /tmp/qq-goal-delivery-20261015/g5-measurements \
+  4851fc2e755f7997b3e0cd5086653a64286e69bc
+```
+
+The private input directory contains `g5-launch.json`, `g5-live.jsonl` and
+`g5-exit.json`; the launch record names the preserved executable. Linux `/proc`
+is used to check the supervisor's PID/start-time identity. The command writes a
+private `g5-terminal-audit.json`; **`qualifies: true` and every check true** are
+required. An active or incomplete trial reports false. The script and invocation
+are published; raw inputs, credentials, executable and receipt remain untracked.
 
 ### Useful task result and separate qualification limits
 
