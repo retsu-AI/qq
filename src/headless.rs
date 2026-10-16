@@ -173,8 +173,13 @@ impl RecordSink {
         }
         let line = serde_json::to_string(&record).map_err(io::Error::other)?;
         if let Some(trace) = &mut self.trace {
-            trace.write_all(line.as_bytes())?;
-            trace.write_all(b"\n")?;
+            let result = trace.write_all(line.as_bytes()).and_then(|()| trace.write_all(b"\n"));
+            if let Err(error) = result {
+                // Keep a failed optional trace from blocking the final stdout
+                // record after an earlier event could not be traced.
+                self.trace = None;
+                return Err(error);
+            }
         }
         if self.to_stdout {
             stdout.write_all(line.as_bytes())?;
