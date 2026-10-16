@@ -30,8 +30,8 @@ crates/qq-core/src/sessions/tests/commands.rs	2064	fn stream(&self, _request: Mo
 crates/qq-core/src/sessions/tests/compaction.rs	1458	async fn saturated_reserved_reload_waits_after_auto_compaction() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/compaction.rs	4395	async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/contract.rs	103	async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime() {	tokio::time::sleep(Duration::from_millis(5)).await;
-crates/qq-core/src/sessions/tests/deadlines.rs	266	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
-crates/qq-core/src/sessions/tests/deadlines.rs	434	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;
+crates/qq-core/src/sessions/tests/deadlines.rs	267	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
+crates/qq-core/src/sessions/tests/deadlines.rs	435	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;
 crates/qq-core/src/sessions/tests/delegation.rs	2870	async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() {	tokio::time::sleep(Duration::from_millis(1_200)).await;
 crates/qq-core/src/sessions/tests/delegation.rs	5658	fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {	tokio::time::sleep(Duration::from_millis(if expires_during_preflight {
 crates/qq-core/src/sessions/tests/nonblocking.rs	183	async fn children_started(delegation: &Delegation, count: usize) {	tokio::time::sleep(Duration::from_millis(5)).await;
@@ -67,10 +67,10 @@ src/headless.rs	4003	async fn aborting_the_headless_owner_still_settles_its_acce
 src/headless.rs	4021	async fn aborting_the_headless_owner_still_settles_its_accepted_run() {	tokio::time::sleep(Duration::from_millis(10)).await;
 src/headless.rs	4034	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
 src/headless.rs	4151	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
-src/runtime.rs	4846	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/runtime.rs	8572	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	8582	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	8590	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	8755	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
+src/runtime.rs	4876	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/runtime.rs	8602	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	8612	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	8620	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	8785	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
 xtask/src/perf.rs	5857	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
 xtask/src/perf.rs	5900	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
