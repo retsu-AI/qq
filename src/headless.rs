@@ -214,10 +214,10 @@ impl Failure {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SessionIntent {
+#[derive(Clone, Copy)]
+enum SessionIntent<'a> {
     Prompt,
-    Goal,
+    Goal(&'a GoalInvocation),
 }
 
 struct SessionHandle {
@@ -332,6 +332,53 @@ impl RunEnd {
     }
 }
 
+/// Pure admission preparation runs before persisted session settings change.
+fn prepare_goal_request(
+    request: &GoalInvocation,
+    options: &HeadlessOptions,
+    session_id: SessionId,
+    current: Option<&qq_protocol::GoalSnapshot>,
+) -> Result<Option<SessionCommand>, Failure> {
+    let command = if let Some(objective) = &request.objective {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        let args = crate::cli::GoalSetArgs {
+            target: crate::cli::GoalTarget { session: session_id, workspace: None, json: true },
+            objective: objective.clone(), replace: request.replace, check: request.check.clone(), clear_check: false,
+            goal_deadline: request.deadline, goal_max_runs: request.max_runs,
+            max_cost_usd_nanos: options.max_cost_usd_nanos,
+        };
+        let mut command = crate::goals::prepare_set(&args, current,
+            &request.defaults, u64::try_from(now.as_millis())
+                .map_err(|_| Failure::invalid("system clock exceeds supported range"))?)
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        if let SessionCommand::SetGoal { budget, .. } = &mut command {
+            if let Some(timeout) = options.timeout {
+                budget.per_run.max_duration_ms = Some(u64::try_from(timeout.as_millis())
+                    .map_err(|_| Failure::invalid("per-run timeout is too large"))?);
+            }
+            if let Some(turns) = options.max_turns { budget.per_run.max_model_turns = Some(turns); }
+        }
+        Some(command)
+    } else {
+        if current.is_none() { return Err(Failure::invalid("session has no stored goal")); }
+        None
+    };
+    let check = match &command {
+        Some(SessionCommand::SetGoal { check, .. }) => check.as_ref(),
+        _ => current.and_then(|goal| goal.check.as_ref()),
+    };
+    if request.check_approval.is_some() {
+        let check = check.ok_or_else(|| Failure::invalid("goal has no check"))?;
+        if request.check.as_deref() != Some(check.command.as_str()) {
+            return Err(Failure::invalid("check consent requires --check with the exact stored command"));
+        }
+    } else if request.objective.is_none() && request.check.is_some() {
+        return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
+    }
+    Ok(command)
+}
+
 /// Hosts the core goal driver until its goal leaves Active. No prompt is
 /// resubmitted by this adapter; scheduling and spending remain runtime-owned.
 pub async fn run_goal(
@@ -348,45 +395,16 @@ pub async fn run_goal(
     let result: Result<u8, Failure> = async {
         let sink = record_sink.insert(RecordSink::open(&options)
             .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
-        let handle = prepare_session(sessions, &options, SessionIntent::Goal).await?;
+        let handle = prepare_session(sessions, &options, SessionIntent::Goal(&request)).await?;
         let snapshot = sessions.snapshot(SnapshotRequest::new(
             handle.workspace_id, Some(handle.session_id), 1, 1,
         )).await.map_err(|error| Failure::harness(error.to_string()))?;
         let current = snapshot.focused.and_then(|session| session.goal);
-        let creating = request.objective.is_some();
-        let mut goal = if let Some(objective) = request.objective {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| Failure::invalid(error.to_string()))?;
-            let args = crate::cli::GoalSetArgs {
-                target: crate::cli::GoalTarget { session: handle.session_id,
-                    workspace: None, json: true },
-                objective, replace: request.replace, check: request.check.clone(), clear_check: false,
-                goal_deadline: request.deadline, goal_max_runs: request.max_runs,
-                max_cost_usd_nanos: options.max_cost_usd_nanos,
-            };
-            let mut command = crate::goals::prepare_set(&args, current.as_deref(),
-                &request.defaults, u64::try_from(now.as_millis())
-                    .map_err(|_| Failure::invalid("system clock exceeds supported range"))?)
-                .map_err(|error| Failure::invalid(error.to_string()))?;
-            if let SessionCommand::SetGoal { budget, .. } = &mut command {
-                if let Some(timeout) = options.timeout {
-                    budget.per_run.max_duration_ms = Some(u64::try_from(timeout.as_millis())
-                        .map_err(|_| Failure::invalid("per-run timeout is too large"))?);
-                }
-                if let Some(turns) = options.max_turns { budget.per_run.max_model_turns = Some(turns); }
-            }
-            goal_receipt(send(sessions, command).await?)?
-        } else {
-            current.ok_or_else(|| Failure::invalid("session has no stored goal"))?
+        let command = prepare_goal_request(&request, &options, handle.session_id, current.as_deref())?;
+        let mut goal = match command {
+            Some(command) => goal_receipt(send(sessions, command).await?)?,
+            None => current.ok_or_else(|| Failure::invalid("session has no stored goal"))?,
         };
-        if let Some(_scope) = request.check_approval {
-            let check = goal.check.as_ref().ok_or_else(|| Failure::invalid("goal has no check"))?;
-            if request.check.as_deref() != Some(check.command.as_str()) {
-                return Err(Failure::invalid("check consent requires --check with the exact stored command"));
-            }
-        } else if !creating && request.check.is_some() {
-            return Err(Failure::invalid("stored check changes require --goal OBJECTIVE"));
-        }
         accepted = Some((handle.workspace_id, goal.clone()));
         cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal));
         let guard = cleanup.as_mut().unwrap();
@@ -1016,7 +1034,7 @@ async fn submit(
 async fn prepare_session(
     sessions: &SessionRuntime,
     options: &HeadlessOptions,
-    intent: SessionIntent,
+    intent: SessionIntent<'_>,
 ) -> Result<SessionHandle, Failure> {
     let workspace = options.workspace.display().to_string();
     let resolved = send(
@@ -1083,11 +1101,14 @@ async fn prepare_session(
                     "workspace snapshot omitted the focused session",
                 ));
             };
+            if let SessionIntent::Goal(request) = intent {
+                prepare_goal_request(request, options, session_id, focused.goal.as_deref())?;
+            }
             let active_goal = focused
                 .goal
                 .as_ref()
                 .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active);
-            if intent == SessionIntent::Goal
+            if matches!(intent, SessionIntent::Goal(_))
                 && let Some(goal) = &focused.goal
                 && sessions
                     .has_preempting_goal_work(session_id, goal.goal_id)
@@ -1108,7 +1129,7 @@ async fn prepare_session(
             if (summary.status != qq_protocol::SessionStatus::Idle
                 || summary.active_run_id.is_some()
                 || summary.queued_prompts > 0)
-                && !(intent == SessionIntent::Goal && active_goal)
+                && !(matches!(intent, SessionIntent::Goal(_)) && active_goal)
             {
                 return Err(Failure::invalid(format!(
                     "session {session_id} is {}; it must be idle with no queued prompts",
@@ -1156,7 +1177,7 @@ async fn prepare_session(
             }
             (
                 session_id,
-                if intent == SessionIntent::Goal {
+                if matches!(intent, SessionIntent::Goal(_)) {
                     sessions
                         .startup_goal_cursor(workspace_id)
                         .await
@@ -3012,7 +3033,8 @@ mod tests {
         .unwrap();
         let mut opts = base;
         opts.session = Some(owner.session_id);
-        let result = prepare_session(&fixture.sessions, &opts, SessionIntent::Goal).await;
+        let request = goal_request();
+        let result = prepare_session(&fixture.sessions, &opts, SessionIntent::Goal(&request)).await;
         assert!(
             matches!(
                 result,
