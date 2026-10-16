@@ -1462,10 +1462,12 @@ impl RunState {
                         if turn_ordinal == 1 {
                             slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
                         }
-                        let input_tokens = if goal_paid.is_some() { compatible_input_tokens.unwrap_or_else(|| {
+                        // Occupancy estimates are not safe paid-admission bounds.
+                        // Reserve one token per byte, even after measured usage.
+                        let input_tokens = if goal_paid.is_some() {
                             window.reducible_message_bytes.saturating_add(window.irreducible_message_bytes)
-                                .saturating_add(system_bytes).saturating_add(tool_schema_bytes).div_ceil(4)
-                        }) } else { 0 };
+                                .saturating_add(system_bytes).saturating_add(tool_schema_bytes)
+                        } else { 0 };
                         let mut request_cap = run.max_output_tokens;
                         if let Some(paid) = goal_paid.as_ref() {
                             // The first Prepared lets session start refresh a queued

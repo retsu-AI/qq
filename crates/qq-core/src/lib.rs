@@ -1186,7 +1186,7 @@ impl Runtime {
         });
         loop {
             let input_tokens = static_bytes.map(|static_bytes|
-                static_bytes.saturating_add(measure_messages(&messages)).div_ceil(4));
+                static_bytes.saturating_add(measure_messages(&messages)));
             yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
             let request_cap = paid_output_cap.as_ref().map_or(max_output_tokens, |cap|
                 cap.load(std::sync::atomic::Ordering::Acquire).min(max_output_tokens));
