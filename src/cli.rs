@@ -802,7 +802,9 @@ mod tests {
 
     #[test]
     fn run_help_documents_goal_exit_codes() {
-        let help = Cli::try_parse_from(["qq", "run", "--help"]).unwrap_err().to_string();
+        let help = Cli::try_parse_from(["qq", "run", "--help"])
+            .unwrap_err()
+            .to_string();
         for expected in ["6 paused", "7 blocked", "8 goal-budget exhaustion"] {
             assert!(help.contains(expected), "missing {expected}: {help}");
         }

@@ -5900,14 +5900,22 @@ fn goal_form_stale_refresh_releases_pending_form() {
     app.apply_snapshot(initial.clone());
     app.composer.replace("/goal new objective".to_owned());
     app.submit_prompt();
-    let Some(Overlay::GoalForm(form)) = &mut app.overlay else { panic!("form") };
+    let Some(Overlay::GoalForm(form)) = &mut app.overlay else {
+        panic!("form")
+    };
     form.refresh = crate::input::GoalFormRefresh::Pending;
-    app.apply_live_event(fixtures::envelope(2, session, SessionEvent::GoalUpdated {
-        goal: fixtures::goal_snapshot(session),
-    }));
+    app.apply_live_event(fixtures::envelope(
+        2,
+        session,
+        SessionEvent::GoalUpdated {
+            goal: fixtures::goal_snapshot(session),
+        },
+    ));
     app.sessions.get_mut(&session).unwrap().loaded_through = 2;
     app.apply_snapshot(initial);
-    let Some(Overlay::GoalForm(form)) = &app.overlay else { panic!("form retained") };
+    let Some(Overlay::GoalForm(form)) = &app.overlay else {
+        panic!("form retained")
+    };
     assert_eq!(form.refresh, crate::input::GoalFormRefresh::Ready);
 }
 

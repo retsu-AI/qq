@@ -971,3 +971,9 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 - Subscription-only live concurrency task demonstrated that an external Pause advances goal revision while the foreground event guard accepted only the original exact revision, hanging after paid-family drain. Independently ported tests first: nextest f96d48c8 fails with `pause: held-family acceptance hung` against original production code.
 - Accept newer stopped revisions only for the same goal ID, then settle and clean up using that observed exact identity; direct-run records retain original execution correlation and replacement IDs remain fenced. Repaired foreground suite13/13 passes (4c1fd710). Independent source/test review approved.
 - Seven reachable held-preparation rows prove cancellation/drain retention, child-before-parent finish, unrelated-run isolation and terminal-record ordering. Clear/replace are races during interrupt drain; output/drop prove retained asynchronous cleanup, not terminal output. No new sleep sites:73 remain. Full resulting-head gate and smoke follow.
+
+### 2026-10-16 — G4 review repairs on updated G3
+
+- Rebased owned #331 branch onto localG3review-fix head1763403e. Resolved append-only ledger overlap and refreshed the same73legacy sleep identities; no runtime source conflict or discarded upstream change. Publication awaits completed surface repair gate.
+- Ported test-first pairs for documented goal exit6/7/8, stale TUI refresh leaving its form Pending, and invalid stored-goal arguments arming cancellation cleanup. Focused8cf0c890 passes3/3 on integrated source; independent fixed-snapshot review approves TUI and argument validation.
+- Outer review rejects the initial foreign-work close repair: retained shutdown can wait forever after the sole Ctrl-C listener is dropped. Needs an interruptible close phase plus terminal-goal/held-foreign-work/interrupt regression. Other live task fixes remain in progress; hosted threads remain open.
