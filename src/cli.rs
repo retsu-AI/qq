@@ -86,7 +86,9 @@ pub enum Command {
     /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
     /// persistence failure, 5 needs input (the model asked a question no
-    /// client could answer), 130 interrupted by Ctrl-C.
+    /// client could answer), 130 interrupted by Ctrl-C. With --goal: 0 achieved,
+    /// 6 paused, 7 blocked, 8 goal-budget exhaustion; 2, 4 and 130 retain
+    /// their configuration, harness-failure and interrupt meanings.
     Run(Box<RunArgs>),
 
     /// Inspect or control a session goal on an already running qq serve.
