@@ -390,9 +390,17 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
     })
     .await
     .unwrap();
+    #[cfg(target_os = "linux")]
+    let descendant_exit = super::goal_driver_soak::observe_pid(descendant);
     cancellation.cancel();
     let result = task.await.unwrap().unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Cancelled);
+    #[cfg(target_os = "linux")]
+    {
+        let mut descriptors = [rustix::event::PollFd::new(descendant_exit.0.get_ref(), rustix::event::PollFlags::IN)];
+        rustix::event::poll(&mut descriptors, Some(&rustix::event::Timespec::default())).unwrap();
+        assert!(descriptors[0].revents().intersects(rustix::event::PollFlags::IN | rustix::event::PollFlags::HUP), "descendant exit must be confirmed before cancellation completes");
+    }
     #[cfg(target_os = "linux")]
     {
         // An orphan may await init's reap; it must no longer execute.
