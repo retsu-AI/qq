@@ -1,9 +1,8 @@
 //! xAI API-key and OAuth credentials.
 
 use std::{
-    io::Read,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use reqwest::blocking::Response;
@@ -11,8 +10,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
-    resolve_provider_credential, validate_credential_name,
+    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
+    resolve_provider_credential,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
@@ -176,15 +175,7 @@ impl XaiTokenClient for SystemXaiTokenClient {
 }
 
 fn oauth_client() -> Result<reqwest::blocking::Client, XaiAuthError> {
-    reqwest::blocking::Client::builder()
-        .use_rustls_tls()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| XaiAuthError::DeviceRequestFailed)
+    oauth::http_client().map_err(|_| XaiAuthError::DeviceRequestFailed)
 }
 
 fn decode_poll(mut response: Response) -> Result<DevicePoll, XaiAuthError> {
@@ -243,15 +234,7 @@ fn decode_bounded<T: DeserializeOwned>(
     response: &mut Response,
     error: XaiAuthError,
 ) -> Result<T, XaiAuthError> {
-    let mut bytes = Vec::new();
-    response
-        .take((MAX_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| error)?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(error);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| error)
+    oauth::read_json(response, MAX_RESPONSE_BYTES).ok_or(error)
 }
 
 fn is_https_url(value: &str) -> bool {
@@ -554,16 +537,11 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    let name = format!("xai/{profile}");
-    validate_credential_name(&name)?;
-    Ok(name)
+    oauth::profile_credential_name("xai", profile)
 }
 
 fn unix_time() -> Result<u64, XaiAuthError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| XaiAuthError::ClockUnavailable)
+    oauth::unix_time().map_err(|_| XaiAuthError::ClockUnavailable)
 }
 
 #[cfg(test)]

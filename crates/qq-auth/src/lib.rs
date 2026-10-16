@@ -27,6 +27,7 @@ use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
 
 mod codex;
+mod oauth;
 mod xai;
 
 pub use codex::{CodexDeviceLogin, CodexLogin};
