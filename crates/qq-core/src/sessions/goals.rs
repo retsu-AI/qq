@@ -23,6 +23,7 @@ pub(crate) struct GoalRunInput {
     origin: Option<qq_protocol::RunOrigin>,
     displayed_revision: u32,
     display: Option<Arc<GoalSnapshot>>,
+    admitted_final_slot: bool,
 }
 
 type GoalUpdateReceipt =
@@ -43,14 +44,37 @@ impl GoalRunInput {
             origin: claimed.origin,
             displayed_revision: goal.revision,
             display: Some(Arc::clone(goal)),
+            admitted_final_slot: matches!(
+                claimed.goal_admission,
+                Some(GoalAdmission::Allowed {
+                    final_slot: true,
+                    ..
+                })
+            ),
         })
+    }
+
+    pub(crate) const FINAL_RUN_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThis is the final budgeted run for this goal. Work within the remaining limits and end with a tool-free handoff describing completed work, evidence, remaining work and blockers.";
+
+    pub(crate) const HANDOFF_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThis is the final budgeted run for this goal. Give a concise handoff: what is completed, the evidence, what remains, and any blockers. Do not call tools or claim unfinished work is complete.";
+
+    pub(crate) fn final_slot(&self) -> bool {
+        self.identity.kind == RunKind::Prompt
+            && matches!(
+                self.origin,
+                Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+            )
+            && (self.admitted_final_slot
+                || self.display.as_ref().is_some_and(|goal| {
+                    goal.counters.runs.saturating_add(1) >= goal.budget.max_goal_runs
+                }))
     }
 
     pub(crate) fn initial_notice(&self) -> &str {
         &self.initial_notice
     }
 
-    pub(crate) async fn refresh_notice(&mut self) -> Result<Option<String>, SessionRuntimeError> {
+    async fn refresh_display(&mut self) -> Result<(), SessionRuntimeError> {
         let session = self.identity.session_id;
         let captured_id = self.captured.goal_id;
         let current = self
@@ -69,20 +93,50 @@ impl GoalRunInput {
             })
             .await?;
         self.display = current;
-        let Some(current) = &self.display else {
-            return Ok(None);
-        };
-        if current.revision == self.displayed_revision {
-            return Ok(None);
-        }
-        self.displayed_revision = current.revision;
-        Ok(Some(crate::tools::goal::render_notice(current, now_ms())))
+        Ok(())
     }
 
-    pub(crate) fn post_summary_notice(&self) -> Option<String> {
-        self.display
-            .as_ref()
-            .map(|goal| crate::tools::goal::render_notice(goal, now_ms()))
+    fn take_notice(&mut self) -> Option<String> {
+        let Some(current) = &self.display else {
+            return None;
+        };
+        if current.revision == self.displayed_revision {
+            return None;
+        }
+        self.displayed_revision = current.revision;
+        Some(crate::tools::goal::render_notice(current, now_ms()))
+    }
+
+    pub(crate) async fn refresh_notice(&mut self) -> Result<Option<String>, SessionRuntimeError> {
+        self.refresh_display().await?;
+        Ok(self.take_notice())
+    }
+
+    pub(crate) async fn refresh_handoff_notice(
+        &mut self,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        self.refresh_display().await?;
+        // A non-final candidate may still enter output repair or audit. Do not
+        // acknowledge its new revision until a subsequent request carries it.
+        Ok(if self.final_slot() {
+            self.take_notice()
+        } else {
+            None
+        })
+    }
+
+    pub(crate) fn post_summary_notice(&self, handoff: bool) -> Option<String> {
+        self.display.as_ref().map(|goal| {
+            let mut notice = crate::tools::goal::render_notice(goal, now_ms());
+            if handoff {
+                notice.push_str("\n\n");
+                notice.push_str(Self::HANDOFF_NOTICE);
+            } else if self.final_slot() {
+                notice.push_str("\n\n");
+                notice.push_str(Self::FINAL_RUN_NOTICE);
+            }
+            notice
+        })
     }
 
     pub(crate) async fn admit_update(
@@ -1157,6 +1211,7 @@ fn apply_terminal_outcome(
 #[derive(Clone, Copy)]
 pub(super) enum GoalAdmission {
     Allowed {
+        final_slot: bool,
         deadline_ms: u64,
         anchor_ms: u64,
         execution_started: Option<tokio::time::Instant>,
@@ -1235,6 +1290,10 @@ pub(super) fn admit_run(
         );
     }
     Ok(GoalAdmission::Allowed {
+        final_slot: matches!(
+            origin,
+            Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+        ) && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs,
         deadline_ms: current.budget.deadline_ms,
         anchor_ms,
         execution_started: None,
@@ -1251,10 +1310,14 @@ pub(super) fn admit_sponsored_run(
     now: u64,
     anchor_ms: u64,
 ) -> Result<GoalAdmission, SessionRuntimeError> {
-    let mut deadline_ms = match own_admission {
-        Some(GoalAdmission::Allowed { deadline_ms, .. }) => deadline_ms,
+    let (mut deadline_ms, final_slot) = match own_admission {
+        Some(GoalAdmission::Allowed {
+            deadline_ms,
+            final_slot,
+            ..
+        }) => (deadline_ms, final_slot),
         Some(refusal) => return Ok(refusal),
-        None => u64::MAX,
+        None => (u64::MAX, false),
     };
     let mut sponsored = false;
     for (_, session, goal) in paid_goal_owners(connection, run_id)?.into_iter().skip(1) {
@@ -1283,6 +1346,7 @@ pub(super) fn admit_sponsored_run(
             .map_or(remaining, |cap| cap.min(remaining)),
     );
     Ok(GoalAdmission::Allowed {
+        final_slot,
         deadline_ms,
         anchor_ms,
         execution_started: None,

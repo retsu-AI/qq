@@ -964,7 +964,10 @@ pub(super) enum RoutingCostRefusal {
 pub(super) enum GoalStartRefusal {
     PerRunDuration,
     RoutingCost(RoutingCostRefusal),
-    Reprepare { limits: Box<RunLimits> },
+    Reprepare {
+        limits: Box<RunLimits>,
+        final_slot: bool,
+    },
     Exhausted(qq_protocol::GoalExhaustion),
     Cancelled,
 }
@@ -986,9 +989,9 @@ pub(super) fn refresh_goal_limits(
     identity: RunIdentity,
     metadata: &RunStartMetadata<'_>,
     now: u64,
-) -> Result<Result<RunLimits, GoalStartRefusal>, SessionRuntimeError> {
+) -> Result<Result<(RunLimits, bool), GoalStartRefusal>, SessionRuntimeError> {
     if metadata.goal.is_none() && metadata.goal_spend_owner.is_none() {
-        return Ok(Ok(metadata.limits));
+        return Ok(Ok((metadata.limits, false)));
     }
     let anchor_ms = match metadata.admission {
         Some(goals::GoalAdmission::Allowed { anchor_ms, .. }) => anchor_ms,
@@ -1030,7 +1033,7 @@ pub(super) fn refresh_goal_limits(
         own_admission.ok_or(SessionRuntimeError::CONSTRAINT)?
     };
     match admission {
-        goals::GoalAdmission::Allowed { .. } => {
+        goals::GoalAdmission::Allowed { final_slot, .. } => {
             if let Some(duration) = refreshed.max_duration_ms {
                 let elapsed_ms = match metadata.admission {
                     Some(goals::GoalAdmission::Allowed {
@@ -1043,7 +1046,7 @@ pub(super) fn refresh_goal_limits(
                     return Ok(Err(GoalStartRefusal::PerRunDuration));
                 }
             }
-            Ok(Ok(refreshed))
+            Ok(Ok((refreshed, final_slot)))
         }
         goals::GoalAdmission::Exhausted(reason) => Ok(Err(GoalStartRefusal::Exhausted(reason))),
         goals::GoalAdmission::Cancelled => Ok(Err(GoalStartRefusal::Cancelled)),
@@ -1073,13 +1076,24 @@ pub(super) fn start_reserved_run(
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
     if goal.is_some() || goal_spend_owner.is_some() {
-        let refreshed = match refresh_goal_limits(&transaction, identity, &metadata, now)? {
-            Ok(refreshed) => refreshed,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
-        if refreshed != limits {
+        let (refreshed, final_slot) =
+            match refresh_goal_limits(&transaction, identity, &metadata, now)? {
+                Ok(refreshed) => refreshed,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+        if refreshed != limits
+            || final_slot
+                != matches!(
+                    metadata.admission,
+                    Some(goals::GoalAdmission::Allowed {
+                        final_slot: true,
+                        ..
+                    })
+                )
+        {
             return Ok(Err(GoalStartRefusal::Reprepare {
                 limits: Box::new(refreshed),
+                final_slot,
             }));
         }
     }

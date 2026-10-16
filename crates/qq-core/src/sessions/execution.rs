@@ -710,8 +710,15 @@ async fn route_run(
                 break (budget, deadline, task, oversized);
             }
             Ok(Ok(None)) => return Err(RunOutcome::Cancelled),
-            Ok(Err(claim::GoalStartRefusal::Reprepare { limits })) => {
+            Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                 claimed.limits = *limits;
+                if let Some(goals::GoalAdmission::Allowed {
+                    final_slot: admitted,
+                    ..
+                }) = &mut claimed.goal_admission
+                {
+                    *admitted = final_slot;
+                }
                 continue;
             }
             Ok(Err(claim::GoalStartRefusal::PerRunDuration)) => {
@@ -955,9 +962,14 @@ pub(super) async fn execute_run(
         let refusal = match admission {
             goals::GoalAdmission::Cancelled => Some(RunOutcome::Cancelled),
             goals::GoalAdmission::Exhausted(reason) => Some(goal_admission_exhaustion(reason)),
-            goals::GoalAdmission::Allowed { deadline_ms, .. } => {
+            goals::GoalAdmission::Allowed {
+                deadline_ms,
+                final_slot,
+                ..
+            } => {
                 let anchor_ms = now_ms();
                 claimed.goal_admission = Some(goals::GoalAdmission::Allowed {
+                    final_slot,
                     deadline_ms,
                     anchor_ms,
                     execution_started: Some(execution_started),
@@ -1282,11 +1294,18 @@ pub(super) async fn execute_run(
                         .await;
                         return;
                     }
-                    Ok(Err(claim::GoalStartRefusal::Reprepare { limits })) => {
+                    Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                         // The stream has not been polled. Reassemble under the
                         // tighter bounds while retaining resolved input bytes.
                         drop(prepared);
                         claimed.limits = *limits;
+                        if let Some(goals::GoalAdmission::Allowed {
+                            final_slot: admitted,
+                            ..
+                        }) = &mut claimed.goal_admission
+                        {
+                            *admitted = final_slot;
+                        }
                         if summary_only_admission {
                             if !admit_with_summary_only_history(&inner, &mut claimed).await {
                                 return;

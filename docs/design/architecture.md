@@ -1504,6 +1504,10 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
 
+Repair instructions use the same bounded ordered boundary-notice storage as
+goal revisions. The next completed turn commits their text and position among
+child deliveries, preserving the actual model window on replay.
+
 After cancellation, deadline teardown or panic, a started prompt's terminal
 transaction settles its abandoned in-run summary first. This preserves the
 summary's durable measured prefix and unknown pending-send aggregate, and
@@ -1748,6 +1752,17 @@ replacement scheduling wait for those cancelled obligations. Replayed controls
 restore outstanding cancellation signals without changing the original receipt
 or appending duplicate events. Later unrelated prompts in child sessions inherit
 no old paid ownership and remain independent of these controls.
+
+The last charged goal run, including a user prompt under an active goal, announces
+its final-slot status before model work. Admission and main start carry this
+classification independently of numeric limits, so a concurrent run-cap edit
+forces reprepare even when those limits stay equal. An early completion reserves
+one tool-free handoff within the existing run allowance. A caller's stricter
+one-turn cap uses that turn for the handoff; hard token, cost and deadline bounds
+still take precedence. Tools requested during the handoff are refused. The
+handoff follows normal output-contract validation and survives in-run compaction.
+Completion refreshes the live goal display without acknowledging a new revision
+until a subsequent request actually carries its notice.
 
 The session scheduler queues due active goals in batches of at most32. The
 idle-session check, absence of queued prompts/checks, fresh Goal-origin run,

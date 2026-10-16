@@ -698,14 +698,24 @@ pub(super) fn record_routing_started(
 ) -> Result<claim::RunStart, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     if metadata.goal.is_some() || metadata.goal_spend_owner.is_some() {
-        let refreshed =
+        let (refreshed, final_slot) =
             match claim::refresh_goal_limits(&transaction, identity, &metadata, now_ms())? {
                 Ok(refreshed) => refreshed,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-        if refreshed != metadata.limits {
+        if refreshed != metadata.limits
+            || final_slot
+                != matches!(
+                    metadata.admission,
+                    Some(goals::GoalAdmission::Allowed {
+                        final_slot: true,
+                        ..
+                    })
+                )
+        {
             return Ok(Err(claim::GoalStartRefusal::Reprepare {
                 limits: Box::new(refreshed),
+                final_slot,
             }));
         }
     }
