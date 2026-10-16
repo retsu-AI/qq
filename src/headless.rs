@@ -2811,6 +2811,78 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_goal_reopen_replays_work_before_client_adoption() {
+        struct CheckAuthority;
+        impl qq_core::WorkspaceGrantAuthority for CheckAuthority {
+            fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
+                Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
+            }
+            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
+                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
+            }
+            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
+                panic!("check consent must not promote tool grants")
+            }
+            fn validate_goal_check(&self, _: &Path, command: &str) -> qq_core::GoalCheckPolicyFuture {
+                assert_eq!(command, "printf checked");
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+        for asking in [false, true] {
+            let loader: Arc<dyn RuntimeLoader> = if asking {
+                Arc::new(ProviderLoader(|| AskingProvider { turn: Mutex::new(0) }))
+            } else {
+                Arc::new(ProviderLoader(|| GoalVerdictProvider { blocked: false, turns: Mutex::new(0) }))
+            };
+            let mut fixture = fixture_with_loader(Arc::clone(&loader)).await;
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.check = Some("printf checked".into());
+            request.max_runs = Some(3);
+            assert_eq!(run_goal(&fixture.sessions, opts.clone(), request, std::future::pending(), &mut Vec::new(), &mut Vec::new()).await, 6);
+            fixture.sessions.close().await.unwrap();
+            let path = fixture._directory.path().canonicalize().unwrap().join("sessions.sqlite3");
+            fixture.sessions = SessionRuntime::open(SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(CheckAuthority)), loader).await.unwrap();
+            let snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)).await.unwrap();
+            let goal = snapshot.focused.unwrap().goal.unwrap();
+            let mut events = fixture.sessions.subscribe(SubscribeRequest { workspace_id: handle.workspace_id, after: snapshot.cursor }).unwrap();
+            send(&fixture.sessions, SessionCommand::GoalControl {
+                session_id: handle.session_id, expected: goal_identity(&goal),
+                action: qq_protocol::GoalControl::ApproveCheck {
+                    scope: qq_protocol::GoalCheckScope::ForGoal, command: "printf checked".into(),
+                },
+            }).await.unwrap();
+            // Let startup work reach a held question or achievement before
+            // the foreground client takes its first adoption snapshot.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = events.next().await.unwrap().unwrap().event;
+                    if (asking && matches!(event, SessionEvent::ToolApprovalRequested { question: Some(_), .. }))
+                        || matches!(event, SessionEvent::GoalUpdated { ref goal } if goal.status == qq_protocol::GoalStatus::Achieved) {
+                        break;
+                    }
+                }
+            }).await.unwrap();
+            let mut resume = goal_request();
+            resume.objective = None;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(Duration::from_secs(5), run_goal(&fixture.sessions, opts, resume, std::future::pending(), &mut stdout, &mut stderr)).await.expect("adoption must consume an already-held input request");
+            assert_eq!(code, if asking { 6 } else { 0 }, "{}", String::from_utf8_lossy(&stderr));
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let direct: Vec<_> = records.iter().filter(|r| r["type"] == "goal_run").collect();
+            assert_eq!(direct.len(), if asking { 1 } else { 2 }, "every startup run must precede the final record");
+            if asking {
+                assert_eq!(records.last().unwrap()["goal"]["status"]["reason"]["cause"]["type"], "approval");
+            }
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn foreground_goal_rejects_preempting_user_work_before_adoption() {
         let fixture = fixture(|| HangingProvider).await;
