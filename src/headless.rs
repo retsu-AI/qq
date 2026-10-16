@@ -4319,6 +4319,39 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn foreground_goal_early_trace_failure_keeps_final_stdout_usable() {
+        struct LargeText;
+        impl Provider for LargeText {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([Ok(ProviderEvent::OutputTextDelta {
+                    text: "x".repeat(16384),
+                })]).chain(stream::pending()))
+            }
+        }
+        let fixture = fixture(|| LargeText).await;
+        let mut opts = options(&fixture.workspace);
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        let mut request = goal_request();
+        request.objective = Some("x".repeat(2048));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(Duration::from_secs(10), run_goal(
+            &fixture.sessions, opts, request, std::future::pending(),
+            &mut stdout, &mut stderr,
+        )).await.expect("trace failure cleanup must finish");
+        assert_eq!(code, 4);
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let finals: Vec<_> = records.iter().filter(|record| record["type"] == "goal").collect();
+        assert_eq!(finals.len(), 1, "usable stdout needs a final harness result");
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(finals[0]["status"], "harness_failure");
+        assert_eq!(finals[0]["exit_code"], 4);
+        assert!(!stderr.is_empty());
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn foreground_goal_trace_flush_does_not_duplicate_the_final_record() {
         let fixture = fixture(|| HangingProvider).await;
         let mut opts = options(&fixture.workspace);
