@@ -2703,7 +2703,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
                 .inner
                 .check_policy_slots
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-            let permit = match Arc::clone(slots).try_acquire_owned() {
+            let permit = match Arc::clone(slots).acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => return Err(qq_core::GoalCheckPolicyError::Overloaded),
             };
@@ -6805,10 +6805,12 @@ mod tests {
             .check_policy_slots
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
-        let mut waiting = WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        let mut waiting =
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(waiting);
-        let mut waiting = WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        let mut waiting =
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
         assert_eq!(waiting.await, Ok(()));

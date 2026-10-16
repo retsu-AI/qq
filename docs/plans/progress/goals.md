@@ -921,3 +921,13 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 - Focused completion tests:29/29 pass. Independent review approves b75b3419.
   Full workspace gate passes (111.1s); final docs/evidence, smoke, stack
   publication and hosted review-thread resolution remain pending.
+
+### 2026-10-16 — G3 completion-policy pool backpressure
+
+- Review-body finding5546040233 was missed during inline-thread triage. Holding
+  all4 shared policy slots reproduced immediate completion-check rejection.
+- Check validation now awaits bounded pool capacity, matching goal policy
+  loading; caller cancellation/check deadline/command timeout remain in force.
+  The regression cancels one queued waiter, then verifies success and all4 slots
+  returned after capacity frees. Focused policy/managed-denial tests:3/3 pass.
+  Final gate, independent review and stack publication remain pending.
