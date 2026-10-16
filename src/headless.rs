@@ -4107,6 +4107,33 @@ mod tests {
         assert_eq!(records.last().unwrap()["exit_code"], 4);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_goal_trace_flush_does_not_duplicate_the_final_record() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut opts = options(&fixture.workspace);
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        let mut request = goal_request();
+        request.check = Some("printf checked".into());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            request,
+            std::future::pending(),
+            &mut stdout,
+            &mut stderr,
+        ).await;
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let finals: Vec<_> = records.iter().filter(|record| record["type"] == "goal").collect();
+        assert_eq!(finals.len(), 1, "a flushed final record must never be retried");
+        assert_eq!(finals[0]["exit_code"], code);
+        assert_eq!(code, 6);
+        assert!(!stderr.is_empty(), "the trace failure must still be reported");
+        fixture.sessions.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn foreground_goal_output_failure_pauses_active_work_and_preserves_stopped_reason() {
         for needs_consent in [false, true] {
