@@ -8,7 +8,7 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | DM0 | Decision-model plan, design, ADR-0055, doc rename | In review | ENG-985 | This PR |
-| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | DM0 accepted, ADR-0055 settled, explicit owner scope/implementation approval required; root request for `Cargo.toml` |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | In progress | ENG-1062; `feat/eng-1062-dm1-neutral-seam` | Owner authorized stacked implementation 2026-10-16; DM0 remains base PR249, not merged. No hot-path integration in DM1 |
 | DM2 | System One adapter on `HttpExchange` | Planned | — | |
 | DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
