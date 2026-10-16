@@ -43,7 +43,7 @@ pub struct JevApprovalReviewer {
 #[derive(Clone)]
 struct CachedJevClient {
     epoch: qq_protocol::CredentialEpoch,
-    client: reqwest::Client,
+    client: super::TypeSafeHttpClient,
 }
 
 impl JevApprovalReviewer {
@@ -75,7 +75,7 @@ impl JevApprovalReviewer {
 
     /// Blocking: the TypeSafe client for the current credential epoch.
     /// Called only for an opted-in hold.
-    fn prepare(&self) -> Result<reqwest::Client, &'static str> {
+    fn prepare(&self) -> Result<super::TypeSafeHttpClient, &'static str> {
         let epoch = self
             .factory
             .inner
@@ -166,7 +166,13 @@ impl ApprovalReviewer for JevApprovalReviewer {
                 Ok(Ok(client)) => {
                     match tokio::time::timeout(
                         JEV_APPROVAL_TIMEOUT,
-                        ask_jev(&client, &reviewer.endpoint, &reviewer.model, &request),
+                        ask_jev(
+                            &client.client,
+                            &reviewer.endpoint,
+                            &reviewer.model,
+                            &request,
+                            &client.request_id_guard,
+                        ),
                     )
                     .await
                     {
@@ -320,6 +326,7 @@ async fn ask_jev(
     endpoint: &str,
     model: &super::jev::ModelRequest,
     request: &ReviewRequest,
+    request_id_guard: &str,
 ) -> JevAnswer {
     let Some(body) = jev_request_body(model, request) else {
         return JevAnswer {
@@ -332,8 +339,10 @@ async fn ask_jev(
             response_id: None,
         };
     };
-    match routing::typesafe_evaluate(client, endpoint, &body).await {
-        Ok(value) => parse_jev_approval(model, &value),
+    match routing::typesafe_evaluate(client, endpoint, &body, request_id_guard).await {
+        Ok(response) => {
+            parse_jev_approval(model, &response.body, response.request_id, request_id_guard)
+        }
         Err(error) => JevAnswer {
             decision: Err(JevAbstain::Transport(error.to_string())),
             spend: qq_core::ReviewSpend::default(),
@@ -348,15 +357,32 @@ async fn ask_jev(
 /// with a distribution that sums to one, the chosen label carries the maximum
 /// probability, and both confidence and that probability clear
 /// `JEV_MIN_CONFIDENCE`. Anything else is an abstention, never an approval.
-fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Value) -> JevAnswer {
+fn parse_jev_approval(
+    model: &super::jev::ModelRequest,
+    value: &serde_json::Value,
+    transport_request_id: Option<String>,
+    request_id_guard: &str,
+) -> JevAnswer {
+    let response_model = value["model"].as_str().map(str::to_owned);
+    let response_id = transport_request_id.or_else(|| {
+        value["id"]
+            .as_str()
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 256
+                    && id.bytes().all(|byte| !byte.is_ascii_control())
+                    && *id != request_id_guard
+            })
+            .map(str::to_owned)
+    });
     let spend = match super::jev::spend(value, model) {
         Ok(spend) => spend,
         Err(_) => {
             return JevAnswer {
                 decision: Err(JevAbstain::Malformed),
                 spend: qq_core::ReviewSpend::default(),
-                response_model: None,
-                response_id: None,
+                response_model,
+                response_id,
             };
         }
     };
@@ -369,8 +395,8 @@ fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Valu
     let malformed = || JevAnswer {
         decision: Err(JevAbstain::Malformed),
         spend,
-        response_model: None,
-        response_id: None,
+        response_model: response_model.clone(),
+        response_id: response_id.clone(),
     };
     if !model.matches_response(value["model"].as_str()) {
         return malformed();
@@ -431,14 +457,6 @@ fn parse_jev_approval(model: &super::jev::ModelRequest, value: &serde_json::Valu
             _ => unreachable!("validated choice"),
         }
     };
-    let response_model = decision
-        .as_ref()
-        .ok()
-        .map(|_| value["model"].as_str().unwrap_or("unknown").to_owned());
-    let response_id = decision
-        .as_ref()
-        .ok()
-        .and_then(|_| value["id"].as_str().map(str::to_owned));
     JevAnswer {
         decision,
         spend,
@@ -457,6 +475,10 @@ mod tests {
             requested: "jev-1.13.0".into(),
             resolved: Some("jev-1.13.0".into()),
         }
+    }
+
+    fn parse(value: &serde_json::Value) -> JevAnswer {
+        super::parse_jev_approval(&model(), value, None, "fixture-key")
     }
 
     fn request() -> ReviewRequest {
@@ -497,25 +519,48 @@ mod tests {
 
     #[test]
     fn jev_approval_parses_only_a_confident_pinned_answer_and_charges_spend() {
-        let approve = parse_jev_approval(&model(), &response("approve", 0.9));
+        let approve = parse(&response("approve", 0.9));
         assert_eq!(approve.decision, Ok(ReviewDecision::Approve));
         assert_eq!(approve.spend.cost_usd_nanos, Some(4200));
         assert_eq!(approve.spend.usage.unwrap().input_tokens, 100);
         assert_eq!(approve.response_id.as_deref(), Some("jev-response-42"));
 
-        let deny = parse_jev_approval(&model(), &response("deny", 0.9));
+        let deny = parse(&response("deny", 0.9));
         assert!(matches!(deny.decision, Ok(ReviewDecision::Deny { .. })));
 
-        let abstain = parse_jev_approval(&model(), &response("abstain", 0.9));
+        let abstain = parse(&response("abstain", 0.9));
         assert_eq!(abstain.decision, Err(JevAbstain::Abstained));
 
         // A weak winner is an abstention, never an approval.
-        let weak = parse_jev_approval(&model(), &response("approve", 0.4));
+        let weak = parse(&response("approve", 0.4));
         assert_eq!(weak.decision, Err(JevAbstain::LowConfidence));
         assert_eq!(
             weak.spend.cost_usd_nanos,
             Some(4200),
             "spend is charged either way"
+        );
+        let weak_with_transport = super::parse_jev_approval(
+            &model(),
+            &response("approve", 0.4),
+            Some("req_header_low_confidence".to_owned()),
+            "fixture-key",
+        );
+        assert_eq!(weak_with_transport.decision, Err(JevAbstain::LowConfidence));
+        assert_eq!(
+            weak_with_transport.response_model.as_deref(),
+            Some("jev-1.13.0")
+        );
+        assert_eq!(
+            weak_with_transport.response_id.as_deref(),
+            Some("req_header_low_confidence")
+        );
+        let mut reflected_key = response("approve", 0.9);
+        reflected_key["id"] = serde_json::json!("fixture-key");
+        let reflected = parse(&reflected_key);
+        assert_eq!(reflected.decision, Ok(ReviewDecision::Approve));
+        assert_eq!(
+            reflected.response_id, None,
+            "JSON fallback must reject the active key"
         );
 
         for (pointer, replacement) in [
@@ -534,7 +579,7 @@ mod tests {
             let mut value = response("approve", 0.9);
             *value.pointer_mut(pointer).unwrap() = replacement;
             assert_eq!(
-                parse_jev_approval(&model(), &value).decision,
+                parse(&value).decision,
                 Err(JevAbstain::Malformed),
                 "{pointer}"
             );
@@ -546,7 +591,7 @@ mod tests {
             let mut malformed = response("approve", 0.9);
             malformed["usage"][field] = value;
             assert_eq!(
-                parse_jev_approval(&model(), &malformed).decision,
+                parse(&malformed).decision,
                 Err(JevAbstain::Malformed),
                 "{field}"
             );
@@ -556,25 +601,19 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("input_tokens");
-        assert_eq!(
-            parse_jev_approval(&model(), &missing_usage).decision,
-            Err(JevAbstain::Malformed)
-        );
+        assert_eq!(parse(&missing_usage).decision, Err(JevAbstain::Malformed));
         for field in ["input_tokens", "output_tokens"] {
             let mut nullable = response("approve", 0.9);
             nullable["usage"][field] = serde_json::Value::Null;
+            assert_eq!(parse(&nullable).decision, Ok(ReviewDecision::Approve));
             assert_eq!(
-                parse_jev_approval(&model(), &nullable).decision,
-                Ok(ReviewDecision::Approve)
-            );
-            assert_eq!(
-                parse_jev_approval(&model(), &nullable).spend.cost_usd_nanos,
+                parse(&nullable).spend.cost_usd_nanos,
                 (field != "input_tokens").then_some(4200)
             );
         }
         let mut wrong_model = response("approve", 0.9);
         wrong_model["model"] = serde_json::json!("jev-latest");
-        let answer = parse_jev_approval(&model(), &wrong_model);
+        let answer = parse(&wrong_model);
         assert_eq!(answer.decision, Err(JevAbstain::Malformed));
         assert_eq!(
             answer.spend.cost_usd_nanos, None,
@@ -582,10 +621,7 @@ mod tests {
         );
         let mut extra_label = response("approve", 0.9);
         extra_label["answers"]["approval"]["probabilities"]["maybe"] = serde_json::json!(0.0);
-        assert_eq!(
-            parse_jev_approval(&model(), &extra_label).decision,
-            Err(JevAbstain::Malformed)
-        );
+        assert_eq!(parse(&extra_label).decision, Err(JevAbstain::Malformed));
     }
 
     #[test]

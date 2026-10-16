@@ -3633,7 +3633,13 @@ pub(crate) fn advisory_reviewer() -> Result<Arc<dyn CheckpointReviewer>, Runtime
     )?))
 }
 
-fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
+#[derive(Clone)]
+pub(super) struct TypeSafeHttpClient {
+    pub(super) client: reqwest::Client,
+    pub(super) request_id_guard: Arc<str>,
+}
+
+fn typesafe_http_client(store: &CredentialStore) -> Result<TypeSafeHttpClient, RuntimeBuildError> {
     let secret = resolve_provider_credential(
         store,
         None,
@@ -3658,12 +3664,15 @@ fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, Runt
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|_| RuntimeBuildError::JevClientUnavailable)?;
-    Ok(client)
+    Ok(TypeSafeHttpClient {
+        client,
+        request_id_guard: key.to_owned().into(),
+    })
 }
 
 #[derive(Clone)]
 struct TypeSafeCheckpointReviewer {
-    client: reqwest::Client,
+    client: TypeSafeHttpClient,
     endpoint: Arc<str>,
     mode: qq_config::JevReviewMode,
 }
@@ -3749,8 +3758,15 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                 "questions": questions,
                 "model": crate::runtime::jev::ModelRequest::from_environment().requested
             });
-            let value = match routing::typesafe_evaluate(&client, &endpoint, &body).await {
-                Ok(value) => value,
+            let response = match routing::typesafe_evaluate(
+                &client.client,
+                &endpoint,
+                &body,
+                &client.request_id_guard,
+            )
+            .await
+            {
+                Ok(response) => response,
                 Err(error) => {
                     return CheckpointVerdict {
                         spend: qq_protocol::CheckpointSpend::default(),
@@ -3760,7 +3776,11 @@ impl CheckpointReviewer for TypeSafeCheckpointReviewer {
                     };
                 }
             };
-            parse_typesafe_checkpoint(&value)
+            parse_typesafe_checkpoint(
+                &response.body,
+                response.request_id.as_deref(),
+                &client.request_id_guard,
+            )
         })
     }
 }
@@ -3779,7 +3799,11 @@ fn checkpoint_claim_and_instructions(tool_phase: bool) -> (&'static str, &'stati
     }
 }
 
-fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
+fn parse_typesafe_checkpoint(
+    value: &serde_json::Value,
+    transport_request_id: Option<&str>,
+    request_id_guard: &str,
+) -> CheckpointVerdict {
     let model = crate::runtime::jev::ModelRequest::from_environment();
     let spend = crate::runtime::jev::spend(value, &model).unwrap_or_default();
     let unavailable = || CheckpointVerdict {
@@ -3872,7 +3896,7 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
             };
         }
     }
-    let provenance = typesafe_checkpoint_provenance(value);
+    let provenance = typesafe_checkpoint_provenance(value, transport_request_id, request_id_guard);
     CheckpointVerdict {
         spend,
         outcome,
@@ -3890,12 +3914,21 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
     }
 }
 
-fn typesafe_checkpoint_provenance(value: &serde_json::Value) -> String {
+fn typesafe_checkpoint_provenance(
+    value: &serde_json::Value,
+    transport_request_id: Option<&str>,
+    request_id_guard: &str,
+) -> String {
     let model = value["model"].as_str().unwrap_or("unknown");
-    let request_id = value["id"]
-        .as_str()
-        .filter(|id| {
-            !id.is_empty() && id.len() <= 128 && id.chars().all(|character| !character.is_control())
+    let request_id = transport_request_id
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            value["id"].as_str().filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && id.chars().all(|character| !character.is_control())
+                    && *id != request_id_guard
+            })
         })
         .unwrap_or("unknown");
     format!(" [provider_model={model}; provider_request_id={request_id}]")
@@ -9890,7 +9923,10 @@ mod tests {
             socket.write_all(b"0\r\n\r\n").await.unwrap();
         });
         let reviewer = TypeSafeCheckpointReviewer {
-            client: reqwest::Client::new(),
+            client: TypeSafeHttpClient {
+                client: reqwest::Client::new(),
+                request_id_guard: "fixture-key".into(),
+            },
             endpoint: format!("http://{address}/").into(),
             mode: qq_config::JevReviewMode::Final,
         };
@@ -9931,7 +9967,7 @@ mod tests {
         });
         let mut uncertain = valid.clone();
         uncertain["answers"]["direct_evidence"]["confidence"] = serde_json::json!(0.2);
-        let verdict = parse_typesafe_checkpoint(&uncertain);
+        let verdict = parse_typesafe_checkpoint(&uncertain, None, "fixture-key");
         assert_eq!(verdict.outcome, CheckpointOutcome::InsufficientEvidence);
         assert!(verdict.feedback.contains("direct_evidence"));
         assert_eq!(verdict.spend.usage.unwrap().input_tokens, 10);
@@ -9941,22 +9977,32 @@ mod tests {
                 .feedback
                 .contains("provider_model=jev-1.13.0; provider_request_id=jev-checkpoint-42")
         );
+        let transport_verdict =
+            parse_typesafe_checkpoint(&valid, Some("req-header-checkpoint"), "fixture-key");
+        assert!(
+            transport_verdict
+                .feedback
+                .contains("provider_model=jev-1.13.0; provider_request_id=req-header-checkpoint")
+        );
+        assert!(!transport_verdict.feedback.contains("jev-checkpoint-42"));
+        let reflected = parse_typesafe_checkpoint(&valid, None, "jev-checkpoint-42");
+        assert!(reflected.feedback.contains("provider_request_id=unknown"));
         let mut conflicting = valid.clone();
         conflicting["answers"]["consistency"]["choice"] = serde_json::json!("contradicted");
         conflicting["answers"]["consistency"]["probabilities"] = serde_json::json!({
             "supported": 0.05, "partially_supported": 0.05, "contradicted": 0.85, "insufficient_evidence": 0.05,
         });
-        let verdict = parse_typesafe_checkpoint(&conflicting);
+        let verdict = parse_typesafe_checkpoint(&conflicting, None, "fixture-key");
         assert_eq!(verdict.outcome, CheckpointOutcome::Contradicted);
         assert!(verdict.feedback.contains("consistency=contradicted"));
         assert_eq!(
-            parse_typesafe_checkpoint(&valid).outcome,
+            parse_typesafe_checkpoint(&valid, None, "fixture-key").outcome,
             CheckpointOutcome::Supported
         );
         for field in ["input_tokens", "output_tokens"] {
             let mut nullable = valid.clone();
             nullable["usage"][field] = serde_json::Value::Null;
-            let nullable_verdict = parse_typesafe_checkpoint(&nullable);
+            let nullable_verdict = parse_typesafe_checkpoint(&nullable, None, "fixture-key");
             assert_eq!(nullable_verdict.outcome, CheckpointOutcome::Supported);
             assert_eq!(
                 nullable_verdict.spend.estimated_cost_usd_nanos,
@@ -9973,7 +10019,7 @@ mod tests {
             serde_json::json!({"model":"jev-1.13.0","usage":{"output_tokens":2},"answers":valid["answers"].clone()}),
         ] {
             assert_eq!(
-                parse_typesafe_checkpoint(&invalid).outcome,
+                parse_typesafe_checkpoint(&invalid, None, "fixture-key").outcome,
                 CheckpointOutcome::Unavailable
             );
         }

@@ -100,6 +100,21 @@ its qualification procedure to § Qualification procedure.
 
 ### 2026-10-15 — QQ protocol sync (ENG791)
 
+#### Transport provenance repair (same boundary, additive evidence)
+
+The TypeSafe HTTP boundary returns a typed response containing the decoded JSON
+body plus bounded transport provenance. It selects the first safe non-empty
+identifier from `x-typesafe-request-id`, `x-request-id`, then `request-id`,
+matching the shared provider adapter; invalid or oversized values are ignored.
+Callers keep this header identifier independently of the JSON body `id`, with
+the header taking precedence when both exist. Approval retains returned model
+and request ID internally even for low-confidence or abstained answers, while
+checkpoint feedback uses the transport ID before a validated JSON fallback.
+Fallback reviewers remain the recorded decider when Jev abstains. The
+transport fixture covers primary, safe fallback, invalid, missing, and
+low-confidence cases; a live read-only QA request must record HTTP 200,
+returned model, header name/ID, and decoder outcome without exposing secrets.
+
 - Synced the shared Jev contract and conformance fixtures into QQ and routed
   approval, checkpoint and advisory parsing through the shared production
   boundary. The default is the exact pinned `jev-1.13.0`; `jev-1.14.0`,

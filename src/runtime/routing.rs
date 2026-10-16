@@ -16,6 +16,7 @@ struct Candidate {
 
 pub(super) struct TypeSafeTaskRouter {
     client: reqwest::Client,
+    request_id_guard: Arc<str>,
     endpoint: Arc<str>,
     candidates: Arc<[Candidate]>,
     configuration_identity: String,
@@ -116,9 +117,11 @@ impl TypeSafeTaskRouter {
             digest
                 .update(serde_json::to_vec(candidate).expect("candidate fields are serializable"));
         }
+        let typesafe_client = typesafe_http_client(&factory.inner.credentials)?;
         Ok(Self {
             configuration_identity: format!("{:x}", digest.finalize()),
-            client: typesafe_http_client(&factory.inner.credentials)?,
+            client: typesafe_client.client,
+            request_id_guard: typesafe_client.request_id_guard,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             candidates: candidates.into(),
             model,
@@ -226,6 +229,7 @@ impl TaskRouter for TypeSafeTaskRouter {
     fn route(&self, task: String) -> TaskRoutingFuture {
         let router = Self {
             client: self.client.clone(),
+            request_id_guard: Arc::clone(&self.request_id_guard),
             endpoint: Arc::clone(&self.endpoint),
             candidates: Arc::clone(&self.candidates),
             configuration_identity: self.configuration_identity.clone(),
@@ -274,8 +278,15 @@ impl TaskRouter for TypeSafeTaskRouter {
                     free,
                 );
             }
-            match typesafe_evaluate(&router.client, &router.endpoint, &body).await {
-                Ok(value) => router.parse(&value),
+            match typesafe_evaluate(
+                &router.client,
+                &router.endpoint,
+                &body,
+                &router.request_id_guard,
+            )
+            .await
+            {
+                Ok(response) => router.parse(&response.body),
                 Err(error) => {
                     router.fallback(&error.to_string(), qq_protocol::CheckpointSpend::default())
                 }
@@ -300,11 +311,49 @@ pub(super) enum TypeSafeRequestError {
     InvalidJson,
 }
 
+/// The provider response body plus the bounded transport provenance that the
+/// JSON body cannot reliably carry. Header names follow the shared Jev
+/// provider adapter's precedence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TypeSafeResponse {
+    pub(super) body: serde_json::Value,
+    pub(super) request_id: Option<String>,
+    pub(super) request_id_header: Option<&'static str>,
+}
+
+fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b':' | b'-'))
+        })
+}
+
+fn provider_request_id(
+    response: &reqwest::Response,
+    request_id_guard: &str,
+) -> (Option<String>, Option<&'static str>) {
+    for name in ["x-typesafe-request-id", "x-request-id", "request-id"] {
+        let Some(value) = response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+        else {
+            continue;
+        };
+        if valid_request_id(value) && value != request_id_guard {
+            return (Some(value.to_owned()), Some(name));
+        }
+    }
+    (None, None)
+}
+
 pub(super) async fn typesafe_evaluate(
     client: &reqwest::Client,
     endpoint: &str,
     body: &serde_json::Value,
-) -> Result<serde_json::Value, TypeSafeRequestError> {
+    request_id_guard: &str,
+) -> Result<TypeSafeResponse, TypeSafeRequestError> {
     let mut request = client.post(endpoint);
     if std::env::var("JEV_LONG_CONTEXT").ok().as_deref() == Some("1") {
         request = request.header(jev::LONG_CONTEXT_HEADER, "true");
@@ -321,6 +370,7 @@ pub(super) async fn typesafe_evaluate(
         }
     };
     const LIMIT: usize = 64 * 1024;
+    let (request_id, request_id_header) = provider_request_id(&response, request_id_guard);
     if response
         .content_length()
         .is_some_and(|length| length > LIMIT as u64)
@@ -340,7 +390,12 @@ pub(super) async fn typesafe_evaluate(
             Err(_) => return Err(TypeSafeRequestError::BodyInterrupted),
         }
     }
-    serde_json::from_slice(&bytes).map_err(|_| TypeSafeRequestError::InvalidJson)
+    let body = serde_json::from_slice(&bytes).map_err(|_| TypeSafeRequestError::InvalidJson)?;
+    Ok(TypeSafeResponse {
+        body,
+        request_id,
+        request_id_header,
+    })
 }
 
 #[cfg(test)]
@@ -354,6 +409,7 @@ mod tests {
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .unwrap(),
+            request_id_guard: "fixture-key".into(),
             endpoint: "http://127.0.0.1:1/unused".into(),
             candidates: ["custom/default", "custom/fast"]
                 .into_iter()
@@ -516,6 +572,61 @@ mod tests {
                 decision.estimated_cost_usd_nanos,
                 if oversized { None } else { Some(4200) }
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn typesafe_response_keeps_safe_request_header_precedence() {
+        use tokio::io::AsyncWriteExt as _;
+        for (headers, expected_id, expected_header) in [
+            (
+                "x-typesafe-request-id: req_primary_123\r\nx-request-id: req_fallback\r\n",
+                Some("req_primary_123"),
+                Some("x-typesafe-request-id"),
+            ),
+            (
+                "x-typesafe-request-id: https://provider.invalid/id\r\nx-request-id: req_fallback_123\r\nrequest-id: req_lower\r\n",
+                Some("req_fallback_123"),
+                Some("x-request-id"),
+            ),
+            (
+                "x-typesafe-request-id: bad value\r\nx-request-id: \r\n",
+                None,
+                None,
+            ),
+            (
+                "x-typesafe-request-id: fixture-key\r\nx-request-id: req_safe_fallback\r\n",
+                Some("req_safe_fallback"),
+                Some("x-request-id"),
+            ),
+            (
+                "x-typesafe-request-id: fixture-key\r\nx-request-id: fixture-key\r\nrequest-id: fixture-key\r\n",
+                None,
+                None,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let body = "{}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+                    body.len(),
+                    headers,
+                    body
+                );
+                // The client only needs the response; the request body is irrelevant here.
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let client = reqwest::Client::new();
+            let response =
+                typesafe_evaluate(&client, &endpoint, &serde_json::json!({}), "fixture-key")
+                    .await
+                    .unwrap();
+            server.await.unwrap();
+            assert_eq!(response.request_id.as_deref(), expected_id);
+            assert_eq!(response.request_id_header, expected_header);
         }
     }
 }
