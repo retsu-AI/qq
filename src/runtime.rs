@@ -6805,15 +6805,14 @@ mod tests {
             .check_policy_slots
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
-        assert_eq!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
-            Err(qq_core::GoalCheckPolicyError::Overloaded)
-        );
+        let mut waiting = WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        let mut waiting = WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
-        assert_eq!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
-            Ok(())
-        );
+        assert_eq!(waiting.await, Ok(()));
+        assert_eq!(slots.available_permits(), 4);
     }
 
     #[tokio::test]
