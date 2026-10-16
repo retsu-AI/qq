@@ -100,6 +100,57 @@ fn actual_validator_rejects_malformed_and_unsupported_answers() {
 }
 
 #[test]
+fn choice_winner_certainty_accounts_for_normalization() {
+    let request = request();
+    let mut response = response();
+    for (probabilities, accepted) in [
+        (vec![0.41, 0.40, 0.20], true),
+        (vec![0.40, 0.40, 0.20], false),
+        (vec![0.40, 0.41, 0.20], false),
+    ] {
+        response.answers[0].probabilities = Some(probabilities);
+        assert_eq!(
+            validate_response(&request, &response, 0.005).is_ok(),
+            accepted
+        );
+    }
+}
+
+#[test]
+fn degraded_boolean_winners_round_trip_without_fabricated_probability() {
+    let mut request = request();
+    request.questions[0].kind = QuestionKind::Boolean {
+        true_criterion: "relevant".into(),
+        false_criterion: "unrelated".into(),
+    };
+    for confidence in [None, Some(0.9)] {
+        let mut response = response();
+        response.answers[0].value = AnswerValue::Boolean {
+            winner: Some(true),
+            probability_true: None,
+        };
+        response.answers[0].probabilities = None;
+        response.answers[0].vendor_confidence = confidence;
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DecisionResponse>(&encoded).unwrap(),
+            response
+        );
+        assert!(matches!(
+            validate_response(&request, &response, 0.005),
+            Err(AnswerError::MissingDistribution { .. })
+        ));
+        response.answers[0].probabilities = Some(vec![0.1, 0.9]);
+        assert_eq!(validate_response(&request, &response, 0.005), Ok(()));
+        response.answers[0].value = AnswerValue::Boolean {
+            winner: Some(false),
+            probability_true: None,
+        };
+        assert!(validate_response(&request, &response, 0.005).is_err());
+    }
+}
+
+#[test]
 fn clipped_rounding_intervals_must_admit_a_normalized_distribution() {
     let mut request = request();
     let mut response = response();
@@ -162,21 +213,25 @@ fn boolean_score_and_wrong_type_use_the_same_production_boundary() {
         false_criterion: "unrelated".into(),
     };
     response.answers[0].value = AnswerValue::Boolean {
-        probability_true: 0.9,
+        winner: None,
+        probability_true: Some(0.9),
     };
     response.answers[0].probabilities = Some(vec![0.1, 0.9]);
     assert_eq!(validate_response(&request, &response, 0.005), Ok(()));
     response.answers[0].value = AnswerValue::Boolean {
-        probability_true: 0.2,
+        winner: None,
+        probability_true: Some(0.2),
     };
     assert!(validate_response(&request, &response, 0.005).is_err());
     response.answers[0].probabilities = Some(vec![0.94, 0.04]);
     response.answers[0].value = AnswerValue::Boolean {
-        probability_true: 0.031,
+        winner: None,
+        probability_true: Some(0.031),
     };
     assert!(validate_response(&request, &response, 0.01).is_err());
     response.answers[0].value = AnswerValue::Boolean {
-        probability_true: 0.05,
+        winner: None,
+        probability_true: Some(0.05),
     };
     assert_eq!(validate_response(&request, &response, 0.01), Ok(()));
     request.questions[0].kind = QuestionKind::Score {

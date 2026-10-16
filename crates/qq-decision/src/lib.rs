@@ -93,25 +93,63 @@ pub fn validate_response(
                 let Some(winner_index) = labels.iter().position(|label| &label.id == winner) else {
                     return Err(invalid());
                 };
-                let winner_lower = (probabilities[winner_index] - rounding_error).max(0.0);
-                if probabilities.iter().enumerate().any(|(i, p)| {
-                    i != winner_index && winner_lower <= (p + rounding_error).min(1.0)
-                }) {
-                    return Err(invalid());
+                for rival in 0..count {
+                    if rival == winner_index {
+                        continue;
+                    }
+                    // Minimize winner minus rival subject to box bounds and
+                    // unit mass: fill rival first, neutral options, winner last.
+                    let mut remaining = (1.0 - lower_mass).max(0.0);
+                    let mut margin = (probabilities[winner_index] - rounding_error).max(0.0)
+                        - (probabilities[rival] - rounding_error).max(0.0);
+                    for i in std::iter::once(rival)
+                        .chain((0..count).filter(|i| *i != rival && *i != winner_index))
+                        .chain(std::iter::once(winner_index))
+                    {
+                        let capacity = (probabilities[i] + rounding_error).min(1.0)
+                            - (probabilities[i] - rounding_error).max(0.0);
+                        let added = remaining.min(capacity);
+                        if i == rival {
+                            margin -= added;
+                        }
+                        if i == winner_index {
+                            margin += added;
+                        }
+                        remaining -= added;
+                    }
+                    if margin <= numeric_slack {
+                        return Err(invalid());
+                    }
                 }
             }
-            (QuestionKind::Boolean { .. }, AnswerValue::Boolean { probability_true }) => {
+            (
+                QuestionKind::Boolean { .. },
+                AnswerValue::Boolean {
+                    winner,
+                    probability_true,
+                },
+            ) => {
+                if winner.is_none() && probability_true.is_none() {
+                    return Err(invalid());
+                }
                 let lower = (probabilities[1] - rounding_error)
                     .max(0.0)
                     .max(1.0 - (probabilities[0] + rounding_error).min(1.0));
                 let upper = (probabilities[1] + rounding_error)
                     .min(1.0)
                     .min(1.0 - (probabilities[0] - rounding_error).max(0.0));
-                if !probability_true.is_finite()
-                    || !(0.0..=1.0).contains(probability_true)
-                    || probability_true + rounding_error + numeric_slack < lower
-                    || probability_true - rounding_error - numeric_slack > upper
-                {
+                if probability_true.is_some_and(|p| {
+                    !p.is_finite()
+                        || !(0.0..=1.0).contains(&p)
+                        || p + rounding_error + numeric_slack < lower
+                        || p - rounding_error - numeric_slack > upper
+                }) || winner.is_some_and(|w| {
+                    if w {
+                        lower <= 0.5 + numeric_slack
+                    } else {
+                        upper >= 0.5 - numeric_slack
+                    }
+                }) {
                     return Err(invalid());
                 }
             }

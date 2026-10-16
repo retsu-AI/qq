@@ -111,7 +111,8 @@ fn request_response_and_capabilities_round_trip_without_inventing_usage() {
         answers: vec![DecisionAnswer {
             question_id: "relevant".into(),
             value: AnswerValue::Boolean {
-                probability_true: 0.9,
+                winner: None,
+                probability_true: Some(0.9),
             },
             probabilities: Some(vec![0.1, 0.9]),
             vendor_confidence: None,

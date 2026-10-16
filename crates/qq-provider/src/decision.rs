@@ -103,9 +103,16 @@ pub struct DecisionAnswer {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AnswerValue {
-    Boolean { probability_true: f64 },
-    Choice { winner: String },
-    Score { expected: f64 },
+    Boolean {
+        winner: Option<bool>,
+        probability_true: Option<f64>,
+    },
+    Choice {
+        winner: String,
+    },
+    Score {
+        expected: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
