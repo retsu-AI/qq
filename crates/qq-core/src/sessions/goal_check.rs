@@ -147,15 +147,19 @@ fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let mut stat = String::new();
-    file.take(4097).read_to_string(&mut stat)?;
+    let mut stat = Vec::new();
+    file.take(4097).read_to_end(&mut stat)?;
     if stat.len() > 4096 {
         return Err(std::io::Error::other(
             "check group member stat exceeds bound",
         ));
     }
     let malformed = || std::io::Error::other("invalid check group member stat");
-    let (_, fields) = stat.rsplit_once(") ").ok_or_else(malformed)?;
+    let delimiter = stat
+        .windows(2)
+        .rposition(|bytes| bytes == b") ")
+        .ok_or_else(malformed)?;
+    let fields = std::str::from_utf8(&stat[delimiter + 2..]).map_err(|_| malformed())?;
     let mut fields = fields.split_ascii_whitespace();
     let group = fields
         .nth(2)

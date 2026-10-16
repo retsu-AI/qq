@@ -889,3 +889,9 @@ Existing rustix enables its event API without a new dependency or version change
 
 Focused run `14ab4e7d-0c5e-408e-95fe-5d8af95054c4`: 5/5 process supervision
 tests passed. Final full gate, smoke and independent source review remain pending.
+
+Independent review found non-UTF-8 process names could fail whole-record decoding.
+A real check that writes byte 0xff to its Linux process name reproduced Cleanup
+InvalidData before the correction. Bounded byte reads now decode only the numeric
+stat suffix; no process-name UTF-8 assumption remains. Focused nextest
+`b669c0a1-d4f6-44bc-9ca3-176b4894c37b`: 6/6 process tests passed.

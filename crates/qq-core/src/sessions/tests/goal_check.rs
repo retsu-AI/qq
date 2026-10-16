@@ -1483,7 +1483,9 @@ async fn goal_check_process_accepts_non_utf8_process_names() {
         RunCancellation::new(),
         Arc::new(crate::ProcessProducer::new("test")),
         execution::RunResources::default(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     assert_eq!(result.tail, "checked");
 }
