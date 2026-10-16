@@ -9,8 +9,8 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
-| G4 | TUI, CLI and foreground hosting | In progress | ENG-1064 | feat/eng-1064-goal-surfaces | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
+| G4 | TUI, CLI and foreground hosting | In progress | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
 
@@ -955,3 +955,8 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 - Focused goal/CLI/docs/wire suite107/107 passes. Real-binary smoke8/8 passes, including exact check consent and one charged final-slot run with two requests and tool-free handoff. The earlier smoke assertion incorrectly equated runs with model requests; actual event/request artifacts established the correction, independently reviewed.
 - Isolated real-server CLI drive passes11 commands, once-authorized check marker, one work run and one audit to achieved; no-server command fails with guidance and creates no session store. Six CLI help surfaces captured.
 - Rendering19 scenarios×50 samples: candidate/baseline medians0.9607–1.0162; expanded32-call frame56.0→53.8us, ultra480×120 frame125.1→122.5us. Shared-host diagnostics, no H0/tail claim. Logs and verify homes remain outside Git under /tmp/qq-goal-delivery-20261015/. Independent static surface review approved; final-head gate/hosted platform checks remain.
+
+### 2026-10-16 — G4 rebase and live G5 start
+
+- Rebased #331 onto #330's current-main integration. Preserve all73 remaining sleep sites and main's lowered ceiling; G4 production source is unchanged apart from upstream main auth integration. Final-head gate follows; prior2733-pass report identifies old e72a82cc exactly.
+- G5 started2026-10-16T06:14:26Z on qualified e72a82cc with openai-codex/gpt-6.1-sol subscription only, no paid API fallback:4h deadline,8runs,64turns/250000tokens/30min per run. Private supervisor captures exit/usage and terminal state. Five real recovery tests pass; first run stopped after rejected compaction, next attempt compacted and retained15checklist items. Multi-hour/three-compaction acceptance remains open. No live raw content or credentials are committed.
