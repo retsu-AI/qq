@@ -3066,6 +3066,8 @@ mod tests {
             args.check = Some("new check".into());
             args.check_approval = approval;
             let mut opts = base;
+            opts.model.model = Some("test/changed-model".into());
+            opts.approval = HeadlessApproval::Full;
             opts.session = Some(handle.session_id);
             let code = run_goal(
                 &fixture.sessions,
@@ -3087,7 +3089,11 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            let current = snapshot.focused.unwrap().goal.unwrap();
+            let focused = snapshot.focused.unwrap();
+            assert_eq!(focused.summary.approval_mode, qq_protocol::ApprovalMode::ReadOnly);
+            assert_eq!(focused.summary.profile, qq_protocol::AgentProfileId::default());
+            assert_eq!(focused.summary.model.as_deref(), Some("test/model"));
+            let current = focused.goal.unwrap();
             assert_eq!(current.status, qq_protocol::GoalStatus::Active);
             assert_eq!(current.revision, goal.revision);
             fixture.sessions.close().await.unwrap();
