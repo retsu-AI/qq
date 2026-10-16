@@ -1856,8 +1856,8 @@ mod tests {
 
     use futures_util::stream;
     use qq_core::{
-        LoadedRuntime, Runtime, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest,
-        RuntimeLoader, SessionRuntimeOptions,
+        LoadedRuntime, Runtime, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+        RuntimeLoadRequest, RuntimeLoader, SessionRuntimeOptions,
     };
     use qq_protocol::{AccountingTotal, ModelPricing, RunStatus, SessionStatus, WorkspaceSnapshot};
     use qq_provider::{
@@ -1933,19 +1933,63 @@ mod tests {
         }
     }
 
+    struct HeldChildPreparation {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<RuntimeLoadProgress>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        exited: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
     struct ParentChildLoader {
         parent: Arc<dyn Provider>,
         child: Arc<dyn Provider>,
+        held_child: Option<Arc<HeldChildPreparation>>,
     }
 
     impl RuntimeLoader for ParentChildLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            let provider = if request.model.model.as_deref() == Some("test/child") {
+            // Spawn preflight validates before admission; hold only the queued
+            // child's real execution preparation, which has a cancellation owner.
+            Self {
+                parent: Arc::clone(&self.parent),
+                child: Arc::clone(&self.child),
+                held_child: None,
+            }
+            .load_with_progress(request, RuntimeLoadProgress::default())
+        }
+
+        fn load_with_progress(
+            &self,
+            request: RuntimeLoadRequest,
+            progress: RuntimeLoadProgress,
+        ) -> RuntimeLoadFuture {
+            let is_child = request.model.model.as_deref() == Some("test/child");
+            let held = is_child.then(|| self.held_child.clone()).flatten();
+            let provider: Arc<dyn Provider> = if is_child {
                 Arc::clone(&self.child)
+            } else if request.model.model.as_deref() == Some("test/foreign") {
+                Arc::new(HangingProvider)
             } else {
                 Arc::clone(&self.parent)
             };
             Box::pin(async move {
+                if let Some(held) = held {
+                    let release = held.release.lock().unwrap().take().unwrap();
+                    held.entered
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(progress)
+                        .unwrap();
+                    release.await.unwrap();
+                    held.exited
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                }
                 Runtime::with_provider(provider, "test-model", 256)
                     .map(|runtime| {
                         loaded_runtime(
@@ -3380,6 +3424,243 @@ mod tests {
             qq_protocol::RunStatus::Running
         );
         fixture.sessions.close().await.unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct ForegroundOutput {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Write for ForegroundOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("injected output failure"));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_held_family_drains_before_terminal_output() {
+        use futures_util::FutureExt;
+
+        for action in [
+            "interrupt",
+            "pause",
+            "cancel",
+            "clear",
+            "replace",
+            "output",
+            "abort",
+        ] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (entered, entry) = tokio::sync::oneshot::channel();
+                let (release, released) = tokio::sync::oneshot::channel();
+                let (exited, exit) = tokio::sync::oneshot::channel();
+                let fixture = fixture_with_loader(Arc::new(ParentChildLoader {
+                    parent: Arc::new(SpawnsLoopingChildProvider::new()),
+                    child: Arc::new(HangingProvider),
+                    held_child: Some(Arc::new(HeldChildPreparation {
+                        entered: Mutex::new(Some(entered)),
+                        release: Mutex::new(Some(released)),
+                        exited: Mutex::new(Some(exited)),
+                    })),
+                })).await;
+                let mut opts = options(&fixture.workspace);
+                opts.approval = HeadlessApproval::Full;
+                let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                    .await.unwrap();
+                opts.session = Some(handle.session_id);
+                let mut foreign_opts = opts.clone();
+                foreign_opts.session = None;
+                foreign_opts.model.model = Some("test/foreign".into());
+                let foreign = prepare_session(&fixture.sessions, &foreign_opts, SessionIntent::Prompt)
+                    .await.unwrap();
+                let receipt = send(&fixture.sessions, SessionCommand::SubmitPrompt {
+                    session_id: foreign.session_id,
+                    input: vec![InputPart::text("independent work")],
+                    limits: RunLimits::default(), correlation: Default::default(), output: None,
+                }).await.unwrap();
+                let CommandOutcome::PromptQueued { run_id: foreign_run, .. } = receipt.outcome else {
+                    panic!("foreign prompt")
+                };
+                let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+                let output = ForegroundOutput::default();
+                let mut writer = output.clone();
+                let mut stderr = Vec::new();
+                let mut foreground = Box::pin(run_goal(
+                    &fixture.sessions, opts, goal_request(),
+                    async { interrupted.await.unwrap(); }, &mut writer, &mut stderr,
+                ));
+                let progress = tokio::select! {
+                    entry = entry => entry.unwrap(),
+                    code = &mut foreground => panic!("{action}: returned before child entry: {code}"),
+                };
+                let snapshot = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 16, 16,
+                )).await.unwrap();
+                let owner = snapshot.focused.unwrap();
+                let goal = owner.goal.unwrap();
+                let expected = goal_identity(&goal);
+                let root = owner.summary.active_run_id.expect("parent retains child ownership");
+                let pending = fixture.sessions.goal_pending_runs(handle.session_id, expected).await.unwrap();
+                assert_eq!(pending.len(), 2, "{action}: root and admitted sponsored child");
+                let child = *pending.iter().find(|id| **id != root).unwrap();
+                assert!(fixture.sessions.goal_owns_run(handle.session_id, expected, child).await.unwrap());
+                let mut events = fixture.sessions.subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id, after: snapshot.cursor,
+                }).unwrap();
+
+                let early_code = match action {
+                    "interrupt" | "clear" | "replace" => {
+                        interrupt.send(()).unwrap();
+                        None
+                    }
+                    "pause" => {
+                        send(&fixture.sessions, SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected, action: qq_protocol::GoalControl::Pause,
+                        }).await.unwrap();
+                        None
+                    }
+                    "cancel" => {
+                        request_cancel(&fixture.sessions, root).await.unwrap();
+                        None
+                    }
+                    "output" => {
+                        output.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Some((&mut foreground).await)
+                    }
+                    "abort" => None,
+                    _ => unreachable!(),
+                };
+                if action == "abort" || early_code.is_some() {
+                    drop(foreground);
+                } else {
+                    tokio::select! {
+                        () = progress.cancelled() => {},
+                        code = &mut foreground => panic!("{action}: returned while child preparation held: {code}"),
+                    }
+                    assert!(foreground.as_mut().now_or_never().is_none(),
+                        "{action}: foreground must remain pending after cancellation receipt");
+                    let stopped = fixture.sessions.snapshot(SnapshotRequest::new(
+                        handle.workspace_id, Some(handle.session_id), 1, 1,
+                    )).await.unwrap().focused.unwrap().goal.unwrap();
+                    if action != "cancel" {
+                        let error = fixture.sessions.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected: goal_identity(&stopped),
+                            action: qq_protocol::GoalControl::Resume,
+                        }).await.unwrap_err();
+                        assert!(matches!(error, SessionRuntimeError::GoalCancellationPending));
+                    }
+                    assert_eq!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&stopped)).await.unwrap().len(), 2);
+                    if action == "clear" {
+                        send(&fixture.sessions, SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected: goal_identity(&stopped),
+                            action: qq_protocol::GoalControl::Clear,
+                        }).await.unwrap();
+                    } else if action == "replace" {
+                        send(&fixture.sessions, SessionCommand::SetGoal {
+                            session_id: handle.session_id, objective: "replacement must survive".into(),
+                            check: Some(qq_protocol::GoalCheck {
+                                command: "printf checked".into(), timeout_ms: 1000,
+                            }),
+                            budget: Box::new(goal.budget.clone()), expected: Some(goal_identity(&stopped)), replace: true,
+                        }).await.unwrap();
+                    }
+                    assert!(foreground.as_mut().now_or_never().is_none());
+                    assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())
+                        .iter().any(|record| record["type"] == "goal"));
+                    release.send(()).unwrap();
+                    exit.await.unwrap();
+                    let code = foreground.await;
+                    let records = parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap());
+                    let finals: Vec<_> = records.iter().filter(|r| r["type"] == "goal").collect();
+                    if matches!(action, "clear" | "replace") {
+                        assert_eq!(code, 4);
+                        assert!(finals.is_empty());
+                        let errors = String::from_utf8_lossy(&stderr);
+                        assert!(errors.contains(if action == "clear" { "goal was not found" } else { "goal identity or revision conflicts with the current goal" })
+                            || errors.contains("goal changed while terminal work drained"), "{action}: {errors}");
+                    } else {
+                        assert_eq!(code, if action == "interrupt" { 130 } else { 6 });
+                        assert_eq!(finals.len(), 1, "{action}: {records:?}");
+                        assert_eq!(records.last().unwrap()["type"], "goal");
+                        assert_eq!(finals[0]["exit_code"], code);
+                        assert_eq!(finals[0]["status"], if action == "interrupt" { "interrupted" } else { "paused" });
+                        let direct: Vec<_> = records.iter().enumerate().filter(|(_, r)| r["type"] == "goal_run").collect();
+                        assert_eq!(direct.len(), 1, "descendants must not produce direct-run records");
+                        assert_eq!(direct[0].1["goal"], serde_json::to_value(expected).unwrap());
+                        assert_eq!(direct[0].1["run"]["id"], serde_json::to_value(root).unwrap());
+                        let finished = records.iter().position(|r| r["envelope"]["event"]["type"] == "run_finished"
+                            && r["envelope"]["run_id"] == serde_json::to_value(root).unwrap()).unwrap();
+                        assert!(finished < direct[0].0 && direct[0].0 < records.len() - 1);
+                        let sequences: Vec<_> = records.iter().filter(|r| r["type"] == "event")
+                            .map(|r| r["envelope"]["cursor"]["sequence"].as_u64().expect("event sequence")).collect();
+                        assert!(sequences.len() >= 2);
+                        assert!(sequences.windows(2).all(|w| w[0] < w[1]));
+                    }
+                    // Check current identity separately from the old family's finish stream.
+                    let durable = fixture.sessions.snapshot(SnapshotRequest::new(
+                        handle.workspace_id, Some(handle.session_id), 1, 16,
+                    )).await.unwrap().focused.unwrap();
+                    assert_eq!(durable.summary.active_run_id, None);
+                    if action == "clear" {
+                        assert!(durable.goal.is_none());
+                    } else {
+                        let final_goal = durable.goal.unwrap();
+                        if action == "replace" {
+                            assert_ne!(final_goal.goal_id, expected.goal_id);
+                            assert_eq!(final_goal.objective, "replacement must survive");
+                        }
+                        assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
+                    }
+                    let mut finished = Vec::new();
+                    while finished.len() < 2 {
+                        let event = events.next().await.unwrap().unwrap();
+                        if let SessionEvent::RunFinished { run_id, .. } = event.event
+                            && [root, child].contains(&run_id) {
+                            finished.push(run_id);
+                        }
+                    }
+                    assert_eq!(finished, vec![child, root], "child settles before parent publication");
+                    assert_eq!(fixture.sessions.run_snapshot(handle.workspace_id, foreign.session_id, foreign_run).await.unwrap().status, RunStatus::Running);
+                    fixture.sessions.close().await.unwrap();
+                    return;
+                }
+                // Failure/owner-drop may return early, but core must retain cleanup ownership.
+                progress.cancelled().await;
+                assert_eq!(early_code, (action == "output").then_some(4));
+                let stopped = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 1, 1,
+                )).await.unwrap().focused.unwrap().goal.unwrap();
+                assert_eq!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&stopped)).await.unwrap().len(), 2);
+                assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())
+                    .iter().any(|record| record["type"] == "goal"));
+                release.send(()).unwrap();
+                exit.await.unwrap();
+                let mut finished = Vec::new();
+                while finished.len() < 2 {
+                    let event = events.next().await.unwrap().unwrap();
+                    if let SessionEvent::RunFinished { run_id, .. } = event.event
+                        && [root, child].contains(&run_id) { finished.push(run_id); }
+                }
+                assert_eq!(finished, vec![child, root]);
+                let durable = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 1, 16,
+                )).await.unwrap().focused.unwrap();
+                let durable_goal = durable.goal.unwrap();
+                assert_eq!(durable_goal.status, qq_protocol::GoalStatus::Paused { reason: qq_protocol::GoalPauseReason::User });
+                assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&durable_goal)).await.unwrap().is_empty());
+                assert_eq!(fixture.sessions.run_snapshot(handle.workspace_id, foreign.session_id, foreign_run).await.unwrap().status, RunStatus::Running);
+                fixture.sessions.close().await.unwrap();
+            }).await.unwrap_or_else(|_| panic!("{action}: held-family acceptance hung"));
+        }
     }
 
     #[tokio::test]
@@ -5472,7 +5753,12 @@ mod tests {
     async fn hard_cost_budget_cancels_an_unmetered_looping_child() {
         let parent: Arc<dyn Provider> = Arc::new(SpawnsLoopingChildProvider::new());
         let child: Arc<dyn Provider> = Arc::new(ReadLoopProvider::unmetered());
-        let fixture = fixture_with_loader(Arc::new(ParentChildLoader { parent, child })).await;
+        let fixture = fixture_with_loader(Arc::new(ParentChildLoader {
+            parent,
+            child,
+            held_child: None,
+        }))
+        .await;
         std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
         let mut options = options(&fixture.workspace);
         options.max_cost_usd_nanos = Some(4_000);
