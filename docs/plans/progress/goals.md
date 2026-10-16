@@ -982,3 +982,18 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 
 - Caller-level teardown regression from the live task preserves foreign runs by awaiting natural settlement. Outer review found its original Ctrl-C future was already dropped after run_goal returned. Added a second closing row with a new interrupt; a97c4286 reproduces the uninterruptible wait and cleans up the test-owned runtime even on red.
 - A fresh close-phase listener remains polled at the idle query and settlement wait. On interruption, release the lifecycle admission guard before ordinary bounded shutdown cancels/drains remaining work. Keep the selected goal's already-emitted record and exit status. Focused db87522b passes1/1 with both natural and explicit-interrupt rows; independent review approves lock/wake/cancellation behavior. Guide and contract document the ownership phase. Broader/final gate follows after remaining repairs.
+
+### G4 review integration: owned compaction and harness failure records
+
+The adoption guard now considers queued/running prompt work rather than treating
+an owned compaction as an interactive preemptor. The real Store fixture reproduced
+the rejected goal adoption before the fix; both goal-owned and user-origin prompt
+rows pass afterward. The clear/replace held-family acceptance rows now require
+exactly one final `harness_failure` record for the originally accepted goal after
+its family drains. They retain the no-early-output and replacement-survival checks.
+The guide and headless contract describe the last-observed snapshot fallback.
+
+Focused nextest run `3662fc4e-5e7a-40e5-930a-00ba71739778`: 5/5 passed.
+The remaining changes in runtime/headless are rustfmt of the integrated review
+fixes. Existing sleep identities and the ceiling remain unchanged (73 sites).
+Full-stack gates and publication remain pending; review threads stay open.

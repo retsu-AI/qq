@@ -226,3 +226,10 @@ Or skip the store entirely: QQ reads `ANTHROPIC_API_KEY` from the
 environment when nothing is stored. `QQ_CONFIG_CONTENT='(version: 1, model:
 "…")'` supplies configuration without a file. If the repository ships
 `.qq/config.ron` with sensitive sections, run `qq trust` first.
+
+If a foreground goal encounters a harness failure after accepting a goal, its
+final JSONL goal record uses `harness_failure` and exit code `4` when output is
+still writable. The record includes the current snapshot of that same goal when
+available, otherwise its last observed snapshot. This fallback supplies context;
+it does not assert that the goal is still current or reached a terminal state.
+Clearing or replacing the goal never substitutes the replacement in this record.

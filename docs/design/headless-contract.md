@@ -453,3 +453,10 @@ Before adding a headless flag, record, or field, answer:
    An opt-in runtime feature such as typed-output validation needs explicit
    bounds, cancellation and budget tests, and measurements of both its
    enabled cost and the unchanged default path.
+
+If a foreground goal encounters a harness failure after accepting a goal, its
+final JSONL goal record uses `harness_failure` and exit code `4` when output is
+still writable. The record includes the current snapshot of that same goal when
+available, otherwise its last observed snapshot. This fallback supplies context;
+it does not assert that the goal is still current or reached a terminal state.
+Clearing or replacing the goal never substitutes the replacement in this record.

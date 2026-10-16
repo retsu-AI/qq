@@ -9454,11 +9454,30 @@ async fn goal_adoption_ignores_owned_compaction_but_detects_preempting_prompts()
         let audit = test_prepared_audit(&owner);
         let (helper, _) = store
             .start_in_run_compaction(&owner, &audit.resolved_model, 0)
-            .await.unwrap().unwrap();
-        assert_eq!(store.has_preempting_goal_work(owner.identity.session_id, goal.goal_id)
-            .await.unwrap(), !goal_origin, "owned summary must not turn a goal prompt into preempting work");
-        store.finish_in_run_compaction_failed(&helper, RunOutcome::Cancelled).await.unwrap();
-        store.finish_run(&owner, RunOutcome::Completed, None, TeardownComplete::nothing_ran()).await.unwrap();
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .has_preempting_goal_work(owner.identity.session_id, goal.goal_id)
+                .await
+                .unwrap(),
+            !goal_origin,
+            "owned summary must not turn a goal prompt into preempting work"
+        );
+        store
+            .finish_in_run_compaction_failed(&helper, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                &owner,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
         store.close().await.unwrap();
     }
 }

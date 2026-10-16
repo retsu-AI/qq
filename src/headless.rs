@@ -545,11 +545,22 @@ pub async fn run_goal(
             {
                 // Prefer authoritative state when readable; otherwise retain
                 // the last observed goal without inventing a durable outcome.
-                if let Ok(snapshot) = sessions.snapshot(SnapshotRequest::new(workspace, Some(goal.session_id), 1, 1)).await
+                if let Ok(snapshot) = sessions
+                    .snapshot(SnapshotRequest::new(workspace, Some(goal.session_id), 1, 1))
+                    .await
                     && let Some(current) = snapshot.focused.and_then(|session| session.goal)
                     && current.goal_id == goal.goal_id
-                { goal = current; }
-                if let Err(error) = finish_goal(sink, stdout, &options, workspace, goal, Some(qq_protocol::HeadlessGoalStatus::HarnessFailure)) {
+                {
+                    goal = current;
+                }
+                if let Err(error) = finish_goal(
+                    sink,
+                    stdout,
+                    &options,
+                    workspace,
+                    goal,
+                    Some(qq_protocol::HeadlessGoalStatus::HarnessFailure),
+                ) {
                     let _ = writeln!(stderr, "error: final goal record failed: {}", error.message);
                 }
             }
@@ -1064,10 +1075,14 @@ async fn prepare_session(
                 .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active);
             if intent == SessionIntent::Goal
                 && let Some(goal) = &focused.goal
-                && sessions.has_preempting_goal_work(session_id, goal.goal_id).await
+                && sessions
+                    .has_preempting_goal_work(session_id, goal.goal_id)
+                    .await
                     .map_err(|error| Failure::harness(error.to_string()))?
             {
-                return Err(Failure::invalid("session has preempting user work; settle it with an interactive client before resuming the goal"));
+                return Err(Failure::invalid(
+                    "session has preempting user work; settle it with an interactive client before resuming the goal",
+                ));
             }
             let summary = focused.summary;
             if summary.parent_id.is_some() {
@@ -2789,23 +2804,57 @@ mod tests {
     async fn foreground_goal_rejects_preempting_user_work_before_adoption() {
         let fixture = fixture(|| HangingProvider).await;
         let base = options(&fixture.workspace);
-        let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
-        send(&fixture.sessions, SessionCommand::SubmitPrompt {
-            session_id: owner.session_id, input: vec![InputPart::text("question")],
-            limits: RunLimits::default(), correlation: Default::default(), output: None,
-        }).await.unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        send(&fixture.sessions, SessionCommand::SetGoal {
-            session_id: owner.session_id, objective: "later objective".into(), check: None,
-            budget: Box::new(qq_protocol::GoalBudget { max_goal_runs: 2, deadline_ms: now + 60000,
-                max_total_tokens: None, max_cost_usd_nanos: None, per_run: RunLimits::default() }),
-            expected: None, replace: false,
-        }).await.unwrap();
+        let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        send(
+            &fixture.sessions,
+            SessionCommand::SubmitPrompt {
+                session_id: owner.session_id,
+                input: vec![InputPart::text("question")],
+                limits: RunLimits::default(),
+                correlation: Default::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        send(
+            &fixture.sessions,
+            SessionCommand::SetGoal {
+                session_id: owner.session_id,
+                objective: "later objective".into(),
+                check: None,
+                budget: Box::new(qq_protocol::GoalBudget {
+                    max_goal_runs: 2,
+                    deadline_ms: now + 60000,
+                    max_total_tokens: None,
+                    max_cost_usd_nanos: None,
+                    per_run: RunLimits::default(),
+                }),
+                expected: None,
+                replace: false,
+            },
+        )
+        .await
+        .unwrap();
         let mut opts = base;
         opts.session = Some(owner.session_id);
         let result = prepare_session(&fixture.sessions, &opts, SessionIntent::Goal).await;
-        assert!(matches!(result, Err(Failure { status: HeadlessStatus::InvalidConfiguration, .. })),
-            "must reject same-session user work before accepting exclusive goal ownership");
+        assert!(
+            matches!(
+                result,
+                Err(Failure {
+                    status: HeadlessStatus::InvalidConfiguration,
+                    ..
+                })
+            ),
+            "must reject same-session user work before accepting exclusive goal ownership"
+        );
         fixture.sessions.close().await.unwrap();
     }
 
@@ -3272,17 +3321,30 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_goal_interrupt_reconciles_durable_achievement() {
-        let fixture = fixture(|| GoalVerdictProvider { blocked: false, turns: Mutex::new(0) }).await;
+        let fixture = fixture(|| GoalVerdictProvider {
+            blocked: false,
+            turns: Mutex::new(0),
+        })
+        .await;
         let base = options(&fixture.workspace);
-        let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt).await.unwrap();
-        let mut observer = fixture.sessions.subscribe(SubscribeRequest {
-            workspace_id: handle.workspace_id, after: handle.subscribe_after,
-        }).unwrap();
+        let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut observer = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
         let interrupt = async move {
             loop {
                 let event = observer.next().await.unwrap().unwrap();
                 if matches!(event.event, SessionEvent::GoalUpdated { goal }
-                    if goal.status == qq_protocol::GoalStatus::Achieved) { break; }
+                    if goal.status == qq_protocol::GoalStatus::Achieved)
+                {
+                    break;
+                }
             }
         };
         let mut opts = base;
@@ -3291,7 +3353,15 @@ mod tests {
         request.max_runs = Some(3);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = run_goal(&fixture.sessions, opts, request, interrupt, &mut stdout, &mut stderr).await;
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            request,
+            interrupt,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
         let records = parse_records(&String::from_utf8(stdout).unwrap());
         assert_eq!(records.last().unwrap()["type"], "goal");
@@ -3549,11 +3619,22 @@ mod tests {
             })
             .await
             .unwrap();
-            let goal = goal_receipt(send(&fixture.sessions, SessionCommand::SetGoal {
-                session_id: owner.session_id, objective: "edited while running".into(),
-                check: goal.check.clone(), budget: Box::new(goal.budget.clone()),
-                expected: Some(goal_identity(&goal)), replace: false,
-            }).await.unwrap()).unwrap();
+            let goal = goal_receipt(
+                send(
+                    &fixture.sessions,
+                    SessionCommand::SetGoal {
+                        session_id: owner.session_id,
+                        objective: "edited while running".into(),
+                        check: goal.check.clone(),
+                        budget: Box::new(goal.budget.clone()),
+                        expected: Some(goal_identity(&goal)),
+                        replace: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
             let mut options = base;
             options.session = Some(owner.session_id);
             let mut request = goal_request();
@@ -3589,9 +3670,15 @@ mod tests {
                     .count(),
                 1
             );
-            let adopted = records.iter().find(|record| record["type"] == "goal_run").unwrap();
+            let adopted = records
+                .iter()
+                .find(|record| record["type"] == "goal_run")
+                .unwrap();
             assert_eq!(adopted["goal"]["revision"], goal.revision - 1);
-            assert_eq!(adopted["goal"]["goal_id"], serde_json::to_value(goal.goal_id).unwrap());
+            assert_eq!(
+                adopted["goal"]["goal_id"],
+                serde_json::to_value(goal.goal_id).unwrap()
+            );
             assert_eq!(
                 fixture
                     .sessions
@@ -3808,7 +3895,11 @@ mod tests {
                     let finals: Vec<_> = records.iter().filter(|r| r["type"] == "goal").collect();
                     if matches!(action, "clear" | "replace") {
                         assert_eq!(code, 4);
-                        assert!(finals.is_empty());
+                        assert_eq!(finals.len(), 1, "{action}: {records:?}");
+                        assert_eq!(records.last().unwrap()["type"], "goal");
+                        assert_eq!(finals[0]["exit_code"], 4);
+                        assert_eq!(finals[0]["status"], "harness_failure");
+                        assert_eq!(finals[0]["goal"]["goal_id"], serde_json::to_value(expected.goal_id).unwrap());
                         let errors = String::from_utf8_lossy(&stderr);
                         assert!(errors.contains(if action == "clear" { "goal was not found" } else { "goal identity or revision conflicts with the current goal" })
                             || errors.contains("goal changed while terminal work drained"), "{action}: {errors}");
@@ -3892,12 +3983,24 @@ mod tests {
     async fn foreground_goal_harness_failure_still_emits_final_record() {
         let fixture = fixture(|| HangingProvider).await;
         let opts = options(&fixture.workspace);
-        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
-        let mut events = fixture.sessions.subscribe(SubscribeRequest { workspace_id: handle.workspace_id,
-            after: handle.subscribe_after }).unwrap();
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
         let stop = async {
             loop {
-                if matches!(events.next().await.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; }
+                if matches!(
+                    events.next().await.unwrap().unwrap().event,
+                    SessionEvent::RunStarted { .. }
+                ) {
+                    break;
+                }
             }
             fixture.sessions.close().await.unwrap();
         };
@@ -3905,7 +4008,18 @@ mod tests {
         let mut stderr = Vec::new();
         let mut opts = opts;
         opts.session = Some(handle.session_id);
-        assert_eq!(run_goal(&fixture.sessions, opts, goal_request(), stop, &mut stdout, &mut stderr).await, 4);
+        assert_eq!(
+            run_goal(
+                &fixture.sessions,
+                opts,
+                goal_request(),
+                stop,
+                &mut stdout,
+                &mut stderr
+            )
+            .await,
+            4
+        );
         let records = parse_records(&String::from_utf8(stdout).unwrap());
         assert_eq!(records.last().unwrap()["type"], "goal");
         assert_eq!(records.last().unwrap()["status"], "harness_failure");
