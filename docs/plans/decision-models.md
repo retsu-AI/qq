@@ -101,13 +101,14 @@ an independently verified result, broken down by decision model.
 | DM0 | This plan, the design, ADR-0055, and the doc rename | — | `docs/**` | Links resolve; one plan; § Docs gate |
 | DM1 | Neutral decision types, `DecisionProvider`, `DecisionCapabilities` and `DecisionError` in `qq-provider`; empty `qq-decision` crate with the answer validator | DM0 accepted, ADR-0055 settled, and explicit owner scope/implementation approval recorded | `crates/qq-provider/src/lib.rs`, `crates/qq-provider/src/decision.rs`, `crates/qq-decision/**`, root `Cargo.toml` (root request) | D1 |
 | DM2 | System One adapter (`providers/typesafe.rs`) on `HttpExchange`; recorded-reply fixtures and explicit transport-policy migration; replaces `routing::typesafe_evaluate` and `typesafe_http_client` | DM1 | `qq-provider` adapter and recipe; `src/runtime{,/routing,/approval}.rs` call sites; `src/advisory.rs` | D2 |
-| DM2c | Cloudflare Clef hosted transport/envelope, credential audience and non-truncating admission proof; shared System One codec | DM2 | `crates/qq-provider/src/providers{,/cloudflare_decisions}.rs`, compiler recipe, `qq-auth` audience; loopback fixtures | D2c; shadow comparison after DM7/JV7, paid runs only with approved spend |
+| DM2c | Cloudflare Clef hosted transport/envelope, credential audience and non-truncating admission proof; shared System One codec | DM2 | `crates/qq-provider/src/providers{,/cloudflare_decisions}.rs`, compiler recipe, `qq-auth` audience; loopback fixtures | D2c (adapter only); comparison belongs to DM9c |
 | DM3 | Move the rubrics, parsers and thresholds of routing, approval and checkpoint into `qq-decision` consumers, **behavior-identical** (same requests, same dispositions, same policy identities) | DM2 | `crates/qq-decision/**`, `src/runtime*.rs`, `src/advisory.rs` | D3 |
 | DM4 | Receipt-ready interpretation: raw distribution kept, QQ-computed confidence, vendor confidence side by side; JV3 precision parsed/recorded in shadow, never broadens authority | DM3 | `qq-decision` validator | A3 + D4 |
-| DM5 | OpenAI Decisions adapter from the **published** contract, with fixtures copied from it; capabilities declared; `openai/default` credential audience | DM1, OpenAI API reference published | `crates/qq-provider/src/providers.rs`, `crates/qq-provider/src/providers/openai_decisions.rs`, `qq-auth` audience only | D5 |
+| DM5 | OpenAI Decisions adapter from the **published** contract, with fixtures copied from it; capabilities declared; `openai/default` credential audience | DM2 shared transport/admission complete, OpenAI API reference published | `crates/qq-provider/src/providers.rs`, `crates/qq-provider/src/providers/openai_decisions.rs`, `qq-auth` audience only | D5 |
 | DM6 | Configuration: `decision_models`, per-consumer `decisions` settings, `jev_*` aliases with provenance, `QQ_DECISIONS=off`, exact-id requirement for authority consumers; plan identity carries model, rubric and policy ids | DM3, DM7, owner decision 2 accepted (public configuration naming) | `qq-config`, composition root, `src/plan.rs` | D6 |
 | DM7 | Calibration table and shadow-only rule for uncalibrated complete keys and moved aliases; the shadow consumer from JV7 uses it | DM4, JV6 | `qq-decision` | D7 |
 | DM8 | Neutral names in core and protocol: `decision_approval`, `DelegateIdentity::Decision{provider}`, `ResolvingDecisionCredential`; fixtures kept | DM3, JV5 protocol bump | `qq-core`, `qq-protocol`, `qq-client`, `qq-tui` | D8 |
+| DM9c | Paired Clef/Jev shadow comparison | DM2c, DM7, JV7, owner-approved evaluation spend | Evaluation tooling; receipts | D9 statistics with identical evidence; no recommendation or activation |
 | DM9 | Vendor comparison: OpenAI vs Jev as paired shadow arms on the same holds and routes | DM5, DM7, JV13 procedure | Evaluation tooling; receipts | D9 |
 
 DM3 is behavior-preserving relative to the accepted DM2 baseline. DM2 changes
@@ -216,8 +217,9 @@ Every behavior bullet is a failing test first, then green.
 - Token admission includes question overhead; oversized/truncatable evidence
   cannot authorize. Unknown revision remains shadow-only. No automatic media
   fetch. Share D2 admission across plans; reject credential cross-audience use.
-- After DM7/JV7, paired shadow comparison uses identical evidence with Jev;
-  no authority or quality claim follows from API compatibility.
+- D2c closes on adapter fixtures only. Deferred paired shadow comparison is
+  owned by DM9c, not a condition for closing this adapter slice. No authority
+  or quality claim follows from API compatibility.
 
 **D3 — move without change.**
 - Every existing Jev test passes unmodified except for import paths.
@@ -232,17 +234,22 @@ Every behavior bullet is a failing test first, then green.
   DM3 baseline retain that baseline's fallback/abstention disposition; they
   cannot approve or route automatically before D7 qualification and explicit
   policy activation. Test rounded confident approve rejected by old tolerance
-  but accepted by new intervals: shadow receipt exists, held action never
-  settles from that reply. Legacy compatibility cannot grandfather this change.
-- Activation after DM7 is a separate reviewed policy identity/calibration
-  change with paired legacy/new negative and fallback fixtures; DM7 installs
-  the gate and does not itself activate the broader parser.
+  but accepted by new intervals: validator returns a non-settling observation
+  while the baseline disposition remains fallback. Legacy compatibility cannot
+  grandfather this change. Durable receipt proof belongs to JV6/JV7, not DM4.
+- This plan does not authorize broader-parser authority activation. A future
+  separately scoped activation slice requires explicit owner acceptance and
+  completed A7/A13 qualification, in addition to DM7 and reviewed policy
+  identity changes. DM7 installs the gate only.
 - The vendor confidence and QQ's confidence are both stored.
 - A winner-only answer yields `Unsupported` for approval and routing.
 - Exact question-ID set required: duplicate, missing and extra/unknown IDs fail;
   valid reordered answers produce identical per-question interpretation.
 
 **D5 — OpenAI adapter.**
+- Run the common D2 admission suite against OpenAI handles, including
+  multi-plan shared 8/32 limits, combined deadline, cancellation recovery,
+  pre-dispatch backpressure and no resend after uncertain send.
 - Fixtures are copied from the published reference, with the doc URL and
   access date in the fixture header.
 - Declared capabilities match the reference.
@@ -1143,3 +1150,10 @@ latency and cost, not against the number of `approve` labels.
    switcher and `/jev` picker, citing ADR-0042, which is the trust-prompt ADR)
    overlap JV9. They remain held with no resumption implied; the owner must
    close them or explicitly rebase them onto JV9's `/decisions` panel.
+
+### Precision observation receipt ownership
+
+JV6 acceptance includes durable receipts for the D4 rounded-confident-approve
+regression, preserving baseline fallback; JV7 proves its shadow projection
+cannot settle. Neither task activates the broader parser. DM4 proves only the
+non-settling interpretation boundary and has no downstream receipt dependency.
