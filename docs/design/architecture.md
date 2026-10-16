@@ -1720,7 +1720,9 @@ no old paid ownership and remain independent of these controls.
 The session scheduler queues due active goals in batches of at most32. The
 idle-session check, absence of queued prompts/checks, fresh Goal-origin run,
 immutable goal notice and pending guard commit together. Each run starts from
-the current goal, rather than a previous user's prompt. Queue admission applies
+the current goal, rather than a previous user's prompt. Automatic task routing
+uses the captured objective; user-prompt routing keeps the submitted prompt.
+Both use the existing bounded, secret-masked routing input. Queue admission applies
 the goal's per-run bounds and known remaining token/cost/deadline allowance;
 spent or unknown capped allowances transition to budget exhausted. The scheduler
 uses one nearest-wake timer for idle goal waits and deadlines and publishes the
@@ -1730,14 +1732,19 @@ durable rows. SetGoal conservatively enables it, while committed driver sweeps
 recompute it in worker order.
 An OS ownership lock excludes a second store worker before SQLite opens. Store
 clones share the presence cache; a successor reads durable presence after acquiring
-ownership.
+ownership. Replayed goal controls and cancellations retain the scheduler wake
+without changing their original durable receipts.
 
 After acquiring a scheduler permit, reservation derives paid-work admission
 from the captured goal's current durable budget. Goal-origin runs use current
 per-run limits; user prompts keep their own stricter limits. Token, cost and
 duration bounds intersect with known remaining allowance. Expired or unknown
 capped spending refuses execution before runtime loading; stale inactive goal
-ownership cancels it. Goal-less reservation skips this admission lookup.
+ownership cancels it. Sponsored descendants also intersect every historical
+paid ancestor's absolute goal deadline at reservation, routing and main start,
+including when the child has its own goal. This accounting-only admission grants
+no ancestor goal notice or tool authority. Runs without goal ownership or paid
+sponsorship skip this admission lookup.
 Execution also checks the fixed goal deadline before loading. A reserved
 terminal refusal freezes captured goal metadata in its existing settlement
 transaction, so even a user prompt refused before paid work retains exact
@@ -1756,7 +1763,7 @@ current goal per-run budget. Raising a goal budget can therefore recover its
 allowance without widening the prompt's own bounds. Effective limits commit
 with RunStarted. Duration is expressed against one fixed admission
 anchor, so rechecking the absolute goal deadline does not subtract preparation
-time again. Initial goal-owned provider output is capped by the accepted total
+time again. Initial goal-owned and sponsored-child provider output is capped by the accepted total
 and output token limits. When task routing precedes that request, the runtime
 meter charges its reported spend once and caps initial output by the positive
 remaining total/output allowance. Exhausted or unknown routing remainder stops

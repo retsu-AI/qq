@@ -1241,6 +1241,54 @@ pub(super) fn admit_run(
     })
 }
 
+/// Sponsored descendants retain accounting ownership without goal tool authority.
+/// Their inherited relative duration must also respect the owner's absolute deadline.
+pub(super) fn admit_sponsored_run(
+    connection: &Connection,
+    run_id: RunId,
+    own_admission: Option<GoalAdmission>,
+    limits: &mut qq_protocol::RunLimits,
+    now: u64,
+    anchor_ms: u64,
+) -> Result<GoalAdmission, SessionRuntimeError> {
+    let mut deadline_ms = match own_admission {
+        Some(GoalAdmission::Allowed { deadline_ms, .. }) => deadline_ms,
+        Some(refusal) => return Ok(refusal),
+        None => u64::MAX,
+    };
+    let mut sponsored = false;
+    for (_, session, goal) in paid_goal_owners(connection, run_id)?.into_iter().skip(1) {
+        let Some(goal) = goal else { continue };
+        let payload: String = connection.query_row(
+            "SELECT payload_json FROM session_goals WHERE goal_id=?1 AND session_id=?2",
+            params![goal.to_string(), session.to_string()],
+            |row| row.get(0),
+        )?;
+        let owner: GoalSnapshot = serde_json::from_str(&payload)?;
+        deadline_ms = deadline_ms.min(owner.budget.deadline_ms);
+        sponsored = true;
+    }
+    if !sponsored {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    if now >= deadline_ms {
+        return Ok(GoalAdmission::Exhausted(
+            qq_protocol::GoalExhaustion::Deadline,
+        ));
+    }
+    let remaining = deadline_ms.saturating_sub(anchor_ms);
+    limits.max_duration_ms = Some(
+        limits
+            .max_duration_ms
+            .map_or(remaining, |cap| cap.min(remaining)),
+    );
+    Ok(GoalAdmission::Allowed {
+        deadline_ms,
+        anchor_ms,
+        execution_started: None,
+    })
+}
+
 fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExhaustion> {
     if now >= goal.budget.deadline_ms {
         return Some(qq_protocol::GoalExhaustion::Deadline);

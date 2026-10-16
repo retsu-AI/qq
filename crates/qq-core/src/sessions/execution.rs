@@ -500,7 +500,7 @@ async fn prepare_execution(
     .with_inherited_effects(inherited_effects);
     if !internal {
         capabilities.routing_spend = loaded.routing_spend;
-        if claimed.goal.is_some()
+        if (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
             && let Some(tokens) = [
                 claimed.limits.max_total_tokens,
                 claimed.limits.max_output_tokens,
@@ -662,7 +662,11 @@ async fn route_run(
         }
         let mut task = String::new();
         let mut oversized = false;
-        if let Some(message) = claimed
+        if matches!(claimed.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+            && let Some(goal) = &claimed.goal
+        {
+            task.push_str(&goal.objective);
+        } else if let Some(message) = claimed
             .messages
             .iter()
             .rev()

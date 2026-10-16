@@ -523,7 +523,7 @@ impl plan::CompiledAgentPlan {
                        budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
                    }
                    yield TurnStep::Emit( RuntimeEvent::Started);
-                   if goal.is_some() && routing_spend.is_some() {
+                   if (goal.is_some() || goal_spend_tracking) && routing_spend.is_some() {
                        let now = tokio::time::Instant::now();
                        match budget.remaining(now) {
                            Ok(remaining) => {

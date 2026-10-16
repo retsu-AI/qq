@@ -355,7 +355,9 @@ pub(super) fn execute_command(
             receipt,
             schedule: matches!(
                 &command,
-                SessionCommand::SetGoal { .. } | SessionCommand::GoalControl { .. }
+                SessionCommand::SetGoal { .. }
+                    | SessionCommand::GoalControl { .. }
+                    | SessionCommand::CancelRun { .. }
             ),
             replayed: true,
             side_launch: None,

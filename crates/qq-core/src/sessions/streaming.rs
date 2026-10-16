@@ -697,7 +697,7 @@ pub(super) fn record_routing_started(
     maximum_cost: Option<u64>,
 ) -> Result<claim::RunStart, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    if metadata.goal.is_some() {
+    if metadata.goal.is_some() || metadata.goal_spend_owner.is_some() {
         let refreshed =
             match claim::refresh_goal_limits(&transaction, identity, &metadata, now_ms())? {
                 Ok(refreshed) => refreshed,

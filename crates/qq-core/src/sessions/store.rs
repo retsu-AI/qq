@@ -1054,6 +1054,7 @@ impl Store {
         let origin = claimed.origin;
         let limits = claimed.limits;
         let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
         let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(
@@ -1062,6 +1063,7 @@ impl Store {
                 identity,
                 &audit,
                 claim::RunStartMetadata {
+                    goal_spend_owner,
                     goal: goal.as_deref(),
                     goal_initial_notice: goal_initial_notice.as_deref(),
                     origin,
@@ -1920,6 +1922,7 @@ impl Store {
         let origin = claimed.origin;
         let limits = claimed.limits;
         let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
         let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
@@ -1928,6 +1931,7 @@ impl Store {
                 store_id,
                 identity,
                 claim::RunStartMetadata {
+                    goal_spend_owner,
                     goal: goal.as_deref(),
                     goal_initial_notice: goal_initial_notice.as_deref(),
                     origin,

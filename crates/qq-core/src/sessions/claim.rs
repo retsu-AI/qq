@@ -852,7 +852,7 @@ pub(super) fn reserve_next_run_recoverable(
     if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
         limits = RunLimits::default();
     }
-    let goal_admission = goal
+    let mut goal_admission = goal
         .as_deref()
         .map(|goal| {
             goals::admit_run(
@@ -865,6 +865,16 @@ pub(super) fn reserve_next_run_recoverable(
             )
         })
         .transpose()?;
+    if goal_spend_owner.is_some() {
+        goal_admission = Some(goals::admit_sponsored_run(
+            &transaction,
+            run_id,
+            goal_admission,
+            &mut limits,
+            admission_at_ms,
+            admission_at_ms,
+        )?);
+    }
     if goal.is_some() {
         // Control commands must see preparing ownership before loading can wait.
         goals::freeze_goal_claim(
@@ -963,6 +973,7 @@ pub(super) enum GoalStartRefusal {
 pub(super) type RunStart = Result<Option<SessionEventEnvelope>, GoalStartRefusal>;
 
 pub(super) struct RunStartMetadata<'a> {
+    pub(super) goal_spend_owner: Option<qq_protocol::GoalId>,
     pub(super) goal: Option<&'a qq_protocol::GoalSnapshot>,
     pub(super) goal_initial_notice: Option<&'a str>,
     pub(super) origin: Option<qq_protocol::RunOrigin>,
@@ -976,9 +987,9 @@ pub(super) fn refresh_goal_limits(
     metadata: &RunStartMetadata<'_>,
     now: u64,
 ) -> Result<Result<RunLimits, GoalStartRefusal>, SessionRuntimeError> {
-    let Some(goal) = metadata.goal else {
+    if metadata.goal.is_none() && metadata.goal_spend_owner.is_none() {
         return Ok(Ok(metadata.limits));
-    };
+    }
     let anchor_ms = match metadata.admission {
         Some(goals::GoalAdmission::Allowed { anchor_ms, .. }) => anchor_ms,
         _ => now,
@@ -993,14 +1004,32 @@ pub(super) fn refresh_goal_limits(
         )?;
         parse_run_limits(encoded.as_deref())?
     };
-    match goals::admit_run(
-        connection,
-        goal,
-        metadata.origin,
-        &mut refreshed,
-        now,
-        anchor_ms,
-    )? {
+    let own_admission = metadata
+        .goal
+        .map(|goal| {
+            goals::admit_run(
+                connection,
+                goal,
+                metadata.origin,
+                &mut refreshed,
+                now,
+                anchor_ms,
+            )
+        })
+        .transpose()?;
+    let admission = if metadata.goal_spend_owner.is_some() {
+        goals::admit_sponsored_run(
+            connection,
+            identity.run_id,
+            own_admission,
+            &mut refreshed,
+            now,
+            anchor_ms,
+        )?
+    } else {
+        own_admission.ok_or(SessionRuntimeError::CONSTRAINT)?
+    };
+    match admission {
         goals::GoalAdmission::Allowed { .. } => {
             if let Some(duration) = refreshed.max_duration_ms {
                 let elapsed_ms = match metadata.admission {
@@ -1030,6 +1059,7 @@ pub(super) fn start_reserved_run(
     resolved_input: Option<&crate::input::ResolvedInput>,
 ) -> Result<RunStart, SessionRuntimeError> {
     let RunStartMetadata {
+        goal_spend_owner,
         goal,
         goal_initial_notice,
         origin,
@@ -1042,7 +1072,7 @@ pub(super) fn start_reserved_run(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
-    if goal.is_some() {
+    if goal.is_some() || goal_spend_owner.is_some() {
         let refreshed = match refresh_goal_limits(&transaction, identity, &metadata, now)? {
             Ok(refreshed) => refreshed,
             Err(refusal) => return Ok(Err(refusal)),
@@ -1053,7 +1083,7 @@ pub(super) fn start_reserved_run(
             }));
         }
     }
-    let effective_limits = if goal.is_some() {
+    let effective_limits = if goal.is_some() || goal_spend_owner.is_some() {
         Some(serde_json::to_string(&limits)?)
     } else {
         None
