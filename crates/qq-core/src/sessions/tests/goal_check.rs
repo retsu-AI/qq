@@ -1489,3 +1489,72 @@ async fn goal_check_process_accepts_non_utf8_process_names() {
     assert_eq!(result.outcome, ProcessOutcome::Exited { code: Some(0) });
     assert_eq!(result.tail, "checked");
 }
+
+#[tokio::test]
+async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions() {
+    const COMMAND: &str = "printf checked";
+    struct HeldPolicy {
+        calls: AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl WorkspaceGrantAuthority for HeldPolicy {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Authority(COMMAND).goal_policy(Path::new("."))
+        }
+        fn seed_grants(&self, path: &Path) -> GrantSeedFuture { Authority(COMMAND).seed_grants(path) }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture { panic!("not a tool grant") }
+        fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
+            assert_eq!(command, COMMAND);
+            let hold = self.calls.fetch_add(1, Ordering::SeqCst) == 1;
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if hold { entered.notify_one(); release.notified().await; }
+                Ok(())
+            })
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let workspace = directory.path().join("work");
+    std::fs::create_dir(&workspace).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")).with_grant_authority(Arc::new(HeldPolicy {
+            calls: AtomicUsize::new(0), entered: Arc::clone(&entered), release: Arc::clone(&release),
+        })),
+        Arc::new(Loader { failure_tail: false, loads: Arc::new(AtomicUsize::new(0)), calls: Arc::new(AtomicUsize::new(0)) }),
+    ).await.unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
+    let CommandOutcome::SessionCreated { session_id } = create_session(&runtime, workspace_id, None).await.outcome else { panic!("session") };
+    let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+        "type":"set_goal", "session_id":session_id, "objective":"verify work", "check":{"command":COMMAND,"timeout_ms":5000},
+        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
+    })).unwrap()).await.unwrap();
+    let mut events = runtime.subscribe(SubscribeRequest { workspace_id, after:receipt.committed_through }).unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else { panic!("goal") };
+    runtime.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+        session_id, expected:qq_protocol::GoalIdentity { goal_id:goal.goal_id, revision:goal.revision },
+        action:qq_protocol::GoalControl::ApproveCheck { scope:qq_protocol::GoalCheckScope::Once, command:COMMAND.into() },
+    }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+    std::fs::rename(&workspace, directory.path().join("moved-work")).unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.next().await.unwrap().expect("workspace failure must not poison the runtime");
+            if let SessionEvent::RunFinished { origin:Some(qq_protocol::RunOrigin::GoalCheck { .. }), outcome, .. } = event.event {
+                assert!(matches!(outcome, RunOutcome::Failed { .. }));
+                break;
+            }
+        }
+    }).await.unwrap();
+    let snapshot = runtime.snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 256, 256)).await.unwrap();
+    let focused = snapshot.focused.unwrap();
+    assert!(focused.summary.active_run_id.is_none());
+    assert!(focused.messages.iter().any(|message| format!("{message:?}").contains("workspace")));
+    let (other, _) = resolve_workspace(&runtime, directory.path()).await;
+    create_session(&runtime, other, None).await;
+    runtime.close().await.unwrap();
+}
