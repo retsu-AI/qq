@@ -138,16 +138,14 @@ pub fn exit_code(status: HeadlessStatus) -> ExitCode {
     ExitCode::from(status.code())
 }
 
-/// Writes trial records to the optional trace file and, in JSONL format, to
-/// stdout. Text format still traces when a trace path is given.
-#[derive(Default)]
 enum GoalRecordState {
-    #[default]
     Pending,
     Attempted,
     Emitted(u8),
 }
 
+/// Writes trial records to the optional trace file and, in JSONL format, to
+/// stdout. Text format still traces when a trace path is given.
 struct RecordSink {
     goal_record: GoalRecordState,
     trace: Option<BufWriter<std::fs::File>>,

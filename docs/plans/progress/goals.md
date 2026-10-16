@@ -1013,3 +1013,16 @@ verification passed three cases (empty objective, resume without a goal, and
 check approval without a goal), each exit2 and its expected diagnostic. The
 server and fake provider were stopped after the drive. Full final-head gates,
 publication and thread resolution remain pending.
+
+### 2026-10-16 — G4 current-head output and startup corrections
+
+- Four review regressions reproduced: cleanup overwrote a held-input reason;
+  trace flush emitted two finals; caller close replaced an emitted exit; startup
+  adoption omitted two completed direct runs. Test-first commits precede fixes.
+- Atomic exact-identity cleanup preserves stopped state/revision. Final writes
+  are attempted once, and flushed stdout selects the immutable exit. Store open
+  captures an optional startup replay boundary before recovery and scheduling.
+- Focused nextest `13655696-1b3b-45a2-85af-ab37452baaae`:21/21 pass,
+  including reopened-store achievement and already-held question. Independent
+  reviewer approves28235006 with no correctness blocker. Full gate, final
+  upstream restack/publication and review-thread resolution remain pending.
