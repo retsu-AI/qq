@@ -1,6 +1,7 @@
 # G5 — subscription-only live goal evaluation
 
-Status: all three trials settled; G5 acceptance is not established. ENG-1065 / ENG-809.
+Status: three trials settled; a fourth continuation task is active.
+G5 acceptance is not established. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
 
@@ -218,3 +219,28 @@ checklist preservation and a real terminal foreground record. It **does not meet
 the multi-hour requirement**. Durations of separate trials are not combined into
 one qualifying goal run. No delay, repeated work or manufactured compaction was
 added; G5 remains unqualified and #332 remains a draft.
+
+
+## Fourth trial — continuation delivery in progress
+
+- Started 2026-10-16T08:58:27.849937Z on qualified runtime source
+  `27bdd77f2c6b2e5a13e186e4d285645a4f7ba931`, binary SHA256
+  `2d46ac2004afe8bf88c5368d90e4a0427c8da8c0b4f4da7e7a23400fcf76ebbf`.
+- The user selected `openai-codex/gpt-6.1-sol`, subscription only, with no
+  paid API fallback. Worker and audit routes use the same model; optional paid
+  routing/advisories and delegation are disabled. Credentials and private run
+  data remain outside Git.
+- A new admission has a four-hour deadline and eight goal runs; each run has
+  finite64-turn,3000000-token and60-minute limits. Context is65536 and output
+  is8192 tokens per request. This does not reset or extend any prior trial.
+- The useful task integrates and qualifies the existing ENG-1058 continuation
+  candidate from `f98f3c2e50eed69bf597e02ae635f88114191f67` against the stable
+  G3/G4 stack and current main. It works in an isolated writable checkout;
+  the original continuation checkout stays untouched. Local commits only.
+- Acceptance includes real long-running continuation/outage/restart evidence
+  and a final `G5_CONTINUATION_REVIEW.md`. No padding, invented observations,
+  manufactured compactions or relaxed gates are permitted.
+
+The task is still running. No terminal outcome or multi-hour qualification is
+claimed. Later fixes in outer #330/#331 do not retroactively change the runtime
+source under this evaluation. #332 stays draft pending actual evidence.

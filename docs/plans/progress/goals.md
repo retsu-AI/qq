@@ -1103,3 +1103,13 @@ publication and thread resolution remain pending.
 - G5 still lacks one real multi-hour run. Separate trial durations are not added;
   no padding or artificial work. #332 stays draft/In Progress. Curated receipt
   is g-goals-live-eng-1065.md; raw content and private stores stay outside Git.
+
+### 2026-10-16 — G5 continuation admission and stack refresh
+
+- Restacked documentation on G3 `4bc4f247` / G4 `8a59caf4`; the G5 delta
+  remains the two Markdown evidence files. No runtime source changes here.
+- Recorded the fourth useful subscription-only admission, its exact earlier
+  runtime binary and finite bounds. It is active; no terminal or multi-hour
+  result is asserted. Original task sources and all prior trial receipts remain.
+- #332 remains draft. Rebased-head gate/publication follows; current live
+  acceptance and reviews of the newly published runtime heads remain pending.
