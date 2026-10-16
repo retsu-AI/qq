@@ -2754,13 +2754,12 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
     harness.runtime.shutdown().await.unwrap();
 }
 
-async fn await_frozen_setup<T>(future: impl std::future::Future<Output = T>) -> T {
+async fn await_frozen<T>(future: impl std::future::Future<Output = T>, timeout: Duration) -> T {
     let (finished, waiting) = std::sync::mpsc::sync_channel::<()>(1);
-    let mut watchdog =
-        tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_secs(2)));
+    let mut watchdog = tokio::task::spawn_blocking(move || waiting.recv_timeout(timeout));
     let result = tokio::select! {
         result = future => result,
-        _ = &mut watchdog => panic!("frozen-clock setup did not reach its signal within two real seconds"),
+        _ = &mut watchdog => panic!("frozen-clock operation did not complete within {timeout:?} of real time"),
     };
     drop(finished);
     assert!(matches!(
@@ -2768,6 +2767,12 @@ async fn await_frozen_setup<T>(future: impl std::future::Future<Output = T>) -> 
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
     ));
     result
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "frozen-clock operation did not complete")]
+async fn frozen_collection_watchdog_expires_without_virtual_time_advancing() {
+    await_frozen(std::future::pending::<()>(), Duration::ZERO).await;
 }
 
 #[tokio::test]
@@ -2839,7 +2844,9 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         } else {
             submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
         };
-        await_frozen_setup(applying).await.unwrap();
+        await_frozen(applying, Duration::from_secs(2))
+            .await
+            .unwrap();
         let mut observed = Vec::new();
         let child_run = loop {
             let event = harness.events.next().await.unwrap().unwrap();
@@ -5708,7 +5715,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             },
         )
         .await;
-        await_frozen_setup(entered.notified()).await;
+        await_frozen(entered.notified(), Duration::from_secs(2)).await;
         tokio::time::advance(Duration::from_millis(if expires_during_preflight {
             600
         } else {
@@ -5716,7 +5723,11 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
         }))
         .await;
         release.notify_one();
-        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        let observed = await_frozen(
+            collect_until_run_finished(&mut harness.events, run_id),
+            Duration::from_secs(30),
+        )
+        .await;
         tokio::time::resume();
         keep_clock.abort();
         harness.runtime.shutdown().await.unwrap();
