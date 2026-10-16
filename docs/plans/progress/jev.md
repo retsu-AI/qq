@@ -97,3 +97,53 @@ its qualification procedure to § Qualification procedure.
   `git diff --check` is clean. The website build was not run because
   `website/node_modules` is incomplete (`html-escaper` missing after
   `nub install`).
+
+### 2026-10-15 — QQ protocol sync (ENG791)
+
+#### Transport provenance repair (same boundary, additive evidence)
+
+The TypeSafe HTTP boundary returns a typed response containing the decoded JSON
+body plus bounded transport provenance. It selects the first safe non-empty
+identifier from `x-typesafe-request-id`, `x-request-id`, then `request-id`,
+matching the shared provider adapter; invalid or oversized values are ignored.
+Callers keep this header identifier independently of the JSON body `id`, with
+the header taking precedence when both exist. Approval retains returned model
+and request ID internally even for low-confidence or abstained answers, while
+checkpoint feedback uses the transport ID before a validated JSON fallback.
+Fallback reviewers remain the recorded decider when Jev abstains. The
+transport fixture covers primary, safe fallback, invalid, missing, and
+low-confidence cases; a live read-only QA request must record HTTP 200,
+returned model, header name/ID, and decoder outcome without exposing secrets.
+The earlier source-only verification had no live QQ provider request ID. This
+refresh exercised the production Rust client with the protected QA credential:
+stable `jev-1.13.0` returned `req_01a142186ea77ccf8721cae5f6d39607`, and
+`jev-preview` resolved to `jev-1.14.0` with
+`req_01a1421885837cdba28834519b13d7ab`; both used
+`x-typesafe-request-id` and both retained `LowConfidence` outcomes. Sanitized
+receipts are `/private/tmp/qq-live-jev-1.13-receipt.json` and
+`/private/tmp/qq-live-jev-preview-receipt.json`. Final focused coverage was
+3/3 QQ tests, 57/57 protocol tests, pinned Clippy, formatting, and 76/76
+repository lint entries.
+
+- Synced the shared Jev contract and conformance fixtures into QQ and routed
+  approval, checkpoint and advisory parsing through the shared production
+  boundary. The default is the exact pinned `jev-1.13.0`; `jev-1.14.0`,
+  `jev-latest` and `jev-preview` are accepted, with aliases retaining the
+  provider's returned version in evidence. Per-field nullable usage remains
+  unknown and is never priced; malformed, missing or negative values reject
+  the response. The explicit long-context header is sent only for
+  `JEV_LONG_CONTEXT=1`.
+- Successful approval receipts retain the returned Jev model and optional
+  response ID in additive `tool_approval_resolved` fields. Checkpoint and
+  passive advisory feedback now retain bounded `provider_model` and
+  `provider_request_id` provenance; an absent ID remains `unknown`.
+- Final evidence on Rust 1.97.1 with canonical `TMPDIR=/private/tmp`:
+  18 Jev-focused tests and all 57 protocol tests passed, as did the targeted
+  durable Jev approval fixture. The repository gate passed formatting,
+  lint (76/76 sleep entries), and Clippy. Full nextest: 2,058 passed,
+  six failed, and 12 skipped. The six failures are unchanged long-path
+  fixtures exceeding macOS path limits (`ENAMETOOLONG`); the full gate is
+  therefore not green. Canonical temporary paths resolved the earlier
+  SQLite/symlink failures. Tests unset the inherited `TYPESAFE_API_KEY`
+  for fixture isolation; no stored credential, provider authentication,
+  live Jev request or QQ installation was changed.

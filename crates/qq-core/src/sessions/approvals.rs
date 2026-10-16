@@ -284,6 +284,7 @@ impl ToolGate for SessionToolGate {
                                                     call.id,
                                                     delegate_grant.take(),
                                                     verdict.delegate,
+                                                    (verdict.delegate_model.clone(), verdict.delegate_request_id.clone()),
                                                 )
                                                 .await
                                             {
@@ -321,6 +322,7 @@ impl ToolGate for SessionToolGate {
                                                     call.id,
                                                     message.clone(),
                                                     verdict.delegate,
+                                                    (verdict.delegate_model.clone(), verdict.delegate_request_id.clone()),
                                                 )
                                                 .await
                                             {

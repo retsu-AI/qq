@@ -20,7 +20,7 @@ use std::{
 };
 use thiserror::Error;
 
-const POLICY: &str = "qq/jev-1.13.0/external-advisory-1";
+const POLICY: &str = "qq/jev/external-advisory-2026-10-15.1";
 const JOURNAL_LIMIT: u64 = 4 * 1024 * 1024;
 const MAX_RECORDS: usize = 256;
 const REQUEST_TOKEN_RESERVATION: u64 = 131_072;
