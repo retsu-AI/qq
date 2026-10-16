@@ -182,3 +182,27 @@ and #166/#170 remain held. Source-parsed26-node/45-edge DAG has no cycles;
 consistency checks, with the original23-test receipt retained under October4;
 independent review, publication and hosted CI remain pending. No future
 runtime/provider work ran and no slice is marked shipped by this entry.
+
+
+### 2026-10-16 — PR249 rebase and provider-neutral safety review
+
+- Consolidated the original eight-commit DM0 series into one local rebase
+  commit on `origin/main` `55936a1e`, preserving main's current indexes,
+  later root entries, shipped activation/headless fixes and accepted ADR0055.
+- Added proposed safety contracts and dated primary-source research: Clef
+  truncation/envelope, neutral prediction/policy/execution split, action-bound
+  revalidation, qualification and explicit legacy compatibility. PR319 was
+  inspected as untrusted source only; its conformance test duplicates a weaker
+  parser. No contributor code, live inference or paid evaluation ran.
+- Independent read-only review identified legacy-authority and Off ambiguities;
+  clarified the exact compatibility exception and marked immediate Off proposed
+  for owner acceptance. Runtime behavior remains unchanged.
+- Initial `cargo xtask check --base origin/main`: fmt, lint and Clippy passed;
+  tests 393 passed, 2 failed, 2 skipped. Both failures are headless timeouts in
+  unchanged Rust; isolated rerun passed 2/2, not a green full gate. Final
+  verification is reported separately. No push or merge.
+
+- Final narrow verification: docs-truth 24/24 passed; all 559 local Markdown
+  file links resolved; conflict-marker scan and `git diff --check` passed.
+  No runtime smoke or live-provider quality evaluation was needed or claimed
+  for this docs-only change. The affected-package gate remains red as above.

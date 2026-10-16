@@ -175,7 +175,7 @@ not disable review or routing, and it does not revoke earlier grants.
 
 ### Known limitations
 
-These are current behavior; [`../plans/jev.md`](../plans/jev.md) tracks the
+These are current behavior; [`../plans/decision-models.md`](../plans/decision-models.md) tracks the
 planned changes.
 
 - **You may be prompted before Jev answers.** The TUI shows "approval

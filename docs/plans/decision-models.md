@@ -29,8 +29,8 @@ summarized in the ledger.
 
 ## Goal
 
-Decision models (TypeSafe Jev and OpenAI's Decisions API today, whatever
-ships next tomorrow) are one opt-in capability. An operator who turns it on:
+Decision models (TypeSafe Jev, Cloudflare Clef and the proposed OpenAI
+Decisions integration, plus future models) are one opt-in capability. An operator who turns it on:
 
 - rarely gets interrupted, and every remaining interruption is explained;
 - gets faster and cheaper verified tasks, with no loss of authorization,
@@ -82,7 +82,8 @@ an independently verified result, broken down by decision model.
   - The composition root translates configuration.
 - Provider identity never branches in `qq-decision`. Vendor differences are
   declared capabilities.
-- An uncalibrated (provider, model id, rubric id, effect) key only shadows. An alias whose
+- Except for the explicitly scoped legacy compatibility exception below, an
+  uncalibrated (provider, model id, rubric id, effect) key only shadows. An alias whose
   reported model id differs from the calibrated one is uncalibrated.
 - Clients render committed state and never run a gate themselves.
 - These always run before inference: hard refusals, mode ceilings, grants,
@@ -232,8 +233,10 @@ Every behavior bullet is a failing test first, then green.
 - An uncalibrated complete key and a moved alias both run shadow only and
   never settle; wrong provider, model, rubric, or effect fixtures remain shadow-only.
 - Adding a calibration row changes the policy identity.
-- Existing Jev thresholds become rows with their current identities, so
-  there is no behavior change.
+- Existing Jev thresholds become explicitly `legacy_unqualified` rows with
+  their current identities and only their existing authority. This exception
+  is not measured qualification; no changed model, deployment, rubric, evidence
+  builder, batch shape or expanded effect scope inherits it.
 
 **D8 — neutral names.**
 - Protocol and schema bumped against the actual merge base.
@@ -536,8 +539,10 @@ These apply to every decision model and every consumer. The previous Jev
 direction carries over unchanged. What changes is that it is no longer
 specific to one vendor.
 
-**A decision replaces an LLM turn or a human interruption. It never adds a
-serial wait to the hot path.**
+**A decision should replace an LLM turn or a human interruption, not add
+unmeasured serial review.** Authorization inference necessarily precedes its
+held effect; measure that critical-path cost. Independent eligible work must
+not wait for an unrelated decision.
 
 - **Code owns authority; the model answers semantic questions code can't.**
   - Classify every action by effect: local read, recoverable workspace
@@ -945,6 +950,130 @@ idempotent tools, cancellation or bounded resources.
 
 
 
+## Provider-neutral safety contract (research update, 2026-10-16)
+
+The following proposed safety contract refines the planned DM contracts, not
+shipped behavior or new implementation authority. Its Off, deployment identity
+and qualification requirements need explicit owner acceptance before they alter
+legacy Jev behavior. Research and PR319 source-review evidence are in
+[`../research/decision-models.md`](../research/decision-models.md).
+
+### Separate prediction, policy and execution
+
+The stable seam is **bounded questions over evidence**, not Jev JSON and
+not a model's `approve` token. A provider returns observations; deterministic
+QQ policy produces an action-scoped disposition. The executor alone may act.
+
+1. Classify effects in code and apply current hard denies, mode ceilings,
+   workspace/host boundaries, grants and budgets. Already-allowed work skips
+   inference. Always-human effects and explicit user questions skip models.
+2. For an eligible hold, assemble a bounded evidence snapshot: effective user
+   task and steering, child restrictions, exact proposed action, relevant
+   persisted results, provenance and explicit omissions. Separate trusted
+   instructions from untrusted tool/model text; delimiters alone do not stop
+   injection. Sensitive evidence requires consent to that provider's egress.
+3. Ask versioned atomic relevance, constraint-conflict and evidence-sufficiency
+   questions. Validate question IDs, exact labels, finite probabilities, mass,
+   winner consistency, precision and required capabilities. A high score is
+   neither permission nor an empirical error bound.
+4. Interpret with the calibrated complete key and policy identity. The existing
+   four-part key remains necessary; bind its calibration artifact additionally
+   to serving endpoint/deployment revision, adapter/contract version, evidence
+   builder version and batching shape. Different hosting, quantization or a
+   changed fine-tune must not inherit qualification merely by echoing a model
+   name. Missing immutable revision evidence permits shadow/advisory only.
+5. Persist an action-bound resolution, then atomically revalidate task,
+   authorization, trust/config epochs, cancellation, deadline, action digest
+   and relevant workspace preconditions before execution. Stale evidence
+   invalidates the result. Approval is not a general session grant or a cache
+   entry for a superficially similar command.
+
+The result algebra distinguishes `eligible`, `concern`, `missing_evidence`,
+`uncertain`, `unsupported`, `unavailable`, and `stale`. Only eligible plus a
+current deterministic policy check can settle a hold. Concern is not silently
+converted to an authoritative deny in modes whose existing contract treats it
+as advice. Errors never become approval.
+
+### Protocol families, not vendor branches
+
+Keep the accepted `qq-provider` / `qq-decision` split. The provider layer owns
+protocol encodings, envelopes, authentication, transport and nullable usage;
+`qq-decision` owns rubric-specific validation and interpretation. Use a shared
+System One codec where fixtures establish compatibility, with small transport
+adapters for different envelopes. Cloudflare Workers AI's account-scoped URL,
+auth audience and response envelope are not a TypeSafe endpoint substitution.
+OpenAI remains a distinct adapter only when its primary contract is verified.
+No policy branches on provider names. No arbitrary plugin registry is needed.
+
+Capabilities must describe evidence preservation as well as question kinds:
+context/token limits including question overhead, truncation behavior and its
+observability, immutable model/deployment identity, distribution fidelity,
+media limits, and pricing/usage uncertainty. Reject oversized input locally;
+never silently truncate or fetch provider-requested URLs. For a service that
+truncates automatically, prove conservative token admission or an explicit
+non-truncating mode before authorization; otherwise shadow only. Multimodal
+support is declared without adding media consumers before they are needed.
+Winner-only providers remain useful for supported advisory roles; do not
+fabricate probability distributions to satisfy an authority consumer.
+
+### Fewer interruptions without optimistic trust
+
+A successful automatic decision stays in the transcript/ledger, not a modal.
+Only durable `human-required` takes focus. A concern may return once to the
+same agent to propose a safer action or gather already-authorized evidence;
+the model cannot authorize its own missing-evidence read. Repeated unchanged
+attempts, unresolved disagreement and unavailable fallback escalate once with
+an explanation. Do not retry different models until one says yes; multi-model
+agreement is correlated evidence, not proof or a substitute for calibration.
+
+Proposed for owner acceptance: Off immediately blocks new admissions and
+invalidates pending authority results in active sessions and owned children;
+it also suppresses consumers in later runs. It does not undo a started effect
+or erase receipts and existing explicit grants. JV9/A9 must adopt and prove
+this behavior before enabling its control; the older later-run-only acceptance
+is not sufficient for this proposed contract. Keep consumer activation separate from model selection. Unknown
+spend, bounded queues, cancellation, and durable uncertain-send markers remain
+mandatory even for free/local models.
+
+### Qualification and delivery
+
+Existing pinned Jev behavior is a compatibility baseline, not a newly measured
+calibration row. Keep DM2/DM3 extraction behavior-identical; any enforcement
+change is a separate explicitly approved policy migration. This resolves the
+tension between D7's legacy rows and shadow-only admission: label old rows
+`legacy_unqualified`; they may retain only the existing Jev configuration,
+requests, dispositions and policy identities preserved by extraction, including
+its existing authority. They do not qualify another deployment/model, evidence
+builder, batching shape, rubric, expanded effect scope or the JV8 pilot. New
+restrictions on that legacy path require a separately approved policy migration.
+
+Extend D1/D2 fixtures to cover Clef's hosted envelope, silent truncation,
+missing/mismatched revision, nullable/malformed usage and unsupported fidelity.
+Extend A5/A8 to cover steering/revocation races, injection in evidence,
+symlink/file changes after judgment, duplicate and late replies, and partial
+batch success. Batching is an optimization, not permission to reorder dependent
+calls; each action keeps its own digest, evidence and terminal resolution.
+
+Use held-out human-labeled QQ cases, severity-stratified false approvals,
+selective risk versus coverage, Brier/reliability diagnostics and distribution
+shift checks. Human acceptance, a tool exit code and another model's agreement
+are imperfect observations, not automatic truth labels. Zero observed severe
+errors is necessary but not a statistical guarantee: with zero failures in
+`n` independent eligible cases the one-sided 95% upper bound is
+`1 - 0.05^(1/n)` (about `3/n`); clustered agent actions require cluster-aware
+analysis. Predeclare an acceptable bound per effect class and a minimum sample
+before promotion. Drift or a severe false approval disables the affected
+qualification, preserves receipts and falls back to ordinary policy; it never
+automatically promotes a replacement.
+
+Sequence: context and durable hold UX first; behavior-preserving provider and
+consumer extraction; receipts and spend admission; Clef contract fixtures and
+shadow comparison alongside Jev; qualified low-blast-radius pilot. OpenAI's
+availability must not block any of these. Durable reuse and fleet batching
+remain later experiments, not foundation requirements. Measure interruption
+reduction against verified task success, false-approval risk, end-to-end
+latency and cost, not against the number of `approve` labels.
+
 ## Open owner decisions
 
 1. **Accept this plan and close ENG-938 / #193 as superseded.** The crate
@@ -952,7 +1081,9 @@ idempotent tools, cancellation or bounded resources.
    crate" non-goal and accepted ADR-0055.
 2. **Config naming for DM6:** `decision_models` + `decisions`, or keep
    `jev_*` as the primary spelling with a `decision_model` key.
-3. **Immediate stop vs. next-run Off** semantics for JV9.
+3. **Immediate stop vs. next-run Off** semantics for JV9: the proposed safety
+   contract blocks admissions and invalidates pending authority immediately;
+   owner acceptance and runtime proof are still required.
 4. **The pilot's authority and data-egress scope** (JV8), per vendor. OpenAI
    and TypeSafe are different data processors.
 5. **The A13 utility gate,** and whether DM9 picks a recommended model.
