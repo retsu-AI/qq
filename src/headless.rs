@@ -689,15 +689,10 @@ impl AcceptedGoalGuard {
     }
     async fn settle(&mut self) -> Result<(), Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
-            send(
-                sessions,
-                SessionCommand::GoalControl {
-                    session_id: *session_id,
-                    expected: self.expected,
-                    action: qq_protocol::GoalControl::Pause,
-                },
-            )
-            .await?;
+            sessions
+                .pause_goal_if_active(*session_id, self.expected)
+                .await
+                .map_err(|error| Failure::harness(error.to_string()))?;
             self.disarm();
         }
         Ok(())
@@ -715,19 +710,10 @@ impl Drop for AcceptedGoalGuard {
                 return;
             };
             drop(runtime.spawn(async move {
-                if let Err(error) = send(
-                    &sessions,
-                    SessionCommand::GoalControl {
-                        session_id,
-                        expected,
-                        action: qq_protocol::GoalControl::Pause,
-                    },
-                )
-                .await
-                {
+                if let Err(error) = sessions.pause_goal_if_active(session_id, expected).await {
                     report_detached_cleanup_failure(&format!(
                         "accepted goal cleanup failed: {}",
-                        error.message
+                        error
                     ));
                 }
             }));
@@ -3088,37 +3074,95 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_goal_cleanup_preserves_an_existing_input_pause() {
-        let fixture = fixture(|| AskingProvider { turn: Mutex::new(0) }).await;
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
         let opts = options(&fixture.workspace);
-        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
-        let mut events = fixture.sessions.subscribe(SubscribeRequest {
-            workspace_id: handle.workspace_id, after: handle.subscribe_after,
-        }).unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let goal = goal_receipt(send(&fixture.sessions, SessionCommand::SetGoal {
-            session_id: handle.session_id, objective: "ask for the missing input".into(),
-            check: None, budget: Box::new(qq_protocol::GoalBudget {
-                max_goal_runs: 2, deadline_ms: now + 60000, max_total_tokens: None,
-                max_cost_usd_nanos: None, per_run: RunLimits::default(),
-            }), expected: None, replace: false,
-        }).await.unwrap()).unwrap();
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let goal = goal_receipt(
+            send(
+                &fixture.sessions,
+                SessionCommand::SetGoal {
+                    session_id: handle.session_id,
+                    objective: "ask for the missing input".into(),
+                    check: None,
+                    budget: Box::new(qq_protocol::GoalBudget {
+                        max_goal_runs: 2,
+                        deadline_ms: now + 60000,
+                        max_total_tokens: None,
+                        max_cost_usd_nanos: None,
+                        per_run: RunLimits::default(),
+                    }),
+                    expected: None,
+                    replace: false,
+                },
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
         let mut guard = AcceptedGoalGuard::new(fixture.sessions.clone(), &goal);
         let call = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } = events.next().await.unwrap().unwrap().event {
+                if let SessionEvent::ToolApprovalRequested {
+                    tool_call,
+                    question: Some(_),
+                    ..
+                } = events.next().await.unwrap().unwrap().event
+                {
                     break tool_call.id;
                 }
             }
-        }).await.unwrap();
-        let stopped = goal_receipt(send(&fixture.sessions, SessionCommand::GoalControl {
-            session_id: handle.session_id, expected: goal_identity(&goal),
-            action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call },
-        }).await.unwrap()).unwrap();
+        })
+        .await
+        .unwrap();
+        let stopped = goal_receipt(
+            send(
+                &fixture.sessions,
+                SessionCommand::GoalControl {
+                    session_id: handle.session_id,
+                    expected: goal_identity(&goal),
+                    action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call },
+                },
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
         guard.expected = goal_identity(&stopped);
         guard.settle().await.unwrap();
-        let actual = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id,
-            Some(handle.session_id), 1, 1)).await.unwrap().focused.unwrap().goal.unwrap();
-        assert_eq!(actual.status, stopped.status, "cleanup must preserve the actionable input request");
+        let actual = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                1,
+                1,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(
+            actual.status, stopped.status,
+            "cleanup must preserve the actionable input request"
+        );
         assert_eq!(actual.revision, stopped.revision);
         fixture.sessions.close().await.unwrap();
     }

@@ -953,6 +953,37 @@ impl SessionRuntime {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<CommandReceipt, SessionRuntimeError> {
+        self.command_with_pause_condition(command_id, command, false)
+            .await
+    }
+
+    /// Stops an accepted active goal without overwriting a stopped reason.
+    /// The status and identity predicate is checked in the command transaction.
+    pub async fn pause_goal_if_active(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<(), SessionRuntimeError> {
+        let id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        self.command_with_pause_condition(
+            id,
+            SessionCommand::GoalControl {
+                session_id,
+                expected,
+                action: qq_protocol::GoalControl::Pause,
+            },
+            true,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn command_with_pause_condition(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+        pause_goal_only_if_active: bool,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
         }
@@ -1071,6 +1102,7 @@ impl SessionRuntime {
                 command,
                 CommandAdmission {
                     goal_work_present: false,
+                    pause_goal_only_if_active,
                     seed,
                     goal_check_policy,
                     goal_policy,
