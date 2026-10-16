@@ -202,15 +202,15 @@ impl RecordSink {
                 return Err(error);
             }
         }
-        if self.to_stdout && final_code.is_none() {
-            if let Err(error) = stdout
+        if self.to_stdout
+            && final_code.is_none()
+            && let Err(error) = stdout
                 .write_all(line.as_bytes())
                 .and_then(|()| stdout.write_all(b"\n"))
                 .and_then(|()| stdout.flush())
-            {
-                self.stdout_failed = true;
-                return Err(error);
-            }
+        {
+            self.stdout_failed = true;
+            return Err(error);
         }
         Ok(())
     }

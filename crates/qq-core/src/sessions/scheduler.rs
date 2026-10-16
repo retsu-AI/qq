@@ -48,24 +48,27 @@ pub(super) async fn schedule_runs(
         }
         // Serialize the last autonomous admission with the host's drain
         // boundary. Already accepted work and its children remain claimable.
-        let lifecycle = inner.lifecycle.read().await;
-        next_goal_wake = if inner.store.has_goals() && !inner.draining.load(Ordering::Acquire) {
-            match inner.store.drive_goals(now_ms()).await {
-                Ok(pass) => {
-                    for cursor in pass.cursors {
-                        inner.notify(cursor);
+        next_goal_wake = if inner.store.has_goals() {
+            let _lifecycle = inner.lifecycle.read().await;
+            if inner.draining.load(Ordering::Acquire) {
+                None
+            } else {
+                match inner.store.drive_goals(now_ms()).await {
+                    Ok(pass) => {
+                        for cursor in pass.cursors {
+                            inner.notify(cursor);
+                        }
+                        pass.next_wake
                     }
-                    pass.next_wake
-                }
-                Err(_) => {
-                    inner.failed.send_replace(true);
-                    break;
+                    Err(_) => {
+                        inner.failed.send_replace(true);
+                        break;
+                    }
                 }
             }
         } else {
             None
         };
-        drop(lifecycle);
         // Each depth is claimed from its own queue against its own permit
         // pool; see `child_permits` for why sharing a pool between a depth
         // and its parents would deadlock parents awaiting their children.
