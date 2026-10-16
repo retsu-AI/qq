@@ -960,3 +960,8 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 
 - Rebased #331 onto #330's current-main integration. Preserve all73 remaining sleep sites and main's lowered ceiling; G4 production source is unchanged apart from upstream main auth integration. Final-head gate follows; prior2733-pass report identifies old e72a82cc exactly.
 - G5 started2026-10-16T06:14:26Z on qualified e72a82cc with openai-codex/gpt-6.1-sol subscription only, no paid API fallback:4h deadline,8runs,64turns/250000tokens/30min per run. Private supervisor captures exit/usage and terminal state. Five real recovery tests pass; first run stopped after rejected compaction, next attempt compacted and retained15checklist items. Multi-hour/three-compaction acceptance remains open. No live raw content or credentials are committed.
+
+### 2026-10-16 — G4 rendered guide anchor
+
+- Hosted Linux, Windows and wasm checks pass for #330/#331. #331 website build exposed one bad headless-guide link to #qq-goal-; reproduced locally with the unchanged rendered-site checker and inspected actual CLI heading id #qq-goal. Corrected the guide source only.
+- Full local nub site build now succeeds:15pages and550resolved internal links. Existing check-links gate catches the regression; no gate or generated site output changed. Resulting-head repository/push gate follows.

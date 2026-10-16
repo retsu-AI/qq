@@ -206,7 +206,7 @@ unspecified budget and check fields. `--replace` starts a replacement with
 workspace defaults. `resume` and `clear` are also available. These commands
 use authenticated local server discovery and leave store ownership with the
 server. They return the goal snapshot (`show`) or command receipt (mutations),
-without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal-).
+without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal).
 
 ## In CI
 
