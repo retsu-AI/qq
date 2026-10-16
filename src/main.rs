@@ -192,8 +192,16 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 /// maps every failure to a distinguishable exit code: 0 success, 1 task or
 /// model failure, 2 invalid configuration, 3 timeout or budget exhaustion,
 /// 4 harness or persistence failure, 130 interrupted.
-async fn close_headless(sessions: &qq_core::SessionRuntime, goal: bool) -> Result<(), qq_core::SessionRuntimeError> {
-    if goal { sessions.close_when_idle().await } else { sessions.close().await }
+async fn close_headless(
+    sessions: &qq_core::SessionRuntime,
+    goal: bool,
+    _interrupt: impl std::future::Future<Output = ()>,
+) -> Result<(), qq_core::SessionRuntimeError> {
+    if goal {
+        sessions.close_when_idle().await
+    } else {
+        sessions.close().await
+    }
 }
 
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
@@ -249,7 +257,11 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             drop(stdout);
             drop(stderr);
-            match close_headless(&sessions, is_goal).await {
+            match close_headless(&sessions, is_goal, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+            {
                 Ok(()) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("error: could not close the session runtime: {error}");

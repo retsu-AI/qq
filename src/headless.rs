@@ -3380,132 +3380,171 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_goal_adopts_active_work_and_leaves_foreign_runs_running() {
-        let fixture = fixture(|| HangingProvider).await;
-        let base = options(&fixture.workspace);
-        let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
-            .await
-            .unwrap();
-        let other = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
-            .await
-            .unwrap();
-        let mut events = fixture
-            .sessions
-            .subscribe(SubscribeRequest {
-                workspace_id: owner.workspace_id,
-                after: other.subscribe_after,
-            })
-            .unwrap();
-        let foreign = send(
-            &fixture.sessions,
-            SessionCommand::SubmitPrompt {
-                session_id: other.session_id,
-                input: vec![InputPart::text("independent work")],
-                limits: RunLimits::default(),
-                correlation: Default::default(),
-                output: None,
-            },
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::PromptQueued {
-            run_id: foreign_id, ..
-        } = foreign.outcome
-        else {
-            panic!("foreign prompt")
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let goal = goal_receipt(
-            send(
+        for interrupt_on_close in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let other = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut events = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: owner.workspace_id,
+                    after: other.subscribe_after,
+                })
+                .unwrap();
+            let foreign = send(
                 &fixture.sessions,
-                SessionCommand::SetGoal {
-                    session_id: owner.session_id,
-                    objective: "existing active objective".into(),
-                    check: None,
-                    budget: Box::new(qq_protocol::GoalBudget {
-                        max_goal_runs: 2,
-                        deadline_ms: now + 60000,
-                        max_total_tokens: None,
-                        max_cost_usd_nanos: None,
-                        per_run: RunLimits::default(),
-                    }),
-                    expected: None,
-                    replace: false,
+                SessionCommand::SubmitPrompt {
+                    session_id: other.session_id,
+                    input: vec![InputPart::text("independent work")],
+                    limits: RunLimits::default(),
+                    correlation: Default::default(),
+                    output: None,
                 },
             )
             .await
-            .unwrap(),
-        )
-        .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut own_started = false;
-            let mut other_started = false;
-            while !own_started || !other_started {
-                let event = events.next().await.unwrap().unwrap();
-                if matches!(event.event, SessionEvent::RunStarted { .. }) {
-                    own_started |= event.session_id == owner.session_id;
-                    other_started |= event.session_id == other.session_id;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        let mut options = base;
-        options.session = Some(owner.session_id);
-        let mut request = goal_request();
-        request.objective = None;
-        request.max_runs = None;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_goal(
-            &fixture.sessions,
-            options,
-            request,
-            std::future::ready(()),
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
-        let records = parse_records(&String::from_utf8(stdout).unwrap());
-        let finished = &records.last().unwrap()["goal"];
-        assert_eq!(
-            finished["goal_id"],
-            serde_json::to_value(goal.goal_id).unwrap()
-        );
-        assert_eq!(finished["objective"], goal.objective);
-        assert_eq!(
-            finished["budget"],
-            serde_json::to_value(&goal.budget).unwrap()
-        );
-        assert_eq!(
-            records
-                .iter()
-                .filter(|record| record["type"] == "goal_run")
-                .count(),
-            1
-        );
-        assert_eq!(
-            fixture
-                .sessions
-                .run_snapshot(owner.workspace_id, other.session_id, foreign_id)
-                .await
+            .unwrap();
+            let CommandOutcome::PromptQueued {
+                run_id: foreign_id, ..
+            } = foreign.outcome
+            else {
+                panic!("foreign prompt")
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .status,
-            qq_protocol::RunStatus::Running
-        );
-        let closing = crate::close_headless(&fixture.sessions, true);
-        tokio::pin!(closing);
-        assert!(futures_util::poll!(closing.as_mut()).is_pending());
-        let inspect_and_finish = async {
-            assert_eq!(fixture.sessions.run_snapshot(owner.workspace_id, other.session_id, foreign_id)
-                .await.unwrap().status, qq_protocol::RunStatus::Running);
-            request_cancel(&fixture.sessions, foreign_id).await.unwrap();
-        };
-        let (closed, ()) = tokio::join!(closing, inspect_and_finish);
-        closed.unwrap();
+                .as_millis() as u64;
+            let goal = goal_receipt(
+                send(
+                    &fixture.sessions,
+                    SessionCommand::SetGoal {
+                        session_id: owner.session_id,
+                        objective: "existing active objective".into(),
+                        check: None,
+                        budget: Box::new(qq_protocol::GoalBudget {
+                            max_goal_runs: 2,
+                            deadline_ms: now + 60000,
+                            max_total_tokens: None,
+                            max_cost_usd_nanos: None,
+                            per_run: RunLimits::default(),
+                        }),
+                        expected: None,
+                        replace: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut own_started = false;
+                let mut other_started = false;
+                while !own_started || !other_started {
+                    let event = events.next().await.unwrap().unwrap();
+                    if matches!(event.event, SessionEvent::RunStarted { .. }) {
+                        own_started |= event.session_id == owner.session_id;
+                        other_started |= event.session_id == other.session_id;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let mut options = base;
+            options.session = Some(owner.session_id);
+            let mut request = goal_request();
+            request.objective = None;
+            request.max_runs = None;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_goal(
+                &fixture.sessions,
+                options,
+                request,
+                std::future::ready(()),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
+            assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let finished = &records.last().unwrap()["goal"];
+            assert_eq!(
+                finished["goal_id"],
+                serde_json::to_value(goal.goal_id).unwrap()
+            );
+            assert_eq!(finished["objective"], goal.objective);
+            assert_eq!(
+                finished["budget"],
+                serde_json::to_value(&goal.budget).unwrap()
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record["type"] == "goal_run")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fixture
+                    .sessions
+                    .run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+                    .await
+                    .unwrap()
+                    .status,
+                qq_protocol::RunStatus::Running
+            );
+            let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+            let closing = crate::close_headless(&fixture.sessions, true, async {
+                if interrupt_on_close {
+                    interrupted.await.unwrap();
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            });
+            tokio::pin!(closing);
+            assert!(futures_util::poll!(closing.as_mut()).is_pending());
+            let inspect_and_finish = async {
+                assert_eq!(
+                    fixture
+                        .sessions
+                        .run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+                        .await
+                        .unwrap()
+                        .status,
+                    qq_protocol::RunStatus::Running
+                );
+                if interrupt_on_close {
+                    interrupt.send(()).unwrap();
+                    loop {
+                        let event = events.next().await.unwrap().unwrap();
+                        if let SessionEvent::RunFinished {
+                            run_id, outcome, ..
+                        } = event.event
+                            && run_id == foreign_id
+                        {
+                            assert!(matches!(outcome, qq_protocol::RunOutcome::Cancelled));
+                            break;
+                        }
+                    }
+                } else {
+                    request_cancel(&fixture.sessions, foreign_id).await.unwrap();
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(closing, inspect_and_finish)
+            })
+            .await;
+            if result.is_err() {
+                fixture.sessions.close().await.unwrap();
+            }
+            let (closed, ()) = result
+                .expect("runtime close must react to the new interrupt after the goal settles");
+            closed.unwrap();
+        }
     }
 
     #[derive(Clone, Default)]

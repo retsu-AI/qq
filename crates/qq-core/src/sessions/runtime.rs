@@ -1426,7 +1426,10 @@ impl SessionRuntime {
                 return self.close().await;
             }
             drop(lifecycle);
-            settlements.changed().await.map_err(|_| SessionRuntimeError::Unavailable)?;
+            settlements
+                .changed()
+                .await
+                .map_err(|_| SessionRuntimeError::Unavailable)?;
         }
     }
 
