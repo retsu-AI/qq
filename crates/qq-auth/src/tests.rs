@@ -2837,7 +2837,7 @@ fn codex_refresh_preserves_an_explicit_private_file_backend() {
         CredentialBackend::File
     );
     assert_eq!(
-        fs::metadata(store.paths().codex_lock_file())
+        fs::metadata(store.paths().oauth_lock_file(OAuthProvider::OpenAiCodex))
             .unwrap()
             .permissions()
             .mode()
