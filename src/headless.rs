@@ -3916,52 +3916,195 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_goal_interrupt_reconciles_durable_achievement() {
-        let fixture = fixture(|| GoalVerdictProvider {
-            blocked: false,
-            turns: Mutex::new(0),
-        })
-        .await;
-        let base = options(&fixture.workspace);
-        let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+        struct RefusedLoad(qq_protocol::RunFailureKind);
+        impl RuntimeLoader for RefusedLoad {
+            fn load(&self, _: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let kind = self.0;
+                Box::pin(std::future::ready(Err(RuntimeLoadError {
+                    kind,
+                    message: "recover this configuration or credential".into(),
+                })))
+            }
+        }
+        for failure in [
+            None,
+            Some(qq_protocol::RunFailureKind::Authentication),
+            Some(qq_protocol::RunFailureKind::Configuration),
+        ] {
+            let loader: Arc<dyn RuntimeLoader> = match failure {
+                Some(kind) => Arc::new(RefusedLoad(kind)),
+                None => Arc::new(ProviderLoader(|| GoalVerdictProvider {
+                    blocked: false,
+                    turns: Mutex::new(0),
+                })),
+            };
+            let fixture = fixture_with_loader(loader).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut observer = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id,
+                    after: handle.subscribe_after,
+                })
+                .unwrap();
+            let stopped = Arc::new(Mutex::new(None));
+            let observed = Arc::clone(&stopped);
+            let interrupt = async move {
+                loop {
+                    let event = observer.next().await.unwrap().unwrap();
+                    if let SessionEvent::GoalUpdated { goal } = event.event
+                        && goal.status != qq_protocol::GoalStatus::Active
+                    {
+                        *observed.lock().unwrap() = Some((goal.status.clone(), goal.revision));
+                        break;
+                    }
+                }
+            };
+            let mut opts = base;
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    request,
+                    interrupt,
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
             .await
             .unwrap();
-        let mut observer = fixture
-            .sessions
-            .subscribe(SubscribeRequest {
-                workspace_id: handle.workspace_id,
-                after: handle.subscribe_after,
-            })
-            .unwrap();
-        let interrupt = async move {
-            loop {
-                let event = observer.next().await.unwrap().unwrap();
-                if matches!(event.event, SessionEvent::GoalUpdated { goal }
-                    if goal.status == qq_protocol::GoalStatus::Achieved)
-                {
-                    break;
-                }
+            assert_eq!(
+                code,
+                if failure.is_none() { 0 } else { 6 },
+                "{failure:?}: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            assert_eq!(records.last().unwrap()["type"], "goal");
+            let (status, revision) = stopped.lock().unwrap().take().unwrap();
+            assert_eq!(
+                records.last().unwrap()["goal"]["status"],
+                serde_json::to_value(&status).unwrap()
+            );
+            assert_eq!(records.last().unwrap()["goal"]["revision"], revision);
+            match failure {
+                None => assert_eq!(status, qq_protocol::GoalStatus::Achieved),
+                Some(qq_protocol::RunFailureKind::Authentication) => assert!(matches!(
+                    status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Authentication { .. },
+                        }
+                    }
+                )),
+                Some(_) => assert!(matches!(
+                    status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Configuration { .. },
+                        }
+                    }
+                )),
             }
-        };
-        let mut opts = base;
-        opts.session = Some(handle.session_id);
-        let mut request = goal_request();
-        request.max_runs = Some(3);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_goal(
-            &fixture.sessions,
-            opts,
-            request,
-            interrupt,
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
-        let records = parse_records(&String::from_utf8(stdout).unwrap());
-        assert_eq!(records.last().unwrap()["type"], "goal");
-        assert_eq!(records.last().unwrap()["status"], "achieved");
-        fixture.sessions.close().await.unwrap();
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_refused_check_consent_is_invalid_configuration() {
+        struct DeniedCheck;
+        impl qq_core::WorkspaceGrantAuthority for DeniedCheck {
+            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
+                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
+            }
+            fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
+                Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
+            }
+            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
+                panic!("refused check cannot promote grants")
+            }
+            fn validate_goal_check(&self, _: &Path, _: &str) -> qq_core::GoalCheckPolicyFuture {
+                Box::pin(std::future::ready(Err(
+                    qq_core::GoalCheckPolicyError::ManagedDenied,
+                )))
+            }
+        }
+        for command in ["sudo printf checked", "printf checked"] {
+            let mut fixture = fixture(|| HangingProvider).await;
+            fixture.sessions.close().await.unwrap();
+            let path = fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sessions.sqlite3");
+            fixture.sessions = SessionRuntime::open(
+                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(DeniedCheck)),
+                Arc::new(ProviderLoader(|| HangingProvider)),
+            )
+            .await
+            .unwrap();
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.check = Some(command.into());
+            request.check_approval = Some(qq_protocol::GoalCheckScope::ForGoal);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_goal(
+                &fixture.sessions,
+                opts,
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
+            assert_eq!(code, 2, "{command}: {}", String::from_utf8_lossy(&stderr));
+            assert!(!stderr.is_empty());
+            let goal = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap()
+                .goal
+                .unwrap();
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::CheckApproval
+                    },
+                }
+            ));
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Pending)
+            );
+            assert_eq!(goal.counters.runs, 0);
+            assert_eq!(goal.counters.audits, 0);
+            assert!(goal.pending_run_id.is_none());
+            fixture.sessions.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
