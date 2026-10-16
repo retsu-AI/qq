@@ -1,6 +1,6 @@
 # G5 — subscription-only live goal evaluation
 
-Status: first trial settled; second trial running; G5 acceptance is not established. ENG-1065 / ENG-809.
+Status: both trials settled; G5 acceptance is not established. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
 
@@ -101,7 +101,7 @@ own source and actual outcomes.
 
 Started 2026-10-16T06:56:09.355934+00:00
 on source `07aab1d15bdb142a0c11f8510bc41cf3a1ad3e61` and binary SHA256
-`9593d83cad54b216f69f369db5c1565fc854a97e2815eb1eb2ac9c1da37bc437`. This is the final qualified G4 source from #331.
+`9593d83cad54b216f69f369db5c1565fc854a97e2815eb1eb2ac9c1da37bc437`. This is the qualified G4 snapshot used for this trial; subsequent fixes are recorded below.
 The task closes the foreground sponsored-family concurrency acceptance gaps,
 using reachable interleavings, explicit channel barriers, meaningful red/green
 checks and a final supported report. Implementation changes require a demonstrated
@@ -115,5 +115,61 @@ The larger per-run token allowance gives a useful work run and its summaries
 room to finish, unlike the first trial's restrictive250000-token allowance.
 
 The exact authorized route remains `openai-codex/gpt-6.1-sol`, subscription only,
-with no paid API fallback. Final duration, compactions, code/test results,
-terminal state and usage are pending. Neither trial is currently a G5 pass.
+with no paid API fallback. The initial bounds and the final results below describe the same goal, including its recovery. Neither trial is a G5 pass.
+
+
+## Second trial recovery and outcome
+
+The 32768-token context setting was too small for fixed repository/tool context
+plus the 8192-token output reserve. Three work runs failed closed when compaction
+could not fit the remaining context; the goal stopped as `blocked/repeated_failure`.
+This configuration failure is not evidence of a production context-window defect.
+The evaluator restored the usable 65536-token setting and resumed **the same goal**
+through the real server CLI. Revision advanced to2; the three spent runs, eight-run
+cap and original deadline were retained. No budget was reset or extended.
+
+Finished 2026-10-16T07:21:18.264271+00:00, **1508.908 seconds (25 minutes)**
+after starting. The authoritative goal-update stream reports **achieved**, all
+**5 checklist items done**, **5 charged runs** and **1 independent audit**.
+The resumed server exited cleanly with code0. This resumed HTTP/SSE path did not
+emit a new foreground terminal JSONL record; the earlier blocked CLI record is
+not presented as its final revision's result.
+
+- All **69** observed completed model turns used `openai-codex/gpt-6.1-sol`.
+- Exactly **2 successful compactions** retained the same five checklist item IDs
+  and texts, SHA256 `0e973f66ed0f897e6cd82a54c69ba8d7c2c2bc2616342898975c57ddba6ac461`.
+  Both occurred before the explicit resume; no third compaction is claimed.
+- Goal counters match the observed usage sum: **2282927 fresh input +409472
+  cache-read input +28453 output tokens**; cache-write input0. Estimated dollar
+  cost remains unknown (`null`). **Paid API spend: USD0**; subscription-amortized
+  dollar value remains unknown.
+
+### Useful result and independently reproduced defect
+
+The goal produced a seven-row foreground acceptance test covering interrupt,
+external pause, parent cancellation, clear/replace during interrupt drain, output
+failure and owner drop. It holds an actually admitted child's execution
+preparation through bounded channels, verifies retained cleanup ownership,
+child-before-parent durable finish, unrelated-run isolation and ordered direct-run
+records before a single final goal record. Clear/replace rows test mutations
+during interrupt drain, not standalone external clear/replace termination.
+
+It demonstrated a G4 bug: an external pause increments the goal revision, while
+the foreground loop accepted only its original exact revision and could hang
+after the owned family finished. The repair observes newer stopped revisions of
+the same goal and uses the observed exact identity for settlement and cleanup;
+replacement goal IDs remain excluded. It belongs in the originating #331.
+
+The evaluator independently copied the tests onto #331 while retaining its
+original production code: nextest `f96d48c8` failed with
+`pause: held-family acceptance hung`. The repair and all foreground regressions
+are qualified separately in #331. Independent read-only review approved the
+restored fix and test. The live task also demonstrated a temporary early-drain
+mutation failing the direct-run ordering assertion, restored the source exactly,
+and passed its affected-package gate (**422 tests,2 deliberate skips**) and
+real-binary loopback smoke (**8/8**). No mutation ships.
+
+This was useful real subscription-backed implementation work and reached a
+verified terminal state. It still does **not** meet the multi-hour requirement
+or the at-least-three-compactions requirement. G5 remains open; no delay or
+artificial work was added to change that outcome.

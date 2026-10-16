@@ -1082,3 +1082,9 @@ publication and thread resolution remain pending.
 - #330 b750d347 passes2701/2701 plus doctests/Clippy/minimal211 and smoke6/6; #331 07aab1d1 passes2747/2747 and the same gates plus smoke8/8. Both heads are published and conflict-free; #331 is ready for review again. Hosted CI remains a separate gate.
 - G5 first trial settled in1502.661s with8runs,45model turns,15/15checklist done,1compaction; terminal budget_exhausted/runs, exit8. Independently reconciled192focused passes/1manual ignore. Paid APIUSD0; estimated token dollar value unknown. Multi-hour/three-compaction acceptance is NOT met. Curated record: g-goals-live-eng-1065.md.
 - Second useful subscription-only trial started on07aab1d1 to close foreground concurrency coverage. It stays inside the original four-hour window, uses8runs max and finite3million-token/64turn/30minute per-run limits, with32768-token context. No padding or manufactured compactions; final evidence remains pending. No credentials or raw sessions committed.
+
+### 2026-10-16 — G5 second live result
+
+- Second useful subscription-only goal finished achieved after1508.908seconds,5charged runs and1independent audit; all5checklist items done,69completed model turns,2real compactions. The initial32k context configuration failed three runs; restored64k and resumed the same goal, retaining spent caps and original deadline. No paid API fallback.
+- Demonstrated external-pause foreground hang; independently reproduced and repaired in originating #331 with13foreground regressions passing and read-only review approved. Curated trial evidence records actual token totals, unknown estimated/subscription dollar value, zero paid API spend and explicit HTTP/SSE terminal proof.
+- Both trials remain short of multi-hour/at-least-three-compaction G5 qualification. #332 remains draft/In Progress; no artificial delay or work used to meet duration. Raw transcripts, private homes and session stores remain outside Git.
