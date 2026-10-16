@@ -1037,7 +1037,14 @@ publication can finish after the execution deadline. Unconfirmed cleanup fails
 the runtime closed instead of releasing its session. Runtime preparation reports
 a secret-free stage before each named construction phase. If its deadline
 expires, the terminal message retains the stage observed at expiry and states
-that provider work did not start. The loader still retains ownership until its
+that provider work did not start. Initial loading and selected-route reloading
+signal cooperative cancellation on expiry or explicit cancellation, then await
+the same loader before settlement. The production loader checks before starting
+blocking work and between configuration, credential, provider, tool, and plan
+phases, so cancellation suppresses unnecessary later phases. A cancelled compile
+returns an error from the cache's compile closure rather than publishing an
+incomplete generation. Legacy custom loaders may ignore the additive signal;
+they remain fully drained. The loader still retains ownership until its
 blocking work returns: abandoning a started blocking credential read would only
 detach it and could leave an OS credential prompt active after false terminal
 settlement. The wall-clock bound therefore remains a cancellation request plus

@@ -157,8 +157,10 @@ impl LoadedRuntime {
 pub trait RuntimeLoader: Send + Sync + 'static {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture;
 
-    /// Loads a runtime while reporting secret-free preparation progress. The
-    /// default preserves the embedding contract for loaders without stages.
+    /// Loads a runtime while reporting secret-free preparation progress and
+    /// observing cooperative cancellation at phase boundaries. The default
+    /// preserves the embedding contract for loaders without stages; owners
+    /// await these noncooperating loaders before terminal settlement too.
     fn load_with_progress(
         &self,
         request: RuntimeLoadRequest,

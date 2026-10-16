@@ -1468,6 +1468,7 @@ impl RuntimeFactory {
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
+        preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
         let workspace = qq_config::canonical_working_directory(request.cwd())?;
@@ -1519,15 +1520,14 @@ impl RuntimeFactory {
     ) -> Result<CompiledGeneration, RuntimeBuildError> {
         // The credential index is fingerprinted before secrets are read so a
         // rotation racing this compile is observed on the next lookup.
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::ReadingCredentialMetadata);
-        }
+        preparation_phase(
+            progress,
+            qq_core::RuntimeLoadStage::ReadingCredentialMetadata,
+        )?;
         let credential_index =
             SourceFingerprint::capture(self.inner.credentials.paths().index_file());
         let epoch = self.inner.credentials.epoch()?;
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
-        }
+        preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingConfiguration)?;
         let snapshot = self.load(request)?;
         let mut configuration_sources = vec![snapshot.sources().clone()];
         // A named profile supplies defaults beneath the request's explicit
@@ -1626,6 +1626,7 @@ impl RuntimeFactory {
                 {
                     overrides = overrides.with_approval_delegate(setting);
                 }
+                preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingConfiguration)?;
                 let snapshot = self.load(&request.clone().with_overrides(overrides))?;
                 if !configuration_sources.contains(snapshot.sources()) {
                     configuration_sources.push(snapshot.sources().clone());
@@ -1633,6 +1634,7 @@ impl RuntimeFactory {
                 snapshot
             }
         };
+        preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let resolved_model = self.resolved_model_for_snapshot(&snapshot)?;
         // How far the empty-truncation recovery may raise a turn's cap: the
         // catalog limit, never past a managed policy ceiling.
@@ -1745,11 +1747,10 @@ impl RuntimeFactory {
             .providers()
             .get(provider_id)
             .ok_or_else(|| RuntimeBuildError::UnknownProvider(provider_id.to_owned()))?;
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::CompilingProvider);
-        }
+        preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let (recipe, descriptor) =
             self.prepare_provider(provider_id, snapshot.model().model(), provider_config)?;
+        preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
         let provider = self.inner.providers.compile(recipe)?;
         let spawn_model_routes = self
             .model_options_for_plan(&snapshot)
@@ -1789,15 +1790,17 @@ impl RuntimeFactory {
             profile = profile.with_reasoning_effort(effort);
         }
         if snapshot.jev_routing() {
+            preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingProvider)?;
             profile = profile.with_task_router(Arc::new(
                 routing::TypeSafeTaskRouter::from_snapshot(self, &snapshot, model_pinned)?,
             ));
         }
 
         if snapshot.jev_review() != qq_config::JevReviewMode::Off {
-            if let Some(progress) = progress {
-                progress.set(qq_core::RuntimeLoadStage::ResolvingCheckpointCredential);
-            }
+            preparation_phase(
+                progress,
+                qq_core::RuntimeLoadStage::ResolvingCheckpointCredential,
+            )?;
             profile = profile.with_checkpoint_reviewer(Arc::new(
                 TypeSafeCheckpointReviewer::from_credentials(
                     &self.inner.credentials,
@@ -1839,9 +1842,7 @@ impl RuntimeFactory {
             mcp: None,
             runtime: crate::plan::RuntimeSwitches { output_ceiling },
         };
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::LoadingTools);
-        }
+        preparation_phase(progress, qq_core::RuntimeLoadStage::LoadingTools)?;
         if let Some(wired) = self.inner.mcp.registry_for_snapshot(
             &self.inner.credentials,
             epoch,
@@ -1856,13 +1857,13 @@ impl RuntimeFactory {
                 .with_host(HostSnapshot::capture_blocking(wired.registry))
                 .with_mcp_servers(wired.servers);
         }
-        if let Some(progress) = progress {
-            progress.set(qq_core::RuntimeLoadStage::CompilingPlan);
-        }
+        preparation_phase(progress, qq_core::RuntimeLoadStage::CompilingPlan)?;
         let plan = CompiledAgentPlan::compile_blocking(profile)?;
         let mut sources = Vec::with_capacity(plan.instruction_sources().len() + 1);
         sources.push(credential_index);
         sources.extend(plan.instruction_sources().iter().cloned());
+        // Fail inside the cache's compile closure, before publishing a generation.
+        preparation_phase(progress, qq_core::RuntimeLoadStage::Complete)?;
         Ok(CompiledGeneration {
             plan,
             sources,
@@ -2501,9 +2502,18 @@ impl RuntimeLoader for RuntimeFactory {
     ) -> RuntimeLoadFuture {
         let factory = self.clone();
         Box::pin(async move {
+            if progress.is_cancelled() {
+                return Err(RuntimeLoadError {
+                    kind: RunFailureKind::Server,
+                    message: RuntimeBuildError::PreparationCancelled.to_string(),
+                });
+            }
             let completed = progress.clone();
             let build = tokio::task::spawn_blocking(move || {
-                progress.set(qq_core::RuntimeLoadStage::CanonicalizingWorkspace);
+                preparation_phase(
+                    Some(&progress),
+                    qq_core::RuntimeLoadStage::CanonicalizingWorkspace,
+                )?;
                 let requested_workspace = PathBuf::from(&request.workspace);
                 let workspace = std::fs::canonicalize(&requested_workspace).map_err(|_| {
                     ConfigError::InvalidWorkingDirectory {
@@ -2516,7 +2526,10 @@ impl RuntimeLoader for RuntimeFactory {
                     }
                     .into());
                 }
-                progress.set(qq_core::RuntimeLoadStage::LoadingConfiguration);
+                preparation_phase(
+                    Some(&progress),
+                    qq_core::RuntimeLoadStage::LoadingConfiguration,
+                )?;
                 let mut load =
                     factory.request_for_workspace(&workspace, request.model.max_output_tokens)?;
                 let mut overrides = load.overrides().clone();
@@ -3894,8 +3907,24 @@ fn parse_typesafe_checkpoint(value: &serde_json::Value) -> CheckpointVerdict {
     }
 }
 
+/// Checks cancellation before starting the next blocking preparation phase.
+fn preparation_phase(
+    progress: Option<&qq_core::RuntimeLoadProgress>,
+    stage: qq_core::RuntimeLoadStage,
+) -> Result<(), RuntimeBuildError> {
+    if let Some(progress) = progress {
+        if progress.is_cancelled() {
+            return Err(RuntimeBuildError::PreparationCancelled);
+        }
+        progress.set(stage);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum RuntimeBuildError {
+    #[error("runtime preparation was cancelled")]
+    PreparationCancelled,
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -4025,7 +4054,8 @@ impl RuntimeBuildError {
             | Self::UnsupportedApi { .. }
             | Self::UnrepresentableOutputLimit { .. } => RunFailureKind::ProviderConfiguration,
             Self::Plan(_) => RunFailureKind::Configuration,
-            Self::McpBridge(qq_harness::McpBuildError::CacheUnavailable)
+            Self::PreparationCancelled
+            | Self::McpBridge(qq_harness::McpBuildError::CacheUnavailable)
             | Self::CacheUnavailable
             | Self::PlanCacheFull
             | Self::PlanCacheShutDown
@@ -8803,6 +8833,93 @@ mod tests {
         )
         .unwrap();
         fixture.factory_with_credentials(credentials)
+    }
+
+    struct CancellingKeyring {
+        inner: MemoryKeyring,
+        progress: qq_core::RuntimeLoadProgress,
+        reads: AtomicU64,
+    }
+
+    impl KeyringBackend for CancellingKeyring {
+        fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.progress.cancel();
+            self.inner.get(name)
+        }
+        fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+            self.inner.set(name, secret)
+        }
+        fn remove(&self, name: &str) -> Result<(), KeyringError> {
+            self.inner.remove(name)
+        }
+    }
+
+    #[test]
+    fn preparation_cancellation_suppresses_later_phases_and_cache_publication() {
+        let fixture = RuntimeFixture::new();
+        let progress = qq_core::RuntimeLoadProgress::default();
+        let keyring = Arc::new(CancellingKeyring {
+            inner: MemoryKeyring::default(),
+            progress: progress.clone(),
+            reads: AtomicU64::new(0),
+        });
+        let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 1);
+        let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
+        let result =
+            factory.plan_for_profile_with_progress(&request, &AgentProfileId::default(), &progress);
+        assert!(
+            matches!(result, Err(RuntimeBuildError::PreparationCancelled)),
+            "{result:?}"
+        );
+        assert_eq!(
+            progress.stage(),
+            qq_core::RuntimeLoadStage::CompilingProvider
+        );
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
+        let (_, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled);
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 2);
+
+        // Pre-cancelled loads do not even attempt configuration or credential reads.
+        let result = factory.plan_for_profile_with_progress(
+            &fixture.request("invalid"),
+            &AgentProfileId::default(),
+            &progress,
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeBuildError::PreparationCancelled)
+        ));
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn preparation_cancelled_before_poll_skips_blocking_workspace_work() {
+        let fixture = RuntimeFixture::new();
+        let progress = qq_core::RuntimeLoadProgress::default();
+        progress.cancel();
+        let result = fixture
+            .factory()
+            .load_with_progress(
+                RuntimeLoadRequest {
+                    reasoning_effort: None,
+                    checkpoint: None,
+                    routing: None,
+                    approval_delegate: None,
+                    workspace: fixture.path("missing").to_string_lossy().into_owned(),
+                    model: ModelSelection::default(),
+                    profile: AgentProfileId::default(),
+                },
+                progress.clone(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(RuntimeLoadError { message, .. }) if message == "runtime preparation was cancelled")
+        );
+        assert_eq!(progress.stage(), qq_core::RuntimeLoadStage::Starting);
     }
 
     #[test]
