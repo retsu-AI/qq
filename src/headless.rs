@@ -4525,9 +4525,22 @@ mod tests {
         }
         let fixture = fixture(|| LargeText).await;
         let mut opts = options(&fixture.workspace);
-        opts.trace = Some(PathBuf::from("/dev/full"));
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+        let mut events = fixture.sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after: handle.subscribe_after,
+        }).unwrap();
         let mut request = goal_request();
         request.objective = Some("x".repeat(2048));
+        let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
+        send(&fixture.sessions, command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(events.next().await.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; }
+            }
+        }).await.unwrap();
+        opts.session = Some(handle.session_id);
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        request.objective = None;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = tokio::time::timeout(
@@ -4558,6 +4571,13 @@ mod tests {
         assert_eq!(finals[0]["status"], "harness_failure");
         assert_eq!(finals[0]["exit_code"], 4);
         assert!(!stderr.is_empty());
+        let runs: Vec<_> = records.iter().filter(|record| record["type"] == "goal_run").collect();
+        assert_eq!(runs.len(), 1, "error cleanup must emit the settled direct run");
+        assert!(runs[0]["run"]["outcome"].is_object());
+        assert!(finals[0]["goal"]["pending_run_id"].is_null());
+        let durable = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id,
+            Some(handle.session_id), 1, 1)).await.unwrap().focused.unwrap().goal.unwrap();
+        assert_eq!(finals[0]["goal"]["counters"], serde_json::to_value(durable.counters).unwrap());
         fixture.sessions.close().await.unwrap();
     }
 
