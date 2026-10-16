@@ -935,9 +935,11 @@ pub(super) async fn execute(
                 }
                 let workspace = match Workspace::open(Path::new(&claimed.workspace)) {
                     Ok(workspace) => workspace,
-                    Err(_) => {
-                        inner.failed.send_replace(true);
-                        return;
+                    Err(error) => {
+                        break Completion::Process(ProcessResult {
+                            outcome: ProcessOutcome::Failed,
+                            tail: truncate_utf8(format!("check workspace could not open: {error}"), OUTPUT_BYTES),
+                        });
                     }
                 };
                 let cancelled = RunCancellation::new();
