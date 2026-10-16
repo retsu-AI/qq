@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | docs/eng-1065-goal-live-evidence | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
+| G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Fifth trial passes live acceptance; subscription only, no paid API fallback; separate continuation measurements remain incomplete |
 
 ## Entries
 
@@ -1140,3 +1140,20 @@ publication and thread resolution remain pending.
 - #331 edit-event publication repair passes focused26/26 and independent
   review. Restack #332 above it; only two Markdown evidence files differ.
   Keep draft/unqualified pending actual live acceptance and final checks.
+
+
+### 2026-10-16 — G5 live acceptance and stack review
+
+- Fifth trial settled budget_exhausted/exit8 after7951.093seconds,8charged
+  runs,441model turns and20compactions; all12checklist identities survived.
+  Final states6done/2pending/1dropped/3in_progress. Every terminal audit passes.
+- Usage16746945fresh+4194176cache-read+180779output reconciles exactly;
+  paid APIUSD0, estimated/subscription value unknown. Exact subscription model,
+  original bounds and pinned4851fc2e binary preserved; no runner resume/padding.
+- Goals acceptance5 passes; #332 moves to review above independently reviewed
+  #331e84e3552. G2/G3 #330 and G4 #331 remain in review, not merged.
+- Separate local continuation measurement task remains incomplete; its baseline
+  passed, candidate capture was still running at settlement, final comparison
+  and stable-source full verification pending. ENG-1058/H0 are not closed.
+- Curated receipt: g-goals-live-eng-1065.md. Final docs check and publication
+  follow; no runtime source, protocol or schema changes in this three-file delta.

@@ -312,3 +312,55 @@ outer PR repairs continue.
 The supervisor is live. Terminal accounting, actual duration, checklist retention
 and final independent review remain pending. This admission does not establish
 G5 acceptance; #332 remains draft.
+
+
+## Fifth trial — terminal result and live acceptance
+
+Finished **2026-10-16T13:16:12.402844Z**, after **7951.093 seconds
+(132.5 minutes)**. The foreground process exited **8** at the original
+**eight-run cap**, with exactly one final `budget_exhausted` record, last in
+complete valid JSONL. The supervisor is stopped. No runner resume, deadline
+extension, cap reset or artificial duration padding occurred.
+
+- **441 completed model turns** and **20 actual compactions** (11 in-run,
+  9 automatic). All **12 checklist IDs and texts** survived every compaction;
+  final states are **6 done,2 pending,1 dropped,3 in progress**. Budget exhaustion
+  is the terminal outcome; this does not claim the useful task was completed.
+- Authoritative goal usage exactly equals all completed-turn usage:
+  **16746945 fresh input +4194176 cache-read input +180779 output tokens**;
+  cache-write input0. Estimated cost is `null`; **paid API spend USD0**,
+  subscription-amortized value unknown. The sole model route was
+  `openai-codex/gpt-6.1-sol`, subscription only, without a paid API fallback.
+- The original four-hour deadline, eight-run cap and per-run
+  64turn/3000000token/60minute limits are unchanged. Runtime source remains
+  `4851fc2e755f7997b3e0cd5086653a64286e69bc`; the launch binary hash still
+  matches, and its embedded version identifies that source. Later outer
+  #330/#331 fixes are not retroactively qualified by this trial.
+- The independent terminal audit passes every check: actual duration,
+  terminal/process agreement, complete JSONL, usage reconciliation, checklist
+  identity, finite unchanged bounds, exact route and source/binary binding.
+  Its script SHA256 is
+  `33c1135e24204e07e9dee1bc3477efa5d0944983f0e6488751a9c6f3e2e1a646`.
+
+**G5 / goals acceptance5 passes for this single live trial.** Durations from
+prior trials are not combined. Credentials, transcripts, stores and generated
+receipts remain outside Git. The private terminal receipt is
+`/tmp/qq-goal-delivery-20261015/g5-measurements/g5-terminal-audit.json`.
+
+### Useful task result and separate qualification limits
+
+The task produced local measurement harness commits and a pinned integration;
+none of that code is included in #332. Its baseline full soak completed with
+**2000 work turns,5000 unique effects,433 completed compactions** (425 in-run,
+8 automatic), three actual600-second outages and two process kills. Root
+independently verified exit0,69470 process-tree samples and observation of all
+three admitted worker generations. Sampled peak tree RSS was71580KiB, with a
+maximum poll gap of194.792ms; this is not a continuous peak bound.
+
+At live-goal settlement the candidate capture and comparison work were still
+running. The local `G5_MEASUREMENTS_REVIEW.md` remained explicitly incomplete:
+closed candidate audit, matched pair summaries and a final stable-source full
+check/smoke were pending. Earlier test failures and excluded captures remain
+retained. No complete resource comparison, H0, storage/fsync budget, continuation
+acceptance or task implementation readiness is claimed. ENG-1058 remains open;
+G5 live acceptance does not waive those separate requirements.
