@@ -4032,6 +4032,7 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
+    for run_duration in [false, true] {
     struct Loader {
         inner: DepthLoader,
         root_loads: AtomicUsize,
@@ -4108,7 +4109,8 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
                 "type":"set_goal","session_id":session_id,
                 "objective":"wait for the sponsored child's explicit answer",
                 "budget":{"max_goal_runs":10,"max_total_tokens":1_000_000,
-                    "deadline_ms":start+3_600_000}
+                    "deadline_ms":start+if run_duration { 7_200_000 } else { 3_600_000 },
+                    "per_run": if run_duration { RunLimits { max_duration_ms: Some(3_600_000), ..RunLimits::default() } } else { RunLimits::default() }}
             }))
             .unwrap(),
         )
@@ -4195,4 +4197,5 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
     );
     assert_eq!(parent_requests.lock().unwrap().len(), 1);
     assert_eq!(child_requests.lock().unwrap().len(), 1);
+    }
 }
