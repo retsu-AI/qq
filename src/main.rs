@@ -62,7 +62,12 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
         Some(cli::Command::Run(args)) => return Ok(headless_run(*args, &overrides).await),
-        Some(cli::Command::Goal { command }) => goals::run(command, &overrides).await?,
+        Some(cli::Command::Goal { command }) => {
+            if let Err(error) = goals::run(command, &overrides).await {
+                eprintln!("error: {error}");
+                return Ok(error.exit_code());
+            }
+        }
         Some(cli::Command::Serve {
             bind,
             allow_origins,

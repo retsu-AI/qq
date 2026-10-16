@@ -48,7 +48,23 @@ pub enum GoalError {
 
 impl GoalError {
     pub(crate) fn exit_code(&self) -> std::process::ExitCode {
-        std::process::ExitCode::FAILURE
+        match self {
+            Self::Invalid(_)
+            | Self::SessionMissing
+            | Self::GoalMissing
+            | Self::Achieved
+            | Self::CheckMissing
+            | Self::CheckChanged => std::process::ExitCode::from(2),
+            Self::Workspace(_)
+            | Self::PreparationStopped
+            | Self::Discovery(_)
+            | Self::NoServer
+            | Self::Client(_)
+            | Self::Configuration(_)
+            | Self::IdentityUnavailable
+            | Self::Encoding(_)
+            | Self::Output(_) => std::process::ExitCode::FAILURE,
+        }
     }
 }
 
@@ -694,7 +710,11 @@ fn goal_cli_distinguishes_argument_errors_from_runtime_failures() {
     ] {
         assert_eq!(error.exit_code(), ExitCode::from(2), "{error}");
     }
-    for error in [GoalError::NoServer, GoalError::PreparationStopped, GoalError::IdentityUnavailable] {
+    for error in [
+        GoalError::NoServer,
+        GoalError::PreparationStopped,
+        GoalError::IdentityUnavailable,
+    ] {
         assert_eq!(error.exit_code(), ExitCode::FAILURE, "{error}");
     }
 }

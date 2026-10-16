@@ -997,3 +997,19 @@ Focused nextest run `3662fc4e-5e7a-40e5-930a-00ba71739778`: 5/5 passed.
 The remaining changes in runtime/headless are rustfmt of the integrated review
 fixes. Existing sleep identities and the ceiling remain unchanged (73 sites).
 Full-stack gates and publication remain pending; review threads stay open.
+
+### G4 goal command argument exit codes
+
+Fresh review thread PRRT_kwDOTmbEW86tGxYJ identified semantic goal validation
+escaping main through the generic exit-1 path. An isolated real authenticated
+server reproduced `qq goal set '' --session ID` exiting1 with the objective
+validation diagnostic. Argument/target-state variants now map explicitly to2;
+workspace/configuration/server/client/encoding/output failures remain1, with
+exhaustive domain-error matching. The main dispatch preserves the diagnostic.
+
+Regression test failed before the mapping. Goal CLI focused nextest
+`780ec0c0-13df-4db1-94b7-5dff5e93e18c`: 9/9 passed. Real-binary isolated-server
+verification passed three cases (empty objective, resume without a goal, and
+check approval without a goal), each exit2 and its expected diagnostic. The
+server and fake provider were stopped after the drive. Full final-head gates,
+publication and thread resolution remain pending.
