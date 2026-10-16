@@ -1063,3 +1063,16 @@ publication and thread resolution remain pending.
   owner-drop rows remain covered; all26foreground/close tests pass.
 - Exact unchanged legacy sleep locations move; ceiling73 stays fixed. Final
   full gate, smoke, independent review and published thread resolution follow.
+
+
+### 2026-10-16 — G4 stopped-state interrupt race and refused consent
+
+- Red rows reproduce a same-revision authentication pause overwritten by
+  Ctrl-C (130 instead of6) and refused check consent returning harness4.
+- Interrupt uses the existing conditional pause transaction; an unchanged
+  stopped receipt or non-active snapshot keeps its reason and natural exit.
+  Only this interrupt's committed user pause selects130. Forbidden/managed
+  check consent maps to setup2, with pending authority and zero work retained.
+- Authentication/configuration/achievement race rows and both refusal sources
+  pass; focused foreground/close27/27. Design/guide clarify exits. Unchanged
+  legacy sleep locations move without raising73. Full gate/publication follow.

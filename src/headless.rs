@@ -512,24 +512,29 @@ pub async fn run_goal(
                 biased;
                 () = interrupt.as_mut(), if interrupt_armed => {
                     interrupt_armed = false;
-                    let paused = send(sessions, SessionCommand::GoalControl {
-                        session_id: handle.session_id, expected,
-                        action: qq_protocol::GoalControl::Pause,
-                    }).await;
-                    goal = match paused {
-                        Ok(receipt) => goal_receipt(receipt)?,
+                    let paused = sessions.pause_goal_if_active(handle.session_id, expected).await;
+                    let (paused_goal, interrupted) = match paused {
+                        Ok(receipt) => {
+                            let goal = goal_receipt(receipt)?;
+                            // A stopped no-op retains its revision; only our pause advances it.
+                            let interrupted = goal.revision > expected.revision
+                                && goal.status == qq_protocol::GoalStatus::Paused {
+                                    reason: qq_protocol::GoalPauseReason::User,
+                                };
+                            (goal, interrupted)
+                        }
                         Err(error) => {
                             let current = sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)).await
                                 .map_err(|error| Failure::harness(error.to_string()))?
                                 .focused.and_then(|session| session.goal)
-                                .filter(|goal| goal.goal_id == expected.goal_id && matches!(goal.status, qq_protocol::GoalStatus::Achieved | qq_protocol::GoalStatus::Blocked { .. } | qq_protocol::GoalStatus::BudgetExhausted { .. }));
-                            match current { Some(goal) => goal, None => return Err(error) }
+                                .filter(|goal| goal.goal_id == expected.goal_id && goal.status != qq_protocol::GoalStatus::Active);
+                            match current { Some(goal) => (goal, false), None => return Err(Failure::harness(error.to_string())) }
                         }
                     };
-                    let terminal = matches!(goal.status, qq_protocol::GoalStatus::Achieved | qq_protocol::GoalStatus::Blocked { .. } | qq_protocol::GoalStatus::BudgetExhausted { .. });
+                    goal = paused_goal;
                     guard.expected = goal_identity(&goal);
                     let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
-                    final_goal = Some((goal, through.sequence, if terminal { None } else { Some(qq_protocol::HeadlessGoalStatus::Interrupted) }));
+                    final_goal = Some((goal, through.sequence, interrupted.then_some(qq_protocol::HeadlessGoalStatus::Interrupted)));
                 }
                 event = events.next() => {
                     let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
@@ -2089,7 +2094,9 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::InvalidSlashCommand(_)
         | SessionRuntimeError::InvalidRunLimits
         | SessionRuntimeError::InvalidOutputContract(_)
-        | SessionRuntimeError::InvalidModelSelection => HeadlessStatus::InvalidConfiguration,
+        | SessionRuntimeError::InvalidModelSelection
+        | SessionRuntimeError::GoalCheckForbidden
+        | SessionRuntimeError::GoalCheckPolicy(_) => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }
 }

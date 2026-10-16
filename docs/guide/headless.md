@@ -36,7 +36,9 @@ qq run --goal --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --
 Without separate check consent the first command returns a paused goal (exit6)
 without running the model or check. Review the check before authorizing it.
 `once` permits one check; `for-goal` permits reuse for the current goal check.
-An ordinary shell allowlist never authorizes a goal check.
+An ordinary shell allowlist never authorizes a goal check. Forbidden or
+policy-refused explicit check consent exits2 and grants no new authorization;
+a newly created goal remains paused for check approval.
 
 `--goal-deadline 24h`, `--goal-max-runs 20` and `--max-cost-usd 5` bound the
 goal; workspace defaults apply when omitted. Timeout and turn flags constrain

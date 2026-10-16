@@ -333,7 +333,11 @@ paid descendant runs remain event records. The final `goal` record contains
 A goal invocation continues while active and ends on any other state,
 including needs-user pauses. Final goal exits are achieved0, paused6,
 blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only
-achievement exits0. Interruption first requests a durable pause. On every stopped state, the
+achievement exits0. Interruption conditionally pauses an active goal; an already
+stopped goal retains its reason, revision and natural exit. Only a pause committed
+by this interrupt selects130. Forbidden or policy-refused explicit check consent
+is a setup error2 and grants no new authority; a new goal retains its check-approval
+pause. On every stopped state, the
 adapter cancels and drains that exact goal's unsettled paid family under one
 30-second cleanup bound, including late admitted descendants. It replays the
 committed terminal prefix so settled direct-run records precede the final
