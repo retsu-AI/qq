@@ -5893,6 +5893,25 @@ fn goal_form_uses_configured_presets_and_rejects_oversize_paste_without_truncati
 }
 
 #[test]
+fn goal_form_stale_refresh_releases_pending_form() {
+    let mut app = App::new(TuiOptions::default());
+    let initial = snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    app.apply_snapshot(initial.clone());
+    app.composer.replace("/goal new objective".to_owned());
+    app.submit_prompt();
+    let Some(Overlay::GoalForm(form)) = &mut app.overlay else { panic!("form") };
+    form.refresh = crate::input::GoalFormRefresh::Pending;
+    app.apply_live_event(fixtures::envelope(2, session, SessionEvent::GoalUpdated {
+        goal: fixtures::goal_snapshot(session),
+    }));
+    app.sessions.get_mut(&session).unwrap().loaded_through = 2;
+    app.apply_snapshot(initial);
+    let Some(Overlay::GoalForm(form)) = &app.overlay else { panic!("form retained") };
+    assert_eq!(form.refresh, crate::input::GoalFormRefresh::Ready);
+}
+
+#[test]
 fn goal_form_failure_keeps_draft_refreshes_and_never_rebinds_a_changed_goal() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
