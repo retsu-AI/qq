@@ -1040,3 +1040,15 @@ publication and thread resolution remain pending.
   stdout precedes optional trace and uncertain stdout writes are never retried.
   Focused foreground/close tests:23/23 pass; final independent review, stack
   integration, full gate/smoke/site and publication remain pending.
+
+### 2026-10-16 — G4 active edits, session preflight and text output
+
+- Red tests reproduced Ctrl-C after an observed active edit using a stale
+  revision, invalid new requests creating visible empty sessions, and text
+  mode losing its final result on trace flush failure.
+- Observed same-goal edits update both action and cleanup identities; Ctrl-C
+  and owner-drop cases pause the edited goal. New requests validate before
+  creation; replacement/bounds/empty/missing cases leave no sessions. Text
+  stdout precedes optional trace work, retaining its selected status.
+- Focused foreground/close tests:26/26 pass. Final integration/full gate, smoke,
+  independent review, publication and three-thread resolution remain pending.

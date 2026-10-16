@@ -354,8 +354,11 @@ existing stopped reasons. Recoverable errors drain the accepted goal family
 before the final snapshot and replay missing settled direct-run records from
 the last emitted direct-run cursor. Replay does not reapply approvals or retry
 uncertain stdout writes. A failed optional trace is detached; final JSONL stdout
-is flushed before tracing that final record. Stored-goal validation, candidate
-replacement and exact consent are checked before session settings change.
+is flushed before tracing that final record. Goal validation, candidate replacement and exact consent are checked before
+creating a new session or changing an existing session's settings. Observed
+same-goal edits advance the foreground owner's identity for later controls and
+cleanup; replaced goals remain fenced by their distinct identity. Both text and
+JSONL final stdout are flushed before optional final trace writes/flushes.
 New records do not change the
 ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
 requires an existing session and resumes its specification. Separate
