@@ -949,3 +949,9 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
 - Root owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Integrated `/goal` status, explicit check consent, revision-fenced forms/controls, server `qq goal` and foreground `qq run --goal`, with complete terminal records and binary smoke scenarios.
 - Protocol35 adds foreground goal records and input-pause controls; schema58 and descriptor15 remain unchanged. All forced protocol consumers and guide/design docs move together. Verification feature copies remain identical; the lockfile adds only the existing workspace time dependency to qq-tui.
 - Retained all75 existing counted sleeps and refreshed their source positions, with no new sites or ceiling change. Local integrated gates, binary smoke and independent review remain pending; no PR or live G5 receipt yet.
+
+### 2026-10-16 — G4 local acceptance
+
+- Focused goal/CLI/docs/wire suite107/107 passes. Real-binary smoke8/8 passes, including exact check consent and one charged final-slot run with two requests and tool-free handoff. The earlier smoke assertion incorrectly equated runs with model requests; actual event/request artifacts established the correction, independently reviewed.
+- Isolated real-server CLI drive passes11 commands, once-authorized check marker, one work run and one audit to achieved; no-server command fails with guidance and creates no session store. Six CLI help surfaces captured.
+- Rendering19 scenarios×50 samples: candidate/baseline medians0.9607–1.0162; expanded32-call frame56.0→53.8us, ultra480×120 frame125.1→122.5us. Shared-host diagnostics, no H0/tail claim. Logs and verify homes remain outside Git under /tmp/qq-goal-delivery-20261015/. Independent static surface review approved; final-head gate/hosted platform checks remain.
