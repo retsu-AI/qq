@@ -1130,6 +1130,24 @@ fn indent(text: &str) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    #[cfg(unix)]
+    #[test]
+    fn pre_push_keeps_fixture_git_operations_out_of_the_caller_repository() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(root.join(".github/scripts/test-pre-push.sh"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn evidence_rejects_execution_options() {
         use clap::Parser;
