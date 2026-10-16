@@ -602,9 +602,7 @@ pub(super) fn resolve_approval_by_reviewer(
     tool_call_id: ToolCallId,
     grant: Option<DelegateGrant>,
     delegate: DelegateIdentity,
-    delegate_evidence: (Option<String>, Option<String>),
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let (delegate_model, delegate_request_id) = delegate_evidence;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
@@ -679,8 +677,6 @@ pub(super) fn resolve_approval_by_reviewer(
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
             delegate: Some(delegate),
-            delegate_model,
-            delegate_request_id,
         },
     )?;
     transaction.commit()?;
@@ -697,9 +693,7 @@ pub(super) fn deny_approval_by_reviewer(
     tool_call_id: ToolCallId,
     message: &str,
     delegate: DelegateIdentity,
-    delegate_evidence: (Option<String>, Option<String>),
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
-    let (delegate_model, delegate_request_id) = delegate_evidence;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let Some((state, resolution, provider_call_id, first_result_in_turn)) = transaction
@@ -756,8 +750,6 @@ pub(super) fn deny_approval_by_reviewer(
             tool_call,
             resolution: ApprovalResolution::DeniedByReviewer,
             delegate: Some(delegate),
-            delegate_model,
-            delegate_request_id,
         },
     )?;
     transaction.commit()?;
@@ -940,8 +932,6 @@ pub(super) fn conclude_tool_approval(
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
             delegate: None,
-            delegate_model: None,
-            delegate_request_id: None,
         },
     )?;
     transaction.commit()?;

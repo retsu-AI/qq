@@ -177,18 +177,6 @@ client-only timing workaround.
 
 ## Acceptance
 
-### Cross-host contract synchronization delta (2026-10-15)
-
-QQ consumes the canonical cross-host Jev contract and conformance fixtures from
-`contracts/jev`. The QQ copy is byte-identical and a deterministic test fails
-when it drifts. Boundary parsing accepts the documented pinned models and
-versioned responses for `jev-latest` and `jev-preview`, preserves the resolved
-model in decision evidence, keeps nullable usage unknown, and prices only
-documented model versions. Existing default-off, fallback, approval, and
-probability tolerance semantics remain unchanged. `JEV_LONG_CONTEXT=1` is the
-only long-context opt-in. Authentication, installation, login, TUI, provider
-execution, and acceptance remain outside this slice.
-
 Every behavior bullet below is a failing test first, then green.
 
 **A1 — activation.**

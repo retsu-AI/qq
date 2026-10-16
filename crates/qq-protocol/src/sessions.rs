@@ -2199,13 +2199,6 @@ pub enum SessionEvent {
         /// human, timeout, and answer resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegate: Option<DelegateIdentity>,
-        /// The provider response model that produced a delegate decision.
-        /// Absent for human resolutions and legacy delegate events.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        delegate_model: Option<String>,
-        /// Provider request identifier for the delegate response, when supplied.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        delegate_request_id: Option<String>,
     },
     /// A delegate declined to settle a held call and the hold now waits for
     /// a human (protocol 28): an `escalate`, a non-final `deny` under `ask`,
@@ -3160,8 +3153,6 @@ mod tests {
             tool_call,
             resolution: ApprovalResolution::DeniedTimeout,
             delegate: None,
-            delegate_model: None,
-            delegate_request_id: None,
         };
         let encoded = serde_json::to_value(&resolved).unwrap();
         assert_eq!(encoded["type"], "tool_approval_resolved");
@@ -3182,14 +3173,10 @@ mod tests {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
             delegate: Some(DelegateIdentity::Jev),
-            delegate_model: Some("jev-1.13.0".to_owned()),
-            delegate_request_id: Some("jev-response-42".to_owned()),
         };
         let encoded = serde_json::to_value(&by_jev).unwrap();
         assert_eq!(encoded["resolution"], "approved_by_reviewer");
         assert_eq!(encoded["delegate"], "jev");
-        assert_eq!(encoded["delegate_model"], "jev-1.13.0");
-        assert_eq!(encoded["delegate_request_id"], "jev-response-42");
         assert_eq!(
             serde_json::to_value(DelegateIdentity::Reviewer).unwrap(),
             "reviewer"

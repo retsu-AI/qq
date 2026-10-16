@@ -749,8 +749,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 },
                 resolution: ApprovalResolution::ApprovedByReviewer,
                 delegate: Some(DelegateIdentity::Jev),
-                delegate_model: Some("jev-1.13.0".to_owned()),
-                delegate_request_id: Some("jev-response-42".to_owned()),
             },
         ),
     );

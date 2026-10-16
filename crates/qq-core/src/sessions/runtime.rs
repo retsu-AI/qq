@@ -501,11 +501,6 @@ pub struct ReviewVerdict {
     /// Who decided. A composed reviewer that falls through from Jev to the
     /// model reports whichever one produced `decision`.
     pub delegate: DelegateIdentity,
-    /// The provider response model when a delegate supplied one. This is
-    /// optional so older reviewer implementations remain wire-compatible.
-    pub delegate_model: Option<String>,
-    /// Provider request identifier when the delegate response supplied one.
-    pub delegate_request_id: Option<String>,
 }
 
 impl ReviewVerdict {
@@ -520,8 +515,6 @@ impl ReviewVerdict {
                 cost_usd_nanos: Some(0),
             },
             delegate: DelegateIdentity::Reviewer,
-            delegate_model: None,
-            delegate_request_id: None,
         }
     }
 

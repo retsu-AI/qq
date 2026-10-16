@@ -1744,7 +1744,6 @@ impl Store {
         tool_call_id: ToolCallId,
         grant: Option<DelegateGrant>,
         delegate: DelegateIdentity,
-        delegate_evidence: (Option<String>, Option<String>),
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1756,7 +1755,6 @@ impl Store {
                 tool_call_id,
                 grant,
                 delegate,
-                delegate_evidence,
             )
         })
         .await
@@ -1857,7 +1855,6 @@ impl Store {
         tool_call_id: ToolCallId,
         message: String,
         delegate: DelegateIdentity,
-        delegate_evidence: (Option<String>, Option<String>),
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1869,7 +1866,6 @@ impl Store {
                 tool_call_id,
                 &message,
                 delegate,
-                delegate_evidence,
             )
         })
         .await

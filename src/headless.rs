@@ -857,7 +857,6 @@ async fn stream_run(
                             resolution @ (ApprovalResolution::ApprovedByReviewer
                             | ApprovalResolution::DeniedByReviewer),
                         delegate,
-                        ..
                     } if ours && text => {
                         let verdict = match resolution {
                             ApprovalResolution::ApprovedByReviewer => "approved",
