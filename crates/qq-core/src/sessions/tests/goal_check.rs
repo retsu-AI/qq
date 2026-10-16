@@ -12,6 +12,8 @@ struct Model {
 }
 impl Provider for Model {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
+        assert!(!request_texts(&request).join("\n").contains("hunter2hunter2"),
+            "raw check credentials must never enter provider context");
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if self.failure_tail && call >= 2 {
             assert!(
@@ -588,6 +590,22 @@ async fn goal_check_noisy_descendants_cannot_starve_leader_exit() {
         assert!(result.tail.len() <= 4096);
         let mut readiness = exited.0.readable().await.unwrap();
         readiness.retain_ready();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_check_process_masks_credentials_before_bounding_diagnostics() {
+    use super::super::goal_check::run_process;
+    let directory = TempDir::new().unwrap();
+    for (command, expected) in [
+        ("printf 'DB_PASSWORD=hunter2hunter2\nsafe-tail\n'", "DB_PASSWORD=[masked:credential]\nsafe-tail\n"),
+        ("printf 'DB_PASSWORD='; i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf '\nsafe-tail\n'", "safe-tail\n"),
+    ] {
+        let result = run_process(crate::workspace::Workspace::open(directory.path()).unwrap(),
+            command.to_owned(), tokio::time::Instant::now()+Duration::from_secs(5),
+            RunCancellation::new(), Arc::new(crate::ProcessProducer::new("test")), execution::RunResources::default()).await.unwrap();
+        assert_eq!(result.tail, expected);
     }
 }
 
@@ -1180,7 +1198,7 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evidence() {
-    const COMMAND: &str = "printf checked >> three-checks; printf failure-evidence; exit 7";
+    const COMMAND: &str = "printf checked >> three-checks; printf 'DB_PASSWORD=hunter2hunter2\nfailure-evidence'; exit 7";
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("sessions.sqlite3");
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1274,7 +1292,7 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     );
     assert_eq!(
         goal.check_output.as_deref(),
-        Some("exit 7\nfailure-evidence")
+        Some("exit 7\nDB_PASSWORD=[masked:credential]\nfailure-evidence")
     );
     assert!(!goal.audit_pending);
     assert_eq!(calls.load(Ordering::SeqCst), 6);
@@ -1289,7 +1307,7 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     for run in checks {
         assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
         assert!(snapshot.messages.iter().any(
-            |message| message.run_id == run.id && message.output == "exit 7\nfailure-evidence"
+            |message| message.run_id == run.id && message.output == "exit 7\nDB_PASSWORD=[masked:credential]\nfailure-evidence"
         ));
     }
     assert_eq!(
@@ -1675,7 +1693,13 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
         .await
         .unwrap();
     std::fs::rename(&workspace, directory.path().join("moved-work")).unwrap();
+    #[cfg(unix)]
+    let opened = crate::workspace::Workspace::observe_next_open(&workspace);
     release.notify_one();
+    #[cfg(unix)]
+    assert_ne!(opened.await.unwrap(), std::thread::current().id(),
+        "check filesystem opens must not execute on the Tokio worker");
+
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events

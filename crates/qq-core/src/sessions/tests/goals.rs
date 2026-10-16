@@ -8350,6 +8350,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                     goal.status = setup_status;
                     goal.counters.failure_streak = 3;
+                    goal.counters.check_failures = 2;
                     crate::sessions::goals::save(connection, &goal)
                 })
                 .await
@@ -8389,6 +8390,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
                 "remove={remove}, original={status:?}"
             );
             assert_eq!(goal.counters.failure_streak, 3);
+            assert_eq!(goal.counters.check_failures, if remove {0} else {2});
             assert_eq!(
                 goal.check_authorization,
                 if remove {
