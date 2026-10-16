@@ -9,8 +9,8 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
-| G4 | TUI, CLI and foreground hosting | In progress | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
+| G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | docs/eng-1065-goal-live-evidence | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
 
@@ -1076,3 +1076,9 @@ publication and thread resolution remain pending.
 - Authentication/configuration/achievement race rows and both refusal sources
   pass; focused foreground/close27/27. Design/guide clarify exits. Unchanged
   legacy sleep locations move without raising73. Full gate/publication follow.
+
+### 2026-10-16 — rebased heads qualified and G5 trial outcome
+
+- #330 b750d347 passes2701/2701 plus doctests/Clippy/minimal211 and smoke6/6; #331 07aab1d1 passes2747/2747 and the same gates plus smoke8/8. Both heads are published and conflict-free; #331 is ready for review again. Hosted CI remains a separate gate.
+- G5 first trial settled in1502.661s with8runs,45model turns,15/15checklist done,1compaction; terminal budget_exhausted/runs, exit8. Independently reconciled192focused passes/1manual ignore. Paid APIUSD0; estimated token dollar value unknown. Multi-hour/three-compaction acceptance is NOT met. Curated record: g-goals-live-eng-1065.md.
+- Second useful subscription-only trial started on07aab1d1 to close foreground concurrency coverage. It stays inside the original four-hour window, uses8runs max and finite3million-token/64turn/30minute per-run limits, with32768-token context. No padding or manufactured compactions; final evidence remains pending. No credentials or raw sessions committed.
