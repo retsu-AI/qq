@@ -7708,7 +7708,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             })
         }
     }
-    for condition in ["expired", "over_cost", "unknown_cost", "per_run_duration"] {
+    for condition in ["expired", "over_cost", "unknown_cost", "over_tokens", "unknown_tokens", "per_run_duration"] {
         for user_prompt in [true, false] {
             let directory = TempDir::new().unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
@@ -7808,6 +7808,8 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                         if !user_prompt {
                             goal.budget.per_run.max_duration_ms = Some(1);
                         }
+                    } else if matches!(condition, "over_tokens" | "unknown_tokens") {
+                        goal.budget.max_total_tokens = Some(1);
                     } else {
                         goal.budget.max_cost_usd_nanos = Some(30);
                     }
