@@ -147,6 +147,32 @@ async fn goal_scheduler_waits_for_uncancelled_sponsored_children() {
 }
 
 #[tokio::test]
+async fn replayed_sponsored_child_cancel_wakes_the_goal_scheduler() {
+    let (_directory, store, parent) = super::goals::model_goal_claim(true).await;
+    let child = store.create_child_run(&parent, ToolCallId::generate().unwrap(), ChildAdmission {
+        reasoning_effort: None, profile: AgentProfileId::default(), model: parent.model.clone(),
+        task: "queued sponsored work".to_owned(), limits: RunLimits::default(),
+        approval_mode: ApprovalMode::ReadOnly, purpose: SessionPurpose::Task, detached: true,
+    }).await.unwrap();
+    store.finish_run(&parent, RunOutcome::Completed, None, TeardownComplete::nothing_ran()).await.unwrap();
+    assert!(store.queue_due_goals(now_ms()).await.unwrap().is_none());
+    let command_id = CommandId::generate().unwrap();
+    let command = SessionCommand::CancelRun { run_id: child.run_id };
+    // Persist cancellation without the command waiter's post-commit schedule signal.
+    let first = store.command(command_id, command.clone()).await.unwrap();
+    let replay = store.command(command_id, command).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, first.receipt);
+    assert!(replay.schedule, "a queued child's cancellation has no executor to wake scheduling");
+    store.queue_due_goals(now_ms()).await.unwrap();
+    let next = store.reserve_next_run(false).await.unwrap().expect("replayed wake releases the goal");
+    assert_eq!(next.identity.session_id, parent.identity.session_id);
+    assert!(matches!(next.origin, Some(qq_protocol::RunOrigin::Goal { .. })));
+    store.finish_reserved_run(&next, RunOutcome::Cancelled).await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_uncertainty() {
     for routing in ["none", "measured", "unknown"] {
         let (directory, store, initial) = super::goals::model_goal_claim(false).await;
