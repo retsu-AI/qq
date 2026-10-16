@@ -1,6 +1,7 @@
 # G5 — subscription-only live goal evaluation
 
-Status: four trials settled; none meets the single multi-hour requirement.
+Status: four trials settled; a fifth matched-measurement task is active.
+No settled trial meets the single multi-hour requirement.
 G5 acceptance is not established. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
@@ -281,3 +282,33 @@ single-trial duration**. This useful trial therefore **does not qualify G5**.
 Separate trial durations are not combined; no padding or cap extension was used.
 #332 remains draft. Raw transcripts, credentials, session stores and detailed
 receipts stay outside Git under the private evaluation directory.
+
+
+## Fifth trial — matched measurements in progress
+
+Started 2026-10-16T11:03:41.310231+00:00 on runtime source
+`4851fc2e755f7997b3e0cd5086653a64286e69bc`, binary SHA256
+`1f7b30c95d78187fea69f6a11630b3bb029358370b81332440da06d4ffb2f29e`. The useful task starts from local continuation
+review head `ab8eca3ac072e1186fbb305aef28bb6986adf19b` and compares the relevant
+pre-integration baseline `f98f3c2e50eed69bf597e02ae635f88114191f67` with an
+integration of the latest goals fixes. Sources and binaries stay pinned while
+outer PR repairs continue.
+
+- The task repairs concrete missing measurement evidence: common support,
+  baseline/candidate resource sampling across actual outage/kill recovery,
+  fsync observations and matched turn-overhead A/B and A/A diagnostics.
+  Missing registered budgets, sampler limits or host noise remain explicit;
+  no old partial sample is relabelled complete and no threshold is invented.
+- Exact route is `openai-codex/gpt-6.1-sol`, subscription only, no paid API
+  fallback. The fresh goal has a four-hour deadline and eight charged runs;
+  each run is bounded at64turns/3000000tokens/60minutes, context65536 and
+  output8192. Prior trial counters and deadlines remain unchanged.
+- The worker uses an isolated checkout and local commits only. It must stop
+  when the useful task is done or blocked; no padding, repeated passing work
+  without cause or manufactured compactions. A setup run with180-second
+  outages was caught, stopped and explicitly retained as invalid. The corrected
+  baseline uses600-second outages; no result or resource acceptance is claimed.
+
+The supervisor is live. Terminal accounting, actual duration, checklist retention
+and final independent review remain pending. This admission does not establish
+G5 acceptance; #332 remains draft.

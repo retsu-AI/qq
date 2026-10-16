@@ -1127,3 +1127,16 @@ publication and thread resolution remain pending.
 - G3 725dabe8 and G4 4851fc2e pass full workspace gates; independent source
   review approves all six current Codex repairs. Final smoke/parity/publication
   and hosted CI follow. G5 remains two evidence Markdown files above G4.
+
+
+### 2026-10-16 — G5 matched measurement admission
+
+- Fifth useful subscription-only task starts on pinned runtime4851fc2e and
+  continuation reviewab8eca3a; common baselinef98 versus current integration,
+  full resource sampling and matched A/B+A/A address known measurement gaps.
+  New finite4h/8run admission; prior terminal trials remain unchanged.
+- One180-second setup run was rejected and retained as invalid; corrected
+  baseline600-second outages are running. No final result or qualification yet.
+- #331 edit-event publication repair passes focused26/26 and independent
+  review. Restack #332 above it; only two Markdown evidence files differ.
+  Keep draft/unqualified pending actual live acceptance and final checks.
