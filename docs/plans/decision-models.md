@@ -103,9 +103,9 @@ an independently verified result, broken down by decision model.
 | DM2 | System One adapter (`providers/typesafe.rs`) on `HttpExchange`; recorded-reply fixtures and explicit transport-policy migration; replaces `routing::typesafe_evaluate` and `typesafe_http_client` | DM1 | `qq-provider` adapter and recipe; `src/runtime{,/routing,/approval}.rs` call sites; `src/advisory.rs` | D2 |
 | DM2c | Cloudflare Clef hosted transport/envelope, credential audience and non-truncating admission proof; shared System One codec | DM2 | `crates/qq-provider/src/providers{,/cloudflare_decisions}.rs`, compiler recipe, `qq-auth` audience; loopback fixtures | D2c; shadow comparison after DM7/JV7, paid runs only with approved spend |
 | DM3 | Move the rubrics, parsers and thresholds of routing, approval and checkpoint into `qq-decision` consumers, **behavior-identical** (same requests, same dispositions, same policy identities) | DM2 | `crates/qq-decision/**`, `src/runtime*.rs`, `src/advisory.rs` | D3 |
-| DM4 | Receipt-ready interpretation: raw distribution kept, QQ-computed confidence, vendor confidence side by side; JV3 precision lands here once for all consumers | DM3 | `qq-decision` validator | A3 + D4 |
+| DM4 | Receipt-ready interpretation: raw distribution kept, QQ-computed confidence, vendor confidence side by side; JV3 precision parsed/recorded in shadow, never broadens authority | DM3 | `qq-decision` validator | A3 + D4 |
 | DM5 | OpenAI Decisions adapter from the **published** contract, with fixtures copied from it; capabilities declared; `openai/default` credential audience | DM1, OpenAI API reference published | `crates/qq-provider/src/providers.rs`, `crates/qq-provider/src/providers/openai_decisions.rs`, `qq-auth` audience only | D5 |
-| DM6 | Configuration: `decision_models`, per-consumer `decisions` settings, `jev_*` aliases with provenance, `QQ_DECISIONS=off`, exact-id requirement for authority consumers; plan identity carries model, rubric and policy ids | DM3, DM7 | `qq-config`, composition root, `src/plan.rs` | D6 |
+| DM6 | Configuration: `decision_models`, per-consumer `decisions` settings, `jev_*` aliases with provenance, `QQ_DECISIONS=off`, exact-id requirement for authority consumers; plan identity carries model, rubric and policy ids | DM3, DM7, owner decision 2 accepted (public configuration naming) | `qq-config`, composition root, `src/plan.rs` | D6 |
 | DM7 | Calibration table and shadow-only rule for uncalibrated complete keys and moved aliases; the shadow consumer from JV7 uses it | DM4, JV6 | `qq-decision` | D7 |
 | DM8 | Neutral names in core and protocol: `decision_approval`, `DelegateIdentity::Decision{provider}`, `ResolvingDecisionCredential`; fixtures kept | DM3, JV5 protocol bump | `qq-core`, `qq-protocol`, `qq-client`, `qq-tui` | D8 |
 | DM9 | Vendor comparison: OpenAI vs Jev as paired shadow arms on the same holds and routes | DM5, DM7, JV13 procedure | Evaluation tooling; receipts | D9 |
@@ -227,6 +227,16 @@ Every behavior bullet is a failing test first, then green.
   A/B plus a same-binary A/A.
 
 **D4 — interpretation.** A3, plus:
+
+- New interval parsing records observations only. Replies rejected by the
+  DM3 baseline retain that baseline's fallback/abstention disposition; they
+  cannot approve or route automatically before D7 qualification and explicit
+  policy activation. Test rounded confident approve rejected by old tolerance
+  but accepted by new intervals: shadow receipt exists, held action never
+  settles from that reply. Legacy compatibility cannot grandfather this change.
+- Activation after DM7 is a separate reviewed policy identity/calibration
+  change with paired legacy/new negative and fallback fixtures; DM7 installs
+  the gate and does not itself activate the broader parser.
 - The vendor confidence and QQ's confidence are both stored.
 - A winner-only answer yields `Unsupported` for approval and routing.
 - Exact question-ID set required: duplicate, missing and extra/unknown IDs fail;
@@ -242,6 +252,9 @@ Every behavior bullet is a failing test first, then green.
 - Whether Codex sign-in works is recorded as a capability, never assumed.
 
 **D6 — configuration.**
+
+- Owner decision 2 is recorded before implementation; public spelling and
+  alias tests use that accepted naming, not the illustrative names below.
 - `jev_*` and `QQ_JEV_*` behave exactly as before.
 - `qq config explain` names alias sources.
 - `QQ_DECISIONS=off` beats every profile, and a stored key plus a
