@@ -863,3 +863,8 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 - All four hosted330findings have local test-first repairs. Policy pool saturation now awaits a cancellation-safe bounded semaphore rather than durably pausing valid goals; its focused regression passes1/1 (031ffd42). Current goal refresh already bounds that wait by cancellation and deadline.
 - Independent read-only reviews approve managed ceiling source plus strengthened actual-start test, conservative paid input, and monotonic sponsor registration (a8933e72). Rejected timestamp-based and post-event experiments do not define the resulting source. Four-row sponsor test and ordinary approval regression pass2/2, including nonzero preparation and wall-clock lag.
 - Preserve all73existing sleep sites; final head full pre-push gate and runtime smoke follow. Review threads stay open until fixing commits are published and final evidence is verified.
+
+### 2026-10-16 — G3 conservative admission outage fixture
+
+- Full gate on1763403e stops at the outage fixture's10000-token row. Exact diagnostic rerun proves TotalTokens refusal before dispatch, not provider-retry/accounting failure. The new paid input bound correctly includes complete request bytes.
+- Keep caps finite but leave100000tokens of room to exercise the intended HTTP529 rejection; retain every retry, direct ownership, known-zero accounting and zero-run-charge assertion. Full goal_admission group passes19/19 (4c2ac02f), including token-only/cost-only/combined rows for goal and prompt origins. Resulting-head full push gate follows.

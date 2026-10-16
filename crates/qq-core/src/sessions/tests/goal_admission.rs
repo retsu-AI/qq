@@ -751,11 +751,13 @@ async fn legacy_model_work_repair_rolls_back_on_invalid_turn() {
 
 #[tokio::test]
 async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero() {
+    // Admit the full byte-bounded request so this exercises HTTP retry,
+    // rather than refusing the request before the provider can reject it.
     for goal_origin in [false, true] {
         for (tokens, cost) in [
-            (Some(10_000_u64), None),
+            (Some(100_000_u64), None),
             (None, Some(1_000_000_000_u64)),
-            (Some(10_000), Some(1_000_000_000)),
+            (Some(100_000), Some(1_000_000_000)),
         ] {
             let attempts = Arc::new(AtomicUsize::new(0));
             struct Outage(Arc<AtomicUsize>);
@@ -851,7 +853,8 @@ async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero
                     finished_outcome(&events, run_id),
                     Some(RunOutcome::Paused { pause }) if matches!(pause.as_ref(),qq_protocol::RunPause::ProviderRetry{..})
                 ),
-                "known outage pauses the run"
+                "known outage pauses the run: goal_origin={goal_origin}, tokens={tokens:?}, cost={cost:?}, actual={:?}",
+                finished_outcome(&events, run_id)
             );
             let snapshot = runtime
                 .snapshot(SnapshotRequest::new(
