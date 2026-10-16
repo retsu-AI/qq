@@ -12,8 +12,12 @@ struct Model {
 }
 impl Provider for Model {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
-        assert!(!request_texts(&request).join("\n").contains("hunter2hunter2"),
-            "raw check credentials must never enter provider context");
+        assert!(
+            !request_texts(&request)
+                .join("\n")
+                .contains("hunter2hunter2"),
+            "raw check credentials must never enter provider context"
+        );
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if self.failure_tail && call >= 2 {
             assert!(
@@ -365,8 +369,8 @@ async fn goal_check_process_keeps_exit_status_and_only_a_four_kib_tail() {
     use super::super::goal_check::{ProcessOutcome, run_process};
     let directory = TempDir::new().unwrap();
     let result = run_process(
-        crate::workspace::Workspace::open(directory.path()).unwrap(),
-        "i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf end; exit 7"
+        directory.path().to_owned(),
+        "i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf '\\n'; i=0; while [ \"$i\" -lt 4093 ]; do printf x; i=$((i+1)); done; printf end; exit 7"
             .to_owned(),
         tokio::time::Instant::now() + Duration::from_secs(5),
         RunCancellation::new(),
@@ -391,7 +395,7 @@ async fn goal_check_process_expired_or_cancelled_before_start_never_spawns() {
             cancellation.cancel();
         }
         let result = run_process(
-            crate::workspace::Workspace::open(directory.path()).unwrap(),
+            directory.path().to_owned(),
             "printf unexpected > marker".to_owned(),
             if cancel {
                 tokio::time::Instant::now() + Duration::from_secs(5)
@@ -423,7 +427,7 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
     let directory = TempDir::new().unwrap();
     let cancellation = RunCancellation::new();
     let task = tokio::spawn(run_process(
-        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        directory.path().to_owned(),
         "sleep 60 & printf '%s' \"$!\" > descendant; wait".to_owned(),
         tokio::time::Instant::now() + Duration::from_secs(5),
         cancellation.clone(),
@@ -478,7 +482,7 @@ async fn goal_check_process_kills_background_descendants_before_success() {
     use super::super::goal_check::{ProcessOutcome, run_process};
     let directory = TempDir::new().unwrap();
     let result = run_process(
-        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        directory.path().to_owned(),
         "sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\" > descendant; exit 0".to_owned(),
         tokio::time::Instant::now() + Duration::from_secs(5),
         RunCancellation::new(),
@@ -508,7 +512,7 @@ async fn goal_check_process_kills_background_descendants_before_success() {
     let ready = signal_pipe(directory.path(), "descendant-ready");
     let leader_release = signal_pipe(directory.path(), "leader-release");
     let descendant_release = signal_pipe(directory.path(), "descendant-release");
-    let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+    let workspace = directory.path().to_owned();
     let task = tokio::spawn(run_process(
         workspace,
         "(read -r signal < descendant-release; printf forbidden > descendant-wrote) >/dev/null 2>&1 & printf '%s' \"$!\" > descendant-pid; printf r > descendant-ready; read -r signal < leader-release; exit 0".to_owned(),
@@ -564,7 +568,7 @@ async fn goal_check_noisy_descendants_cannot_starve_leader_exit() {
             "i=0; while [ \"$i\" -lt 32 ]; do yes flood{redirect} & i=$((i+1)); done; printf '%s' \"$!\" > descendant; printf r > ready; read -r signal < release; exit 0"
         );
         let task = tokio::spawn(run_process(
-            crate::workspace::Workspace::open(directory.path()).unwrap(),
+            directory.path().to_owned(),
             command,
             tokio::time::Instant::now() + Duration::from_secs(5),
             RunCancellation::new(),
@@ -599,12 +603,25 @@ async fn goal_check_process_masks_credentials_before_bounding_diagnostics() {
     use super::super::goal_check::run_process;
     let directory = TempDir::new().unwrap();
     for (command, expected) in [
-        ("printf 'DB_PASSWORD=hunter2hunter2\nsafe-tail\n'", "DB_PASSWORD=[masked:credential]\nsafe-tail\n"),
-        ("printf 'DB_PASSWORD='; i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf '\nsafe-tail\n'", "safe-tail\n"),
+        (
+            "printf 'DB_PASSWORD=hunter2hunter2\nsafe-tail\n'",
+            "DB_PASSWORD=[masked:credential]\nsafe-tail\n",
+        ),
+        (
+            "printf 'DB_PASSWORD='; i=0; while [ \"$i\" -lt 5000 ]; do printf x; i=$((i+1)); done; printf '\nsafe-tail\n'",
+            "safe-tail\n",
+        ),
     ] {
-        let result = run_process(crate::workspace::Workspace::open(directory.path()).unwrap(),
-            command.to_owned(), tokio::time::Instant::now()+Duration::from_secs(5),
-            RunCancellation::new(), Arc::new(crate::ProcessProducer::new("test")), execution::RunResources::default()).await.unwrap();
+        let result = run_process(
+            directory.path().to_owned(),
+            command.to_owned(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            RunCancellation::new(),
+            Arc::new(crate::ProcessProducer::new("test")),
+            execution::RunResources::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.tail, expected);
     }
 }
@@ -615,8 +632,8 @@ async fn goal_check_process_timeout_and_binary_output_stay_bounded() {
     use super::super::goal_check::{ProcessOutcome, run_process};
     let directory = TempDir::new().unwrap();
     let result = run_process(
-        crate::workspace::Workspace::open(directory.path()).unwrap(),
-        "i=0; while [ \"$i\" -lt 5000 ]; do printf '\\377'; i=$((i+1)); done; printf end; sleep 60"
+        directory.path().to_owned(),
+        "i=0; while [ \"$i\" -lt 5000 ]; do printf '\\377'; i=$((i+1)); done; printf '\\n'; i=0; while [ \"$i\" -lt 1800 ]; do printf '\\377'; i=$((i+1)); done; printf end; sleep 60"
             .to_owned(),
         tokio::time::Instant::now() + Duration::from_secs(2),
         RunCancellation::new(),
@@ -960,7 +977,8 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_historical_result_survives_edit_replace_and_clear() {
-    const COMMAND: &str = "printf '%05000d' 0; printf historical-check-result; exit 7";
+    const COMMAND: &str =
+        "printf '%05000d\n' 0; printf '%04072d' 0; printf historical-check-result; exit 7";
     for mutation in ["edit", "replace", "clear", "pause"] {
         let directory = TempDir::new().unwrap();
         let database = directory.path().join("sessions.sqlite3");
@@ -1198,8 +1216,15 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evidence() {
-    const COMMAND: &str = "printf checked >> three-checks; printf 'DB_PASSWORD=hunter2hunter2\nfailure-evidence'; exit 7";
+    const COMMAND: &str =
+        "printf checked >> three-checks; cat check-credential; printf failure-evidence; exit 7";
     let directory = TempDir::new().unwrap();
+    tokio::fs::write(
+        directory.path().join("check-credential"),
+        b"DB_PASSWORD=hunter2hunter2\n",
+    )
+    .await
+    .unwrap();
     let database = directory.path().join("sessions.sqlite3");
     let calls = Arc::new(AtomicUsize::new(0));
     let loader = Arc::new(Loader {
@@ -1306,9 +1331,14 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     assert_eq!(checks.len(), 3);
     for run in checks {
         assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
-        assert!(snapshot.messages.iter().any(
-            |message| message.run_id == run.id && message.output == "exit 7\nDB_PASSWORD=[masked:credential]\nfailure-evidence"
-        ));
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .any(|message| message.run_id == run.id
+                    && message.output
+                        == "exit 7\nDB_PASSWORD=[masked:credential]\nfailure-evidence")
+        );
     }
     assert_eq!(
         tokio::fs::read_to_string(directory.path().join("three-checks"))
@@ -1587,7 +1617,7 @@ async fn goal_check_process_accepts_non_utf8_process_names() {
     use super::super::goal_check::{ProcessOutcome, run_process};
     let directory = TempDir::new().unwrap();
     let result = run_process(
-        crate::workspace::Workspace::open(directory.path()).unwrap(),
+        directory.path().to_owned(),
         "printf '\\377' > /proc/self/comm; printf checked".to_owned(),
         tokio::time::Instant::now() + Duration::from_secs(5),
         RunCancellation::new(),
@@ -1697,8 +1727,11 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     let opened = crate::workspace::Workspace::observe_next_open(&workspace);
     release.notify_one();
     #[cfg(unix)]
-    assert_ne!(opened.await.unwrap(), std::thread::current().id(),
-        "check filesystem opens must not execute on the Tokio worker");
+    assert_ne!(
+        opened.await.unwrap(),
+        std::thread::current().id(),
+        "check filesystem opens must not execute on the Tokio worker"
+    );
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1735,7 +1768,11 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
         focused
             .messages
             .iter()
-            .any(|message| format!("{message:?}").contains("workspace"))
+            .any(|message| format!("{message:?}").contains(if cfg!(unix) {
+                "workspace"
+            } else {
+                "unavailable"
+            }))
     );
     let (other, _) = resolve_workspace(&runtime, directory.path()).await;
     create_session(&runtime, other, None).await;

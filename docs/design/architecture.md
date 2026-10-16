@@ -1911,12 +1911,17 @@ closed their output pipes. Linux confirms process exit through pidfds before
 reaping the pinned leader. Other Unix targets reap the killed leader, disarm
 signals, and require process-group absence within five seconds using signal-zero
 probes. Reused group ids can only delay confirmation. Bounded blocking permits
-cover preparation and exit observation. Cancellation and the shared deadline drain the process group. A
+cover workspace opening, preparation and exit observation. Workspace opens run on
+the same bounded blocking path; started work is joined before releasing exclusion.
+Cancellation and the shared deadline drain the process group. A
 resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
 rather than publishing completion. A workspace-open failure before spawn settles
 as a failed check through ordinary drain and finish, preserving host availability.
-Results retain an exit/timeout diagnostic and
-UTF-8 output suffix within4KiB, including the diagnostic header. Every check
+Results mask recognized secrets before persistence and retain an exit/timeout
+diagnostic and UTF-8 output suffix within4KiB, including the diagnostic header.
+If raw capture drops a line prefix, its incomplete leading fragment is omitted
+so losing a credential marker cannot expose the retained value. Changing the
+check specification resets its consecutive failure streak; neutral edits retain it. Every check
 settlement persists that diagnostic on its original run's assistant message and
 publishes the existing message event in the terminal transaction, even if the
 goal was edited, replaced, cleared, or cancelled. A check has no user prompt,

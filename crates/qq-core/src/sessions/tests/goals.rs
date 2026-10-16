@@ -8308,6 +8308,55 @@ async fn paused_goal_fences_preparing_user_prompt_until_cancelled() {
 }
 
 #[tokio::test]
+async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
+    for command in [Some("true"), Some("false"), None] {
+        let (directory, runtime) = test_runtime().await;
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace, None).await.outcome
+        else {
+            panic!("session");
+        };
+        let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"checked work", "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal");
+        };
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                goal.counters.check_failures = 2;
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        let edited = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+            "objective":"edited objective", "check":command.map(|command|serde_json::json!({"command":command})),
+            "budget":goal.budget
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal: edited, .. } = edited.outcome else {
+            panic!("edit");
+        };
+        assert_eq!(
+            edited.counters.check_failures,
+            if command == Some("true") { 2 } else { 0 }
+        );
+        assert_eq!(edited.counters.runs, goal.counters.runs);
+        assert_eq!(edited.counters.audits, goal.counters.audits);
+        assert_eq!(
+            edited.check_authorization,
+            command.map(|_| qq_protocol::GoalCheckAuthorization::Pending)
+        );
+        runtime.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn goal_check_edits_preserve_unrelated_stop_states() {
     use qq_protocol::{
         GoalBlockedReason, GoalCheckAuthorization, GoalNeedsUser, GoalPauseReason, GoalStatus,
@@ -8390,7 +8439,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
                 "remove={remove}, original={status:?}"
             );
             assert_eq!(goal.counters.failure_streak, 3);
-            assert_eq!(goal.counters.check_failures, if remove {0} else {2});
+            assert_eq!(goal.counters.check_failures, if remove { 0 } else { 2 });
             assert_eq!(
                 goal.check_authorization,
                 if remove {

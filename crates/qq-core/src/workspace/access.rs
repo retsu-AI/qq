@@ -22,19 +22,25 @@ pub(crate) struct Workspace {
     apply_lock: Arc<Mutex<()>>,
 }
 
-#[cfg(test)]
-static OPEN_OBSERVERS: Mutex<Vec<(PathBuf, tokio::sync::oneshot::Sender<std::thread::ThreadId>)>> = Mutex::new(Vec::new());
+#[cfg(all(test, unix))]
+static OPEN_OBSERVERS: Mutex<Vec<(PathBuf, tokio::sync::oneshot::Sender<std::thread::ThreadId>)>> =
+    Mutex::new(Vec::new());
 
 impl Workspace {
-    #[cfg(test)]
-    pub(crate) fn observe_next_open(path: &Path) -> tokio::sync::oneshot::Receiver<std::thread::ThreadId> {
+    #[cfg(all(test, unix))]
+    pub(crate) fn observe_next_open(
+        path: &Path,
+    ) -> tokio::sync::oneshot::Receiver<std::thread::ThreadId> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        OPEN_OBSERVERS.lock().unwrap().push((path.to_owned(), sender));
+        OPEN_OBSERVERS
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), sender));
         receiver
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self, std::io::Error> {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         {
             let mut observers = OPEN_OBSERVERS.lock().unwrap();
             if let Some(index) = observers.iter().position(|(root, _)| root == path) {

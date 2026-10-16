@@ -931,3 +931,16 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
   The regression cancels one queued waiter, then verifies success and all4 slots
   returned after capacity frees. Focused policy/managed-denial tests:3/3 pass.
   Final gate, independent review and stack publication remain pending.
+
+### 2026-10-16 — G3 check workspace, streak and diagnostic corrections
+
+- Red tests observed workspace opens on the Tokio worker, stale failure counts
+  after check edits, and unmasked check output. Workspace opening now joins the
+  existing bounded blocking preparation; failures settle normally.
+- Check-spec changes reset consecutive check failures; unchanged checks retain
+  them. Recognized secrets are masked before durable output/model notices;
+  truncated leading fragments are omitted to avoid marker-prefix loss.
+- Existing4KiB/binary/history fixtures retain their exact assertions using
+  complete retained lines. Masked durable messages/reopen/context and long-secret
+  truncation are covered. Focused completion tests:31/31 pass. Independent review,
+  final gate/smoke/restack/publication and thread resolution remain pending.

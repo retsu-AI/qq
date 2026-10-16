@@ -4,6 +4,7 @@ use super::*;
 use crate::tools::process_context;
 #[cfg(unix)]
 use crate::tools::{ProcessGroupGuard, ToolCancellation};
+#[cfg(unix)]
 use crate::workspace::Workspace;
 #[cfg(unix)]
 use std::collections::VecDeque;
@@ -72,6 +73,9 @@ pub(super) enum ProcessError {
     #[cfg(not(unix))]
     #[error("completion-check process supervision is unavailable on this platform")]
     UnsupportedPlatform,
+    #[cfg(unix)]
+    #[error("check workspace could not open: {0}")]
+    Workspace(#[source] std::io::Error),
     #[cfg(unix)]
     #[error("check preparation failed: {0}")]
     Preparation(#[source] process_context::PreparationError),
@@ -310,7 +314,7 @@ fn confirm_linux_group_exit(
 /// authorization. This task retains process ownership until confirmed reap.
 #[cfg(unix)]
 pub(super) async fn run_process(
-    workspace: Workspace,
+    workspace: PathBuf,
     command: String,
     deadline: tokio::time::Instant,
     cancellation: RunCancellation,
@@ -329,6 +333,7 @@ pub(super) async fn run_process(
     };
     let preparation_cancellation = ToolCancellation::new(cancellation.clone());
     let (mut prepared, observer_permit) = match tokio::task::spawn_blocking(move || {
+        let workspace = Workspace::open(&workspace).map_err(ProcessError::Workspace)?;
         process_context::prepare_goal_check(
             workspace,
             command,
@@ -337,6 +342,7 @@ pub(super) async fn run_process(
             deadline.into_std(),
         )
         .map(|prepared| (prepared, permit))
+        .map_err(ProcessError::Preparation)
     })
     .await
     {
@@ -353,7 +359,7 @@ pub(super) async fn run_process(
                 tail: String::new(),
             });
         }
-        Ok(Err(error)) => return Err(ProcessError::Preparation(error)),
+        Ok(Err(error)) => return Err(error),
         Err(error) => return Err(ProcessError::PreparationTask(error)),
     };
     if cancellation.is_cancelled() {
@@ -407,6 +413,7 @@ pub(super) async fn run_process(
     let mut out_buffer = [0_u8; OUTPUT_BYTES];
     let mut err_buffer = [0_u8; OUTPUT_BYTES];
     let mut tail = VecDeque::<u8>::with_capacity(OUTPUT_BYTES);
+    let mut leading_fragment = false;
     let outcome = loop {
         let read = tokio::select! {
             biased;
@@ -470,6 +477,9 @@ pub(super) async fn run_process(
             .len()
             .saturating_add(read.len())
             .saturating_sub(OUTPUT_BYTES);
+        if discard > 0 {
+            leading_fragment = tail.get(discard - 1).copied() != Some(b'\n');
+        }
         tail.drain(..discard);
         tail.extend(read);
     };
@@ -528,8 +538,15 @@ pub(super) async fn run_process(
         Ok(outcome) => outcome,
         Err(error) => return Err(error),
     };
+    if leading_fragment {
+        let complete = tail
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(tail.len(), |index| index + 1);
+        tail.drain(..complete);
+    }
     let bytes: Vec<u8> = tail.into();
-    let text = String::from_utf8_lossy(&bytes);
+    let text = crate::tools::output::mask_secrets(String::from_utf8_lossy(&bytes).into_owned());
     // Replacement characters may expand invalid UTF-8; preserve a bounded
     // valid UTF-8 suffix even for binary process output.
     let mut start = text.len().saturating_sub(OUTPUT_BYTES);
@@ -730,6 +747,7 @@ fn finish(
         Completion::Forbidden => "check forbidden by current shell policy".to_owned(),
         Completion::Stopped => "check not started".to_owned(),
     };
+    let output = truncate_utf8(crate::tools::output::mask_secrets(output), OUTPUT_BYTES);
     let (queued, message): (bool, String) = transaction.query_row(
         "SELECT status='queued',assistant_message_id FROM runs WHERE id=?1",
         [claimed.identity.run_id.to_string()],
@@ -981,21 +999,9 @@ pub(super) async fn execute(
                 for event in events {
                     inner.notify(event.cursor)
                 }
-                let workspace = match Workspace::open(Path::new(&claimed.workspace)) {
-                    Ok(workspace) => workspace,
-                    Err(error) => {
-                        break Completion::Process(ProcessResult {
-                            outcome: ProcessOutcome::Failed,
-                            tail: truncate_utf8(
-                                format!("check workspace could not open: {error}"),
-                                OUTPUT_BYTES,
-                            ),
-                        });
-                    }
-                };
                 let cancelled = RunCancellation::new();
                 let process = run_process(
-                    workspace,
+                    PathBuf::from(&claimed.workspace),
                     check.command.clone(),
                     deadline,
                     cancelled.clone(),
@@ -1162,7 +1168,7 @@ pub(super) fn recover(
 
 #[cfg(not(unix))]
 pub(super) async fn run_process(
-    _workspace: Workspace,
+    _workspace: PathBuf,
     _command: String,
     _deadline: tokio::time::Instant,
     _cancellation: RunCancellation,

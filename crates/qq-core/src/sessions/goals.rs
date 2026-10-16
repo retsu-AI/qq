@@ -428,6 +428,7 @@ pub(super) fn set(
     goal.check_output = None;
     goal.next_run_at_ms = now;
     if check_changed || replace {
+        goal.counters.check_failures = 0;
         goal.check_authorization = goal.check.as_ref().map(|_| GoalCheckAuthorization::Pending);
         if goal.check.is_some() && goal.status == GoalStatus::Active {
             goal.status = needs_check_approval();
