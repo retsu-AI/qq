@@ -397,9 +397,17 @@ async fn goal_check_process_cancellation_drains_its_process_group() {
     assert_eq!(result.outcome, ProcessOutcome::Cancelled);
     #[cfg(target_os = "linux")]
     {
-        let mut descriptors = [rustix::event::PollFd::new(descendant_exit.0.get_ref(), rustix::event::PollFlags::IN)];
+        let mut descriptors = [rustix::event::PollFd::new(
+            descendant_exit.0.get_ref(),
+            rustix::event::PollFlags::IN,
+        )];
         rustix::event::poll(&mut descriptors, Some(&rustix::event::Timespec::default())).unwrap();
-        assert!(descriptors[0].revents().intersects(rustix::event::PollFlags::IN | rustix::event::PollFlags::HUP), "descendant exit must be confirmed before cancellation completes");
+        assert!(
+            descriptors[0]
+                .revents()
+                .intersects(rustix::event::PollFlags::IN | rustix::event::PollFlags::HUP),
+            "descendant exit must be confirmed before cancellation completes"
+        );
     }
     #[cfg(target_os = "linux")]
     {

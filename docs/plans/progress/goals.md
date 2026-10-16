@@ -868,3 +868,24 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 
 - Full gate on1763403e stops at the outage fixture's10000-token row. Exact diagnostic rerun proves TotalTokens refusal before dispatch, not provider-retry/accounting failure. The new paid input bound correctly includes complete request bytes.
 - Keep caps finite but leave100000tokens of room to exercise the intended HTTP529 rejection; retain every retry, direct ownership, known-zero accounting and zero-run-charge assertion. Full goal_admission group passes19/19 (4c2ac02f), including token-only/cost-only/combined rows for goal and prompt origins. Resulting-head full push gate follows.
+
+### G3 full-gate descendant exit correction
+
+The full gate on `2a75c4aa` caught a descendant still in state `R` when completion
+check cancellation returned. A narrow rerun passed, but independent source review
+confirmed the real gap: killpg plus leader wait did not observe descendant exit.
+The test now pins the descendant with a pidfd before cancellation and checks
+terminal readiness at the return boundary. It retains its original /proc check.
+
+Linux completion checks now retain the WNOWAIT leader pin while confirming every
+matching process through pidfd readiness, including zombie leaders with live
+threads. A bounded off-executor /proc scan (65,536 entries, 4,096 members, 4,096
+bytes per stat) is repeated after observed exits to close the fork/enumeration
+window. All scans and waits share one five-second cleanup deadline. Identity is
+checked around pidfd acquisition. Failure still reaps the shell but leaves the
+process lease unconfirmed and the runtime failed, preserving workspace exclusion.
+This adds Linux check-cleanup work only; ordinary prompt requests are unchanged.
+Existing rustix enables its event API without a new dependency or version change.
+
+Focused run `14ab4e7d-0c5e-408e-95fe-5d8af95054c4`: 5/5 process supervision
+tests passed. Final full gate, smoke and independent source review remain pending.
