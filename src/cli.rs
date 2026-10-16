@@ -799,6 +799,14 @@ mod tests {
     }
 
     #[test]
+    fn run_help_documents_goal_exit_codes() {
+        let help = Cli::try_parse_from(["qq", "run", "--help"]).unwrap_err().to_string();
+        for expected in ["6 paused", "7 blocked", "8 goal-budget exhaustion"] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
+    #[test]
     fn version_names_the_crate_version_and_the_source_revision() {
         let error = Cli::try_parse_from(["qq", "--version"]).unwrap_err();
         let rendered = error.to_string();
