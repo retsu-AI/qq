@@ -14,6 +14,8 @@ mod bedrock_auth;
 pub mod compiler;
 mod construction;
 mod credentials;
+
+pub mod decision;
 mod exchange;
 mod http;
 mod limits;

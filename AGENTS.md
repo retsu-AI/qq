@@ -57,6 +57,8 @@ ledger every session, and reserve ADR numbers in
   session state/reducer (`state`).
 - `crates/qq-config/`: layered configuration, policy, provider presets.
 - `crates/qq-core/`: agent runtime, sessions, tools, persistence.
+
+- `crates/qq-decision/`: provider-neutral decision answer validation; no runtime activation.
 - `crates/qq-harness/`: configuration-driven hosting composition, plan cache,
   MCP bridge.
 - `crates/qq-mcp/`: MCP client transport and tool discovery.
