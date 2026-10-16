@@ -8,7 +8,7 @@ puts the fix next to whatever failed. Its header reports the build and
 compatibility versions, also available from `qq version`:
 
 ```
-qq <version> (<commit> <build date>) · protocol 34 · capabilities 1 · descriptor 15 · store schema 58
+qq <version> (<commit> <build date>) · protocol 35 · capabilities 1 · descriptor 15 · store schema 58
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5

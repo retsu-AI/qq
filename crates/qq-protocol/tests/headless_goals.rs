@@ -5,6 +5,25 @@ use qq_protocol::{
     RunSnapshot, RunStatus, SessionId, WorkspaceId,
 };
 
+fn golden(name: &str, encoded: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "tests/fixtures/headless-goals/v{}/{}.jsonl",
+        qq_protocol::PROTOCOL_VERSION,
+        name
+    ));
+    let encoded = format!("{encoded}\n");
+    if std::env::var_os("QQ_UPDATE_FIXTURES").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &encoded).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        encoded,
+        "{}",
+        path.display()
+    );
+}
+
 fn goal(status: GoalStatus) -> GoalSnapshot {
     GoalSnapshot {
         session_id: SessionId::from_bytes([1; 16]),
@@ -37,7 +56,7 @@ fn goal(status: GoalStatus) -> GoalSnapshot {
 #[test]
 fn headless_goal_final_states_have_distinct_exits_and_exact_snapshots() {
     assert_eq!(HeadlessGoalStatus::from_goal(&GoalStatus::Active), None);
-    for (state, expected) in [
+    for (index, (state, expected)) in [
         (GoalStatus::Achieved, 0),
         (
             GoalStatus::Paused {
@@ -57,7 +76,10 @@ fn headless_goal_final_states_have_distinct_exits_and_exact_snapshots() {
             },
             8,
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let goal = goal(state);
         let status = HeadlessGoalStatus::from_goal(&goal.status).unwrap();
         assert_eq!(status.code(), expected);
@@ -77,6 +99,7 @@ fn headless_goal_final_states_have_distinct_exits_and_exact_snapshots() {
             serde_json::from_str::<HeadlessRecord>(&encoded).unwrap(),
             owned
         );
+        golden(&format!("goal_final_{index}"), &encoded);
         let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(value["type"], "goal");
         assert_eq!(value["goal"], serde_json::to_value(goal).unwrap());
@@ -138,8 +161,46 @@ fn headless_goal_run_preserves_direct_run_identity_and_accounting() {
             owned
         );
         let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        golden(
+            if matches!(origin, RunOrigin::Goal { .. }) {
+                "goal_prompt_run"
+            } else {
+                "goal_check_run"
+            },
+            &encoded,
+        );
         assert_eq!(value["type"], "goal_run");
         assert_eq!(value["run"]["estimated_cost_usd_nanos"], 42);
         assert_eq!(value["run"]["context_tokens"], 123);
+    }
+}
+
+#[test]
+fn retained_goal_records_still_decode() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/headless-goals");
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let version: u16 = name
+            .to_str()
+            .unwrap()
+            .strip_prefix('v')
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(version <= qq_protocol::PROTOCOL_VERSION);
+        for record in std::fs::read_dir(entry.path()).unwrap() {
+            let path = record.unwrap().path();
+            let encoded = std::fs::read_to_string(&path).unwrap();
+            for line in encoded.lines() {
+                let decoded: HeadlessRecord = serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert!(matches!(
+                    decoded,
+                    HeadlessRecord::GoalRun(_) | HeadlessRecord::Goal(_)
+                ));
+            }
+        }
     }
 }

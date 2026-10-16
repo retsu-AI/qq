@@ -320,6 +320,24 @@ machine. It is **not** a hosted API: no tenancy, no per-caller authorization,
 no non-loopback bind without an explicit application authentication design.
 See `protocol.md`.
 
+### Foreground goal record contract
+
+Protocol35 reserves two additional records for foreground goal hosting:
+`goal_run` contains `workspace_id`, owning `session_id`, immutable `goal`
+identity/revision and the authoritative settled `run` snapshot. It covers each
+direct goal prompt, model audit and completion check; helper, compaction and
+paid descendant runs remain event records. The final `goal` record contains
+`workspace_id`, the complete durable goal snapshot, invocation `status` and
+`exit_code`. Both owned and borrowing encoders use the same wire shape.
+
+A goal invocation continues while active and ends on any other state,
+including needs-user pauses. Final goal exits are achieved0, paused6,
+blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only
+achievement exits0. Interruption first requests a durable pause; if cleanup
+fails the invocation reports harness failure. New records do not change the
+ordinary prompt trial/event/outcome contract. The record vocabulary alone
+does not constitute a foreground CLI implementation or its qualification.
+
 ### `qq goal`
 
 Server goal scripting discovers the existing local authenticated server and

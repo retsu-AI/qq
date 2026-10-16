@@ -28,8 +28,8 @@ pub use goals::{
     GoalPauseReason, GoalSnapshot, GoalStatus, GoalWait,
 };
 pub use headless::{
-    HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
-    HeadlessTrial,
+    HeadlessApproval, HeadlessGoalOutcome, HeadlessGoalRun, HeadlessGoalStatus, HeadlessOutcome,
+    HeadlessRecord, HeadlessRecordRef, HeadlessStatus, HeadlessTrial,
 };
 pub use ids::{
     CommandId, GoalId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId,
@@ -78,7 +78,7 @@ pub use sessions::{
     WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 34;
+pub const PROTOCOL_VERSION: u16 = 35;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles

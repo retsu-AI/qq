@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
     check(
         "outcome_paused_no_progress",
         &RunOutcome::Paused {
@@ -1391,7 +1391,15 @@ fn historical_fixtures_still_decode() {
                 })
             }
             // The prefix selects the type exactly as the golden test named it.
-            if name.starts_with("command_") {
+            if name == "command_acknowledge_check_interruption" {
+                decode::<SessionCommand>(&path, &stored);
+            } else if name == "event_check_interruption_changed" {
+                decode::<SessionEvent>(&path, &stored);
+            } else if name == "outcome_check_interruption_acknowledged" {
+                decode::<CommandOutcome>(&path, &stored);
+            } else if name == "snapshot_check_interruption" {
+                decode::<qq_protocol::WorkspaceSnapshot>(&path, &stored);
+            } else if name.starts_with("command_") {
                 decode::<CommandRequest>(&path, &stored);
             } else if name.starts_with("receipt_") {
                 decode::<CommandReceipt>(&path, &stored);
