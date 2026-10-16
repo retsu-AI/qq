@@ -100,17 +100,19 @@ an independently verified result, broken down by decision model.
 | --- | --- | --- | --- | --- |
 | DM0 | This plan, the design, ADR-0055, and the doc rename | — | `docs/**` | Links resolve; one plan; § Docs gate |
 | DM1 | Neutral decision types, `DecisionProvider`, `DecisionCapabilities` and `DecisionError` in `qq-provider`; empty `qq-decision` crate with the answer validator | DM0 accepted, ADR-0055 settled, and explicit owner scope/implementation approval recorded | `crates/qq-provider/src/lib.rs`, `crates/qq-provider/src/decision.rs`, `crates/qq-decision/**`, root `Cargo.toml` (root request) | D1 |
-| DM2 | System One adapter (`providers/typesafe.rs`) on `HttpExchange`; recorded-reply fixtures; replaces `routing::typesafe_evaluate` and `typesafe_http_client` | DM1 | `qq-provider` adapter and recipe; `src/runtime{,/routing,/approval}.rs` call sites; `src/advisory.rs` | D2 |
+| DM2 | System One adapter (`providers/typesafe.rs`) on `HttpExchange`; recorded-reply fixtures and explicit transport-policy migration; replaces `routing::typesafe_evaluate` and `typesafe_http_client` | DM1 | `qq-provider` adapter and recipe; `src/runtime{,/routing,/approval}.rs` call sites; `src/advisory.rs` | D2 |
+| DM2c | Cloudflare Clef hosted transport/envelope, credential audience and non-truncating admission proof; shared System One codec | DM2 | `crates/qq-provider/src/providers{,/cloudflare_decisions}.rs`, compiler recipe, `qq-auth` audience; loopback fixtures | D2c; shadow comparison after DM7/JV7, paid runs only with approved spend |
 | DM3 | Move the rubrics, parsers and thresholds of routing, approval and checkpoint into `qq-decision` consumers, **behavior-identical** (same requests, same dispositions, same policy identities) | DM2 | `crates/qq-decision/**`, `src/runtime*.rs`, `src/advisory.rs` | D3 |
 | DM4 | Receipt-ready interpretation: raw distribution kept, QQ-computed confidence, vendor confidence side by side; JV3 precision lands here once for all consumers | DM3 | `qq-decision` validator | A3 + D4 |
 | DM5 | OpenAI Decisions adapter from the **published** contract, with fixtures copied from it; capabilities declared; `openai/default` credential audience | DM1, OpenAI API reference published | `crates/qq-provider/src/providers.rs`, `crates/qq-provider/src/providers/openai_decisions.rs`, `qq-auth` audience only | D5 |
-| DM6 | Configuration: `decision_models`, per-consumer `decisions` settings, `jev_*` aliases with provenance, `QQ_DECISIONS=off`, exact-id requirement for authority consumers; plan identity carries model, rubric and policy ids | DM3 | `qq-config`, composition root, `src/plan.rs` | D6 |
+| DM6 | Configuration: `decision_models`, per-consumer `decisions` settings, `jev_*` aliases with provenance, `QQ_DECISIONS=off`, exact-id requirement for authority consumers; plan identity carries model, rubric and policy ids | DM3, DM7 | `qq-config`, composition root, `src/plan.rs` | D6 |
 | DM7 | Calibration table and shadow-only rule for uncalibrated complete keys and moved aliases; the shadow consumer from JV7 uses it | DM4, JV6 | `qq-decision` | D7 |
 | DM8 | Neutral names in core and protocol: `decision_approval`, `DelegateIdentity::Decision{provider}`, `ResolvingDecisionCredential`; fixtures kept | DM3, JV5 protocol bump | `qq-core`, `qq-protocol`, `qq-client`, `qq-tui` | D8 |
 | DM9 | Vendor comparison: OpenAI vs Jev as paired shadow arms on the same holds and routes | DM5, DM7, JV13 procedure | Evaluation tooling; receipts | D9 |
 
-DM2–DM4 are refactors. The existing Jev tests plus recorded replies prove
-that nothing changes before JV3 intends it. Only DM5 depends on OpenAI, so a
+DM3 is behavior-preserving relative to the accepted DM2 baseline. DM2 changes
+transport retry/admission/deadline behavior and needs explicit migration
+acceptance; DM4 intentionally changes interpretation precision (JV3). Only DM5 depends on OpenAI, so a
 late or changed OpenAI contract never blocks the rest.
 
 ### Repairs and policy (JV, carried from the Jev plan)
@@ -132,7 +134,7 @@ parser" mean the `qq-decision` consumers.
 | JV6 | Per-attempt receipts and pre-dispatch spend admission (finding 7), using `DecisionError`'s dispatch split | JV5, DM4 | Approval gate, core budget, session store, protocol accounting, `qq-decision` receipt builder | A6 |
 | JV7 | Shadow calibration | JV4, JV6, DM7 | `qq-decision` shadow consumer, evaluation projection | A7 |
 | JV8 | Layered approval pilot: effect classes, narrow parallel questions, per-turn batching (findings 1, 7) | JV7, owner scope decision | Approval consumer and composition, pilot fixtures | A8 |
-| JV9 | `/decisions` panel (was `/jev`), explained preset, one server-side Off | JV1a, JV6, DM6 | `qq-tui`, `qq-client`, `qq-protocol` session command | A9 |
+| JV9 | `/decisions` panel (was `/jev`), explained preset, one server-side Off | JV1a, JV6, DM6 | `qq-tui`, `qq-client`, `qq-protocol` session command; `qq-server`, `qq-core/src/sessions/{approvals,commands,runtime,tool_calls}.rs`, composition and `qq-decision` admission/epoch checks | A9; immediate Off requires owner acceptance |
 | JV10 | Routing by adequacy (finding 8) | JV3, JV6 | Routing consumer, candidate metadata | A10 |
 | JV11 | One further acceleration experiment; now drawn from § DX | JV6, JV10 result | That seam only | A11 |
 | JV12 | `enforce`: batch and parallelize, or relabel it as a high-assurance profile | JV6 | `qq-core/src/lib.rs` checkpoint path, `runtime/checkpoint.rs` | A12 |
@@ -153,7 +155,7 @@ JV6, because every one of them needs receipts.
 | DX3 | X9 per-turn effort routing | ≥ 20% lower cost per verified task at equal success |
 | DX4 | X5 fleet approval batching | Interruptions per agent-hour fall with the number of concurrent agents, not rise |
 | DX5 | X8 claim-to-evidence completion | Unsupported final claims fall with ≤ 1 extra turn per run on average |
-| DX6 | X4 durable score reuse | ≥ 40% of eligible holds settled from reuse with zero epoch-mismatch reuse |
+| DX6 | X4 durable score reuse | ≥ 40% of eligible advisory evaluations reused with zero identity mismatch; reuse never settles authority |
 
 X1, X2 and X14 (the decision ledger, tournaments and the economics panel)
 are not experiments. They are the product of JV6, JV7 and JV9.
@@ -195,11 +197,27 @@ Every behavior bullet is a failing test first, then green.
   timeout. Saturation, typed pre-dispatch backpressure, cancellation, drain
   recovery, and uncertain-send accounting fixtures are required. Configuration
   names remain illustrative and open.
+- Admission state is shared in compiler/runtime state by canonical deployment
+  (endpoint/account/model deployment and credential audience), not per compiled
+  plan. Multiple profiles/cached plans share the same 8/32 allowance. Test
+  multi-plan saturation, cancellation and recovery with distinct compiled handles.
+- Migration fixtures compare old and new outcomes for connection failure,
+  saturation, queue expiry, pre-send retry and cancellation. Record intentional
+  differences and require explicit owner acceptance before consumer migration.
 - No resend after a byte is sent.
 - An OpenRouter-style recipe (endpoint, headers, model id) needs no code
   change.
 - `typesafe_http_client` and `typesafe_evaluate` are deleted.
 - The endpoint and model strings each appear once.
+
+**D2c — Clef hosted adapter.**
+- Production entry-point loopback fixtures cover Workers AI envelope, account
+  URL, endpoint-bound credentials, model selector, usage and returned identity.
+- Token admission includes question overhead; oversized/truncatable evidence
+  cannot authorize. Unknown revision remains shadow-only. No automatic media
+  fetch. Share D2 admission across plans; reject credential cross-audience use.
+- After DM7/JV7, paired shadow comparison uses identical evidence with Jev;
+  no authority or quality claim follows from API compatibility.
 
 **D3 — move without change.**
 - Every existing Jev test passes unmodified except for import paths.
@@ -211,6 +229,8 @@ Every behavior bullet is a failing test first, then green.
 **D4 — interpretation.** A3, plus:
 - The vendor confidence and QQ's confidence are both stored.
 - A winner-only answer yields `Unsupported` for approval and routing.
+- Exact question-ID set required: duplicate, missing and extra/unknown IDs fail;
+  valid reordered answers produce identical per-question interpretation.
 
 **D5 — OpenAI adapter.**
 - Fixtures are copied from the published reference, with the doc URL and
@@ -227,11 +247,19 @@ Every behavior bullet is a failing test first, then green.
 - `QQ_DECISIONS=off` beats every profile, and a stored key plus a
   configured model enable nothing.
 - An authority consumer on an alias id fails plan compile.
+- Except the explicitly scoped legacy Jev compatibility path, every enabled
+  authority consumer requires D7 qualification: exact-ID but unqualified models
+  fail plan compilation or remain shadow-only, including OpenAI/System One.
 - Plan identity changes when the model, rubric or policy id changes.
 
 **D7 — calibration.**
 - An uncalibrated complete key and a moved alias both run shadow only and
   never settle; wrong provider, model, rubric, or effect fixtures remain shadow-only.
+- Independently change deployment revision, endpoint/account, adapter/contract
+  version, evidence-builder version and batching shape with the original four
+  fields fixed: every case becomes shadow-only and changes policy identity.
+  Missing revision evidence cannot settle. Test each dimension, not just a
+  combined mismatch.
 - Adding a calibration row changes the policy identity.
 - Existing Jev thresholds become explicitly `legacy_unqualified` rows with
   their current identities and only their existing authority. This exception
@@ -247,8 +275,8 @@ Every behavior bullet is a failing test first, then green.
 - The same holds and routes are scored by both models with identical
   evidence hashes.
 - The report is per model and uses A13's statistics and honesty rules.
-- The result decides only which model is *recommended*. No default is
-  turned on.
+- The result reports paired measurements only. A recommendation requires
+  separate owner decision 5; no default is turned on.
 
 ## Acceptance (JV)
 
@@ -367,6 +395,8 @@ configured model. The "Confirmed with TypeSafe" step in A3 generalizes to
   - privilege expansion;
   - cross-workspace access;
   - instructions embedded in tool output.
+- Batch fixtures reject duplicate/missing/unknown question IDs and preserve
+  action association under reordered responses; no positional answer binding.
 - Thresholds come from A7 data.
 - Actions from MCP tools whose effect is unknown keep the existing policy.
 - A missing-evidence answer never runs the read it asks for itself.
@@ -378,7 +408,11 @@ configured model. The "Confirmed with TypeSafe" step in A3 generalizes to
   compatibility label where an actual current surface requires it.
 - A preset expands into explicit per-capability settings shown to the user.
   It never grants `jev_approval` implicitly.
-- One server-side Off suppresses all three roles for later runs. Clearing it
+- One server-side Off suppresses all three roles for later runs. If immediate
+  Off is accepted, fixtures prove active-session/owned-child admissions stop,
+  queued and in-flight replies racing revocation cannot authorize, reconnect
+  preserves Off, and already-started effects/existing explicit grants remain
+  separate. Core/server enforcement lands before enabling the UI. Clearing it
   says what it restores.
 - If #187 lands, extend its session command instead of adding a parallel
   one.
@@ -840,11 +874,12 @@ Illustrative shape, fixed by DM6. Key names are not final:
     consumer's own deadline; there is no second independent timeout;
   - at most `AttemptPolicy` retries *before* any byte is sent, and never
     after an uncertain send.
-- There is one pooled client per compiled decision provider, not per call.
+- The HTTP client pool and deployment-keyed admission registry are shared
+  across compiled providers/plans, not recreated per compile.
   The current approval reviewer's epoch cache goes away (ADR-0052 already
   moved activation into the plan).
 - Queues are bounded per provider at 8 in-flight and 32 pending requests,
-  with typed pre-dispatch backpressure to the hold rather than an unbounded
+  across all compiled plans for that deployment, with typed pre-dispatch backpressure to the hold rather than an unbounded
   spawn. Cancellation drains queued work and recovers capacity; no retry is
   inferred after an uncertain send.
 
@@ -930,7 +965,7 @@ can do both.
 | X1 | **Decision ledger with outcome labels.** Every answer is a receipt. Later events label it: human override, tool failure, revert, test pass | Codex and fx log to traces only | any | Receipt persisted before effect; calibration reads only |
 | X2 | **Per-model calibration and shadow tournaments.** Replay stored holds against a new model or rubric and promote only on gates | No replayable history elsewhere | any | Shadow never settles; promotion is a reviewed data change |
 | X3 | **Hold without interrupting.** A typed concern goes back to the model instead of a prompt; escalate after one changed attempt | fx has untyped cautions; others prompt | `choice` | Always-human classes never enter |
-| X4 | **Durable score reuse.** Keyed by effect class, argument template and authorization epoch; survives restart | Codex's cache is in memory | `noul` | Exact epoch match; age limit |
+| X4 | **Durable advisory score reuse.** Keyed by exact action digest, task revision, evidence hash, model/rubric/policy and authorization epoch; survives restart | Codex's cache is in memory | `noul` | Exact full identity and precondition match; age limit; never settles authority |
 | X5 | **Fleet approval batching.** One question for K agents holding the same template | Nobody coordinates across agents | `noul` per cluster | Same authorization scope and exact template only |
 | X6 | **Semantic loop guard.** Re-reads without edits, edit/revert, the same failure | OpenCode and fx match identical calls only | `noul` + `choice` | Steers or pauses only; step and token caps stay authoritative (ADR-0049) |
 | X7 | **Failure triage to retry policy.** Transient, flaky, environment or logic | Heuristics elsewhere | `choice` | Retry budget; idempotent tools only |
