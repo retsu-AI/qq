@@ -14,6 +14,8 @@ Predecessor plan: [snapshot before consolidation](https://github.com/retsu-AI/qq
 | AF5 | `QQ_LOG` tracing | Planned | | ADR needed |
 | AF6 | Test audit | Planned (remaining modules) | | one module per PR |
 | AF6.1 | Cancellation module audit | Shipped (`3b763ea1`) | #311 | deterministic wakeups, stress, mutation coverage |
+
+| AF6.2 | Delegation fixture audit | In progress | `test/eng-1028-af6-delegation-audit` | bounded compaction/checkpoint fixtures; baseline 71 tests, one retried-pass failure |
 | AF7 | CI affected/full split | Shipped (`192c9879`) | #282 | merge-queue activation remains an operator task |
 | AF8 | AGENTS.md and skills | Shipped (`192c9879`) | #282 | |
 | AF9 | `cargo xtask lint` | Shipped (`192c9879`; first rules) | #282 | mistake mining remains open |
@@ -166,3 +168,30 @@ Predecessor plan: [snapshot before consolidation](https://github.com/retsu-AI/qq
 - Hosted main CI at `3b763ea1` passes correctness/smoke, Windows teardown and
   WASM. No local macOS/full Windows claim or observed merge-queue activation.
 - AF5, remaining AF6 modules, AF9 mining and AF10 remain open.
+
+
+#### AF6.2 baseline and #317 merge receipt
+
+- #317 merged as `0b4f29e3` after final Codex thumbs-up and resolved threads.
+  Final full CI-profile gate passed: 2468 tests and 211 minimal-provider tests.
+- Owned paths: delegation test fixtures, shared test support only if required,
+  legacy sleep baseline if line locations move, plan and this ledger.
+- Baseline: delegation module 71 tests in 67.0s; 70 pass, one retried-pass
+  (`a_text_only_slice_report_is_never_audited_or_treated_as_the_answer`).
+  Nextest run `4b5e3fc5-6598-4bad-a998-151d46bc5cd0`; no pass claimed.
+- AF5, further AF6 audits, AF9 mining and AF10 remain separate slices.
+
+- Replaced shell transcript inflation with 16 native writes (2 KiB each),
+  preserving real compaction and exact spend assertions. Removed two fixed
+  sleeps with paused-time advances; sleep ceiling 76 → 74. No tests deleted.
+- 256-call audit fixture now uses nextest's process hang guard instead of a
+  competing 30-second inner timer. All answer/audit assertions remain.
+- Initial 20-run stress stopped at the tool's 600s bound after 19 iterations;
+  iteration 18 exposed three retried-pass failures. Deadline fixtures fixed.
+- Final stress alongside full gate: 10/10 iterations, 710/710 tests pass.
+  Full CI-profile gate passed in 279s (2471 tests, minimal provider 211).
+- Mutation audit of owned_run_spend: 17 generated, 10 caught, 6 missed,
+  1 unviable; no deletion or improved mutation score claimed. Misses concern
+  descendant bound guards; evidence target/qq-perf/af6-delegation/mutation-after/.
+- Earlier full gate failed two out-of-slice fixtures; focused reruns and final
+  full gate passed. Independent review fixed prior-child clock granularity.

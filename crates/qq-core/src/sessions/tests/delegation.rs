@@ -2754,6 +2754,27 @@ async fn steering_charges_a_completed_but_unconsumed_child_exactly_once() {
     harness.runtime.shutdown().await.unwrap();
 }
 
+async fn await_frozen<T>(future: impl std::future::Future<Output = T>, timeout: Duration) -> T {
+    let (finished, waiting) = std::sync::mpsc::sync_channel::<()>(1);
+    let mut watchdog = tokio::task::spawn_blocking(move || waiting.recv_timeout(timeout));
+    let result = tokio::select! {
+        result = future => result,
+        _ = &mut watchdog => panic!("frozen-clock operation did not complete within {timeout:?} of real time"),
+    };
+    drop(finished);
+    assert!(matches!(
+        watchdog.await.unwrap(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    result
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "frozen-clock operation did not complete")]
+async fn frozen_collection_watchdog_expires_without_virtual_time_advancing() {
+    await_frozen(std::future::pending::<()>(), Duration::ZERO).await;
+}
+
 #[tokio::test]
 async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() {
     for interruption in [0, 1, 2, 3, 4] {
@@ -2786,6 +2807,17 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         )
         .await;
         let workspace = std::fs::canonicalize(harness._directory.path()).unwrap();
+
+        let keep_clock = if deadline {
+            tokio::time::pause();
+            Some(tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            }))
+        } else {
+            None
+        };
         let (applying, release) = crate::tools::hold_tool_apply(&workspace);
         let parent_run = if deadline {
             let receipt = harness
@@ -2812,9 +2844,8 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         } else {
             submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await
         };
-        tokio::time::timeout(Duration::from_secs(2), applying)
+        await_frozen(applying, Duration::from_secs(2))
             .await
-            .unwrap()
             .unwrap();
         let mut observed = Vec::new();
         let child_run = loop {
@@ -2872,14 +2903,19 @@ async fn child_mutation_drains_before_steering_or_a_replacement_run_can_write() 
         if deadline {
             // Both inherited child and parent deadlines must expire while the
             // write is held; neither terminal may release the checkout early.
-            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            tokio::time::advance(Duration::from_millis(1_200)).await;
         } else if interruption != 2 {
             tokio::time::timeout(Duration::from_secs(2), stopping.take().unwrap())
                 .await
                 .unwrap()
                 .unwrap();
         }
+        if let Some(keep_clock) = keep_clock {
+            tokio::time::resume();
+            keep_clock.abort();
+        }
         // The real write is past its cancellation check and holds the
+
         // apply lock. Completion must remain unavailable until it exits.
         let premature = tokio::time::timeout(Duration::from_millis(50), async {
             loop {
@@ -5013,10 +5049,10 @@ async fn child_compaction_spend_reduces_the_next_child_allowance() {
         requests: Arc::new(StdMutex::new(Vec::new())),
         served: StdMutex::new(0),
         script: AutoCompactScript::Measured {
-            script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
+            script: Box::new(AutoCompactScript::WritesRepeatedlyWithSummaries {
                 // The smaller minimal-profile tool catalog must also cross
                 // a compaction boundary before this child finishes.
-                turns: 24,
+                turns: 16,
                 text: "child done".to_owned(),
                 summary: valid_summary("child work"),
             }),
@@ -5132,8 +5168,8 @@ async fn stopped_child_summary_receipt_does_not_wait_for_spawned_drop_cleanup() 
             requests: Arc::new(StdMutex::new(Vec::new())),
             served: StdMutex::new(0),
             script: AutoCompactScript::Measured {
-                script: Box::new(AutoCompactScript::ShellRepeatedlyWithSummaries {
-                    turns: 24,
+                script: Box::new(AutoCompactScript::WritesRepeatedlyWithSummaries {
+                    turns: 16,
                     text: "child done".to_owned(),
                     summary: "__STALL__".to_owned(),
                 }),
@@ -5592,6 +5628,22 @@ async fn audit_overspend_and_unknown_spend_exhaust_the_parent() {
 
 #[tokio::test]
 async fn child_duration_is_reduced_by_preflight_and_prior_children() {
+    struct ClockChild;
+    impl Provider for ClockChild {
+        fn stream(&self, _request: ModelRequest) -> ProviderStream {
+            Box::pin(
+                stream::once(async {
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: "child done".to_owned(),
+                    })
+                })
+                .chain(stream::iter([Ok(
+                    qq_provider::ProviderEvent::Completed { usage: None },
+                )])),
+            )
+        }
+    }
     struct HeldPreflight {
         inner: ChildBudgetLoader,
         first: AtomicBool,
@@ -5625,7 +5677,7 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             usage: Some(usage(0, 0)),
         });
         let child: Arc<dyn Provider> = Arc::new(UsageProvider {
-            inner: Arc::new(StaticTextProvider),
+            inner: Arc::new(ClockChild),
             usage: Some(usage(0, 0)),
         });
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -5648,6 +5700,12 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             8,
         )
         .await;
+        tokio::time::pause();
+        let keep_clock = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
         let run_id = submit_child_budget_prompt(
             &harness,
             RunLimits {
@@ -5657,17 +5715,21 @@ async fn child_duration_is_reduced_by_preflight_and_prior_children() {
             },
         )
         .await;
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(if expires_during_preflight {
+        await_frozen(entered.notified(), Duration::from_secs(2)).await;
+        tokio::time::advance(Duration::from_millis(if expires_during_preflight {
             600
         } else {
             200
         }))
         .await;
         release.notify_one();
-        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        let observed = await_frozen(
+            collect_until_run_finished(&mut harness.events, run_id),
+            Duration::from_secs(30),
+        )
+        .await;
+        tokio::time::resume();
+        keep_clock.abort();
         harness.runtime.shutdown().await.unwrap();
         let durations: Vec<_> = observed
             .iter()
@@ -5725,7 +5787,18 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
     std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
     std::fs::write(harness._directory.path().join("slice-effects.txt"), "seed").unwrap();
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "long task").await;
-    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    // This fixture executes a complete 256-call slice. Its hang guard is the
+    // nextest process watchdog, not the short shared helper's wall clock.
+    let mut observed = Vec::new();
+    loop {
+        let event = harness.events.next().await.unwrap().unwrap();
+        let finished = matches!(event.event,
+            SessionEvent::RunFinished { run_id: done, .. } if done == run_id);
+        observed.push(event);
+        if finished {
+            break;
+        }
+    }
 
     assert!(matches!(
         finished_outcome(&observed, run_id),
