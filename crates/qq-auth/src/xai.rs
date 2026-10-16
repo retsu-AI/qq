@@ -447,7 +447,7 @@ impl CredentialStore {
     pub(super) fn resolve_xai_oauth(&self, profile: &str) -> Result<Secret, AuthError> {
         let name = credential_name(profile)?;
         let now = unix_time()?;
-        let credential = self.load_xai_oauth(&name)?;
+        let credential = self.load_xai_oauth(&name, false)?;
         if !credential.needs_refresh(now) {
             return Ok(Secret::from_secret_bytes(
                 credential.access_token.into_bytes(),
@@ -457,7 +457,7 @@ impl CredentialStore {
         let _refresh = self
             .lock_xai_operation(&name)?
             .expect("xAI credential names always require the xAI lock");
-        let credential = self.load_xai_oauth(&name)?;
+        let credential = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
             return Ok(Secret::from_secret_bytes(
@@ -480,7 +480,7 @@ impl CredentialStore {
         ))
     }
 
-    fn load_xai_oauth(&self, name: &str) -> Result<StoredXaiCredential, AuthError> {
+    fn load_xai_oauth(&self, name: &str, fresh: bool) -> Result<StoredXaiCredential, AuthError> {
         let metadata =
             self.status(name)?
                 .ok_or_else(|| AuthError::StoredCredentialNotRegistered {
@@ -489,10 +489,12 @@ impl CredentialStore {
         if metadata.kind.as_deref() != Some("xai-oauth") {
             return Err(XaiAuthError::StoredCredentialInvalid.into());
         }
-        let secret = self.resolve_with_endpoint(
-            &SecretRef::Stored(name.to_owned()),
-            Some(XAI_CREDENTIAL_ENDPOINT),
-        )?;
+        let reference = SecretRef::Stored(name.to_owned());
+        let secret = if fresh {
+            self.resolve_with_endpoint_uncached(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
+        } else {
+            self.resolve_with_endpoint(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
+        };
         StoredXaiCredential::parse(secret.expose_secret_bytes()).map_err(Into::into)
     }
 }

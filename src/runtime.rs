@@ -9052,6 +9052,19 @@ mod tests {
             .plan_with_lookup(&request, &AgentProfileId::default())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
+
+        // Credential reuse does not publish a cancelled plan. A durable
+        // rotation must still force both a fresh read and a fresh compilation.
+        factory
+            .inner
+            .credentials
+            .set("bench-0", "sk-rotated-secret", false)
+            .unwrap();
+        let (_, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled);
         assert_eq!(keyring.reads.load(Ordering::Relaxed), 2);
 
         // Pre-cancelled loads do not even attempt configuration or credential reads.
