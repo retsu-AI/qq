@@ -114,6 +114,16 @@ Fallback reviewers remain the recorded decider when Jev abstains. The
 transport fixture covers primary, safe fallback, invalid, missing, and
 low-confidence cases; a live read-only QA request must record HTTP 200,
 returned model, header name/ID, and decoder outcome without exposing secrets.
+The earlier source-only verification had no live QQ provider request ID. This
+refresh exercised the production Rust client with the protected QA credential:
+stable `jev-1.13.0` returned `req_01a142186ea77ccf8721cae5f6d39607`, and
+`jev-preview` resolved to `jev-1.14.0` with
+`req_01a1421885837cdba28834519b13d7ab`; both used
+`x-typesafe-request-id` and both retained `LowConfidence` outcomes. Sanitized
+receipts are `/private/tmp/qq-live-jev-1.13-receipt.json` and
+`/private/tmp/qq-live-jev-preview-receipt.json`. Final focused coverage was
+3/3 QQ tests, 57/57 protocol tests, pinned Clippy, formatting, and 76/76
+repository lint entries.
 
 - Synced the shared Jev contract and conformance fixtures into QQ and routed
   approval, checkpoint and advisory parsing through the shared production
