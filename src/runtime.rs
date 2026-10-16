@@ -3927,7 +3927,7 @@ fn typesafe_checkpoint_provenance(
                 !id.is_empty()
                     && id.len() <= 128
                     && id.chars().all(|character| !character.is_control())
-                    && *id != request_id_guard
+                    && crate::runtime::routing::does_not_reflect_credential(id, request_id_guard)
             })
         })
         .unwrap_or("unknown");
@@ -9985,8 +9985,16 @@ mod tests {
                 .contains("provider_model=jev-1.13.0; provider_request_id=req-header-checkpoint")
         );
         assert!(!transport_verdict.feedback.contains("jev-checkpoint-42"));
-        let reflected = parse_typesafe_checkpoint(&valid, None, "jev-checkpoint-42");
-        assert!(reflected.feedback.contains("provider_request_id=unknown"));
+        for reflected_id in [
+            "jev-checkpoint-42",
+            "prefix-jev-checkpoint-42",
+            "jev-checkpoint-42-suffix",
+        ] {
+            let mut reflected = valid.clone();
+            reflected["id"] = serde_json::json!(reflected_id);
+            let reflected = parse_typesafe_checkpoint(&reflected, None, "jev-checkpoint-42");
+            assert!(reflected.feedback.contains("provider_request_id=unknown"));
+        }
         let mut conflicting = valid.clone();
         conflicting["answers"]["consistency"]["choice"] = serde_json::json!("contradicted");
         conflicting["answers"]["consistency"]["probabilities"] = serde_json::json!({

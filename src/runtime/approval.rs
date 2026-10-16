@@ -371,7 +371,7 @@ fn parse_jev_approval(
                 !id.is_empty()
                     && id.len() <= 256
                     && id.bytes().all(|byte| !byte.is_ascii_control())
-                    && *id != request_id_guard
+                    && super::routing::does_not_reflect_credential(id, request_id_guard)
             })
             .map(str::to_owned)
     });
@@ -554,14 +554,16 @@ mod tests {
             weak_with_transport.response_id.as_deref(),
             Some("req_header_low_confidence")
         );
-        let mut reflected_key = response("approve", 0.9);
-        reflected_key["id"] = serde_json::json!("fixture-key");
-        let reflected = parse(&reflected_key);
-        assert_eq!(reflected.decision, Ok(ReviewDecision::Approve));
-        assert_eq!(
-            reflected.response_id, None,
-            "JSON fallback must reject the active key"
-        );
+        for reflected_id in ["fixture-key", "prefix-fixture-key", "fixture-key-suffix"] {
+            let mut reflected_key = response("approve", 0.9);
+            reflected_key["id"] = serde_json::json!(reflected_id);
+            let reflected = parse(&reflected_key);
+            assert_eq!(reflected.decision, Ok(ReviewDecision::Approve));
+            assert_eq!(
+                reflected.response_id, None,
+                "JSON fallback must reject the active key"
+            );
+        }
 
         for (pointer, replacement) in [
             ("/answers/approval/choice", serde_json::json!("execute")),

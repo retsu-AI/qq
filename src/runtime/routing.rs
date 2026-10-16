@@ -329,6 +329,10 @@ fn valid_request_id(value: &str) -> bool {
         })
 }
 
+pub(super) fn does_not_reflect_credential(value: &str, credential: &str) -> bool {
+    credential.is_empty() || !value.contains(credential)
+}
+
 fn provider_request_id(
     response: &reqwest::Response,
     request_id_guard: &str,
@@ -341,7 +345,7 @@ fn provider_request_id(
         else {
             continue;
         };
-        if valid_request_id(value) && value != request_id_guard {
+        if valid_request_id(value) && does_not_reflect_credential(value, request_id_guard) {
             return (Some(value.to_owned()), Some(name));
         }
     }
@@ -600,7 +604,12 @@ mod tests {
                 Some("x-request-id"),
             ),
             (
-                "x-typesafe-request-id: fixture-key\r\nx-request-id: fixture-key\r\nrequest-id: fixture-key\r\n",
+                "x-typesafe-request-id: prefix-fixture-key-suffix\r\nx-request-id: req_safe_fallback_2\r\n",
+                Some("req_safe_fallback_2"),
+                Some("x-request-id"),
+            ),
+            (
+                "x-typesafe-request-id: prefix-fixture-key\r\nx-request-id: fixture-key-suffix\r\nrequest-id: fixture-key\r\n",
                 None,
                 None,
             ),
