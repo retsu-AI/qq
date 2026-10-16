@@ -131,7 +131,7 @@ from **Implements**, was deleted on 2026-09-28 because this ADR records the
 design as built. Read the plan with
 `git log -- docs/plans/mid-run-compaction.md`. Its open MRC-4 (surfaces) and
 MRC-5 (live evidence) moved to
-[`autonomous-core.md`](../plans/autonomous-core.md) AC14 and Goal 5.
+[`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC14 and Goal 5.
 ADR-0048's continuation of a *stopped* run is not the "auto-start a
 follow-up" rejected above: in-run compaction still keeps a live run in one
 run, and ADR-0048 § 3 applies only after a run has already settled.

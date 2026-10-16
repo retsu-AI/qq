@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-30
 **Deciders:** lead; second reviewer required (run loop, sub-agent admission, tool catalog)
-**Implements:** [`autonomous-core.md`](../plans/autonomous-core.md) AP1–AP5 (AP0 is the measurement runbook). Complements ADR-0049 § 8 (loop guard) and takes over ADR-0048 § 2's empty-checkpoint fault
+**Implements:** [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AP1–AP5 (AP0 is the measurement runbook). Complements ADR-0049 § 8 (loop guard) and takes over ADR-0048 § 2's empty-checkpoint fault
 
 ## Context
 

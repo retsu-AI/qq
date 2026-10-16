@@ -1,6 +1,8 @@
+> Historical evidence ledger. New work and current acceptance: [successor](../developer-experience.md). Existing slice IDs and dated receipts are retained; old status tables are not current assignments.
+
 # Ledger: agent feedback loop
 
-Plan: [`../agent-feedback.md`](../agent-feedback.md). Linear: ENG-1028.
+Predecessor plan: [snapshot before consolidation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/agent-feedback.md). Linear: ENG-1028.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |

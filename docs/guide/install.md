@@ -27,6 +27,43 @@ QQ_VERSION=0.1.7 QQ_INSTALL_DIR="$HOME/bin" sh install.sh
 
 `sh install.sh --help` lists the options. To upgrade, run it again.
 
+The script retains each executable by its SHA-256 in
+`~/.local/bin/.qq-versions/qq-<sha256>` (or `.qq-versions` inside your chosen
+install directory). `qq` is a relative symlink selecting one payload. Updates
+stage a complete, read-only executable on the same filesystem, publish it
+without overwriting an existing payload, then atomically replace the selection
+link. An existing regular executable is copied and checksum-verified into the
+retained directory before replacing it; its bytes are preserved for rollback.
+Payloads are not automatically pruned.
+
+Rerun with `--version X.Y.Z` to roll back to a published release; matching
+retained bytes are verified and reused. For a legacy executable without a
+published release, locate its retained checksum and select it explicitly:
+
+```sh
+cd "$HOME/.local/bin"  # or your chosen install directory
+payload_sha=REPLACE_WITH_FULL_RETAINED_CHECKSUM
+ln -s ".qq-versions/qq-$payload_sha" .qq-rollback
+mv -f .qq-rollback qq
+```
+
+Replace `REPLACE_WITH_FULL_RETAINED_CHECKSUM` with the full retained checksum. Do not select an old
+binary against an incompatible migrated store: follow the backup/rollback
+instructions below. Stop QQ clients and servers before updating and restart
+them together. Retention does not fix macOS Keychain authorization or promise
+that running processes can safely use a different version.
+
+Foreign or dangling selection links, special nodes, multiply hardlinked
+executables, and corrupt retained payloads are refused without replacing the
+selection. Inspect and move conflicting files aside yourself; the installer
+does not repair or delete them. If interrupted during publication, rerun the
+installer: it either publishes again or verifies/reuses the complete payload.
+Stale `.qq-install.*` directories from a killed installer are left untouched;
+after confirming no installer is running, inspect and remove those staging
+directories yourself. This is interruption recovery, not protection against
+concurrent same-user filesystem changes or a guarantee of durability after
+power loss (the shell installer does not fsync).
+
 ## Homebrew (macOS, Linux)
 
 ```sh
@@ -142,8 +179,10 @@ are forward-only, so rollback needs the old binary and a pre-upgrade backup.
 
 ## Uninstall
 
-Remove the binary (`rm ~/.local/bin/qq`, `brew uninstall qq`, `nix profile
-remove`, or `cargo uninstall qq`), then optionally:
+Remove the binary/selection link (`rm ~/.local/bin/qq`, `brew uninstall qq`,
+`nix profile remove`, or `cargo uninstall qq`). For script installs, inspect
+and optionally remove `~/.local/bin/.qq-versions` too (or the corresponding
+chosen install directory); this deletes retained rollback executables. Then optionally:
 
 | Remove | Path (`qq config paths` prints yours) |
 | --- | --- |

@@ -86,7 +86,14 @@ archive="qq-v$VERSION-$target.tar.gz"
 base="$RELEASE_BASE_URL/v$VERSION"
 
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t qq-install)"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+install_stage=""
+cleanup() {
+  [ -z "$install_stage" ] || rm -rf "$install_stage"
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "downloading $base/$archive"
 curl -fsSL -o "$tmp/$archive" "$base/$archive" \
@@ -113,7 +120,80 @@ else
 fi
 
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
-install -m 755 "$binary" "$INSTALL_DIR/qq" || fail "cannot write $INSTALL_DIR/qq"
+file_sha() {
+  hash_output="$( $SHA256 "$1")" || fail "cannot checksum $1; nothing was selected"
+  printf '%s\n' "$hash_output" | awk '{print tolower($1)}'
+}
+link_count() {
+  case "$os" in
+    Darwin) stat -f '%l' "$1" ;;
+    Linux) stat -c '%h' "$1" ;;
+  esac
+}
+regular_executable() {
+  [ ! -L "$1" ] && [ -f "$1" ] && [ -x "$1" ] \
+    || fail "$1 must be a regular executable; nothing was selected"
+  [ "$(link_count "$1")" = 1 ] \
+    || fail "$1 has multiple hard links or could not be inspected; nothing was selected"
+}
+legacy_sha=""
+selected_sha=""
+if [ -L "$INSTALL_DIR/qq" ]; then
+  selected_target="$(readlink "$INSTALL_DIR/qq")" || fail "cannot inspect $INSTALL_DIR/qq"
+  selected_sha="${selected_target#.qq-versions/qq-}"
+  [ "$selected_target" = ".qq-versions/qq-$selected_sha" ] && [ "${#selected_sha}" -eq 64 ] \
+    || fail "$INSTALL_DIR/qq is not an installer selection link"
+  case "$selected_sha" in
+    *[!0-9a-f]*) fail "$INSTALL_DIR/qq is not an installer selection link" ;;
+  esac
+elif [ -e "$INSTALL_DIR/qq" ]; then
+  regular_executable "$INSTALL_DIR/qq"
+  legacy_sha="$(file_sha "$INSTALL_DIR/qq")"
+fi
+
+versions="$INSTALL_DIR/.qq-versions"
+[ ! -L "$versions" ] || fail "$versions must not be a symbolic link"
+mkdir -p "$versions" || fail "cannot create $versions"
+binary_sha="$(file_sha "$binary")"
+install_stage="$(mktemp -d "$INSTALL_DIR/.qq-install.XXXXXX")" \
+  || fail "cannot stage an installation in $INSTALL_DIR"
+
+retain_binary() {
+  retained_binary="$versions/qq-$2"
+  if [ ! -e "$retained_binary" ] && [ ! -L "$retained_binary" ]; then
+    install -m 555 "$1" "$install_stage/payload" || fail "cannot stage $1"
+    staged_sha="$(file_sha "$install_stage/payload")"
+    [ "$staged_sha" = "$2" ] || fail "the staged executable changed while copying; nothing was selected"
+    # Same-filesystem, no-clobber rename: no temporary second hard link.
+    # A killed installer leaves either private staging or a complete retained
+    # payload. Reruns validate/reuse it and never sweep old staging directories.
+    mv -n "$install_stage/payload" "$retained_binary" || fail "cannot publish $retained_binary"
+  fi
+  regular_executable "$retained_binary"
+
+  retained_mode="$(case "$os" in
+    Darwin) stat -f '%Lp' "$retained_binary" ;;
+    Linux) stat -c '%a' "$retained_binary" ;;
+  esac)" || fail "cannot inspect $retained_binary; nothing was selected"
+  # stat prints octal digits; prefix 0 for shell arithmetic. 0222 masks all
+  # owner/group/other write bits, independently of the installer's privileges.
+  [ "$((0$retained_mode & 0222))" -eq 0 ] \
+    || fail "$retained_binary must be read-only; nothing was selected"
+  retained_sha="$(file_sha "$retained_binary")"
+  [ "$retained_sha" = "$2" ] || fail "the retained executable does not match its checksum; nothing was selected"
+}
+
+if [ -n "$selected_sha" ]; then
+  regular_executable "$versions/qq-$selected_sha"
+  retain_binary "$versions/qq-$selected_sha" "$selected_sha"
+fi
+if [ -n "$legacy_sha" ]; then
+  retain_binary "$INSTALL_DIR/qq" "$legacy_sha"
+fi
+retain_binary "$binary" "$binary_sha"
+ln -s ".qq-versions/qq-$binary_sha" "$install_stage/selected"
+# Existing selectors have been restricted to file targets, never directories.
+mv -f "$install_stage/selected" "$INSTALL_DIR/qq" || fail "cannot select $INSTALL_DIR/qq"
 
 echo "installed qq $VERSION to $INSTALL_DIR/qq"
 

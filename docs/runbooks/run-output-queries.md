@@ -2,7 +2,7 @@
 
 Read-only queries over the sessions database. They measure whether long runs
 and sub-agents produce output, rather than only activity. This is the AP0
-baseline for [`autonomous-core.md`](../plans/autonomous-core.md) AP1–AP5
+baseline for [`reliability.md`](../plans/reliability.md) AP1–AP5
 and the evidence behind ADR-0054.
 
 Run it before and after each AP slice. Record the numbers in the plan's

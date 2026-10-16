@@ -1,6 +1,8 @@
+> Historical evidence ledger. New work and current acceptance: [successor](../terminal-bench.md). Existing slice IDs and dated receipts are retained; old status tables are not current assignments.
+
 # Ledger — supervised delegation
 
-Plan: [`../supervised-delegation.md`](../supervised-delegation.md).
+Predecessor plan: [snapshot before consolidation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md).
 Only the agent working this plan edits this file. Current state on top;
 dated entries appended below, newest last.
 

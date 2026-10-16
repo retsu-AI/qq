@@ -4,7 +4,7 @@ Research snapshot: 2026-10-13, QQ `ce768bb` (prompt version 19, store schema
 44). The reference trees under `.source/` were inspected at Codex
 `044e74fef3`, OpenCode `1015cb67d0`, Pi `b9ab2a623` and fx `bc968ad6`. This
 document records evidence. It proposes work but does not claim any. The plan
-that acts on it is [`../plans/action-bias.md`](../plans/action-bias.md).
+that acts on it is [`../plans/action-bias.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/action-bias.md).
 
 ## Question
 
