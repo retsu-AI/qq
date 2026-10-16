@@ -1320,7 +1320,7 @@ fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExh
     None
 }
 
-const PAID_WORK_CTE: &str = "WITH RECURSIVE paid(id,depth) AS (
+pub(super) const PAID_WORK_CTE: &str = "WITH RECURSIVE paid(id,depth) AS (
     SELECT id,0 FROM runs WHERE session_id=?1 AND goal_id IS NOT NULL AND (?2 IS NULL OR goal_id=?2)
     UNION ALL SELECT child.id,paid.depth+1 FROM paid JOIN runs child ON child.goal_paid_owner_run_id=paid.id
       WHERE paid.depth<?3

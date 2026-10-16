@@ -1628,6 +1628,17 @@ only a matching goal `pending_run_id`. A live goal's counter update precedes
 the accounting and terminal outcome. Archived accounting does not publish a
 `GoalUpdated` event that could overwrite the client's replacement goal.
 
+Main and between-run summary requests carry a private accounting-only
+`GoalPaidInput` when they have a direct or sponsored goal. It previews current
+allowance before request preparation, then revalidates it in the transaction
+that records pending provider work. A tighter allowance repeats preparation at
+the same turn ordinal without dispatch. The request cap is separate from the
+caller's cumulative meter; terminal counters and distinct unsettled direct
+run/helper aggregates are counted once. Resolved pricing is carried separately
+from the internal compactor's meter. A summary previews its owner and binds its
+committed helper identity before paid admission. The input grants no goal tools
+or mutation authority. Goal-less requests retain the ordinary activity path.
+
 Goal-bound provider requests record a pending marker in the existing activity
 transaction before dispatch. Their turn transaction records whether the
 attempt committed model work, was rejected before work, or remains uncertain.

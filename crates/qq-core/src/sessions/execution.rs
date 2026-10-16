@@ -105,6 +105,7 @@ fn session_prompt_prefix_key(
 }
 
 struct PreparedExecution {
+    goal_paid: Option<super::GoalPaidInput>,
     events: crate::RuntimeStream,
     audit: PreparedRunAudit,
     tool_cancellation: RunCancellation,
@@ -340,8 +341,14 @@ async fn prepare_execution(
             }
         }
     }
+    let goal_paid = super::GoalPaidInput::new(
+        &inner.store,
+        claimed,
+        loaded.resolved_model().pricing.as_ref(),
+    );
     let mut capabilities = if internal {
         RunCapabilities::restricted()
+            .with_goal_paid(goal_paid.clone())
             .with_goal_spend_tracking(claimed.goal_spend_owner.is_some())
             .with_limits(
                 RunLimits {
@@ -457,6 +464,7 @@ async fn prepare_execution(
         }
         let base = base
             .with_limits(claimed.limits, loaded.resolved_model().pricing.clone())
+            .with_goal_paid(goal_paid.clone())
             .with_goal_spend_tracking(claimed.goal_spend_owner.is_some())
             .with_goal(super::goals::GoalRunInput::new(
                 inner.store.clone(),
@@ -540,6 +548,7 @@ async fn prepare_execution(
             event = events.next() => event,
         };
         match event {
+            Some(RuntimeEvent::GoalPaidCancelled) => return Err(RunOutcome::Cancelled),
             Some(RuntimeEvent::Started) => {}
             Some(RuntimeEvent::Prepared {
                 turn_ordinal: 1,
@@ -568,6 +577,7 @@ async fn prepare_execution(
                         });
                 }
                 return Ok(PreparedExecution {
+                    goal_paid,
                     events,
                     audit: PreparedRunAudit {
                         prompt_identity,
@@ -1693,6 +1703,9 @@ async fn run_auto_compaction(
         }
     };
     candidate.identity.kind = RunKind::Compaction;
+    candidate.origin = Some(qq_protocol::RunOrigin::AutoCompaction {
+        owner_run_id: original.identity.run_id,
+    });
     candidate.user_initiated = false;
     candidate.literal_slash = false;
     candidate.messages = summarizer.messages;
@@ -1781,6 +1794,18 @@ async fn run_auto_compaction(
             return false;
         }
     };
+    if let Some(paid) = prepared.goal_paid.as_ref()
+        && let Err(error) = paid.bind_run(compaction.identity)
+    {
+        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+            inner.failed.send_replace(true);
+            return false;
+        };
+        let outcome = persistence_failure("failed to bind paid compaction identity", &error);
+        finish_run(inner, &compaction, outcome.clone(), teardown).await;
+        finish_prepared_run(inner, original, &original_audit, outcome).await;
+        return false;
+    }
     let (compaction_cancel, compaction_cancellation) = watch::channel(false);
     if let Ok(mut cancellations) = inner.cancellations.lock() {
         cancellations.insert(compaction.identity.run_id, compaction_cancel);
@@ -1997,6 +2022,7 @@ async fn execute_started_run(
     checkpoint_enforced: bool,
 ) {
     let PreparedExecution {
+        goal_paid: _,
         mut events,
         tool_cancellation,
         audit,
@@ -2543,6 +2569,10 @@ async fn execute_started_run(
                 static_prefix,
                 weight,
             })) => {
+                // A preceding rejection was durably settled before this preparation.
+                // Do not let it clear a new pending admission if cancellation wins
+                // before GoalRequestAdmitted is consumed.
+                accounting.goal_request_rejected = false;
                 if let Some(identity) = identity
                     && let Err(error) = inner.store.record_prompt_identity(&claimed, identity).await
                 {
@@ -2610,6 +2640,27 @@ async fn execute_started_run(
                 // sent. The empty-truncation recovery raises it mid-run, so
                 // the claim-time value would misstate the retried turn.
                 claimed.model.max_output_tokens = Some(weight.max_output_tokens);
+            }
+            RunInput::Event(Some(RuntimeEvent::GoalRequestAdmitted { cursor })) => {
+                if let Some(cursor) = cursor {
+                    inner.notify(cursor);
+                }
+                accounting.goal_request_rejected = false;
+            }
+            RunInput::Event(Some(RuntimeEvent::GoalPaidCancelled)) => {
+                let Ok(teardown) = resources.stop(&mut events).await else {
+                    inner.failed.send_replace(true);
+                    return;
+                };
+                finish_run_accounted(
+                    &inner,
+                    &claimed,
+                    RunOutcome::Cancelled,
+                    Some(accounting.snapshot()),
+                    teardown,
+                )
+                .await;
+                return;
             }
             RunInput::Event(Some(RuntimeEvent::GoalRequestRejected)) => {
                 accounting.goal_request_rejected = true;

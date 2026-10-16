@@ -141,6 +141,10 @@ pub(crate) enum ModelWorkDisposition {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RuntimeEvent {
     GoalRequestRejected,
+    GoalRequestAdmitted {
+        cursor: Option<qq_protocol::EventCursor>,
+    },
+    GoalPaidCancelled,
     Started,
     Prepared {
         turn_ordinal: u32,

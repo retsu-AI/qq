@@ -151,6 +151,7 @@ struct RunEnvironment {
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
     goal_spend_tracking: bool,
+    goal_paid: Option<sessions::GoalPaidInput>,
     spills: Option<Arc<dyn runtime::SpillReader>>,
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -487,6 +488,7 @@ impl plan::CompiledAgentPlan {
                        history,
                        goal,
                        goal_spend_tracking,
+                       goal_paid,
                        spills,
                        steering,
                        compactor,
@@ -863,7 +865,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
         });
                }
     }
@@ -1420,7 +1422,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<StreamedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, .. } = env;
+                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let provider = &plan.runtime.provider;
                     let model = &plan.runtime.model;
@@ -1431,6 +1433,30 @@ impl RunState {
                         if turn_ordinal == 1 {
                             slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
                         }
+                        let input_tokens = if goal_paid.is_some() { compatible_input_tokens.unwrap_or_else(|| {
+                            window.reducible_message_bytes.saturating_add(window.irreducible_message_bytes)
+                                .saturating_add(system_bytes).saturating_add(tool_schema_bytes).div_ceil(4) as u64
+                        }) } else { 0 };
+                        let mut request_cap = run.max_output_tokens;
+                        if let Some(paid) = goal_paid.as_ref() {
+                            match paid.preview_request(request_cap, input_tokens).await {
+                                Ok(sessions::PaidRequestAdmission::Reprepare { max_output_tokens }) => request_cap = max_output_tokens,
+                                Ok(sessions::PaidRequestAdmission::Cancelled) => {
+                                    yield TurnStep::Emit(RuntimeEvent::GoalPaidCancelled);
+                                    yield TurnStep::Stop; return;
+                                }
+                                Ok(sessions::PaidRequestAdmission::Exhausted(exhaustion)) => {
+                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion });
+                                    yield TurnStep::Stop; return;
+                                }
+                                Ok(sessions::PaidRequestAdmission::Allowed { .. }) => unreachable!("preview cannot admit provider work"),
+                                Err(error) => {
+                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("failed to preview goal request allowance: {error}") });
+                                    yield TurnStep::Stop; return;
+                                }
+                            }
+                        }
+                        loop {
                         yield TurnStep::Emit( RuntimeEvent::Prepared {
                             turn_ordinal,
                             identity: run.prompt_identity.take(),
@@ -1439,7 +1465,7 @@ impl RunState {
                                 request_has_tools.then_some(run.tool_schema.hash),
                             ),
                             weight: PreparedRequestWeight {
-                                max_output_tokens: run.max_output_tokens,
+                                max_output_tokens: request_cap,
                                 system_bytes,
                                 tool_schema_bytes,
                                 reducible_message_bytes: window.reducible_message_bytes,
@@ -1447,13 +1473,34 @@ impl RunState {
                                 compatible_input_tokens,
                             },
                         });
+                            let Some(paid) = goal_paid.as_ref() else { break; };
+                            match paid.admit_request(request_cap, input_tokens).await {
+                                Ok(sessions::PaidRequestAdmission::Allowed { cursor }) => {
+                                    yield TurnStep::Emit(RuntimeEvent::GoalRequestAdmitted { cursor });
+                                    break;
+                                }
+                                Ok(sessions::PaidRequestAdmission::Reprepare { max_output_tokens }) => request_cap = max_output_tokens,
+                                Ok(sessions::PaidRequestAdmission::Cancelled) => {
+                                    yield TurnStep::Emit(RuntimeEvent::GoalPaidCancelled);
+                                    yield TurnStep::Stop; return;
+                                }
+                                Ok(sessions::PaidRequestAdmission::Exhausted(exhaustion)) => {
+                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion });
+                                    yield TurnStep::Stop; return;
+                                }
+                                Err(error) => {
+                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("failed to admit goal provider request: {error}") });
+                                    yield TurnStep::Stop; return;
+                                }
+                            }
+                        }
                         // The provider owns every retry: it resends only while nothing
                         // has streamed, so this loop sees each logical turn once and
                         // can never duplicate output.
                         let request = ModelRequest::new(
                             Arc::clone(model),
                             Arc::clone(messages),
-                            run.max_output_tokens,
+                            request_cap,
                         );
                         let request = match reasoning_effort {
                             Some(effort) => request.with_reasoning_effort(effort),
@@ -1472,7 +1519,9 @@ impl RunState {
                             request.with_system(Arc::clone(&request_system))
                         };
                         let activity = RunActivity::WaitingForProvider;
-                        yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity });
+                        if goal_paid.is_none() {
+                            yield TurnStep::Emit(RuntimeEvent::ActivityChanged { activity });
+                        }
                         let mut provider_events = provider.stream(request);
                     let mut attempt = AttemptScope {
                         rejected_before_work: false,

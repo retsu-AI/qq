@@ -762,6 +762,7 @@ pub(crate) struct RunCapabilities {
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
     goal_spend_tracking: bool,
+    goal_paid: Option<sessions::GoalPaidInput>,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
     /// install one and keep spills; direct runs keep none, so their markers
     /// say `not stored`.
@@ -816,6 +817,7 @@ impl RunCapabilities {
             history: None,
             goal: None,
             goal_spend_tracking: false,
+            goal_paid: None,
             spills: None,
             steering: None,
             compactor: None,
@@ -867,6 +869,11 @@ impl RunCapabilities {
 
     pub(crate) fn with_history(mut self, history: Arc<dyn HistorySearcher>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    pub(crate) fn with_goal_paid(mut self, paid: Option<sessions::GoalPaidInput>) -> Self {
+        self.goal_paid = paid;
         self
     }
 
@@ -976,6 +983,7 @@ impl RunCapabilities {
             history: None,
             goal: None,
             goal_spend_tracking: false,
+            goal_paid: None,
             spills: None,
             steering: None,
             compactor: None,
@@ -1883,6 +1891,8 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
+                | RuntimeEvent::GoalRequestAdmitted { .. }
+                | RuntimeEvent::GoalPaidCancelled
                 | RuntimeEvent::GoalRequestRejected
                 | RuntimeEvent::ToolCallUnexecuted { .. }
                 | RuntimeEvent::ToolCallAnswered { .. }
