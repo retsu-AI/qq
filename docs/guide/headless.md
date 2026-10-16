@@ -54,7 +54,8 @@ before that final record, bounded by the shutdown grace period; unrelated runs
 stay running. After the final goal record, the process retains ownership until
 other accepted runs settle naturally before closing. A further Ctrl-C cancels
 and drains that remaining work; it preserves the selected goal's final record
-and exit status. A failure to close still exits4. Helpers remain event records. Refused verification attempts also
+and exit status. A failure to close is reported on stderr and preserves that
+selected exit status. Helpers remain event records. Refused verification attempts also
 have run records; the audit counter and check result distinguish them from
 executed checks. A paused goal persists for subsequent resume. Goal mode has no steering pipe or typed
 answer schema; those flags apply to ordinary prompt runs.

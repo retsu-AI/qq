@@ -217,6 +217,9 @@ pub(crate) fn prepare_set(
     defaults: &qq_config::GoalsConfig,
     now: u64,
 ) -> Result<SessionCommand, GoalError> {
+    if args.replace && current.is_none() {
+        return Err(GoalError::GoalMissing);
+    }
     if current.is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Achieved) && !args.replace
     {
         return Err(GoalError::Achieved);
