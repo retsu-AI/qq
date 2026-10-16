@@ -1,5 +1,59 @@
 use super::*;
 
+
+#[tokio::test]
+async fn goal_paid_dense_first_input_is_refused_before_provider_dispatch() {
+    struct Loader(Arc<AtomicUsize>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let calls = self.0.clone();
+            Box::pin(async move {
+                struct Model(Arc<AtomicUsize>);
+                impl Provider for Model {
+                    fn stream(&self, _: ModelRequest) -> ProviderStream {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                            usage: Some(provider_usage_of(usage(20_000, 1))),
+                        })]))
+                    }
+                }
+                Ok(loaded_runtime(Runtime::new(Model(calls), "dense", 1).unwrap(), &request.workspace,
+                    Some(ModelPricing { input_usd_nanos_per_token: 1, output_usd_nanos_per_token: 1,
+                        cache_read_usd_nanos_per_token: Some(1), cache_write_usd_nanos_per_token: Some(1),
+                        context_tier: None, provenance: "dense regression".to_owned() })))
+            })
+        }
+    }
+    for cost in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = SessionRuntime::open(SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader(calls.clone()))).await.unwrap();
+        let held = runtime.inner.permits.clone().acquire_many_owned(runtime.inner.permits.available_permits() as u32).await.unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else { panic!("session") };
+        let mut events = runtime.subscribe(SubscribeRequest { workspace_id: workspace, after: created.committed_through }).unwrap();
+        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"bounded spend",
+            "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000,
+                "max_total_tokens":if cost {None} else {Some(15_000)},
+                "max_cost_usd_nanos":if cost {Some(15_000)} else {None}}
+        })).unwrap()).await.unwrap();
+        let receipt = runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
+            session_id, input: vec![InputPart::text("!x0?".repeat(5_000))], limits: RunLimits::default(),
+            correlation: Correlation::default(), output: None,
+        }).await.unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else { panic!("prompt") };
+        drop(held);
+        runtime.inner.schedule.send(()).await.unwrap();
+        let observed = collect_until_run_finished(&mut events, run_id).await;
+        runtime.shutdown().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "cost={cost}: input alone can exceed the budget");
+        assert!(matches!(finished_outcome(&observed, run_id), Some(RunOutcome::BudgetExhausted { .. })));
+    }
+}
+
 #[tokio::test]
 async fn goal_paid_requests_intersect_the_callers_cumulative_remainder() {
     struct Model {
