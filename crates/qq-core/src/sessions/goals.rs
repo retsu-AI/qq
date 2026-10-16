@@ -386,6 +386,12 @@ pub(super) fn control(
             }
         }
         GoalControl::Resume => {
+            if paid_obligations(connection, session, None)?
+                .iter()
+                .any(|run| run.cancelled)
+            {
+                return Err(SessionRuntimeError::GoalCancellationPending);
+            }
             ensure_activation(&goal, now)?;
             if goal.check.is_some()
                 && !matches!(
@@ -530,7 +536,7 @@ pub(super) fn save(
     Ok(())
 }
 
-/// Freeze the prompt owner's captured attribution inside its first paid admission.
+/// Freeze active attribution at reservation; captured absence at first paid admission.
 /// SQL NULL is uncaptured; JSON null is a durable captured absence.
 pub(super) fn freeze_goal_claim(
     transaction: &Connection,
@@ -827,4 +833,692 @@ pub(super) fn update_model(
     }
     transaction.commit()?;
     Ok(result)
+}
+
+/// Immutable paid-run ancestry. Session ownership alone cannot sponsor later prompts.
+pub(super) fn paid_goal_owners(
+    connection: &Connection,
+    mut run_id: RunId,
+) -> Result<Vec<(RunId, SessionId, Option<qq_protocol::GoalId>)>, SessionRuntimeError> {
+    let mut owners = Vec::new();
+    let mut expected: Option<(SessionId, WorkspaceId, u16)> = None;
+    for _ in 0..=MAX_CHILD_DEPTH {
+        let (session,workspace,depth,parent_session,session_owner,kind,goal,anchor,origin)=
+            connection.query_row("SELECT r.session_id,s.workspace_id,s.depth,s.parent_id,s.owner_run_id,r.kind,r.goal_id,r.goal_paid_owner_run_id,r.origin_json FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?1",[run_id.to_string()],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,u16>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<String>>(6)?,row.get::<_,Option<String>>(7)?,row.get::<_,Option<String>>(8)?)))?;
+        let session: SessionId = parse_id(&session)?;
+        let workspace: WorkspaceId = parse_id(&workspace)?;
+        if kind != "prompt"
+            || depth > MAX_CHILD_DEPTH
+            || expected.is_some_and(|expected| expected != (session, workspace, depth))
+            || owners.iter().any(|(previous, _, _)| *previous == run_id)
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        owners.push((run_id, session, goal.as_deref().map(parse_id).transpose()?));
+        let Some(anchor) = anchor else {
+            return Ok(owners);
+        };
+        let anchor_id: RunId = parse_id(&anchor)?;
+        let origin: qq_protocol::RunOrigin =
+            serde_json::from_str(origin.as_deref().ok_or(SessionRuntimeError::CONSTRAINT)?)?;
+        if !matches!(origin,qq_protocol::RunOrigin::Delegated{owner_run_id,..} if owner_run_id==anchor_id)
+            || session_owner.as_deref() != Some(anchor.as_str())
+            || depth == 0
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        let parent: SessionId = parse_id(
+            parent_session
+                .as_deref()
+                .ok_or(SessionRuntimeError::CONSTRAINT)?,
+        )?;
+        expected = Some((parent, workspace, depth - 1));
+        run_id = anchor_id;
+    }
+    Err(SessionRuntimeError::CONSTRAINT)
+}
+
+/// Called only behind terminal settlement's durable outcome guard. Archived
+/// goals receive their own spend; only live rows produce client updates.
+pub(super) fn finalize_spend(
+    connection: &Connection,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<Vec<GoalSnapshot>, SessionRuntimeError> {
+    let (base,own_goal,anchored,usage_json,cost,completed,uncertain,admitted)=connection.query_row(
+        "SELECT CASE WHEN r.kind='prompt' THEN r.id ELSE owner.id END,
+            CASE WHEN r.kind='prompt' THEN r.goal_id ELSE owner.goal_id END,
+            r.goal_paid_owner_run_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL,
+            r.usage_json,r.estimated_cost_usd_nanos,
+            EXISTS(SELECT 1 FROM model_turns WHERE run_id=r.id AND work_disposition='committed'),
+            r.goal_request_pending OR EXISTS(SELECT 1 FROM model_turns WHERE run_id=r.id AND work_disposition='uncertain'),r.goal_helper_admitted
+         FROM runs r LEFT JOIN runs owner ON r.kind='compaction' AND r.auto_compaction=1
+           AND owner.id=r.auto_compaction_for_run_id AND owner.session_id=r.session_id AND owner.kind='prompt'
+         WHERE r.id=?1 AND r.session_id=?2",
+        params![run_id.to_string(),session_id.to_string()],
+        |row|Ok((row.get::<_,Option<String>>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,bool>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<u64>>(4)?,row.get::<_,bool>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?)),
+    )?;
+    if own_goal.is_none() && !anchored {
+        return Ok(Vec::new());
+    }
+    let Some(base) = base else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    let base: RunId = parse_id(&base)?;
+    let terminal = if own_goal.is_some() && base == run_id {
+        let (revision, outcome, finished): (u32, String, u64) = connection.query_row(
+            "SELECT goal_revision,outcome_json,finished_at_ms FROM runs WHERE id=?1",
+            [run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Some((
+            revision,
+            serde_json::from_str::<RunOutcome>(&outcome)?,
+            finished,
+        ))
+    } else {
+        None
+    };
+    let owners = paid_goal_owners(connection, base)?;
+    let usage: Option<qq_protocol::TokenUsage> = usage_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
+    let has_spend = completed
+        || uncertain
+        || admitted
+        || cost.is_some_and(|cost| cost > 0)
+        || usage.is_some_and(|usage| {
+            usage.input_tokens > 0
+                || usage.output_tokens > 0
+                || usage.cache_read_input_tokens > 0
+                || usage.cache_write_input_tokens > 0
+        });
+    let mut updates = Vec::new();
+    let mut charged = Vec::new();
+    for (owner, goal_session, id) in owners {
+        let Some(id) = id else { continue };
+        let (payload, live): (String, bool) = connection.query_row(
+            "SELECT payload_json,live FROM session_goals WHERE goal_id=?1 AND session_id=?2",
+            params![id.to_string(), goal_session.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let mut goal: GoalSnapshot = serde_json::from_str(&payload)?;
+        if goal.goal_id != id || goal.session_id != goal_session {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        if charged.contains(&id) {
+            continue;
+        };
+        charged.push(id);
+        let direct = owner == run_id;
+        let mut changed = false;
+        if direct && completed {
+            goal.counters.runs = match goal.counters.runs.checked_add(1) {
+                Some(runs) => runs,
+                None => return Err(SessionRuntimeError::CONSTRAINT),
+            };
+            changed = true;
+        }
+        if has_spend {
+            goal.counters.usage = match (goal.counters.usage, usage) {
+                (Some(total), Some(usage)) => execution::add_usage(total, usage),
+                _ => None,
+            };
+            goal.counters.estimated_cost_usd_nanos =
+                match (goal.counters.estimated_cost_usd_nanos, cost) {
+                    (Some(total), Some(cost)) => total.checked_add(cost),
+                    _ => None,
+                };
+            changed = true;
+        }
+        if uncertain {
+            goal.counters.usage = None;
+            goal.counters.estimated_cost_usd_nanos = None;
+            changed = true;
+        }
+        if direct && goal.pending_run_id == Some(run_id) {
+            goal.pending_run_id = None;
+            changed = true;
+        }
+        if live
+            && direct
+            && goal.status == GoalStatus::Active
+            && let Some((revision, outcome, now)) = &terminal
+            && goal.revision == *revision
+        {
+            changed |=
+                apply_terminal_outcome(connection, &mut goal, run_id, outcome, completed, *now)?;
+        }
+        if changed {
+            save(connection, &goal)?;
+            if live {
+                updates.push(goal);
+            }
+        }
+    }
+    Ok(updates)
+}
+
+/// Outcomes never borrow authority from a newer live goal revision.
+fn apply_terminal_outcome(
+    connection: &Connection,
+    goal: &mut GoalSnapshot,
+    run: RunId,
+    outcome: &RunOutcome,
+    committed: bool,
+    now: u64,
+) -> Result<bool, SessionRuntimeError> {
+    let previous = (
+        goal.counters.failure_streak,
+        goal.counters.no_progress_streak,
+        goal.next_run_at_ms,
+        goal.wait.as_ref().map(|wait| wait.until_ms),
+    );
+    let unproductive_failure = matches!(outcome,RunOutcome::Failed{failure} if !matches!(failure.kind,
+        RunFailureKind::Authentication|RunFailureKind::ProviderAuthentication|RunFailureKind::Configuration|RunFailureKind::ProviderConfiguration))
+        || (!committed && matches!(outcome, RunOutcome::BudgetExhausted { .. }));
+    if !matches!(outcome, RunOutcome::Cancelled | RunOutcome::Interrupted) {
+        if !unproductive_failure {
+            goal.counters.failure_streak = 0;
+        }
+        if !matches!(outcome,RunOutcome::Paused{pause} if matches!(pause.as_ref(),qq_protocol::RunPause::NoProgress{..}))
+        {
+            goal.counters.no_progress_streak = 0;
+        }
+    }
+    match outcome {
+        RunOutcome::Completed => {
+            goal.counters.failure_streak = 0;
+            goal.counters.no_progress_streak = 0;
+            if goal.wait.as_ref().is_some_and(|wait| wait.until_ms <= now) {
+                goal.wait = None;
+            }
+            goal.next_run_at_ms = goal
+                .wait
+                .as_ref()
+                .map_or(now, |wait| wait.until_ms)
+                .min(goal.budget.deadline_ms);
+        }
+        RunOutcome::Failed { failure } => {
+            let cause = match failure.kind {
+                RunFailureKind::Authentication | RunFailureKind::ProviderAuthentication => {
+                    Some(GoalNeedsUser::Authentication {
+                        message: super::codec::truncate_utf8(failure.message.clone(), 1024),
+                    })
+                }
+                RunFailureKind::Configuration | RunFailureKind::ProviderConfiguration => {
+                    Some(GoalNeedsUser::Configuration {
+                        message: super::codec::truncate_utf8(failure.message.clone(), 1024),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(cause) = cause {
+                goal.status = GoalStatus::Paused {
+                    reason: GoalPauseReason::NeedsUser { cause },
+                };
+            } else {
+                goal.counters.failure_streak = goal.counters.failure_streak.saturating_add(1);
+                if goal.counters.failure_streak >= 3 {
+                    goal.status = GoalStatus::Blocked {
+                        reason: qq_protocol::GoalBlockedReason::RepeatedFailure,
+                    };
+                } else {
+                    goal.next_run_at_ms = now.min(goal.budget.deadline_ms);
+                }
+            }
+        }
+        RunOutcome::Paused { pause } => match pause.as_ref() {
+            qq_protocol::RunPause::NoProgress { .. } => {
+                goal.counters.no_progress_streak =
+                    goal.counters.no_progress_streak.saturating_add(1);
+                if goal.counters.no_progress_streak >= 2 {
+                    goal.status = GoalStatus::Blocked {
+                        reason: qq_protocol::GoalBlockedReason::NoProgress,
+                    };
+                } else {
+                    goal.next_run_at_ms = now.min(goal.budget.deadline_ms);
+                }
+            }
+            qq_protocol::RunPause::ProviderRetry { .. } => {
+                // Reuse durable terminal evidence, independently of the other-failure
+                // streak. Neutral stops without work do not consume the five-row
+                // lookback; six retry pauses reach the 30-minute ceiling.
+                let mut previous=connection.prepare("SELECT outcome_json,EXISTS(SELECT 1 FROM model_turns WHERE run_id=runs.id AND work_disposition='committed') FROM runs
+                    WHERE session_id=?1 AND goal_id=?2 AND goal_revision=?3 AND kind='prompt'
+                      AND id!=?4 AND outcome_json IS NOT NULL
+                      AND ((json_extract(outcome_json,'$.type') IS NOT 'cancelled'
+                            AND json_extract(outcome_json,'$.type') IS NOT 'interrupted')
+                           OR EXISTS(SELECT 1 FROM model_turns WHERE run_id=runs.id AND work_disposition='committed'))
+                    ORDER BY finished_at_ms DESC,rowid DESC LIMIT 5")?;
+                let mut rows = previous.query(params![
+                    goal.session_id.to_string(),
+                    goal.goal_id.to_string(),
+                    goal.revision,
+                    run.to_string()
+                ])?;
+                let mut streak = 0;
+                while !committed && let Some(row) = rows.next()? {
+                    if row.get::<_, bool>(1)? {
+                        break;
+                    }
+                    let payload: String = row.get(0)?;
+                    if !matches!(serde_json::from_str::<RunOutcome>(&payload)?,RunOutcome::Paused{pause}
+                        if matches!(pause.as_ref(),qq_protocol::RunPause::ProviderRetry{..}))
+                    {
+                        break;
+                    }
+                    streak += 1;
+                }
+                let delay = (60_000_u64 << streak).min(1_800_000);
+                goal.next_run_at_ms = now.saturating_add(delay).min(goal.budget.deadline_ms);
+            }
+        },
+        RunOutcome::BudgetExhausted { .. } => {
+            if let Some(reason) = goal_exhaustion(goal, now) {
+                goal.status = GoalStatus::BudgetExhausted { reason };
+            } else {
+                if !committed {
+                    goal.counters.failure_streak = goal.counters.failure_streak.saturating_add(1);
+                    if goal.counters.failure_streak >= 3 {
+                        goal.status = GoalStatus::Blocked {
+                            reason: qq_protocol::GoalBlockedReason::RepeatedFailure,
+                        };
+                    }
+                }
+                goal.next_run_at_ms = now.min(goal.budget.deadline_ms);
+            }
+        }
+        RunOutcome::Cancelled | RunOutcome::Interrupted => {}
+    }
+    if goal.status == GoalStatus::Active {
+        if let Some(wait) = &goal.wait {
+            goal.next_run_at_ms = goal
+                .next_run_at_ms
+                .max(wait.until_ms)
+                .min(goal.budget.deadline_ms);
+        }
+        if let Some(reason) = goal_exhaustion(goal, now) {
+            goal.status = GoalStatus::BudgetExhausted { reason };
+        }
+    }
+    Ok(goal.status != GoalStatus::Active
+        || previous
+            != (
+                goal.counters.failure_streak,
+                goal.counters.no_progress_streak,
+                goal.next_run_at_ms,
+                goal.wait.as_ref().map(|wait| wait.until_ms),
+            ))
+}
+
+/// Captured tool authority is separate from current paid-work admission.
+#[derive(Clone, Copy)]
+pub(super) enum GoalAdmission {
+    Allowed {
+        deadline_ms: u64,
+        anchor_ms: u64,
+        execution_started: Option<tokio::time::Instant>,
+    },
+    Exhausted(qq_protocol::GoalExhaustion),
+    Cancelled,
+}
+
+pub(super) fn admit_run(
+    connection: &Connection,
+    captured: &GoalSnapshot,
+    origin: Option<qq_protocol::RunOrigin>,
+    limits: &mut qq_protocol::RunLimits,
+    now: u64,
+    anchor_ms: u64,
+) -> Result<GoalAdmission, SessionRuntimeError> {
+    let (payload, live): (String, bool) = connection.query_row(
+        "SELECT payload_json,live FROM session_goals WHERE goal_id=?1 AND session_id=?2",
+        params![
+            captured.goal_id.to_string(),
+            captured.session_id.to_string()
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let current: GoalSnapshot = serde_json::from_str(&payload)?;
+    if !live || current.status != GoalStatus::Active {
+        return Ok(GoalAdmission::Cancelled);
+    }
+    if let Some(reason) = goal_exhaustion(&current, now) {
+        return Ok(GoalAdmission::Exhausted(reason));
+    }
+    let original_duration = limits.max_duration_ms;
+    // Queued automatic limits are a cache; prompts retain their own limits.
+    if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
+        *limits = current.budget.per_run;
+    }
+    let remaining = current.budget.deadline_ms.saturating_sub(anchor_ms);
+    limits.max_duration_ms = Some(
+        limits
+            .max_duration_ms
+            .map_or(remaining, |cap| cap.min(remaining)),
+    );
+    if let Some(original) = original_duration {
+        limits.max_duration_ms = limits
+            .max_duration_ms
+            .map(|duration| duration.min(original));
+    }
+    if let Some(cap) = current.budget.max_total_tokens {
+        let spent = current
+            .counters
+            .usage
+            .ok_or(SessionRuntimeError::CONSTRAINT)?;
+        let spent = spent
+            .input_tokens
+            .checked_add(spent.cache_read_input_tokens)
+            .and_then(|n| n.checked_add(spent.cache_write_input_tokens))
+            .and_then(|n| n.checked_add(spent.output_tokens))
+            .ok_or(SessionRuntimeError::CONSTRAINT)?;
+        let remaining = cap - spent;
+        limits.max_total_tokens = Some(
+            limits
+                .max_total_tokens
+                .map_or(remaining, |cap| cap.min(remaining)),
+        );
+    }
+    if let Some(cap) = current.budget.max_cost_usd_nanos {
+        let remaining = cap
+            - current
+                .counters
+                .estimated_cost_usd_nanos
+                .ok_or(SessionRuntimeError::CONSTRAINT)?;
+        limits.max_cost_usd_nanos = Some(
+            limits
+                .max_cost_usd_nanos
+                .map_or(remaining, |cap| cap.min(remaining)),
+        );
+    }
+    Ok(GoalAdmission::Allowed {
+        deadline_ms: current.budget.deadline_ms,
+        anchor_ms,
+        execution_started: None,
+    })
+}
+
+/// Sponsored descendants retain accounting ownership without goal tool authority.
+/// Their inherited relative duration must also respect the owner's absolute deadline.
+pub(super) fn admit_sponsored_run(
+    connection: &Connection,
+    run_id: RunId,
+    own_admission: Option<GoalAdmission>,
+    limits: &mut qq_protocol::RunLimits,
+    now: u64,
+    anchor_ms: u64,
+) -> Result<GoalAdmission, SessionRuntimeError> {
+    let mut deadline_ms = match own_admission {
+        Some(GoalAdmission::Allowed { deadline_ms, .. }) => deadline_ms,
+        Some(refusal) => return Ok(refusal),
+        None => u64::MAX,
+    };
+    let mut sponsored = false;
+    for (_, session, goal) in paid_goal_owners(connection, run_id)?.into_iter().skip(1) {
+        let Some(goal) = goal else { continue };
+        let payload: String = connection.query_row(
+            "SELECT payload_json FROM session_goals WHERE goal_id=?1 AND session_id=?2",
+            params![goal.to_string(), session.to_string()],
+            |row| row.get(0),
+        )?;
+        let owner: GoalSnapshot = serde_json::from_str(&payload)?;
+        deadline_ms = deadline_ms.min(owner.budget.deadline_ms);
+        sponsored = true;
+    }
+    if !sponsored {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    if now >= deadline_ms {
+        return Ok(GoalAdmission::Exhausted(
+            qq_protocol::GoalExhaustion::Deadline,
+        ));
+    }
+    let remaining = deadline_ms.saturating_sub(anchor_ms);
+    limits.max_duration_ms = Some(
+        limits
+            .max_duration_ms
+            .map_or(remaining, |cap| cap.min(remaining)),
+    );
+    Ok(GoalAdmission::Allowed {
+        deadline_ms,
+        anchor_ms,
+        execution_started: None,
+    })
+}
+
+fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExhaustion> {
+    if now >= goal.budget.deadline_ms {
+        return Some(qq_protocol::GoalExhaustion::Deadline);
+    }
+    if goal.counters.runs >= goal.budget.max_goal_runs {
+        return Some(qq_protocol::GoalExhaustion::Runs);
+    }
+    if let Some(limit) = goal.budget.max_total_tokens {
+        let spent = goal.counters.usage.and_then(|usage| {
+            usage
+                .input_tokens
+                .checked_add(usage.cache_read_input_tokens)
+                .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
+                .and_then(|value| value.checked_add(usage.output_tokens))
+        });
+        match spent {
+            None => return Some(qq_protocol::GoalExhaustion::TokensUnknown),
+            Some(spent) if spent >= limit => return Some(qq_protocol::GoalExhaustion::Tokens),
+            _ => {}
+        }
+    }
+    if let Some(limit) = goal.budget.max_cost_usd_nanos {
+        match goal.counters.estimated_cost_usd_nanos {
+            None => return Some(qq_protocol::GoalExhaustion::CostUnknown),
+            Some(spent) if spent >= limit => return Some(qq_protocol::GoalExhaustion::Cost),
+            _ => {}
+        }
+    }
+    None
+}
+
+const PAID_WORK_CTE: &str = "WITH RECURSIVE paid(id,depth) AS (
+    SELECT id,0 FROM runs WHERE session_id=?1 AND goal_id IS NOT NULL AND (?2 IS NULL OR goal_id=?2)
+    UNION ALL SELECT child.id,paid.depth+1 FROM paid JOIN runs child ON child.goal_paid_owner_run_id=paid.id
+      WHERE paid.depth<?3
+), obligations(id) AS (
+    SELECT id FROM paid UNION SELECT helper.id FROM paid JOIN runs owner ON owner.id=paid.id
+    JOIN runs helper ON helper.auto_compaction_for_run_id=owner.id AND helper.session_id=owner.session_id
+      AND helper.kind='compaction' AND helper.auto_compaction=1
+)";
+
+pub(super) struct PaidObligation {
+    pub(super) run: RunId,
+    pub(super) session: SessionId,
+    pub(super) workspace: WorkspaceId,
+    pub(super) queued: bool,
+    pub(super) preparing: bool,
+    pub(super) cancelled: bool,
+    pub(super) autonomous: bool,
+}
+
+/// Roots include settled historical goal runs. Only their exact paid children
+/// and same-session automatic helpers inherit cancellation ownership.
+pub(super) fn paid_obligations(
+    connection: &Connection,
+    session: SessionId,
+    goal: Option<GoalId>,
+) -> Result<Vec<PaidObligation>, SessionRuntimeError> {
+    let mut statement=connection.prepare(&format!("{PAID_WORK_CTE}
+        SELECT r.id,r.session_id,s.workspace_id,r.status='queued',COALESCE(s.preparing_run_id=r.id,0),r.cancel_requested,
+               COALESCE(json_extract(r.origin_json,'$.type') IN ('goal','goal_check'),0)
+        FROM obligations JOIN runs r ON r.id=obligations.id JOIN sessions s ON s.id=r.session_id
+        WHERE r.outcome_json IS NULL AND r.status IN ('queued','running')"))?;
+    let mut rows = statement.query(params![
+        session.to_string(),
+        goal.map(|goal| goal.to_string()),
+        MAX_CHILD_DEPTH
+    ])?;
+    let mut obligations = Vec::new();
+    while let Some(row) = rows.next()? {
+        obligations.push(PaidObligation {
+            run: parse_id(&row.get::<_, String>(0)?)?,
+            session: parse_id(&row.get::<_, String>(1)?)?,
+            workspace: parse_id(&row.get::<_, String>(2)?)?,
+            queued: row.get(3)?,
+            preparing: row.get(4)?,
+            cancelled: row.get(5)?,
+            autonomous: row.get(6)?,
+        });
+    }
+    Ok(obligations)
+}
+
+pub(super) struct GoalSchedule {
+    pub(super) has_goals: bool,
+    pub(super) next_wake: Option<u64>,
+    pub(super) cursors: Vec<EventCursor>,
+}
+
+/// A single scheduler pass commits at most 32 fresh goal runs. The pending
+/// guard and idle check share the transaction with their durable queue rows.
+pub(super) fn queue_due_goals(
+    connection: &mut Connection,
+    store_id: StoreId,
+    now: u64,
+) -> Result<GoalSchedule, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let mut cursors = Vec::new();
+    let drainage_cte = PAID_WORK_CTE
+        .replace("?1", "s.id")
+        .replace("?2", "NULL")
+        .replace("?3", &MAX_CHILD_DEPTH.to_string());
+    let eligible=format!("g.live=1 AND json_extract(g.payload_json,'$.status.type')='active'
+        AND json_extract(g.payload_json,'$.pending_run_id') IS NULL
+        AND json_extract(g.payload_json,'$.audit_pending')=0
+        AND s.active_run_id IS NULL AND s.preparing_run_id IS NULL AND s.queued_prompts=0
+        AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=s.id AND r.status IN ('queued','running'))
+        AND NOT EXISTS({drainage_cte} SELECT 1 FROM obligations JOIN runs r ON r.id=obligations.id
+            WHERE r.outcome_json IS NULL AND r.status IN ('queued','running'))");
+    let mut candidates=transaction.prepare(&format!("SELECT g.payload_json,s.workspace_id FROM session_goals g
+        JOIN sessions s ON s.id=g.session_id WHERE {eligible}
+        AND MIN(json_extract(g.payload_json,'$.next_run_at_ms'),json_extract(g.payload_json,'$.budget.deadline_ms'))<=?1
+        ORDER BY json_extract(g.payload_json,'$.next_run_at_ms'),g.goal_id LIMIT 32"))?;
+    let rows = candidates.query_map([now], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (payload, workspace) = row?;
+        let mut goal: GoalSnapshot = serde_json::from_str(&payload)?;
+        let workspace: WorkspaceId = parse_id(&workspace)?;
+        let input_tokens = goal.counters.usage.and_then(|usage| {
+            usage
+                .input_tokens
+                .checked_add(usage.cache_read_input_tokens)
+                .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
+                .and_then(|value| value.checked_add(usage.output_tokens))
+        });
+        let exhaustion = goal_exhaustion(&goal, now);
+        if let Some(reason) = exhaustion {
+            goal.status = GoalStatus::BudgetExhausted { reason };
+            save(&transaction, &goal)?;
+            cursors.push(
+                append_event(
+                    &transaction,
+                    EventContext::for_session(store_id, workspace, goal.session_id, None, now),
+                    SessionEvent::GoalUpdated {
+                        goal: Box::new(goal),
+                    },
+                )?
+                .cursor,
+            );
+            continue;
+        }
+        let run = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        let command = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        let message = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        let assistant = MessageId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        let mut limits = goal.budget.per_run;
+        let remaining = goal.budget.deadline_ms - now;
+        limits.max_duration_ms = Some(
+            limits
+                .max_duration_ms
+                .map_or(remaining, |limit| limit.min(remaining)),
+        );
+        if let Some(limit) = goal.budget.max_total_tokens {
+            let remaining = limit - input_tokens.ok_or(SessionRuntimeError::CONSTRAINT)?;
+            limits.max_total_tokens = Some(
+                limits
+                    .max_total_tokens
+                    .map_or(remaining, |limit| limit.min(remaining)),
+            );
+        }
+        if let Some(limit) = goal.budget.max_cost_usd_nanos {
+            let remaining = limit
+                - goal
+                    .counters
+                    .estimated_cost_usd_nanos
+                    .ok_or(SessionRuntimeError::CONSTRAINT)?;
+            limits.max_cost_usd_nanos = Some(
+                limits
+                    .max_cost_usd_nanos
+                    .map_or(remaining, |limit| limit.min(remaining)),
+            );
+        }
+        goal.pending_run_id = Some(run);
+        let origin = qq_protocol::RunOrigin::Goal {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
+        let notice = crate::tools::goal::render_notice(&goal, now);
+        let prompt =
+            "Work toward the current goal. Keep its checklist and notes current with update_goal.";
+        transaction.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms,limits_json,origin_json,
+            goal_id,goal_revision,goal_snapshot_json,goal_initial_notice) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?8,?9,?10,?11,?12)",
+            params![run.to_string(),goal.session_id.to_string(),command.to_string(),message.to_string(),assistant.to_string(),now,
+                serde_json::to_string(&limits)?,serde_json::to_string(&origin)?,goal.goal_id.to_string(),goal.revision,serde_json::to_string(&goal)?,notice])?;
+        transaction.execute("INSERT INTO messages(id,session_id,run_id,ordinal,role,state,output,created_at_ms)
+            VALUES(?1,?2,?3,(SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE session_id=?2),'user','queued',?4,?5)",
+            params![message.to_string(),goal.session_id.to_string(),run.to_string(),prompt,now])?;
+        transaction.execute(
+            "UPDATE sessions SET status='queued',queued_prompts=1,updated_at_ms=?2 WHERE id=?1",
+            params![goal.session_id.to_string(), now],
+        )?;
+        save(&transaction, &goal)?;
+        cursors.push(
+            append_event(
+                &transaction,
+                EventContext::for_session(store_id, workspace, goal.session_id, None, now),
+                SessionEvent::GoalUpdated {
+                    goal: Box::new(goal.clone()),
+                },
+            )?
+            .cursor,
+        );
+        cursors.push(
+            append_event(
+                &transaction,
+                EventContext::for_run_ids(store_id, workspace, goal.session_id, run, None, now),
+                SessionEvent::PromptQueued {
+                    session: Box::new(load_session_summary(&transaction, goal.session_id)?),
+                    message: load_message(&transaction, message)?,
+                    run: Box::new(load_run(&transaction, run)?),
+                    queue_position: 1,
+                },
+            )?
+            .cursor,
+        );
+    }
+    drop(candidates);
+    let next:Option<u64>=transaction.query_row(&format!("SELECT MIN(MIN(json_extract(g.payload_json,'$.next_run_at_ms'),json_extract(g.payload_json,'$.budget.deadline_ms')))
+        FROM session_goals g JOIN sessions s ON s.id=g.session_id WHERE {eligible}"),[],|row|row.get(0))?;
+    let has_goals: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.commit()?;
+    Ok(GoalSchedule {
+        has_goals,
+        next_wake: next,
+        cursors,
+    })
 }

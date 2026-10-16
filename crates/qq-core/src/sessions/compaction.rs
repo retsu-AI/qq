@@ -188,6 +188,15 @@ pub(super) fn start_auto_compaction(
         original.goal.as_deref(),
         original.goal_initial_notice.as_deref(),
     )?;
+    if original.goal.is_some() || original.goal_spend_owner.is_some() {
+        transaction.execute(
+            "UPDATE runs SET usage_json=?2, estimated_cost_usd_nanos=0 WHERE id=?1",
+            params![
+                run_id.to_string(),
+                serde_json::to_string(&TokenUsage::default())?
+            ],
+        )?;
+    }
     let summary = load_session_summary(&transaction, original.identity.session_id)?;
     let started = append_event(
         &transaction,
@@ -229,8 +238,12 @@ pub(super) fn start_auto_compaction(
     transaction.commit()?;
     Ok(Some((
         ClaimedRun {
+            goal_spend_owner: original
+                .goal_spend_owner
+                .or_else(|| original.goal.as_ref().map(|goal| goal.goal_id)),
             goal: None,
             goal_initial_notice: None,
+            goal_admission: None,
             origin: Some(qq_protocol::RunOrigin::AutoCompaction {
                 owner_run_id: original.identity.run_id,
             }),
@@ -446,7 +459,7 @@ pub(super) fn complete_compaction(
                     ),
                 },
             };
-            events.push(expect_settled(settle_run(
+            events.extend(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 claimed,
@@ -520,7 +533,7 @@ pub(super) fn complete_compaction(
                  WHERE id = ?1",
             [claimed.identity.session_id.to_string()],
         )?;
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
@@ -540,7 +553,7 @@ pub(super) fn complete_compaction(
             },
         )?);
     } else {
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,
@@ -752,6 +765,9 @@ pub(super) fn start_in_run_compaction(
     claimed.identity.command_id = command_id;
     claimed.identity.kind = RunKind::Compaction;
     claimed.goal = None;
+    claimed.goal_spend_owner = prompt_run
+        .goal_spend_owner
+        .or_else(|| prompt_run.goal.as_ref().map(|goal| goal.goal_id));
     claimed.compaction_cutoff_ordinal = None;
     claimed.in_run_turn_cutoff = Some((prompt_run.identity.run_id, turn_cutoff));
     Ok(Some((claimed, started)))
@@ -910,7 +926,7 @@ pub(super) fn complete_in_run_compaction(
                      WHERE id = ?1 AND status = 'running'",
                 params![scope_run_id.to_string(), context_base_bytes],
             )?;
-            events.push(expect_settled(settle_run(
+            events.extend(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 claimed,
@@ -941,7 +957,7 @@ pub(super) fn complete_in_run_compaction(
         }
     }
     if committed.is_none() {
-        events.push(expect_settled(settle_run(
+        events.extend(expect_settled(settle_run(
             &transaction,
             store_id,
             claimed,

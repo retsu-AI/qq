@@ -1000,6 +1000,7 @@ impl SessionRuntime {
                 command_id,
                 command,
                 CommandAdmission {
+                    goal_work_present: false,
                     seed,
                     goal_check_policy,
                 },

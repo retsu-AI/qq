@@ -1474,7 +1474,7 @@ async fn every_persistence_fault_variant_is_reachable() {
         .await
         .unwrap();
     let constraint = store
-        .append_run_activity(&claimed, RunActivity::WaitingForProvider)
+        .append_run_activity(&claimed, RunActivity::WaitingForProvider, false)
         .await
         .unwrap_err();
     assert_eq!(

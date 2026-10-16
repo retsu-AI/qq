@@ -64,9 +64,12 @@ pub(super) struct RunIdentity {
 #[derive(Clone)]
 pub(super) struct ClaimedRun {
     pub(super) identity: RunIdentity,
+    /// Captured attribution for owned summaries; grants no goal tool authority.
+    pub(super) goal_spend_owner: Option<qq_protocol::GoalId>,
     /// Immutable active goal captured at reservation, never reloaded during preparation.
     pub(super) goal: Option<Arc<qq_protocol::GoalSnapshot>>,
     pub(super) goal_initial_notice: Option<Arc<str>>,
+    pub(super) goal_admission: Option<goals::GoalAdmission>,
     pub(super) origin: Option<qq_protocol::RunOrigin>,
     pub(super) workspace: String,
     /// Nesting depth of the run's session: 0 for a root, 1 for a child. A
@@ -163,8 +166,12 @@ impl ClaimedRun {
     pub(super) fn panic_settlement_claim(&self) -> Self {
         Self {
             identity: self.identity,
+            goal_spend_owner: self
+                .goal_spend_owner
+                .or_else(|| self.goal.as_ref().map(|goal| goal.goal_id)),
             goal: None,
             goal_initial_notice: None,
+            goal_admission: None,
             origin: self.origin,
             workspace: String::new(),
             user_initiated: self.user_initiated,
@@ -482,7 +489,7 @@ pub(super) fn reserve_next_run_recoverable(
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.goal_id ELSE r.goal_id END,
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.revision ELSE r.goal_revision END,
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.payload_json ELSE r.goal_snapshot_json END, r.origin_json,
-                    r.goal_initial_notice, r.goal_snapshot_json IS NOT NULL
+                    r.goal_initial_notice, r.goal_snapshot_json IS NOT NULL, r.goal_paid_owner_run_id
              FROM runs r
              JOIN sessions s ON s.id = r.session_id
              JOIN workspaces w ON w.id = s.workspace_id
@@ -490,6 +497,24 @@ pub(super) fn reserve_next_run_recoverable(
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
                AND s.depth = ?1
+               AND (r.kind!='prompt' OR g.goal_id IS NULL
+                    OR json_extract(g.payload_json,'$.status.type')!='active'
+                    OR NOT EXISTS(
+                        WITH RECURSIVE paid(id,depth) AS (
+                            SELECT id,0 FROM runs WHERE session_id=s.id AND goal_id IS NOT NULL
+                            UNION ALL SELECT child.id,paid.depth+1 FROM paid JOIN runs child
+                                ON child.goal_paid_owner_run_id=paid.id WHERE paid.depth<?2
+                        ), obligations(id) AS (
+                            SELECT id FROM paid
+                            UNION SELECT helper.id FROM paid JOIN runs owner ON owner.id=paid.id
+                                JOIN runs helper ON helper.auto_compaction_for_run_id=owner.id
+                                    AND helper.session_id=owner.session_id
+                                    AND helper.kind='compaction' AND helper.auto_compaction=1
+                        )
+                        SELECT 1 FROM obligations JOIN runs obligation ON obligation.id=obligations.id
+                        WHERE obligation.id!=r.id AND obligation.outcome_json IS NULL
+                            AND obligation.status IN ('queued','running')
+                    ))
              ORDER BY COALESCE((
                          SELECT MAX(previous.started_at_ms)
                          FROM runs previous
@@ -497,7 +522,7 @@ pub(super) fn reserve_next_run_recoverable(
                      ), 0),
                       r.created_at_ms, r.rowid
              LIMIT 1",
-            [depth],
+            params![depth, MAX_CHILD_DEPTH],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -535,6 +560,7 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(32)?,
                     goals::read_notice(row, 33)?,
                     row.get::<_, bool>(34)?,
+                    row.get::<_,Option<String>>(35)?,
                 ))
             },
         )
@@ -575,6 +601,7 @@ pub(super) fn reserve_next_run_recoverable(
         origin_json,
         goal_initial_notice,
         goal_frozen,
+        paid_owner,
     )) = row
     else {
         return Ok(None);
@@ -597,7 +624,7 @@ pub(super) fn reserve_next_run_recoverable(
         "audit" => SessionPurpose::Audit,
         _ => return Err(SessionRuntimeError::CONSTRAINT),
     };
-    let limits = parse_run_limits(limits_json.as_deref())?;
+    let mut limits = parse_run_limits(limits_json.as_deref())?;
     let input = parse_input_parts(input_json.as_deref())?;
     let profile = parse_profile(profile.as_deref())?;
     let reasoning_effort = parse_reasoning_effort(reasoning_effort.as_deref())?;
@@ -609,6 +636,13 @@ pub(super) fn reserve_next_run_recoverable(
     };
     let session_id: SessionId = parse_id(&session)?;
     let command_id: CommandId = parse_id(&command)?;
+    let goal_spend_owner = if paid_owner.is_some() {
+        goals::paid_goal_owners(&transaction, run_id)?
+            .into_iter()
+            .find_map(|(_, _, goal)| goal)
+    } else {
+        None
+    };
     let goal = match (goal_id, goal_revision, goal_payload) {
         (None, None, None) => None,
         (None, None, Some(payload)) if payload == "null" => None,
@@ -814,11 +848,56 @@ pub(super) fn reserve_next_run_recoverable(
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?;
+    let admission_at_ms = now_ms();
+    if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
+        limits = RunLimits::default();
+    }
+    let mut goal_admission = goal
+        .as_deref()
+        .map(|goal| {
+            goals::admit_run(
+                &transaction,
+                goal,
+                origin,
+                &mut limits,
+                admission_at_ms,
+                admission_at_ms,
+            )
+        })
+        .transpose()?;
+    if goal_spend_owner.is_some() {
+        goal_admission = Some(goals::admit_sponsored_run(
+            &transaction,
+            run_id,
+            goal_admission,
+            &mut limits,
+            admission_at_ms,
+            admission_at_ms,
+        )?);
+    }
+    if goal.is_some() {
+        // Control commands must see preparing ownership before loading can wait.
+        goals::freeze_goal_claim(
+            &transaction,
+            RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id,
+                kind,
+                child: depth > 0,
+            },
+            goal.as_deref(),
+            goal_initial_notice.as_deref(),
+        )?;
+    }
     transaction.commit()?;
     Ok(Some(ClaimedRun {
+        goal_spend_owner,
         origin,
         goal,
         goal_initial_notice,
+        goal_admission,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -875,10 +954,100 @@ pub(super) fn prepared_context_bytes(
     .map_err(|_| SessionRuntimeError::OutputTooLarge)
 }
 
+#[derive(Debug)]
+pub(super) enum RoutingCostRefusal {
+    Undeclared,
+    AboveAllowance,
+}
+
+#[derive(Debug)]
+pub(super) enum GoalStartRefusal {
+    PerRunDuration,
+    RoutingCost(RoutingCostRefusal),
+    Reprepare { limits: Box<RunLimits> },
+    Exhausted(qq_protocol::GoalExhaustion),
+    Cancelled,
+}
+
+/// Storage failure, goal refusal and lost reservation are distinct outcomes.
+pub(super) type RunStart = Result<Option<SessionEventEnvelope>, GoalStartRefusal>;
+
 pub(super) struct RunStartMetadata<'a> {
+    pub(super) goal_spend_owner: Option<qq_protocol::GoalId>,
     pub(super) goal: Option<&'a qq_protocol::GoalSnapshot>,
     pub(super) goal_initial_notice: Option<&'a str>,
     pub(super) origin: Option<qq_protocol::RunOrigin>,
+    pub(super) limits: RunLimits,
+    pub(super) admission: Option<goals::GoalAdmission>,
+}
+
+pub(super) fn refresh_goal_limits(
+    connection: &Connection,
+    identity: RunIdentity,
+    metadata: &RunStartMetadata<'_>,
+    now: u64,
+) -> Result<Result<RunLimits, GoalStartRefusal>, SessionRuntimeError> {
+    if metadata.goal.is_none() && metadata.goal_spend_owner.is_none() {
+        return Ok(Ok(metadata.limits));
+    }
+    let anchor_ms = match metadata.admission {
+        Some(goals::GoalAdmission::Allowed { anchor_ms, .. }) => anchor_ms,
+        _ => now,
+    };
+    let mut refreshed = if matches!(metadata.origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
+        RunLimits::default()
+    } else {
+        let encoded: Option<String> = connection.query_row(
+            "SELECT limits_json FROM runs WHERE id=?1 AND session_id=?2",
+            params![identity.run_id.to_string(), identity.session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        parse_run_limits(encoded.as_deref())?
+    };
+    let own_admission = metadata
+        .goal
+        .map(|goal| {
+            goals::admit_run(
+                connection,
+                goal,
+                metadata.origin,
+                &mut refreshed,
+                now,
+                anchor_ms,
+            )
+        })
+        .transpose()?;
+    let admission = if metadata.goal_spend_owner.is_some() {
+        goals::admit_sponsored_run(
+            connection,
+            identity.run_id,
+            own_admission,
+            &mut refreshed,
+            now,
+            anchor_ms,
+        )?
+    } else {
+        own_admission.ok_or(SessionRuntimeError::CONSTRAINT)?
+    };
+    match admission {
+        goals::GoalAdmission::Allowed { .. } => {
+            if let Some(duration) = refreshed.max_duration_ms {
+                let elapsed_ms = match metadata.admission {
+                    Some(goals::GoalAdmission::Allowed {
+                        execution_started: Some(started),
+                        ..
+                    }) => started.elapsed().as_millis(),
+                    _ => u128::from(now.saturating_sub(anchor_ms)),
+                };
+                if elapsed_ms >= u128::from(duration) {
+                    return Ok(Err(GoalStartRefusal::PerRunDuration));
+                }
+            }
+            Ok(Ok(refreshed))
+        }
+        goals::GoalAdmission::Exhausted(reason) => Ok(Err(GoalStartRefusal::Exhausted(reason))),
+        goals::GoalAdmission::Cancelled => Ok(Err(GoalStartRefusal::Cancelled)),
+    }
 }
 
 pub(super) fn start_reserved_run(
@@ -888,11 +1057,14 @@ pub(super) fn start_reserved_run(
     audit: &PreparedRunAudit,
     metadata: RunStartMetadata<'_>,
     resolved_input: Option<&crate::input::ResolvedInput>,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+) -> Result<RunStart, SessionRuntimeError> {
     let RunStartMetadata {
+        goal_spend_owner,
         goal,
         goal_initial_notice,
         origin,
+        limits,
+        admission: _,
     } = metadata;
     let prompt_identity = serde_json::to_string(audit.prompt_identity.as_ref())?;
     let resolved_model = serde_json::to_string(audit.resolved_model.as_ref())?;
@@ -900,6 +1072,22 @@ pub(super) fn start_reserved_run(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
+    if goal.is_some() || goal_spend_owner.is_some() {
+        let refreshed = match refresh_goal_limits(&transaction, identity, &metadata, now)? {
+            Ok(refreshed) => refreshed,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        if refreshed != limits {
+            return Ok(Err(GoalStartRefusal::Reprepare {
+                limits: Box::new(refreshed),
+            }));
+        }
+    }
+    let effective_limits = if goal.is_some() || goal_spend_owner.is_some() {
+        Some(serde_json::to_string(&limits)?)
+    } else {
+        None
+    };
     // Plan identity and its descriptor are fixed in the same statement that
     // starts the run: a later configuration or credential refresh compiles a
     // new plan for later runs and never touches this row.
@@ -912,7 +1100,14 @@ pub(super) fn start_reserved_run(
                  prompt_identity_json = ?4, resolved_model_json = ?5,
                  context_base_bytes = ?6, context_increment_bytes = 0,
                  plan_identity_json = ?7, plan_descriptor_json = ?8,
-                 activity = CASE WHEN ?9 THEN 'compacting' ELSE activity END
+                 activity = CASE WHEN ?9 THEN 'compacting' ELSE activity END,
+                 limits_json = COALESCE(?10, limits_json),
+                 usage_json = CASE WHEN (?11 OR goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)
+                     AND routing_json IS NULL AND goal_helper_admitted=0 AND goal_request_pending=0
+                     THEN COALESCE(usage_json, '{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":0}') ELSE usage_json END,
+                 estimated_cost_usd_nanos = CASE WHEN (?11 OR goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)
+                     AND routing_json IS NULL AND goal_helper_admitted=0 AND goal_request_pending=0
+                     THEN COALESCE(estimated_cost_usd_nanos,0) ELSE estimated_cost_usd_nanos END
              WHERE id = ?1 AND session_id = ?2 AND status = 'queued'
                AND outcome_json IS NULL AND cancel_requested = 0",
         params![
@@ -925,10 +1120,12 @@ pub(super) fn start_reserved_run(
             plan_identity,
             audit.plan_descriptor_json.as_ref(),
             compacting,
+            effective_limits,
+            goal.is_some(),
         ],
     )?;
     if run_started != 1 {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let session_started = transaction.execute(
         "UPDATE sessions
@@ -943,7 +1140,7 @@ pub(super) fn start_reserved_run(
         ],
     )?;
     if session_started != 1 {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
     transaction.execute(
@@ -990,7 +1187,7 @@ pub(super) fn start_reserved_run(
         )?;
     }
     transaction.commit()?;
-    Ok(Some(started))
+    Ok(Ok(Some(started)))
 }
 
 /// Where a prompt's automatic compaction stands, re-read from the store

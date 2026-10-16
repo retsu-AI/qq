@@ -112,6 +112,12 @@ pub(crate) enum SummarizeStep {
 /// Why one summarizer request produced no summary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SummarizeError {
+    /// A typed provider rejection before output, reasoning, replay or calls.
+    #[error("{message}")]
+    RejectedBeforeWork {
+        kind: RunFailureKind,
+        message: String,
+    },
     /// A provider fault worth re-issuing the request for, as for a model turn.
     #[error("{message}")]
     Transient {

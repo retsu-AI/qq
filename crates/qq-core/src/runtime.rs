@@ -39,8 +39,8 @@ pub(crate) use compaction::{
 };
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{
-    CallRejection, OrderedTurnNotice, PendingToolCall, PreparedRequestWeight, PreparedStaticPrefix,
-    ProjectedToolTurn, RuntimeEvent, RuntimeToolCall, TurnBlock, TurnNotice,
+    CallRejection, ModelWorkDisposition, OrderedTurnNotice, PendingToolCall, PreparedRequestWeight,
+    PreparedStaticPrefix, ProjectedToolTurn, RuntimeEvent, RuntimeToolCall, TurnBlock, TurnNotice,
 };
 pub(crate) use gate::{GateDecision, ToolGate, ToolGateFuture};
 #[cfg(test)]

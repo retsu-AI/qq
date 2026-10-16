@@ -1516,6 +1516,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
             .persist_model_turn(
                 &claimed,
                 ModelTurnCommit {
+                    model_work: crate::runtime::ModelWorkDisposition::Committed,
                     goal_notices: Vec::new(),
                     reserved_goal_notices: 0,
                     turn_ordinal: 1,
@@ -2514,6 +2515,7 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
         .persist_model_turn(
             &growth_run,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 goal_notices: Vec::new(),
                 reserved_goal_notices: 0,
                 turn_ordinal: 1,

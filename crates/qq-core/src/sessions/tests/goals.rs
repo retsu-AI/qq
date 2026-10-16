@@ -476,6 +476,7 @@ async fn failed_turn_notice_commit_rolls_back_the_atom_events_and_capacity() {
         .persist_model_turn(
             &claim,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::assistant("done"),
                 calls: Vec::new(),
@@ -1041,6 +1042,7 @@ async fn failed_runtime_goal_event_never_reports_a_successful_tool_write() {
             connection.execute_batch(
                 "CREATE TRIGGER refuse_goal_event BEFORE INSERT ON events
             WHEN json_extract(NEW.envelope_json, '$.event.type') = 'goal_updated'
+                AND json_extract(NEW.envelope_json, '$.event.goal.notes') = 'must not persist'
             BEGIN SELECT RAISE(ABORT, 'goal event refused'); END;",
             )?;
             Ok(())
@@ -1350,6 +1352,10 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
+    let held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1391,6 +1397,22 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
     authority.allow.store(true, Ordering::SeqCst);
     let id = CommandId::generate().unwrap();
     let receipt = runtime.command(id, approve.clone()).await.unwrap();
+    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+    let stable = runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+        .await
+        .unwrap();
+    let stable_goal = stable.focused.as_ref().unwrap().goal.as_ref().unwrap();
+    let CommandOutcome::GoalUpdated { goal: approved, .. } = &receipt.outcome else {
+        panic!("approved goal")
+    };
+    let mut expected = approved.clone();
+    expected.pending_run_id = stable_goal.pending_run_id;
+    assert_eq!(stable_goal, &expected);
+    let pending = stable_goal
+        .pending_run_id
+        .expect("authorized active goal queues work");
+    assert!(stable.focused.as_ref().unwrap().runs.iter().any(|run|run.id==pending && matches!(run.origin,Some(qq_protocol::RunOrigin::Goal{goal_id,revision}) if goal_id==approved.goal_id && revision==approved.revision)));
     authority.allow.store(false, Ordering::SeqCst);
     for unavailable in [false, true] {
         authority.unavailable.store(unavailable, Ordering::SeqCst);
@@ -1413,11 +1435,8 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
             .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
             .await
             .unwrap();
-        assert_eq!(snapshot.cursor, receipt.committed_through);
-        let CommandOutcome::GoalUpdated { goal, .. } = &receipt.outcome else {
-            panic!("missing approved goal")
-        };
-        assert_eq!(snapshot.focused.unwrap().goal.as_ref(), Some(goal));
+        assert_eq!(snapshot.cursor, stable.cursor);
+        assert_eq!(snapshot.focused.unwrap().goal.as_ref(), Some(stable_goal));
     }
     let mut changed = serde_json::to_value(&approve).unwrap();
     changed["expected"]["revision"] = 2.into();
@@ -1428,24 +1447,46 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         Err(SessionRuntimeError::IdempotencyConflict)
     ));
     runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            connection.execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                [session_id.to_string()],
-            )?;
-            Ok(())
-        })
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: stable_goal.goal_id,
+                    revision: stable_goal.revision,
+                },
+                action: qq_protocol::GoalControl::Pause,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession { session_id },
+        )
         .await
         .unwrap();
     assert_eq!(runtime.command(id, approve).await.unwrap(), receipt);
-    runtime.shutdown().await.unwrap();
+    {
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        assert!(matches!(
+            futures_util::poll!(&mut shutdown),
+            std::task::Poll::Pending
+        ));
+        drop(held);
+        shutdown.await.unwrap();
+    }
 }
 
 #[tokio::test]
 async fn goal_check_approval_requires_exact_command_and_revision() {
     let (directory, runtime) = test_runtime().await;
+    let held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1501,12 +1542,30 @@ async fn goal_check_approval_requires_exact_command_and_revision() {
                 .is_err()
         );
     }
+    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
-    assert_eq!(snapshot.focused.unwrap().goal, Some(goal));
-    runtime.shutdown().await.unwrap();
+    let focused = snapshot.focused.unwrap();
+    let current = focused.goal.as_ref().unwrap();
+    let mut expected = goal.clone();
+    expected.pending_run_id = current.pending_run_id;
+    assert_eq!(current, &expected);
+    let pending = current
+        .pending_run_id
+        .expect("once authorization permits goal work queueing");
+    assert!(focused.runs.iter().any(|run|run.id==pending && matches!(run.origin,Some(qq_protocol::RunOrigin::Goal{goal_id,revision}) if goal_id==goal.goal_id && revision==goal.revision)));
+    {
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        assert!(matches!(
+            futures_util::poll!(&mut shutdown),
+            std::task::Poll::Pending
+        ));
+        drop(held);
+        shutdown.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1640,6 +1699,10 @@ async fn invalid_goal_specs_leave_no_goal_event_or_run() {
 #[tokio::test]
 async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     let (directory, runtime) = test_runtime().await;
+    let held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -1663,12 +1726,13 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     .expect("set_goal is a public client command");
     let receipt = runtime.command(command_id, create.clone()).await.unwrap();
     assert_eq!(runtime.command(command_id, create).await.unwrap(), receipt);
+    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
     let snapshot = serde_json::to_value(snapshot).unwrap();
-    let goal = snapshot["focused"]["goal"].clone();
+    let mut goal = snapshot["focused"]["goal"].clone();
     assert_eq!(goal["objective"], "Implement the durable goal contract");
     assert_eq!(goal["revision"], 1);
     assert_eq!(goal["status"]["type"], "active");
@@ -1677,8 +1741,35 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
             .as_u64()
             .is_some_and(|turns| turns > 0)
     );
-    assert_eq!(snapshot["focused"]["runs"], serde_json::json!([]));
-    runtime.shutdown().await.unwrap();
+    let initial_pending = goal["pending_run_id"].clone();
+    assert!(initial_pending.is_string());
+    let runs = snapshot["focused"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], initial_pending);
+    assert_eq!(
+        runs[0]["origin"],
+        serde_json::json!({"type":"goal","goal_id":goal["goal_id"],"revision":1})
+    );
+    assert_eq!(goal["counters"]["runs"], 0);
+    goal["pending_run_id"] = serde_json::Value::Null;
+    {
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        assert!(matches!(
+            futures_util::poll!(&mut shutdown),
+            std::task::Poll::Pending
+        ));
+        drop(held);
+        shutdown.await.unwrap();
+    }
+    let stopped = runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(stopped).unwrap()["focused"]["goal"],
+        goal
+    );
     drop(runtime);
 
     let runtime = SessionRuntime::open(
@@ -1687,14 +1778,34 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     )
     .await
     .unwrap();
+    let held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
+    runtime.inner.store.drive_goals(now_ms()).await.unwrap();
     let restored = runtime
         .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
         .await
         .unwrap();
-    assert_eq!(
-        serde_json::to_value(restored).unwrap()["focused"]["goal"],
-        goal
+    let restored = serde_json::to_value(restored).unwrap();
+    let mut current = restored["focused"]["goal"].clone();
+    let pending = current["pending_run_id"].clone();
+    assert!(pending.is_string());
+    assert_ne!(
+        pending, initial_pending,
+        "restart queues fresh autonomous work"
     );
+    assert!(
+        restored["focused"]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == pending
+                && run["origin"]
+                    == serde_json::json!({"type":"goal","goal_id":goal["goal_id"],"revision":1}))
+    );
+    current["pending_run_id"] = serde_json::Value::Null;
+    assert_eq!(current, goal);
 
     for expected in [
         serde_json::json!({"goal_id": RunId::generate().unwrap(), "revision": 1}),
@@ -1743,8 +1854,22 @@ async fn client_goal_is_durable_idempotent_and_fences_stale_controls() {
     assert_eq!(edited["revision"], 3);
     assert_eq!(edited["objective"], "Edited while paused");
     assert_eq!(edited["status"]["type"], "paused");
-    assert_eq!(final_snapshot["focused"]["runs"], serde_json::json!([]));
-    runtime.shutdown().await.unwrap();
+    let runs = final_snapshot["focused"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "only the two guarded fresh runs exist");
+    assert!(
+        runs.iter()
+            .all(|run| run["status"] == "cancelled" && run["origin"]["type"] == "goal")
+    );
+    {
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        assert!(matches!(
+            futures_util::poll!(&mut shutdown),
+            std::task::Poll::Pending
+        ));
+        drop(held);
+        shutdown.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1844,8 +1969,12 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
             .unwrap();
         assert_eq!(queued.origin, Some(qq_protocol::RunOrigin::UserPrompt {}));
         assert_eq!(
-            queued.goal, None,
-            "binding is published only at authoritative start"
+            queued.goal,
+            goal.as_ref().map(|goal| qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            }),
+            "active ownership is visible to controls during preparation"
         );
         assert_eq!(claimed.goal.as_deref(), goal.as_deref(), "{state}");
         // A replacement or new goal during preparation never changes this claim.
@@ -1882,11 +2011,28 @@ async fn queued_prompt_claim_pins_only_the_active_goal_before_start() {
                 .await
                 .unwrap();
         }
-        store
+        let started = store
             .start_reserved_run(&claimed, test_prepared_audit(&claimed), None)
             .await
-            .unwrap()
             .unwrap();
+        if matches!(state, "active" | "stopped-after-reserve") {
+            assert!(
+                matches!(
+                    started,
+                    Err(crate::sessions::claim::GoalStartRefusal::Cancelled)
+                ),
+                "inactive captured ownership must refuse start: {state}"
+            );
+            store
+                .finish_reserved_run(&claimed, RunOutcome::Cancelled)
+                .await
+                .unwrap();
+        } else {
+            assert!(
+                started.unwrap().is_some(),
+                "captured None stays independent: {state}"
+            );
+        }
         let run_id = claimed.identity.run_id;
         let stored = store
             .call(Priority::Control, move |connection| {
@@ -2302,8 +2448,9 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             if routed {
                 assert!(
                     store
-                        .record_routing_started(&claim)
+                        .record_routing_started(&claim, true, None)
                         .await
+                        .unwrap()
                         .unwrap()
                         .is_some()
                 );
@@ -2398,11 +2545,33 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
                     goal.as_deref(),
                     "replacement cannot rebind paid preparation"
                 );
-                reopened
+                let started = reopened
                     .start_reserved_run(&reclaimed, test_prepared_audit(&reclaimed), None)
                     .await
-                    .unwrap()
                     .unwrap();
+                if has_goal {
+                    assert!(
+                        reclaimed.cancel_requested,
+                        "replacement retains durable cancellation after paid preparation"
+                    );
+                    assert!(
+                        matches!(
+                            started,
+                            Err(crate::sessions::claim::GoalStartRefusal::Cancelled)
+                        ),
+                        "cancelled paid preparation cannot start model work"
+                    );
+                    reopened
+                        .finish_reserved_run(&reclaimed, RunOutcome::Cancelled)
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(!reclaimed.cancel_requested);
+                    assert!(
+                        started.unwrap().is_some(),
+                        "captured absence remains runnable and gains no later goal authority"
+                    );
+                }
             }
             let persisted = reopened
                 .call(Priority::Control, move |connection| {
@@ -2519,7 +2688,7 @@ async fn malformed_run_origin_refuses_without_committing_a_reservation() {
     store.close().await.unwrap();
 }
 
-async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, ClaimedRun) {
+pub(super) async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, ClaimedRun) {
     let (directory, store, previous) = claimed_store_fixture().await;
     let session_id = previous.identity.session_id;
     store
@@ -2581,6 +2750,7 @@ async fn model_goal_claim(goal_origin: bool) -> (TempDir, Store, ClaimedRun) {
     store
         .start_reserved_run(&claim, test_prepared_audit(&claim), None)
         .await
+        .unwrap()
         .unwrap()
         .unwrap();
     (directory, store, claim)
@@ -3080,6 +3250,14 @@ async fn maximum_goal_notice_keeps_verbatim_fields_and_reserves_the_check_tail()
     }
     assert!(rendered.contains(&format!("[>] 24 {}", "t".repeat(120))));
     assert!(crate::tools::goal::fits_notice(&goal));
+    goal.revision = u32::MAX;
+    goal.counters.runs = u32::MAX;
+    goal.counters.estimated_cost_usd_nanos = Some(u64::MAX);
+    goal.budget.max_goal_runs = 2000;
+    goal.budget.max_cost_usd_nanos = Some(u64::MAX);
+    assert!(crate::tools::goal::fits_notice(&goal));
+    let maximum_counters = crate::tools::goal::render_notice(&goal, 0);
+    assert!(maximum_counters.len() <= crate::tools::goal::MAX_GOAL_RENDER_BYTES);
     goal.objective = "x".repeat(crate::tools::goal::MAX_GOAL_RENDER_BYTES);
     assert!(!crate::tools::goal::fits_notice(&goal));
     store.close().await.unwrap();
@@ -3124,6 +3302,4772 @@ async fn accepted_model_block_stops_further_model_writes_without_changing_revisi
 }
 
 #[tokio::test]
+async fn goal_terminal_spend_is_once_and_stays_with_the_captured_historical_goal() {
+    for goal_origin in [false, true] {
+        for replace in [false, true] {
+            for measured in [false, true] {
+                let (_directory, store, claim) = model_goal_claim(goal_origin).await;
+                let captured = claim.goal.as_ref().unwrap();
+                let goal_id = captured.goal_id;
+                let session_id = claim.identity.session_id;
+                let replacement = if replace {
+                    let result = store
+                        .command(
+                            CommandId::generate().unwrap(),
+                            serde_json::from_value(serde_json::json!({
+                                "type":"set_goal", "session_id":session_id,
+                                "objective":"replacement work", "replace":true,
+                                "expected":{"goal_id":goal_id,"revision":captured.revision},
+                                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                            }))
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let CommandOutcome::GoalUpdated { goal, .. } = result.receipt.outcome else {
+                        panic!("replacement");
+                    };
+                    Some(goal.goal_id)
+                } else {
+                    None
+                };
+                let usage = measured.then_some(TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    ..TokenUsage::default()
+                });
+                let accounting = RunAccounting {
+                    goal_request_rejected: false,
+                    usage,
+                    context_tokens: None,
+                    estimated_cost_usd_nanos: measured.then_some(37),
+                    saw_turn: true,
+                    request_basis: ContextOccupancyBasis {
+                        version: 1,
+                        shape: ContentHash::from_bytes([0; 32]),
+                        static_prefix: PreparedStaticPrefix::new(
+                            ContentHash::from_bytes([0; 32]),
+                            None,
+                        ),
+                        request_bytes: 0,
+                    },
+                    final_output: None,
+                };
+                store
+                    .persist_model_turn(
+                        &claim,
+                        ModelTurnCommit {
+                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            turn_ordinal: 1,
+                            message: Message::assistant("observed model work"),
+                            calls: Vec::new(),
+                            turn_message: None,
+                            context_tokens: None,
+                            occupancy_basis: None,
+                            usage,
+                            estimated_cost_usd_nanos: measured.then_some(37),
+                            accounting: Some(accounting.clone()),
+                            truncated: false,
+                            notice: None,
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let events = store
+                    .finish_run(
+                        &claim,
+                        RunOutcome::Completed,
+                        Some(accounting.clone()),
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(!events.is_empty());
+                let replay = store
+                    .finish_run(
+                        &claim,
+                        RunOutcome::Completed,
+                        Some(accounting),
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    replay.is_empty(),
+                    "terminal replay must publish and charge nothing"
+                );
+                let (historical, live) = store
+                    .call(Priority::Control, move |connection| {
+                        let payload: String = connection.query_row(
+                            "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                            [goal_id.to_string()],
+                            |row| row.get(0),
+                        )?;
+                        let historical: qq_protocol::GoalSnapshot = serde_json::from_str(&payload)?;
+                        Ok((
+                            historical,
+                            crate::sessions::goals::load_live(connection, session_id)?.unwrap(),
+                        ))
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    historical.counters.runs, 1,
+                    "origin={goal_origin}, replace={replace}, measured={measured}"
+                );
+                assert_eq!(historical.counters.usage, usage);
+                assert_eq!(
+                    historical.counters.estimated_cost_usd_nanos,
+                    measured.then_some(37)
+                );
+                if let Some(replacement) = replacement {
+                    assert_eq!(live.goal_id, replacement);
+                    assert_eq!(live.counters, qq_protocol::GoalCounters::default());
+                    assert!(
+                        !events.iter().any(|event| matches!(&event.event,
+                        SessionEvent::GoalUpdated {goal} if goal.goal_id==goal_id)),
+                        "archived accounting cannot replace the live client's goal"
+                    );
+                } else {
+                    assert_eq!(live, historical);
+                    assert!(
+                        events.iter().any(|event| matches!(&event.event,
+                        SessionEvent::GoalUpdated {goal} if goal.goal_id==goal_id)),
+                        "live counters must be published with terminal settlement"
+                    );
+                }
+                store.close().await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_terminal_goal_event_rolls_back_spend_and_outcome_then_retries_once() {
+    let (_directory, store, claim) = model_goal_claim(false).await;
+    let run = claim.identity.run_id;
+    let goal_id = claim.goal.as_ref().unwrap().goal_id;
+    let accounting = RunAccounting {
+        goal_request_rejected: false,
+        usage: Some(TokenUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..TokenUsage::default()
+        }),
+        context_tokens: None,
+        estimated_cost_usd_nanos: Some(37),
+        saw_turn: true,
+        request_basis: ContextOccupancyBasis {
+            version: 1,
+            shape: ContentHash::from_bytes([0; 32]),
+            static_prefix: PreparedStaticPrefix::new(ContentHash::from_bytes([0; 32]), None),
+            request_bytes: 0,
+        },
+        final_output: None,
+    };
+    store
+        .persist_model_turn(
+            &claim,
+            ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                turn_ordinal: 1,
+                message: Message::assistant("observed model work"),
+                calls: Vec::new(),
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: accounting.usage,
+                estimated_cost_usd_nanos: accounting.estimated_cost_usd_nanos,
+                accounting: Some(accounting.clone()),
+                truncated: false,
+                notice: None,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .call(Priority::Control, |connection| {
+            connection.execute_batch(
+                "CREATE TEMP TRIGGER refuse_terminal_goal BEFORE INSERT ON events
+            WHEN json_extract(NEW.envelope_json,'$.event.type')='goal_updated'
+            BEGIN SELECT RAISE(ABORT,'terminal goal event fault'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut snapshots = Vec::new();
+    for after_failure in [false, true] {
+        if after_failure {
+            assert!(
+                store
+                    .finish_run(
+                        &claim,
+                        RunOutcome::Completed,
+                        Some(accounting.clone()),
+                        TeardownComplete::nothing_ran()
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        snapshots.push(
+            store
+                .call(Priority::Control, move |connection| {
+                    let payload: String = connection.query_row(
+                        "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                        [goal_id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    let outcome: Option<String> = connection.query_row(
+                        "SELECT outcome_json FROM runs WHERE id=?1",
+                        [run.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    let events: u64 =
+                        connection
+                            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+                    Ok((payload, outcome, events))
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        snapshots[0], snapshots[1],
+        "failed goal publication must roll back terminal accounting and outcome"
+    );
+    assert!(snapshots[1].1.is_none());
+    store
+        .call(Priority::Control, |connection| {
+            connection.execute_batch("DROP TRIGGER refuse_terminal_goal")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let events = store
+        .finish_run(
+            &claim,
+            RunOutcome::Completed,
+            Some(accounting.clone()),
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(&event.event,SessionEvent::GoalUpdated {goal}
+        if goal.goal_id==goal_id && goal.counters.runs==1 && goal.counters.estimated_cost_usd_nanos==Some(37))));
+    assert!(
+        matches!(&events.last().unwrap().event,SessionEvent::RunFinished {run_id,..} if *run_id==run)
+    );
+    assert!(
+        store
+            .finish_run(
+                &claim,
+                RunOutcome::Completed,
+                Some(accounting),
+                TeardownComplete::nothing_ran()
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_provider_outage_spends_no_goal_run_or_measured_budget() {
+    struct Outage;
+    impl Provider for Outage {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            Box::pin(stream::iter([Err(qq_provider::ProviderError::Api {
+                status: 529,
+                message: "scripted unavailable before model output".to_owned(),
+            })]))
+        }
+    }
+    struct Loader;
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            Box::pin(async move {
+                let runtime = Runtime::new(Outage, "test-model", 256).unwrap();
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(Loader),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created =
+        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session_id,"objective":"survive provider outage",
+                "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+86_400_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: receipt.committed_through,
+        })
+        .unwrap();
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("work")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+        panic!("prompt")
+    };
+    let events = collect_until_run_finished(&mut events, run_id).await;
+    assert!(
+        matches!(
+            finished_outcome(&events, run_id),
+            Some(RunOutcome::Paused { .. })
+        ),
+        "known outage pauses the run"
+    );
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(
+            workspace_id,
+            Some(session_id),
+            256,
+            256,
+        ))
+        .await
+        .unwrap();
+    let focused = snapshot.focused.unwrap();
+    let total = qq_protocol::AccountingTotal {
+        usage: Some(TokenUsage::default()),
+        estimated_cost_usd_nanos: Some(0),
+    };
+    let accounting = focused.summary.accounting.unwrap();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        accounting.direct, total,
+        "typed direct rejection preserves public known zero"
+    );
+    assert_eq!(accounting.inclusive, total);
+    let goal = focused.goal.unwrap();
+    assert_eq!(
+        goal.counters.runs, 0,
+        "HTTP rejection before model output cannot consume the goal run allowance"
+    );
+    assert_eq!(goal.counters.usage, Some(TokenUsage::default()));
+    assert_eq!(goal.counters.estimated_cost_usd_nanos, Some(0));
+}
+
+#[tokio::test]
+async fn pending_goal_request_recovery_poison_spend_without_charging_a_run() {
+    let (directory, store, claim) = model_goal_claim(false).await;
+    let session = claim.identity.session_id;
+    store
+        .append_run_activity(&claim, qq_protocol::RunActivity::WaitingForProvider, false)
+        .await
+        .unwrap();
+    let run = claim.identity.run_id;
+    let pending = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT goal_request_pending FROM runs WHERE id=?1",
+                [run.to_string()],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(pending);
+    store.close().await.unwrap();
+    let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    let goal = reopened
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        goal.counters.runs, 0,
+        "an unconfirmed dispatch is not a committed model turn"
+    );
+    assert_eq!(goal.counters.usage, None);
+    assert_eq!(goal.counters.estimated_cost_usd_nanos, None);
+    let (cost_known, summary) = reopened
+        .call(Priority::Control, move |connection| {
+            let known: bool = connection.query_row(
+                "SELECT cost_known FROM sessions WHERE id=?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok((known, load_session_summary(connection, session)?))
+        })
+        .await
+        .unwrap();
+    assert!(
+        !cost_known,
+        "pending recovery preserves session cost uncertainty without in-memory goal capability"
+    );
+    assert_eq!(summary.estimated_cost_usd_nanos, None);
+
+    assert!(
+        reopened
+            .recover_interrupted_runs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let again = reopened
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(again, goal);
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_parent51_upgrade_retains_notices_and_process_receipts() {
+    let (directory, store, goal_claim) = model_goal_claim(false).await;
+    let run = goal_claim.identity.run_id;
+    let goal = goal_claim.goal.as_ref().unwrap().goal_id;
+    let (process, call, receipt) =
+        super::execution_context::process_call_fixture(&store, directory.path()).await;
+    store
+        .finish_tool_call(
+            &process,
+            call,
+            "exec exit=0\n".to_owned(),
+            false,
+            Vec::new(),
+            None,
+            None,
+            Some(Box::new(receipt.clone())),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    let original: (String, String, String) = (
+        connection
+            .query_row(
+                "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                [goal.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT goal_initial_notice FROM runs WHERE id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT execution_context_json FROM tool_calls WHERE id=?1",
+                [call.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    );
+    assert_eq!(original.2, serde_json::to_string(&receipt).unwrap());
+    connection
+        .execute_batch(
+            "ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id;
+        ALTER TABLE runs DROP COLUMN goal_request_pending;
+        ALTER TABLE runs DROP COLUMN goal_helper_admitted;
+        ALTER TABLE model_turns DROP COLUMN work_disposition;
+        UPDATE metadata SET value='51' WHERE key='schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let (connection, _) = open_database(&path).unwrap();
+        let preserved: (String, String, String) = (
+            connection
+                .query_row(
+                    "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                    [goal.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT goal_initial_notice FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT execution_context_json FROM tool_calls WHERE id=?1",
+                    [call.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+        );
+        assert_eq!(preserved, original);
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            version,
+            crate::sessions::store::STORE_SCHEMA_VERSION.to_string()
+        );
+        let proof: (bool, bool, Option<String>) = connection.query_row("SELECT goal_request_pending,goal_helper_admitted,goal_paid_owner_run_id FROM runs WHERE id=?1", [run.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(proof, (false, false, None));
+    }
+}
+
+#[tokio::test]
+async fn goal_request_migration_refuses_bad_shapes_without_advancing_version() {
+    for column in ["goal_request_pending", "goal_helper_admitted"] {
+        for definition in ["TEXT", "INTEGER", "INTEGER NOT NULL DEFAULT 7"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.sqlite3");
+            let (connection, _) = open_database(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE runs DROP COLUMN {column};
+            ALTER TABLE runs ADD COLUMN {column} {definition};
+            ALTER TABLE model_turns DROP COLUMN work_disposition;
+            UPDATE metadata SET value='51' WHERE key='schema_version';"
+                ))
+                .unwrap();
+            drop(connection);
+            assert!(open_database(&path).is_err());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let version: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, "51");
+            let columns:u32=connection.query_row("SELECT COUNT(*) FROM pragma_table_info('model_turns') WHERE name='work_disposition'",[],|row|row.get(0)).unwrap();
+            assert_eq!(
+                columns, 0,
+                "failed migration cannot leave a new evidence column"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn routing_before_main_charges_historical_goal_spend_on_reserved_settlement() {
+    for (paid, measured_usage, measured_cost) in [
+        (true, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (false, false, false),
+    ] {
+        for replace in [false, true] {
+            let (_directory, store, previous) = model_goal_claim(false).await;
+            let session = previous.identity.session_id;
+            store
+                .finish_run(
+                    &previous,
+                    RunOutcome::Completed,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id: session,
+                        input: vec![InputPart::text("route before main")],
+                        limits: RunLimits::default(),
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+            let goal = claim.goal.as_ref().unwrap();
+            let id = goal.goal_id;
+            store
+                .record_routing_started(&claim, paid, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let usage = measured_usage.then_some(TokenUsage {
+                input_tokens: 13,
+                output_tokens: 2,
+                ..TokenUsage::default()
+            });
+            let cost = measured_cost.then_some(37);
+            if measured_usage || measured_cost {
+                assert!(
+                    store
+                        .record_routing_spend(
+                            &claim,
+                            qq_protocol::CheckpointSpend {
+                                usage,
+                                estimated_cost_usd_nanos: cost,
+                            }
+                        )
+                        .await
+                        .unwrap()
+                );
+            }
+            if replace {
+                store
+                    .command(
+                        CommandId::generate().unwrap(),
+                        serde_json::from_value(serde_json::json!({
+                            "type":"set_goal","session_id":session,"objective":"replacement",
+                            "expected":{"goal_id":id,"revision":goal.revision},"replace":true,
+                            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let events = store
+                .finish_reserved_run(&claim, RunOutcome::Interrupted)
+                .await
+                .unwrap();
+            assert!(!events.is_empty());
+            let goal_events = events
+                .iter()
+                .filter(|event| matches!(event.event, SessionEvent::GoalUpdated { .. }))
+                .count();
+            assert_eq!(goal_events, usize::from(paid && !replace));
+            if paid && !replace {
+                assert!(matches!(events[0].event, SessionEvent::GoalUpdated { .. }));
+                assert!(matches!(events[1].event, SessionEvent::RunFinished { .. }));
+            }
+            assert!(
+                store
+                    .finish_reserved_run(&claim, RunOutcome::Interrupted)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (historical, live) = store
+                .call(Priority::Control, move |connection| {
+                    let payload: String = connection.query_row(
+                        "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    Ok((
+                        serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                        crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                historical.counters.runs, 0,
+                "routing alone is not a committed main turn"
+            );
+            assert_eq!(
+                historical.counters.usage,
+                if paid {
+                    usage
+                } else {
+                    Some(TokenUsage::default())
+                },
+                "routing spend paid={paid}, usage={measured_usage}, cost={measured_cost}, replace={replace}"
+            );
+            assert_eq!(
+                historical.counters.estimated_cost_usd_nanos,
+                if paid { cost } else { Some(0) }
+            );
+            if replace {
+                assert_eq!(live.counters, qq_protocol::GoalCounters::default());
+            } else {
+                assert_eq!(live, historical);
+            }
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_review_before_main_poison_goal_spend_without_a_run_charge() {
+    let (_directory, store, claim) = model_goal_claim(false).await;
+    let session = claim.identity.session_id;
+    store
+        .record_checkpoint_started(
+            &claim,
+            "review-before-main".to_owned(),
+            qq_protocol::CheckpointPhase::FinalCandidate,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_run(
+            &claim,
+            RunOutcome::Interrupted,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let goal = store
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(goal.counters.runs, 0);
+    assert_eq!(goal.counters.usage, None);
+    assert_eq!(goal.counters.estimated_cost_usd_nanos, None);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn owned_compaction_spend_survives_owner_settlement_and_goal_replacement() {
+    for state in ["created", "pending", "measured"] {
+        for replace in [false, true] {
+            let (_directory, store, owner) = model_goal_claim(false).await;
+            let session = owner.identity.session_id;
+            let goal = owner.goal.as_ref().unwrap();
+            let id = goal.goal_id;
+            let audit = test_prepared_audit(&owner);
+            let (helper, _) = store
+                .start_in_run_compaction(&owner, &audit.resolved_model, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                helper.goal.is_none(),
+                "helper never acquires goal tool authority"
+            );
+            let usage = TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                ..TokenUsage::default()
+            };
+            if state != "created" {
+                store.start_in_run_summary_request(&helper).await.unwrap();
+            }
+            if state == "measured" {
+                let accounting = RunAccounting {
+                    goal_request_rejected: false,
+                    usage: Some(usage),
+                    context_tokens: None,
+                    estimated_cost_usd_nanos: Some(43),
+                    saw_turn: true,
+                    request_basis: ContextOccupancyBasis {
+                        version: 1,
+                        shape: ContentHash::from_bytes([0; 32]),
+                        static_prefix: PreparedStaticPrefix::new(
+                            ContentHash::from_bytes([0; 32]),
+                            None,
+                        ),
+                        request_bytes: 0,
+                    },
+                    final_output: None,
+                };
+                store
+                    .persist_in_run_summary_turn(
+                        &helper,
+                        ModelTurnCommit {
+                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            turn_ordinal: 1,
+                            message: Message::assistant("observed summary work"),
+                            calls: Vec::new(),
+                            turn_message: None,
+                            context_tokens: None,
+                            occupancy_basis: None,
+                            usage: Some(usage),
+                            estimated_cost_usd_nanos: Some(43),
+                            accounting: Some(accounting),
+                            truncated: false,
+                            notice: None,
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if replace {
+                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+                    "type":"set_goal", "session_id":session, "objective":"replacement", "replace":true,
+                    "expected":{"goal_id":id,"revision":goal.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                })).unwrap()).await.unwrap();
+            }
+            if state == "measured" && !replace {
+                store
+                    .call(Priority::Control, |connection| {
+                        connection.execute_batch(
+                            "CREATE TEMP TRIGGER refuse_helper_goal BEFORE INSERT ON events
+                        WHEN json_extract(NEW.envelope_json,'$.event.type')='goal_updated'
+                        BEGIN SELECT RAISE(ABORT,'helper goal event fault'); END;",
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .finish_run(
+                            &owner,
+                            RunOutcome::Interrupted,
+                            None,
+                            TeardownComplete::nothing_ran()
+                        )
+                        .await
+                        .is_err()
+                );
+                let owner_id = owner.identity.run_id;
+                let helper_id = helper.identity.run_id;
+                let unchanged=store.call(Priority::Control, move |connection| {
+                    let settled:u32=connection.query_row("SELECT COUNT(*) FROM runs WHERE id IN (?1,?2) AND outcome_json IS NOT NULL", params![owner_id.to_string(),helper_id.to_string()], |row|row.get(0))?;
+                    let goal=crate::sessions::goals::load_live(connection,session)?.unwrap();
+                    connection.execute_batch("DROP TRIGGER refuse_helper_goal")?;
+                    Ok((settled,goal.counters))
+                }).await.unwrap();
+                assert_eq!(
+                    unchanged,
+                    (0, qq_protocol::GoalCounters::default()),
+                    "failed helper publication rolls back both terminal rows and spend"
+                );
+            }
+            let events = store
+                .finish_run(
+                    &owner,
+                    RunOutcome::Interrupted,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.event, SessionEvent::GoalUpdated { .. }))
+                    .count(),
+                usize::from(state != "created" && !replace)
+            );
+            assert!(
+                store
+                    .finish_in_run_compaction_failed(&helper, RunOutcome::Interrupted)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (historical, live) = store
+                .call(Priority::Control, move |connection| {
+                    let payload: String = connection.query_row(
+                        "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    Ok((
+                        serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                        crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(historical.counters.runs, 0, "helper is not a main goal run");
+            assert_eq!(
+                historical.counters.usage,
+                match state {
+                    "created" => Some(TokenUsage::default()),
+                    "measured" => Some(usage),
+                    _ => None,
+                },
+                "helper state={state}, replace={replace}"
+            );
+            assert_eq!(
+                historical.counters.estimated_cost_usd_nanos,
+                match state {
+                    "created" => Some(0),
+                    "measured" => Some(43),
+                    _ => None,
+                }
+            );
+            if replace {
+                assert_eq!(live.counters, qq_protocol::GoalCounters::default());
+            } else {
+                assert_eq!(live, historical);
+            }
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn between_run_compactor_charges_its_goal_after_owner_cancel_and_reopen() {
+    for replace in [false, true] {
+        for recover in [false, true] {
+            let (directory, store, previous) = model_goal_claim(false).await;
+            let session = previous.identity.session_id;
+            store
+                .finish_run(
+                    &previous,
+                    RunOutcome::Completed,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id: session,
+                        input: vec![InputPart::text("needs a summary")],
+                        limits: RunLimits::default(),
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let owner = store.reserve_next_run(false).await.unwrap().unwrap();
+            let goal = owner.goal.as_ref().unwrap();
+            let id = goal.goal_id;
+            let (helper, _) = store
+                .start_auto_compaction(&owner, test_prepared_audit(&owner), None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(helper.goal.is_none());
+            let usage = TokenUsage {
+                input_tokens: 17,
+                output_tokens: 5,
+                ..TokenUsage::default()
+            };
+            let accounting = RunAccounting {
+                goal_request_rejected: false,
+                usage: Some(usage),
+                context_tokens: None,
+                estimated_cost_usd_nanos: Some(61),
+                saw_turn: true,
+                request_basis: ContextOccupancyBasis {
+                    version: 1,
+                    shape: ContentHash::from_bytes([0; 32]),
+                    static_prefix: PreparedStaticPrefix::new(
+                        ContentHash::from_bytes([0; 32]),
+                        None,
+                    ),
+                    request_bytes: 0,
+                },
+                final_output: None,
+            };
+            store
+                .persist_in_run_summary_turn(
+                    &helper,
+                    ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
+                        turn_ordinal: 1,
+                        message: Message::assistant("measured summary prefix"),
+                        calls: Vec::new(),
+                        turn_message: None,
+                        context_tokens: None,
+                        occupancy_basis: None,
+                        usage: Some(usage),
+                        estimated_cost_usd_nanos: Some(61),
+                        accounting: Some(accounting),
+                        truncated: false,
+                        notice: None,
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .finish_reserved_run(&owner, RunOutcome::Cancelled)
+                .await
+                .unwrap();
+            if replace {
+                store.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                    "expected":{"goal_id":id,"revision":goal.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                })).unwrap()).await.unwrap();
+            }
+            store.close().await.unwrap();
+            let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+                .await
+                .unwrap();
+            if recover {
+                assert!(
+                    !reopened
+                        .recover_interrupted_runs()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    reopened
+                        .recover_interrupted_runs()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            } else {
+                assert!(
+                    !reopened
+                        .finish_in_run_compaction_failed(&helper, RunOutcome::Interrupted)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            assert!(
+                reopened
+                    .finish_in_run_compaction_failed(&helper, RunOutcome::Interrupted)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (historical, live) = reopened
+                .call(Priority::Control, move |connection| {
+                    let payload: String = connection.query_row(
+                        "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    Ok((
+                        serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                        crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(historical.counters.runs, 0);
+            assert_eq!(historical.counters.usage, Some(usage));
+            assert_eq!(historical.counters.estimated_cost_usd_nanos, Some(61));
+            if replace {
+                assert_eq!(live.counters, qq_protocol::GoalCounters::default());
+            } else {
+                assert_eq!(live, historical);
+            }
+            reopened.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch() {
+    struct Fault {
+        prefix: bool,
+        transport: bool,
+        evidence: &'static str,
+        calls: AtomicUsize,
+    }
+    impl Provider for Fault {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Box::pin(stream::iter([
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: "summary_call".to_owned(),
+                        name: "read_file".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: "summary_call".to_owned(),
+                        json: r#"{"path":"note"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                        id: "summary_call".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::Completed {
+                        usage: Some(qq_provider::ProviderUsage {
+                            input_tokens: 11,
+                            output_tokens: 3,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            reasoning_tokens: None,
+                        }),
+                    }),
+                ]));
+            }
+            if self.evidence == "eof" {
+                return Box::pin(stream::empty());
+            }
+            let error = if self.transport {
+                qq_provider::ProviderError::Transport("scripted connection loss".to_owned())
+            } else {
+                qq_provider::ProviderError::Api {
+                    status: 529,
+                    message: "scripted rejection before output".to_owned(),
+                }
+            };
+            let mut events = Vec::new();
+            match self.evidence {
+                "text" => events.push(Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "partial".to_owned(),
+                })),
+                "reasoning" => events.push(Ok(qq_provider::ProviderEvent::ReasoningDelta {
+                    kind: qq_protocol::ReasoningKind::ExposedThinking,
+                    text: "thinking".to_owned(),
+                })),
+                _ => {}
+            }
+            events.push(Err(error));
+            Box::pin(stream::iter(events))
+        }
+    }
+    struct Loader;
+    impl RuntimeLoader for Loader {
+        fn load(&self, _: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            Box::pin(async { panic!("scheduler permit is held") })
+        }
+    }
+    for prefix in [false, true] {
+        for (transport, evidence) in [
+            (false, "none"),
+            (true, "none"),
+            (false, "text"),
+            (false, "reasoning"),
+            (false, "eof"),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+            options.max_active_runs = 1;
+            let runtime = SessionRuntime::open(options, Arc::new(Loader))
+                .await
+                .unwrap();
+            let permit = Arc::clone(&runtime.inner.permits)
+                .acquire_owned()
+                .await
+                .unwrap();
+            let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+            let created =
+                create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
+            let CommandOutcome::SessionCreated {
+                session_id: session,
+            } = created.outcome
+            else {
+                panic!("session")
+            };
+            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session,"objective":"preserve helper spending",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            })).unwrap()).await.unwrap();
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id: session,
+                        input: vec![InputPart::text("work")],
+                        limits: RunLimits::default(),
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let store = &runtime.inner.store;
+            let owner = store.reserve_next_run(false).await.unwrap().unwrap();
+            store
+                .start_reserved_run(&owner, test_prepared_audit(&owner), None)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let loaded = loaded_runtime(
+                Runtime::new(
+                    Fault {
+                        prefix,
+                        transport,
+                        evidence,
+                        calls: AtomicUsize::new(0),
+                    },
+                    "test-model",
+                    256,
+                )
+                .unwrap(),
+                &owner.workspace,
+                None,
+            );
+            let compactor = crate::sessions::in_run_compaction::SessionInRunCompactor::new(
+                Arc::clone(&runtime.inner),
+                &owner,
+                &loaded,
+            );
+            let result = crate::runtime::InRunCompactor::compact(
+                &compactor,
+                crate::runtime::InRunCompactionRequest {
+                    transcript: vec![Message::user("summarize")],
+                    turn_cutoff: 0,
+                    system: Arc::from("system"),
+                    tools: Arc::from([qq_provider::ToolSpec::new(
+                        "read_file",
+                        "read",
+                        serde_json::json!({"type":"object"}),
+                    )]),
+                    retained_bytes: 0,
+                    goal_notice: None,
+                    budget: crate::runtime::ChildBudget::default(),
+                },
+            )
+            .await;
+            let Err(crate::runtime::InRunCompactionError::SummarizerUnavailable {
+                usage,
+                estimated_cost_usd_nanos,
+                ..
+            }) = result
+            else {
+                panic!("expected scripted provider fault")
+            };
+            let expected_usage = if transport || evidence != "none" {
+                None
+            } else {
+                Some(if prefix {
+                    TokenUsage {
+                        input_tokens: 11,
+                        output_tokens: 3,
+                        ..TokenUsage::default()
+                    }
+                } else {
+                    TokenUsage::default()
+                })
+            };
+            let expected_cost = if transport || prefix || evidence != "none" {
+                None
+            } else {
+                Some(0)
+            };
+            assert_eq!(
+                usage, expected_usage,
+                "prefix={prefix}, transport={transport}, evidence={evidence}"
+            );
+            assert_eq!(estimated_cost_usd_nanos, expected_cost);
+            let goal = store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(goal.counters.runs, 0);
+            assert_eq!(goal.counters.usage, expected_usage);
+            assert_eq!(goal.counters.estimated_cost_usd_nanos, expected_cost);
+            store
+                .finish_run(
+                    &owner,
+                    RunOutcome::Interrupted,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            drop(permit);
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() {
+    struct Seed {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl Provider for Seed {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "x".repeat(29 * 1024 * 4),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]))
+        }
+    }
+    struct Fault {
+        transport: bool,
+        cancel: bool,
+        prefix: bool,
+        calls: AtomicUsize,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl Provider for Fault {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            assert!(
+                request_texts(&request)
+                    .iter()
+                    .any(|text| text.contains("Summarize this conversation")),
+                "only automatic summarizer work is admitted"
+            );
+            self.requests.lock().unwrap().push(request);
+            if self.prefix && self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Box::pin(stream::iter([
+                    Ok(qq_provider::ProviderEvent::ToolCallStarted {
+                        id: "summary_call".to_owned(),
+                        name: "read_file".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta {
+                        id: "summary_call".to_owned(),
+                        json: r#"{"path":"note"}"#.to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::ToolCallCompleted {
+                        id: "summary_call".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::Completed {
+                        usage: Some(qq_provider::ProviderUsage {
+                            input_tokens: 11,
+                            output_tokens: 3,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            reasoning_tokens: None,
+                        }),
+                    }),
+                ]));
+            }
+            if self.cancel {
+                return Box::pin(stream::pending());
+            }
+            let error = if self.transport {
+                qq_provider::ProviderError::Transport("scripted interrupted summary".to_owned())
+            } else {
+                qq_provider::ProviderError::Api {
+                    status: 529,
+                    message: "scripted empty summary rejection".to_owned(),
+                }
+            };
+            Box::pin(stream::iter([Err(error)]))
+        }
+    }
+    struct Loader {
+        transport: bool,
+        cancel: bool,
+        prefix: bool,
+        loads: AtomicUsize,
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let first = self.loads.fetch_add(1, Ordering::SeqCst) == 0;
+            let requests = Arc::clone(&self.requests);
+            let transport = self.transport;
+            let cancel = self.cancel;
+            let prefix = self.prefix;
+            Box::pin(async move {
+                let runtime = if first {
+                    Runtime::new(Seed { requests }, "test-model", 1024).unwrap()
+                } else {
+                    Runtime::new(
+                        Fault {
+                            transport,
+                            cancel,
+                            prefix,
+                            calls: AtomicUsize::new(0),
+                            requests,
+                        },
+                        "test-model",
+                        1024,
+                    )
+                    .unwrap()
+                };
+                Ok(loaded_runtime(
+                    runtime.with_context_window(Some(32 * 1024)),
+                    &request.workspace,
+                    Some(ModelPricing {
+                        input_usd_nanos_per_token: 1,
+                        output_usd_nanos_per_token: 1,
+                        cache_read_usd_nanos_per_token: Some(1),
+                        cache_write_usd_nanos_per_token: Some(1),
+                        context_tier: None,
+                        provenance: "deterministic fixture".to_owned(),
+                    }),
+                ))
+            })
+        }
+    }
+    for (transport, cancel, prefix) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+        (true, true, true),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(Loader {
+                transport,
+                cancel,
+                prefix,
+                loads: AtomicUsize::new(0),
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
+        let CommandOutcome::SessionCreated {
+            session_id: session,
+        } = created.outcome
+        else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let first = queue_prompt(&runtime, session, "grow".to_owned()).await;
+        let initial = collect_until_run_finished(&mut events, first).await;
+        assert_eq!(
+            finished_outcome(&initial, first),
+            Some(RunOutcome::Completed)
+        );
+        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session,"objective":"survive automatic compaction outage",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+        })).unwrap()).await.unwrap();
+        let owner = queue_prompt(&runtime, session, "continue".to_owned()).await;
+        let cancelled_helper = if cancel {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while requests.lock().unwrap().len() < if prefix { 3 } else { 2 } {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("owned summary dispatch occurs");
+            let helper:RunId=runtime.inner.store.call(Priority::Control,move|connection| {
+                let (id,admitted,usage):(String,bool,Option<String>)=connection.query_row("SELECT id,goal_helper_admitted,usage_json FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1",[owner.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+                assert!(admitted && usage.is_none(),"paid admission is durable before provider poll");
+                parse_id(&id)
+            }).await.unwrap();
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun { run_id: owner },
+                )
+                .await
+                .unwrap();
+            Some(helper)
+        } else {
+            None
+        };
+        let observed = collect_until_run_finished(&mut events, owner).await;
+        if cancel {
+            assert_eq!(
+                finished_outcome(&observed, owner),
+                Some(RunOutcome::Cancelled)
+            );
+            let preparing: Option<String> = runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    Ok(connection.query_row(
+                        "SELECT preparing_run_id FROM sessions WHERE id=?1",
+                        [session.to_string()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert!(
+                preparing.is_none(),
+                "cancelled owner releases preparation only after its helper drains"
+            );
+        }
+        if let Some(helper) = cancelled_helper
+            && !observed.iter().any(|event|matches!(event.event,SessionEvent::RunFinished{run_id,..} if run_id==helper)) {
+                collect_until_run_finished(&mut events,helper).await;
+        }
+        assert!(
+            requests.lock().unwrap().len() > 1,
+            "provider dispatch occurred"
+        );
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let rows:Vec<(Option<String>,Option<u64>,Option<String>)>=connection.prepare("SELECT usage_json,estimated_cost_usd_nanos,goal_id FROM runs WHERE kind='compaction' AND auto_compaction_for_run_id=?1").unwrap().query_map([owner.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert!(!rows.is_empty());
+        let expected_usage = (!transport).then_some(if prefix {
+            TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                ..TokenUsage::default()
+            }
+        } else {
+            TokenUsage::default()
+        });
+        let expected_cost = (!transport).then_some(if prefix { 14 } else { 0 });
+        for (usage, cost, authority) in rows {
+            let usage: Option<TokenUsage> =
+                usage.map(|encoded| serde_json::from_str(&encoded).unwrap());
+            assert_eq!(usage, expected_usage, "transport={transport}");
+            assert_eq!(cost, expected_cost);
+            assert!(
+                authority.is_none(),
+                "compactor has accounting only, not goal authority"
+            );
+        }
+        drop(connection);
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(workspace, Some(session), 256, 256))
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .sessions
+                .iter()
+                .find(|summary| summary.id == session)
+                .unwrap()
+                .estimated_cost_usd_nanos,
+            expected_cost
+        );
+        let cost_known = runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT cost_known FROM sessions WHERE id=?1",
+                    [session.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            cost_known, !transport,
+            "durable session certainty agrees with public accounting"
+        );
+        let goal = snapshot.focused.unwrap().goal.unwrap();
+        assert_eq!(goal.counters.runs, 0);
+        assert_eq!(goal.counters.usage, expected_usage);
+        assert_eq!(goal.counters.estimated_cost_usd_nanos, expected_cost);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn committed_goal_turn_recovery_charges_session_and_historical_goal_once() {
+    for measured in [false, true] {
+        for pending in [false, true] {
+            for replace in [false, true] {
+                let (directory, store, claim) = model_goal_claim(false).await;
+                let session = claim.identity.session_id;
+                store.call(Priority::Control,move|connection| {
+                    connection.execute("UPDATE runs SET usage_json=?2,estimated_cost_usd_nanos=0 WHERE session_id=?1 AND outcome_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM model_turns WHERE run_id=runs.id)",params![session.to_string(),serde_json::to_string(&TokenUsage::default())?])?;
+                    assert_eq!(load_session_summary(connection,session)?.estimated_cost_usd_nanos,Some(0),"fixture starts with known-zero prior spending");
+                    Ok(())
+                }).await.unwrap();
+
+                let goal = claim.goal.as_ref().unwrap();
+                let id = goal.goal_id;
+                let usage = TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 3,
+                    ..TokenUsage::default()
+                };
+                let accounting = RunAccounting {
+                    goal_request_rejected: false,
+                    usage: Some(usage),
+                    estimated_cost_usd_nanos: measured.then_some(37),
+                    saw_turn: true,
+                    context_tokens: None,
+                    final_output: None,
+                    request_basis: ContextOccupancyBasis {
+                        version: 1,
+                        shape: ContentHash::from_bytes([0; 32]),
+                        static_prefix: PreparedStaticPrefix::new(
+                            ContentHash::from_bytes([0; 32]),
+                            None,
+                        ),
+                        request_bytes: 0,
+                    },
+                };
+                store
+                    .persist_model_turn(
+                        &claim,
+                        ModelTurnCommit {
+                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            turn_ordinal: 1,
+                            message: Message::assistant("committed before crash"),
+                            calls: Vec::new(),
+                            turn_message: None,
+                            context_tokens: None,
+                            occupancy_basis: None,
+                            usage: Some(usage),
+                            estimated_cost_usd_nanos: measured.then_some(37),
+                            accounting: Some(accounting),
+                            truncated: false,
+                            notice: None,
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                if pending {
+                    store
+                        .append_run_activity(
+                            &claim,
+                            qq_protocol::RunActivity::WaitingForProvider,
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                }
+                if replace {
+                    store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+                        "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                        "expected":{"goal_id":id,"revision":goal.revision},
+                        "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                    })).unwrap()).await.unwrap();
+                }
+                store.close().await.unwrap();
+                let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+                    .await
+                    .unwrap();
+                assert!(
+                    !reopened
+                        .recover_interrupted_runs()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                let receipt = reopened
+                    .call(Priority::Control, move |connection| {
+                        let payload: String = connection.query_row(
+                            "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                            [id.to_string()],
+                            |row| row.get(0),
+                        )?;
+                        let totals: (u64, bool) = connection.query_row(
+                            "SELECT estimated_cost_usd_nanos,cost_known FROM sessions WHERE id=?1",
+                            [session.to_string()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                        Ok((
+                            serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                            crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                            totals,
+                            load_session_summary(connection, session)?,
+                        ))
+                    })
+                    .await
+                    .unwrap();
+                let known_cost = measured && !pending;
+                assert_eq!(
+                    receipt.2,
+                    (if known_cost { 37 } else { 0 }, known_cost),
+                    "stored session cost measured={measured}, pending={pending}, replace={replace}"
+                );
+                assert_eq!(receipt.0.counters.runs, 1);
+                assert_eq!(receipt.0.counters.usage, (!pending).then_some(usage));
+                assert_eq!(
+                    receipt.0.counters.estimated_cost_usd_nanos,
+                    known_cost.then_some(37)
+                );
+                assert_eq!(receipt.3.estimated_cost_usd_nanos, known_cost.then_some(37));
+                if replace {
+                    assert_eq!(receipt.1.counters, qq_protocol::GoalCounters::default());
+                } else {
+                    assert_eq!(receipt.0, receipt.1);
+                }
+                assert!(
+                    reopened
+                        .recover_interrupted_runs()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                let after = reopened
+                    .call(Priority::Control, move |connection| {
+                        let payload: String = connection.query_row(
+                            "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                            [id.to_string()],
+                            |row| row.get(0),
+                        )?;
+                        let totals: (u64, bool) = connection.query_row(
+                            "SELECT estimated_cost_usd_nanos,cost_known FROM sessions WHERE id=?1",
+                            [session.to_string()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                        Ok((
+                            serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                            totals,
+                        ))
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(after, (receipt.0, receipt.2));
+                reopened.close().await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejection_only_goal_recovery_does_not_invent_session_spending() {
+    let (directory, store, claim) = model_goal_claim(false).await;
+    let session = claim.identity.session_id;
+    store
+        .append_run_activity(&claim, qq_protocol::RunActivity::WaitingForProvider, false)
+        .await
+        .unwrap();
+    store
+        .persist_model_turn(
+            &claim,
+            ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::RejectedBeforeWork,
+                turn_ordinal: 1,
+                message: Message::assistant(""),
+                calls: Vec::new(),
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: Some(RunAccounting {
+                    goal_request_rejected: true,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    saw_turn: false,
+                    context_tokens: None,
+                    final_output: None,
+                    request_basis: ContextOccupancyBasis {
+                        version: 1,
+                        shape: ContentHash::from_bytes([0; 32]),
+                        static_prefix: PreparedStaticPrefix::new(
+                            ContentHash::from_bytes([0; 32]),
+                            None,
+                        ),
+                        request_bytes: 0,
+                    },
+                }),
+                truncated: false,
+                notice: None,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
+            },
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    assert!(
+        !reopened
+            .recover_interrupted_runs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (totals, goal) = reopened
+        .call(Priority::Control, move |connection| {
+            let totals: (u64, bool) = connection.query_row(
+                "SELECT estimated_cost_usd_nanos,cost_known FROM sessions WHERE id=?1",
+                [session.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok((
+                totals,
+                crate::sessions::goals::load_live(connection, session)?.unwrap(),
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(totals, (0, true));
+    assert_eq!(goal.counters, qq_protocol::GoalCounters::default());
+    assert!(
+        reopened
+            .recover_interrupted_runs()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegated_child_spend_keeps_the_original_goal_after_replacement() {
+    for child_goal in [false, true] {
+        for replace in [false, true] {
+            let (_directory, store, parent) = model_goal_claim(false).await;
+            let session = parent.identity.session_id;
+            let goal = parent.goal.as_ref().unwrap();
+            let id = goal.goal_id;
+            let child = store
+                .create_child_run(
+                    &parent,
+                    ToolCallId::from_bytes([0x6b; 16]),
+                    ChildAdmission {
+                        reasoning_effort: None,
+                        profile: AgentProfileId::default(),
+                        model: parent.model.clone(),
+                        task: "delegated work".to_owned(),
+                        limits: RunLimits::default(),
+                        approval_mode: ApprovalMode::ReadOnly,
+                        purpose: SessionPurpose::Task,
+                        detached: true,
+                    },
+                )
+                .await
+                .unwrap();
+            let own_goal = if child_goal {
+                let receipt=store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":child.session_id,"objective":"independent child objective",
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            })).unwrap()).await.unwrap();
+                let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
+                    panic!("child goal")
+                };
+                Some(goal)
+            } else {
+                None
+            };
+            let claim = store.claim_next_run(true).await.unwrap().unwrap();
+            assert_eq!(claim.identity.run_id, child.run_id);
+            assert_eq!(
+                claim.goal.as_ref().map(|goal| goal.goal_id),
+                own_goal.as_ref().map(|goal| goal.goal_id)
+            );
+            let usage = TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                ..TokenUsage::default()
+            };
+            let accounting = RunAccounting {
+                goal_request_rejected: false,
+                usage: Some(usage),
+                estimated_cost_usd_nanos: Some(37),
+                saw_turn: true,
+                context_tokens: None,
+                final_output: None,
+                request_basis: ContextOccupancyBasis {
+                    version: 1,
+                    shape: ContentHash::from_bytes([0; 32]),
+                    static_prefix: PreparedStaticPrefix::new(
+                        ContentHash::from_bytes([0; 32]),
+                        None,
+                    ),
+                    request_bytes: 0,
+                },
+            };
+            store
+                .persist_model_turn(
+                    &claim,
+                    ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
+                        turn_ordinal: 1,
+                        message: Message::assistant("child completed work"),
+                        calls: Vec::new(),
+                        turn_message: None,
+                        context_tokens: None,
+                        occupancy_basis: None,
+                        usage: Some(usage),
+                        estimated_cost_usd_nanos: Some(37),
+                        accounting: Some(accounting.clone()),
+                        truncated: false,
+                        notice: None,
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            if replace {
+                store.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session,"objective":"replacement","replace":true,
+                "expected":{"goal_id":id,"revision":goal.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            })).unwrap()).await.unwrap();
+            }
+            store
+                .finish_run(
+                    &parent,
+                    RunOutcome::Completed,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            let events = store
+                .finish_run(
+                    &claim,
+                    RunOutcome::Completed,
+                    Some(accounting.clone()),
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.event, SessionEvent::GoalUpdated { .. }))
+                    .count(),
+                usize::from(!replace) + usize::from(child_goal)
+            );
+            for event in &events {
+                if let SessionEvent::GoalUpdated { goal } = &event.event {
+                    let expected = if goal.goal_id == id {
+                        session
+                    } else {
+                        child.session_id
+                    };
+                    assert_eq!(goal.session_id, expected);
+                    assert_eq!(
+                        event.session_id, expected,
+                        "each paid goal update has its own session context"
+                    );
+                }
+            }
+            assert!(
+                store
+                    .finish_run(
+                        &claim,
+                        RunOutcome::Completed,
+                        Some(accounting),
+                        TeardownComplete::nothing_ran()
+                    )
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let (historical, live) = store
+                .call(Priority::Control, move |connection| {
+                    let payload: String = connection.query_row(
+                        "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    Ok((
+                        serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)?,
+                        crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                historical.counters.runs, 0,
+                "delegated work does not consume a main goal run"
+            );
+            assert_eq!(historical.counters.usage, Some(usage));
+            assert_eq!(historical.counters.estimated_cost_usd_nanos, Some(37));
+            if replace {
+                assert_eq!(live.counters, qq_protocol::GoalCounters::default());
+            } else {
+                assert_eq!(historical, live);
+            }
+            if let Some(own_goal) = own_goal {
+                let child_session = child.session_id;
+                let own = store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, child_session)?.unwrap())
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(own.goal_id, own_goal.goal_id);
+                assert_eq!(own.counters.runs, 1);
+                assert_eq!(own.counters.usage, Some(usage));
+                assert_eq!(own.counters.estimated_cost_usd_nanos, Some(37));
+                store
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::SubmitPrompt {
+                            session_id: child_session,
+                            input: vec![InputPart::text("unrelated later prompt")],
+                            limits: RunLimits::default(),
+                            correlation: Correlation::default(),
+                            output: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let followup = store.claim_next_run(true).await.unwrap().unwrap();
+                assert!(
+                    followup.goal_spend_owner.is_none(),
+                    "later user prompt has no old root accounting binding"
+                );
+                let followup_accounting = RunAccounting {
+                    goal_request_rejected: false,
+                    usage: Some(usage),
+                    estimated_cost_usd_nanos: Some(37),
+                    saw_turn: true,
+                    context_tokens: None,
+                    final_output: None,
+                    request_basis: ContextOccupancyBasis {
+                        version: 1,
+                        shape: ContentHash::from_bytes([0; 32]),
+                        static_prefix: PreparedStaticPrefix::new(
+                            ContentHash::from_bytes([0; 32]),
+                            None,
+                        ),
+                        request_bytes: 0,
+                    },
+                };
+                store
+                    .persist_model_turn(
+                        &followup,
+                        ModelTurnCommit {
+                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            turn_ordinal: 1,
+                            message: Message::assistant("later work"),
+                            calls: Vec::new(),
+                            turn_message: None,
+                            context_tokens: None,
+                            occupancy_basis: None,
+                            usage: Some(usage),
+                            estimated_cost_usd_nanos: Some(37),
+                            accounting: Some(followup_accounting.clone()),
+                            truncated: false,
+                            notice: None,
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .finish_run(
+                        &followup,
+                        RunOutcome::Completed,
+                        Some(followup_accounting),
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap();
+                let original = store
+                    .call(Priority::Control, move |connection| {
+                        let payload: String = connection.query_row(
+                            "SELECT payload_json FROM session_goals WHERE goal_id=?1",
+                            [id.to_string()],
+                            |row| row.get(0),
+                        )?;
+                        serde_json::from_str::<qq_protocol::GoalSnapshot>(&payload)
+                            .map_err(SessionRuntimeError::from)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    original, historical,
+                    "later work leaves original ancestor goal unchanged"
+                );
+            }
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[test]
+fn paid_owner_schema_upgrades_and_rejects_bad_shapes_atomically() {
+    for definition in [None, Some("INTEGER"), Some("TEXT NOT NULL DEFAULT ''")] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection.execute_batch("ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id; UPDATE metadata SET value='52' WHERE key='schema_version';").unwrap();
+        if let Some(definition) = definition {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE runs ADD COLUMN goal_paid_owner_run_id {definition};"
+                ))
+                .unwrap();
+        }
+        drop(connection);
+        if definition.is_none() {
+            let (connection, _) = open_database(&path).unwrap();
+            let version: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
+            let nullable:Option<String>=connection.query_row("SELECT dflt_value FROM pragma_table_info('runs') WHERE name='goal_paid_owner_run_id'",[],|row|row.get(0)).unwrap();
+            assert_eq!(nullable, None);
+            drop(connection);
+            assert!(open_database(&path).is_ok());
+        } else {
+            assert!(open_database(&path).is_err());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let version: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                version, "52",
+                "failed shape validation does not advance version"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn sponsored_child_rejected_before_turn_preserves_known_zero_goal_spend() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::generate().unwrap(),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "delegated work".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claim = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(claim.identity.run_id, child.run_id);
+    store
+        .call(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET goal_request_pending=1 WHERE id=?1",
+                [child.run_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let accounting = RunAccounting {
+        goal_request_rejected: true,
+        usage: Some(TokenUsage::default()),
+        estimated_cost_usd_nanos: Some(0),
+        saw_turn: false,
+        context_tokens: None,
+        final_output: None,
+        request_basis: ContextOccupancyBasis {
+            version: 1,
+            shape: ContentHash::from_bytes([0; 32]),
+            static_prefix: PreparedStaticPrefix::new(ContentHash::from_bytes([0; 32]), None),
+            request_bytes: 0,
+        },
+    };
+    store
+        .finish_run(
+            &claim,
+            RunOutcome::Cancelled,
+            Some(accounting),
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let (pending, goal) = store
+        .call(Priority::Control, move |connection| {
+            let pending: bool = connection.query_row(
+                "SELECT goal_request_pending FROM runs WHERE id=?1",
+                [child.run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok((
+                pending,
+                crate::sessions::goals::load_live(connection, session)?.unwrap(),
+            ))
+        })
+        .await
+        .unwrap();
+    assert!(
+        !pending,
+        "typed rejection clears sponsored dispatch uncertainty without a persisted turn"
+    );
+    assert_eq!(goal.counters, qq_protocol::GoalCounters::default());
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn parent_deletion_preserves_unsettled_paid_child_then_detaches_settled_child() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::generate().unwrap(),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "delegated work".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let claim = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(claim.identity.run_id, child.run_id);
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let rejected = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: session,
+            },
+        )
+        .await;
+    assert!(
+        matches!(rejected, Err(SessionRuntimeError::SessionActive)),
+        "unsettled sponsored work retains historical ownership"
+    );
+    store
+        .finish_run(
+            &claim,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::DeleteSession {
+                session_id: session,
+            },
+        )
+        .await
+        .unwrap();
+    let detached: (Option<String>,Option<String>,Option<String>) = store.call(Priority::Control, move |connection| {
+        Ok(connection.query_row("SELECT s.parent_id,s.owner_run_id,r.goal_paid_owner_run_id FROM sessions s JOIN runs r ON r.session_id=s.id WHERE r.id=?1", [child.run_id.to_string()], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?)
+    }).await.unwrap();
+    assert_eq!(detached, (None, None, None));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn paid_owner_upgrade_reconstructs_pending_child_through_settled_ancestor() {
+    for mode in ["direct", "nested", "helper"] {
+        let nested = mode == "nested";
+        let (directory, store, parent) = model_goal_claim(false).await;
+        let session = parent.identity.session_id;
+        let child = store
+            .create_child_run(
+                &parent,
+                ToolCallId::generate().unwrap(),
+                ChildAdmission {
+                    reasoning_effort: None,
+                    profile: AgentProfileId::default(),
+                    model: parent.model.clone(),
+                    task: "delegated work".to_owned(),
+                    limits: RunLimits::default(),
+                    approval_mode: ApprovalMode::ReadOnly,
+                    purpose: SessionPurpose::Task,
+                    detached: true,
+                },
+            )
+            .await
+            .unwrap();
+        let grandchild = if nested {
+            let claim = store.claim_next_run(true).await.unwrap().unwrap();
+            assert_eq!(claim.identity.run_id, child.run_id);
+            let grandchild = store
+                .create_child_run(
+                    &claim,
+                    ToolCallId::generate().unwrap(),
+                    ChildAdmission {
+                        reasoning_effort: None,
+                        profile: AgentProfileId::default(),
+                        model: claim.model.clone(),
+                        task: "nested work".to_owned(),
+                        limits: RunLimits::default(),
+                        approval_mode: ApprovalMode::ReadOnly,
+                        purpose: SessionPurpose::Task,
+                        detached: true,
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .finish_run(
+                    &claim,
+                    RunOutcome::Completed,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            Some(grandchild)
+        } else {
+            if mode == "helper" {
+                let owner = store.reserve_next_run(true).await.unwrap().unwrap();
+                assert_eq!(owner.identity.run_id, child.run_id);
+                store
+                    .start_auto_compaction(&owner, test_prepared_audit(&owner), None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                store
+                    .finish_reserved_run(&owner, RunOutcome::Cancelled)
+                    .await
+                    .unwrap();
+            }
+            None
+        };
+        store
+            .finish_run(
+                &parent,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id; UPDATE metadata SET value='52' WHERE key='schema_version';").unwrap();
+        drop(connection);
+        for _ in 0..2 {
+            let (connection, _) = open_database(&path).unwrap();
+            let anchor: Option<String> = connection
+                .query_row(
+                    "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
+                    [child.run_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                anchor,
+                Some(parent.identity.run_id.to_string()),
+                "migration retains the captured root for pending descendant work"
+            );
+            if let Some(grandchild) = &grandchild {
+                let anchor: Option<String> = connection
+                    .query_row(
+                        "SELECT goal_paid_owner_run_id FROM runs WHERE id=?1",
+                        [grandchild.run_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(anchor, Some(child.run_id.to_string()));
+            }
+            let goal = crate::sessions::goals::load_live(&connection, session)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                goal.counters,
+                qq_protocol::GoalCounters::default(),
+                "migration never recharges settled ancestor runs"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn active_idle_goal_dispatches_fresh_work_without_a_user_prompt() {
+    struct Model {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl Provider for Model {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.requests.lock().unwrap().push(request);
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "completed one work slice".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 11,
+                        output_tokens: 3,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]))
+        }
+    }
+    struct Loader {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                Ok(loaded_runtime(
+                    Runtime::new(Model { requests }, "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(Loader {
+            requests: Arc::clone(&requests),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created =
+        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let receipt=runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+        "type":"set_goal","session_id":session_id,"objective":"complete a fresh autonomous work slice",
+        "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"per_run":{"max_model_turns":1}}
+    })).unwrap()).await.unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("goal")
+    };
+    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            if let SessionEvent::RunStarted {
+                run_id,
+                origin: Some(qq_protocol::RunOrigin::Goal { goal_id, revision }),
+                ..
+            } = event.event
+            {
+                assert_eq!((goal_id, revision), (goal.goal_id, goal.revision));
+                return run_id;
+            }
+        }
+        panic!("event stream ended before fresh goal work");
+    })
+    .await;
+    if observed.is_err() {
+        runtime.shutdown().await.unwrap();
+        panic!("active idle goal did not dispatch fresh work without SubmitPrompt");
+    }
+    let run_id = observed.unwrap();
+    let finished = collect_until_run_finished(&mut events, run_id).await;
+    assert!(finished_outcome(&finished, run_id).is_some());
+    let run_count: u64 = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM runs WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        run_count, 1,
+        "one fresh run is created for the finite goal allowance"
+    );
+    assert!(requests.lock().unwrap().iter().any(|request| {
+        request_texts(request)
+            .iter()
+            .any(|text| text.contains("complete a fresh autonomous work slice"))
+    }));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_goal_queue_passes_commit_one_fresh_pending_run() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        store.queue_due_goals(now_ms()),
+        store.queue_due_goals(now_ms())
+    );
+    assert_eq!(first.unwrap(), None);
+    assert_eq!(second.unwrap(), None);
+    let (count,pending)=store.call(Priority::Control,move |connection| {
+        let count:u64=connection.query_row("SELECT COUNT(*) FROM runs WHERE session_id=?1 AND json_extract(origin_json,'$.type')='goal'",[session.to_string()],|row|row.get(0))?;
+        let goal=crate::sessions::goals::load_live(connection,session)?.unwrap();
+        Ok((count,goal.pending_run_id))
+    }).await.unwrap();
+    assert_eq!(count, 1);
+    let claimed = store.reserve_next_run(false).await.unwrap().unwrap();
+    assert_eq!(pending, Some(claimed.identity.run_id));
+    assert!(matches!(
+        claimed.origin,
+        Some(qq_protocol::RunOrigin::Goal { .. })
+    ));
+    assert!(claimed.goal.is_some());
+    store
+        .finish_reserved_run(&claimed, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_wait_deadline_exhausts_without_queueing_expired_work() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let now = now_ms();
+    store
+        .call(Priority::Control, move |connection| {
+            let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+            goal.budget.deadline_ms = now + 1000;
+            goal.next_run_at_ms = now + 60_000;
+            goal.wait = Some(qq_protocol::GoalWait {
+                until_ms: now + 60_000,
+                reason: "external dependency".to_owned(),
+            });
+            crate::sessions::goals::save(connection, &goal)
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.queue_due_goals(now).await.unwrap(), Some(now + 1000));
+    assert_eq!(store.queue_due_goals(now + 1001).await.unwrap(), None);
+    let goal = store
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        goal.status,
+        qq_protocol::GoalStatus::BudgetExhausted {
+            reason: qq_protocol::GoalExhaustion::Deadline
+        }
+    );
+    assert!(goal.pending_run_id.is_none());
+    assert!(store.reserve_next_run(false).await.unwrap().is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn user_prompt_preempts_unclaimed_goal_atomically_without_spending_allowance() {
+    for fault in [false, true] {
+        let (_directory, store, parent) = model_goal_claim(false).await;
+        let session = parent.identity.session_id;
+        store
+            .finish_run(
+                &parent,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.queue_due_goals(now_ms()).await.unwrap();
+        let before = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        let autonomous = before.pending_run_id.unwrap();
+        if fault {
+            store.call(Priority::Control,|connection| {
+                connection.execute_batch("CREATE TEMP TRIGGER refuse_preemption BEFORE INSERT ON events WHEN json_extract(NEW.envelope_json,'$.event.type')='run_finished' BEGIN SELECT RAISE(ABORT,'preemption event fault'); END;")?;
+                Ok(())
+            }).await.unwrap();
+        }
+        let command_id = CommandId::generate().unwrap();
+        let command = SessionCommand::SubmitPrompt {
+            session_id: session,
+            input: vec![InputPart::text("user redirection first")],
+            limits: RunLimits::default(),
+            correlation: Correlation::default(),
+            output: None,
+        };
+        if fault {
+            assert!(
+                store.command(command_id, command.clone()).await.is_err(),
+                "preemption must share the prompt transaction"
+            );
+            let unchanged = store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(unchanged, before);
+            store
+                .call(Priority::Control, |connection| {
+                    connection.execute_batch("DROP TRIGGER refuse_preemption;")?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let receipt = store.command(command_id, command).await.unwrap();
+        let CommandOutcome::PromptQueued { run_id, .. } = receipt.receipt.outcome else {
+            panic!("prompt")
+        };
+        let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+        assert_eq!(
+            claim.identity.run_id, run_id,
+            "user prompt must own the next claim"
+        );
+        assert!(matches!(
+            claim.origin,
+            Some(qq_protocol::RunOrigin::UserPrompt {})
+        ));
+        let (status, goal) = store
+            .call(Priority::Control, move |connection| {
+                let status: String = connection.query_row(
+                    "SELECT status FROM runs WHERE id=?1",
+                    [autonomous.to_string()],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    status,
+                    crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert_eq!(goal.status, qq_protocol::GoalStatus::Active);
+        assert!(goal.pending_run_id.is_none());
+        assert_eq!(goal.counters, qq_protocol::GoalCounters::default());
+        store
+            .finish_reserved_run(&claim, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_pause_cancels_unclaimed_work_and_fences_resume_while_draining() {
+    for phase in ["queued", "reserved", "running"] {
+        let (_directory, store, parent) = model_goal_claim(false).await;
+        let session = parent.identity.session_id;
+        store
+            .finish_run(
+                &parent,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.queue_due_goals(now_ms()).await.unwrap();
+        let before = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        let autonomous = before.pending_run_id.unwrap();
+        let claimed = if phase == "queued" {
+            None
+        } else {
+            let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+            if phase == "running" {
+                store
+                    .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            }
+            Some(claim)
+        };
+        let receipt = store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id: session,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: before.goal_id,
+                        revision: before.revision,
+                    },
+                    action: qq_protocol::GoalControl::Pause,
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.receipt.outcome else {
+            panic!("paused goal")
+        };
+        assert_eq!(
+            goal.status,
+            qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::User
+            }
+        );
+        let (status, cancelled): (String, bool) = store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT status,cancel_requested FROM runs WHERE id=?1",
+                    [autonomous.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        if let Some(claim) = claimed {
+            assert!(
+                cancelled,
+                "pause requests cancellation without releasing draining ownership"
+            );
+            assert_eq!(goal.pending_run_id, Some(autonomous));
+            assert!(matches!(
+                store
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::GoalControl {
+                            session_id: session,
+                            expected: qq_protocol::GoalIdentity {
+                                goal_id: goal.goal_id,
+                                revision: goal.revision
+                            },
+                            action: qq_protocol::GoalControl::Resume,
+                        }
+                    )
+                    .await,
+                Err(SessionRuntimeError::GoalCancellationPending)
+            ));
+            if phase == "reserved" {
+                store
+                    .finish_reserved_run(&claim, RunOutcome::Cancelled)
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .finish_run(
+                        &claim,
+                        RunOutcome::Cancelled,
+                        None,
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        } else {
+            assert_eq!(
+                status, "cancelled",
+                "pause settles unclaimed goal work atomically"
+            );
+            assert!(goal.pending_run_id.is_none());
+            assert!(store.reserve_next_run(false).await.unwrap().is_none());
+        }
+        let drained = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(drained.status, goal.status);
+        assert!(drained.pending_run_id.is_none());
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id: session,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: drained.goal_id,
+                        revision: drained.revision,
+                    },
+                    action: qq_protocol::GoalControl::Resume,
+                },
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn paused_goal_waits_for_paid_detached_child_after_parent_settlement() {
+    let (_directory, store, parent) = model_goal_claim(false).await;
+    let session = parent.identity.session_id;
+    let child = store
+        .create_child_run(
+            &parent,
+            ToolCallId::generate().unwrap(),
+            ChildAdmission {
+                reasoning_effort: None,
+                profile: AgentProfileId::default(),
+                model: parent.model.clone(),
+                task: "detached paid work".to_owned(),
+                limits: RunLimits::default(),
+                approval_mode: ApprovalMode::ReadOnly,
+                purpose: SessionPurpose::Task,
+                detached: true,
+            },
+        )
+        .await
+        .unwrap();
+    let child_claim = store.claim_next_run(true).await.unwrap().unwrap();
+    assert_eq!(child_claim.identity.run_id, child.run_id);
+    store
+        .finish_run(
+            &parent,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let before = store
+        .call(Priority::Control, move |connection| {
+            Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+        })
+        .await
+        .unwrap();
+    let paused = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id: session,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: before.goal_id,
+                    revision: before.revision,
+                },
+                action: qq_protocol::GoalControl::Pause,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = paused.receipt.outcome else {
+        panic!("goal")
+    };
+    let cancelled: bool = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT cancel_requested FROM runs WHERE id=?1",
+                [child.run_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        cancelled,
+        "settled parent does not end the detached child's paid obligation"
+    );
+    assert!(matches!(
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id: session,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision
+                    },
+                    action: qq_protocol::GoalControl::Resume,
+                }
+            )
+            .await,
+        Err(SessionRuntimeError::GoalCancellationPending)
+    ));
+    store
+        .finish_run(
+            &child_claim,
+            RunOutcome::Cancelled,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let resumed = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id: session,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::Resume,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = resumed.receipt.outcome else {
+        panic!("resumed goal")
+    };
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: child.session_id,
+                input: vec![InputPart::text("unrelated later child prompt")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let unrelated = store.claim_next_run(true).await.unwrap().unwrap();
+    assert!(unrelated.goal_spend_owner.is_none());
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id: session,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::Pause,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .cancellation_requested(unrelated.identity.run_id)
+            .await
+            .unwrap(),
+        "old ownership never cancels an unrelated later prompt"
+    );
+    store
+        .finish_run(
+            &unrelated,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn replayed_goal_controls_restore_only_unsettled_paid_cancellation_signals() {
+    for mode in ["pause", "replace", "clear"] {
+        let (_directory, store, parent) = model_goal_claim(false).await;
+        let session = parent.identity.session_id;
+        let child = store
+            .create_child_run(
+                &parent,
+                ToolCallId::generate().unwrap(),
+                ChildAdmission {
+                    reasoning_effort: None,
+                    profile: AgentProfileId::default(),
+                    model: parent.model.clone(),
+                    task: "paid descendant".to_owned(),
+                    limits: RunLimits::default(),
+                    approval_mode: ApprovalMode::ReadOnly,
+                    purpose: SessionPurpose::Task,
+                    detached: true,
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = store.claim_next_run(true).await.unwrap().unwrap();
+        let audit = test_prepared_audit(&claimed);
+        let (helper, _) = store
+            .start_in_run_compaction(&claimed, &audit.resolved_model, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .finish_run(
+                &parent,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        let goal = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        let expected = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
+        let command = if mode == "replace" {
+            serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session,"objective":"replacement", "replace":true,
+                "expected":expected,"budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()
+        } else {
+            SessionCommand::GoalControl {
+                session_id: session,
+                expected,
+                action: if mode == "clear" {
+                    qq_protocol::GoalControl::Clear
+                } else {
+                    qq_protocol::GoalControl::Pause
+                },
+            }
+        };
+        let id = CommandId::generate().unwrap();
+        let original = store.command(id, command.clone()).await.unwrap();
+        assert!(original.cascade_cancels.contains(&child.run_id));
+        assert!(original.cascade_cancels.contains(&helper.identity.run_id));
+        let before = store
+            .call(Priority::Control, move |connection| {
+                workspace_sequence(connection, parent.identity.workspace_id)
+            })
+            .await
+            .unwrap();
+        let replay = store.command(id, command.clone()).await.unwrap();
+        assert_eq!(replay.receipt, original.receipt);
+        assert!(
+            replay.cascade_cancels.contains(&child.run_id),
+            "{mode} replay must restore the child signal after a lost caller"
+        );
+        assert!(
+            replay.cascade_cancels.contains(&helper.identity.run_id),
+            "{mode} replay must restore the helper signal"
+        );
+        let after = store
+            .call(Priority::Control, move |connection| {
+                workspace_sequence(connection, parent.identity.workspace_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "signal restoration appends no duplicate durable events"
+        );
+        assert_eq!(
+            store.queue_due_goals(now_ms()).await.unwrap(),
+            None,
+            "replacement waits for sponsored work to drain"
+        );
+        store
+            .finish_run(
+                &claimed,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        let replay = store.command(id, command).await.unwrap();
+        assert!(
+            replay.cascade_cancels.is_empty(),
+            "settled obligations receive no replayed signals"
+        );
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_terminal_outcomes_pause_backoff_and_bound_failure_streaks() {
+    for case in [
+        "auth",
+        "config",
+        "failure",
+        "no_progress",
+        "retry",
+        "wait",
+        "wait_retry",
+        "wait_failure",
+        "wait_no_progress",
+        "wait_budget",
+        "short_wait_retry",
+    ] {
+        let (directory, store, claim) = model_goal_claim(true).await;
+        let session = claim.identity.session_id;
+        store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                goal.counters.failure_streak =
+                    if matches!(case, "wait_failure" | "wait_no_progress" | "wait_budget") {
+                        0
+                    } else {
+                        2
+                    };
+                goal.counters.no_progress_streak =
+                    if matches!(case, "wait_failure" | "wait_no_progress" | "wait_budget") {
+                        0
+                    } else {
+                        1
+                    };
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        let wait = if matches!(case, "wait" | "short_wait_retry") || case.starts_with("wait_") {
+            store
+                .update_model_goal(
+                    &claim,
+                    serde_json::from_value(
+                        serde_json::json!({"wait":{"seconds":if case == "short_wait_retry" { 1 } else { 100 },"reason":"external dependency"}}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            Some(
+                store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, session)?
+                            .unwrap()
+                            .next_run_at_ms)
+                    })
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let outcome = match case {
+            "auth" => RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::ProviderAuthentication,
+                    message: "refresh credentials".to_owned(),
+                },
+            },
+            "config" => RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Configuration,
+                    message: "configure a model".to_owned(),
+                },
+            },
+            "failure" | "wait_failure" => RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Server,
+                    message: "worker failed".to_owned(),
+                },
+            },
+            "no_progress" | "wait_no_progress" => RunOutcome::Paused {
+                pause: Box::new(qq_protocol::RunPause::NoProgress {
+                    turn_ordinal: 1,
+                    slices: 2,
+                    calls: 512,
+                }),
+            },
+            "retry" | "wait_retry" | "short_wait_retry" => RunOutcome::Paused {
+                pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+                    kind: RunFailureKind::ProviderUnavailable,
+                    message: "outage".to_owned(),
+                    turn_ordinal: 1,
+                    attempts: 1,
+                }),
+            },
+            "wait_budget" => RunOutcome::BudgetExhausted {
+                exhaustion: Box::new(qq_protocol::BudgetExhaustion {
+                    limit: qq_protocol::BudgetLimitKind::ModelTurns,
+                    final_response: false,
+                    message: "per-run cap".to_owned(),
+                }),
+            },
+            "wait" => RunOutcome::Completed,
+            _ => unreachable!(),
+        };
+        let events = store
+            .finish_run(&claim, outcome, None, TeardownComplete::nothing_ran())
+            .await
+            .unwrap();
+        let goal = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        match case {
+            "auth" => assert_eq!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Authentication {
+                            message: "refresh credentials".to_owned()
+                        }
+                    }
+                }
+            ),
+            "config" => assert_eq!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Configuration {
+                            message: "configure a model".to_owned()
+                        }
+                    }
+                }
+            ),
+            "failure" => {
+                assert_eq!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Blocked {
+                        reason: qq_protocol::GoalBlockedReason::RepeatedFailure
+                    }
+                );
+                assert_eq!(goal.counters.failure_streak, 3);
+            }
+            "no_progress" => {
+                assert_eq!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Blocked {
+                        reason: qq_protocol::GoalBlockedReason::NoProgress
+                    }
+                );
+                assert_eq!(goal.counters.no_progress_streak, 2);
+            }
+            "retry" | "short_wait_retry" => {
+                assert_eq!(goal.status, qq_protocol::GoalStatus::Active);
+                assert_eq!(goal.counters.failure_streak, 0);
+                assert!(
+                    goal.next_run_at_ms >= now_ms() + 59_000,
+                    "provider outage schedules backoff without consuming the other-failure streak"
+                );
+            }
+            "wait" | "wait_retry" | "wait_failure" | "wait_no_progress" | "wait_budget" => {
+                assert_eq!(Some(goal.next_run_at_ms), wait);
+                assert_eq!(
+                    goal.counters.failure_streak,
+                    if matches!(case, "wait_failure" | "wait_budget") {
+                        1
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    goal.counters.no_progress_streak,
+                    if case == "wait_no_progress" { 1 } else { 0 }
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            goal.counters.runs, 0,
+            "terminal policy alone proves no committed main-model work"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::GoalUpdated { .. })),
+            "outcome-only changes publish a durable goal update"
+        );
+        if case.starts_with("wait_") {
+            assert_eq!(goal.status, qq_protocol::GoalStatus::Active);
+            assert_eq!(
+                store
+                    .queue_due_goals(goal.next_run_at_ms - 1)
+                    .await
+                    .unwrap(),
+                Some(goal.next_run_at_ms)
+            );
+            assert!(
+                store.reserve_next_run(false).await.unwrap().is_none(),
+                "model wait must prevent early work"
+            );
+        }
+        store.close().await.unwrap();
+        if case == "wait_retry" {
+            let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+                .await
+                .unwrap();
+            let restored = reopened
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(restored, goal, "retry wait persists exactly across reopen");
+            reopened.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn driver_loader_failures_pause_or_block_without_unbounded_restart() {
+    struct Loader {
+        kind: RunFailureKind,
+        calls: Arc<AtomicUsize>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, _: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let kind = self.kind;
+            Box::pin(async move {
+                Err(RuntimeLoadError {
+                    kind,
+                    message: "scripted preparation failure".to_owned(),
+                })
+            })
+        }
+    }
+    for kind in [
+        RunFailureKind::Authentication,
+        RunFailureKind::Configuration,
+        RunFailureKind::Server,
+    ] {
+        let directory = TempDir::new().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                kind,
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session_id,
+            "objective":"bounded preparation failures","budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}})).unwrap()).await.unwrap();
+        let goal = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.next().await {
+                if let SessionEvent::GoalUpdated { goal } = event.unwrap().event
+                    && matches!(
+                        goal.status,
+                        qq_protocol::GoalStatus::Paused { .. }
+                            | qq_protocol::GoalStatus::Blocked { .. }
+                    )
+                {
+                    return goal;
+                }
+            }
+            panic!("goal stream ended");
+        })
+        .await
+        .expect("preparation failures must stop fresh-run scheduling");
+        if kind == RunFailureKind::Server {
+            assert_eq!(
+                goal.status,
+                qq_protocol::GoalStatus::Blocked {
+                    reason: qq_protocol::GoalBlockedReason::RepeatedFailure
+                }
+            );
+            assert_eq!(goal.counters.failure_streak, 3);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+        } else {
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser { .. }
+                }
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(goal.counters.runs, 0);
+        assert!(goal.pending_run_id.is_none());
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn provider_backoff_uses_durable_streak_across_reopen_and_resets_after_completion() {
+    let (directory, mut store, initial) = model_goal_claim(true).await;
+    let session = initial.identity.session_id;
+    let mut next = Some(initial);
+    for (index, delay) in [
+        60_000, 120_000, 60_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000,
+        0, 60_000,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 1 || index == 5 {
+            for neutral in 0..6 {
+                let goal = store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                    })
+                    .await
+                    .unwrap();
+                store.queue_due_goals(goal.next_run_at_ms).await.unwrap();
+                let neutral_claim = store.reserve_next_run(false).await.unwrap().unwrap();
+                store
+                    .start_reserved_run(&neutral_claim, test_prepared_audit(&neutral_claim), None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let outcome = if neutral % 2 == 0 {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::Interrupted
+                };
+                store
+                    .finish_run(
+                        &neutral_claim,
+                        outcome,
+                        None,
+                        TeardownComplete::nothing_ran(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            store.close().await.unwrap();
+            store = Store::open(directory.path().join("sessions.sqlite3"))
+                .await
+                .unwrap();
+        }
+        let claim = if let Some(claim) = next.take() {
+            claim
+        } else {
+            let goal = store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            store.queue_due_goals(goal.next_run_at_ms).await.unwrap();
+            let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+            store
+                .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            claim
+        };
+        if index == 2 {
+            let usage = TokenUsage {
+                input_tokens: 11,
+                output_tokens: 3,
+                ..TokenUsage::default()
+            };
+            store
+                .persist_model_turn(
+                    &claim,
+                    ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
+                        turn_ordinal: 1,
+                        message: Message::assistant("committed prefix before provider outage"),
+                        calls: Vec::new(),
+                        turn_message: None,
+                        context_tokens: None,
+                        occupancy_basis: None,
+                        usage: Some(usage),
+                        estimated_cost_usd_nanos: Some(37),
+                        accounting: Some(RunAccounting {
+                            goal_request_rejected: false,
+                            usage: Some(usage),
+                            estimated_cost_usd_nanos: Some(37),
+                            saw_turn: true,
+                            context_tokens: None,
+                            final_output: None,
+                            request_basis: ContextOccupancyBasis {
+                                version: 1,
+                                shape: ContentHash::from_bytes([0; 32]),
+                                static_prefix: PreparedStaticPrefix::new(
+                                    ContentHash::from_bytes([0; 32]),
+                                    None,
+                                ),
+                                request_bytes: 0,
+                            },
+                        }),
+                        truncated: false,
+                        notice: None,
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let outcome = if delay == 0 {
+            RunOutcome::Completed
+        } else {
+            RunOutcome::Paused {
+                pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+                    kind: RunFailureKind::ProviderUnavailable,
+                    message: "outage".to_owned(),
+                    turn_ordinal: 1,
+                    attempts: 1,
+                }),
+            }
+        };
+        store
+            .finish_run(&claim, outcome, None, TeardownComplete::nothing_ran())
+            .await
+            .unwrap();
+        let run = claim.identity.run_id;
+        let (finished, goal) = store
+            .call(Priority::Control, move |connection| {
+                let finished: u64 = connection.query_row(
+                    "SELECT finished_at_ms FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    finished,
+                    crate::sessions::goals::load_live(connection, session)?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            goal.next_run_at_ms - finished,
+            delay,
+            "backoff step {index}"
+        );
+        assert_eq!(goal.status, qq_protocol::GoalStatus::Active);
+        assert_eq!(goal.counters.failure_streak, 0);
+        assert_eq!(goal.counters.runs, u32::from(index >= 2));
+        if index == 2 {
+            store.close().await.unwrap();
+            store = Store::open(directory.path().join("sessions.sqlite3"))
+                .await
+                .unwrap();
+            let reopened = store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(reopened, goal);
+        }
+    }
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_failure_and_no_progress_streaks_require_consecutive_matching_outcomes() {
+    for sequence in [
+        &["failure", "no_progress", "failure", "failure"][..],
+        &["no_progress", "retry", "no_progress"][..],
+    ] {
+        let (_directory, store, initial) = model_goal_claim(true).await;
+        let session = initial.identity.session_id;
+        let mut next = Some(initial);
+        let mut failures = 0;
+        let mut quiet = 0;
+        for case in sequence {
+            let claim = if let Some(claim) = next.take() {
+                claim
+            } else {
+                let goal = store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                    })
+                    .await
+                    .unwrap();
+                store.queue_due_goals(goal.next_run_at_ms).await.unwrap();
+                let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+                store
+                    .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                claim
+            };
+            let outcome = match *case {
+                "failure" => RunOutcome::Failed {
+                    failure: RunFailure {
+                        kind: RunFailureKind::Server,
+                        message: "scripted failure".to_owned(),
+                    },
+                },
+                "no_progress" => RunOutcome::Paused {
+                    pause: Box::new(qq_protocol::RunPause::NoProgress {
+                        turn_ordinal: 1,
+                        slices: 2,
+                        calls: 512,
+                    }),
+                },
+                "retry" => RunOutcome::Paused {
+                    pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+                        kind: RunFailureKind::ProviderUnavailable,
+                        message: "outage".to_owned(),
+                        turn_ordinal: 1,
+                        attempts: 1,
+                    }),
+                },
+                _ => unreachable!(),
+            };
+            failures = if *case == "failure" { failures + 1 } else { 0 };
+            quiet = if *case == "no_progress" { quiet + 1 } else { 0 };
+            store
+                .finish_run(&claim, outcome, None, TeardownComplete::nothing_ran())
+                .await
+                .unwrap();
+            let goal = store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                goal.status,
+                qq_protocol::GoalStatus::Active,
+                "sequence {sequence:?}"
+            );
+            assert_eq!(goal.counters.failure_streak, failures);
+            assert_eq!(goal.counters.no_progress_streak, quiet);
+        }
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_admission_refuses_expired_or_unknown_budgets_before_loading() {
+    struct Loader(Arc<AtomicUsize>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, _: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Authentication,
+                    message: "expired goal must never reach loading".to_owned(),
+                })
+            })
+        }
+    }
+    for (reason, limit) in [
+        (
+            qq_protocol::GoalExhaustion::Deadline,
+            qq_protocol::BudgetLimitKind::Duration,
+        ),
+        (
+            qq_protocol::GoalExhaustion::TokensUnknown,
+            qq_protocol::BudgetLimitKind::TokensUnknown,
+        ),
+        (
+            qq_protocol::GoalExhaustion::CostUnknown,
+            qq_protocol::BudgetLimitKind::CostUnknown,
+        ),
+    ] {
+        for user_prompt in [false, true] {
+            let directory = TempDir::new().unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let runtime = SessionRuntime::open(
+                SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+                Arc::new(Loader(Arc::clone(&calls))),
+            )
+            .await
+            .unwrap();
+            let held = Arc::clone(&runtime.inner.permits)
+                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+                .await
+                .unwrap();
+            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+            let created = create_session(&runtime, workspace_id, None).await;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("session")
+            };
+            let mut events = runtime
+                .subscribe(SubscribeRequest {
+                    workspace_id,
+                    after: created.committed_through,
+                })
+                .unwrap();
+            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"expire while awaiting the permit",
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            if user_prompt {
+                queue_prompt(
+                    &runtime,
+                    session_id,
+                    "explicit work under the same goal".to_owned(),
+                )
+                .await;
+            }
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    let mut goal =
+                        crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                    match reason {
+                        qq_protocol::GoalExhaustion::Deadline => {
+                            goal.budget.deadline_ms = now_ms().saturating_sub(1)
+                        }
+                        qq_protocol::GoalExhaustion::TokensUnknown => {
+                            goal.budget.max_total_tokens = Some(100);
+                            goal.counters.usage = None;
+                        }
+                        qq_protocol::GoalExhaustion::CostUnknown => {
+                            goal.budget.max_cost_usd_nanos = Some(100);
+                            goal.counters.estimated_cost_usd_nanos = None;
+                        }
+                        _ => unreachable!(),
+                    }
+                    crate::sessions::goals::save(connection, &goal)
+                })
+                .await
+                .unwrap();
+            drop(held);
+            runtime.inner.schedule.send(()).await.unwrap();
+            let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut finished = None;
+                let mut exhausted = false;
+                while let Some(event) = events.next().await {
+                    match event.unwrap().event {
+                        SessionEvent::RunFinished { outcome, .. }
+                            if !matches!(outcome, RunOutcome::Cancelled) =>
+                        {
+                            finished = Some(outcome)
+                        }
+                        SessionEvent::GoalUpdated { goal }
+                            if matches!(
+                                goal.status,
+                                qq_protocol::GoalStatus::BudgetExhausted {
+                                    reason: actual
+                                } if actual == reason
+                            ) =>
+                        {
+                            exhausted = true
+                        }
+                        _ => {}
+                    }
+                    if exhausted && let Some(outcome) = finished.take() {
+                        return outcome;
+                    }
+                }
+                panic!("stream ended");
+            })
+            .await
+            .unwrap();
+            runtime.shutdown().await.unwrap();
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "origin user_prompt={user_prompt}: expired work must not load"
+            );
+            assert!(
+                matches!(outcome, RunOutcome::BudgetExhausted { ref exhaustion } if exhaustion.limit == limit)
+            );
+            let connection =
+                rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+            let goal = crate::sessions::goals::load_live(&connection, session_id)
+                .unwrap()
+                .unwrap();
+            let bound: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE session_id=?1 AND status='budget_exhausted' AND goal_id=?2 AND goal_snapshot_json IS NOT NULL",
+            params![session_id.to_string(), goal.goal_id.to_string()], |row| row.get(0),
+        ).unwrap();
+            assert_eq!(bound, 1, "refused prompt remains durably goal-bound");
+            assert_eq!(goal.counters.runs, 0);
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::BudgetExhausted {
+                    reason: actual
+                } if actual == reason
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn common_goal_reservation_clamps_current_remainders_and_preserves_prompt_limits() {
+    for kind in ["goal", "unbounded_prompt", "strict_prompt"] {
+        let (_directory, store, previous) = model_goal_claim(false).await;
+        let session_id = previous.identity.session_id;
+        store
+            .finish_run(
+                &previous,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                goal.budget.deadline_ms = now_ms() + 60_000;
+                goal.budget.max_total_tokens = Some(100);
+                goal.budget.max_cost_usd_nanos = Some(100);
+                goal.budget.per_run = RunLimits {
+                    max_model_turns: Some(2),
+                    max_total_tokens: Some(80),
+                    max_cost_usd_nanos: Some(70),
+                    max_duration_ms: Some(30_000),
+                    ..RunLimits::default()
+                };
+                goal.counters.usage = Some(usage(11, 4));
+                goal.counters.estimated_cost_usd_nanos = Some(17);
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        if kind == "goal" {
+            store.queue_due_goals(now_ms()).await.unwrap();
+        } else {
+            let limits = if kind == "strict_prompt" {
+                RunLimits {
+                    max_model_turns: Some(1),
+                    max_total_tokens: Some(30),
+                    max_cost_usd_nanos: Some(40),
+                    max_duration_ms: Some(1000),
+                    ..RunLimits::default()
+                }
+            } else {
+                RunLimits::default()
+            };
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id,
+                        input: vec![InputPart::text("explicit prompt budget")],
+                        limits,
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            // Spend changes after queue admission must affect reservation.
+            store
+                .call(Priority::Control, move |connection| {
+                    let mut goal =
+                        crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                    goal.counters.usage = Some(usage(17, 8));
+                    goal.counters.estimated_cost_usd_nanos = Some(27);
+                    crate::sessions::goals::save(connection, &goal)
+                })
+                .await
+                .unwrap();
+        }
+        let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+        let (tokens, cost, turns, duration) = match kind {
+            "goal" => (80, 70, Some(2), 30_000),
+            "unbounded_prompt" => (75, 73, None, 60_000),
+            "strict_prompt" => (30, 40, Some(1), 1000),
+            _ => unreachable!(),
+        };
+        assert_eq!(claim.limits.max_total_tokens, Some(tokens), "{kind}");
+        assert_eq!(claim.limits.max_cost_usd_nanos, Some(cost), "{kind}");
+        assert_eq!(claim.limits.max_model_turns, turns, "{kind}");
+        assert!(
+            claim
+                .limits
+                .max_duration_ms
+                .is_some_and(|value| value > 0 && value <= duration)
+        );
+        assert!(matches!(
+            claim.goal_admission,
+            Some(crate::sessions::goals::GoalAdmission::Allowed { .. })
+        ));
+        store
+            .finish_reserved_run(&claim, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_deadline_expiring_during_loading_refuses_main_request_for_both_origins() {
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                usage: Some(qq_provider::ProviderUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                }),
+            })]))
+        }
+    }
+    struct Loader {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        requests: Arc<AtomicUsize>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(loaded_runtime(
+                    Runtime::new(Model(requests), "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for user_prompt in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"deadline must be revalidated after loading",
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        let expected_run = if user_prompt {
+            queue_prompt(&runtime, session_id, "explicit bounded work".to_owned()).await
+        } else {
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session_id)?
+                        .unwrap()
+                        .pending_run_id
+                        .unwrap())
+                })
+                .await
+                .unwrap()
+        };
+        drop(held);
+        runtime.inner.schedule.send(()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        let origin = runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(load_run(connection, expected_run)?.origin)
+            })
+            .await
+            .unwrap();
+        assert!(if user_prompt {
+            matches!(origin, Some(qq_protocol::RunOrigin::UserPrompt {}))
+        } else {
+            matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+        });
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        release.notify_one();
+        let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.next().await {
+                if let SessionEvent::RunFinished {
+                    run_id, outcome, ..
+                } = event.unwrap().event
+                    && run_id == expected_run
+                {
+                    return outcome;
+                }
+            }
+            panic!("stream ended");
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await.unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "user_prompt={user_prompt}: no main request after expiry"
+        );
+        assert!(
+            matches!(outcome, RunOutcome::BudgetExhausted { ref exhaustion } if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+        );
+        let connection =
+            rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let never_started: bool = connection.query_row(
+            "SELECT started_at_ms IS NULL AND status='budget_exhausted' AND goal_id IS NOT NULL FROM runs WHERE id=?1",
+            [expected_run.to_string()], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            never_started,
+            "refusal must not durably start the exact run"
+        );
+        let goal = crate::sessions::goals::load_live(&connection, session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.counters.runs, 0);
+        assert!(matches!(
+            goal.status,
+            qq_protocol::GoalStatus::BudgetExhausted {
+                reason: qq_protocol::GoalExhaustion::Deadline
+            }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
+    struct Model(Arc<StdMutex<Vec<u32>>>);
+    impl Provider for Model {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.0.lock().unwrap().push(request.max_output_tokens());
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "one bounded work slice".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]))
+        }
+    }
+    struct Loader {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        requests: Arc<StdMutex<Vec<u32>>>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(loaded_runtime(
+                    Runtime::new(Model(requests), "test-model", 1024).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for (user_prompt, raised, strict) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"refresh allowance after loading",
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {10_000}}
+        })).unwrap()).await.unwrap();
+        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+        let run = if user_prompt {
+            let receipt = runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SubmitPrompt {
+                        session_id,
+                        input: vec![InputPart::text("explicit work under the same budget")],
+                        limits: RunLimits {
+                            max_total_tokens: strict.then_some(2000),
+                            ..RunLimits::default()
+                        },
+                        correlation: Correlation::default(),
+                        output: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+                panic!("prompt")
+            };
+            run_id
+        } else {
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    Ok(crate::sessions::goals::load_live(connection, session_id)?
+                        .unwrap()
+                        .pending_run_id
+                        .unwrap())
+                })
+                .await
+                .unwrap()
+        };
+        drop(held);
+        runtime.inner.schedule.send(()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let origin = load_run(connection, run)?.origin;
+                assert!(if user_prompt {
+                    matches!(origin, Some(qq_protocol::RunOrigin::UserPrompt {}))
+                } else {
+                    matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+                });
+                let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                if raised {
+                    goal.budget.max_total_tokens = Some(3000);
+                    goal.budget.deadline_ms = now_ms() + 120_000;
+                } else {
+                    goal.counters.usage = Some(usage(8000, 1000));
+                }
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        release.notify_one();
+        let finished = collect_until_run_finished(&mut events, run).await;
+        runtime.shutdown().await.unwrap();
+        assert!(
+            matches!(
+                finished_outcome(&finished, run),
+                Some(RunOutcome::Completed)
+            ),
+            "positive remainder permits bounded work"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let expected = if strict {
+            2000
+        } else if raised {
+            3000
+        } else {
+            1000
+        };
+        assert!(
+            requests[0] == expected.min(1024),
+            "remaining goal allowance must shape the actual request: {:?}",
+            *requests
+        );
+        let connection =
+            rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let limits: String = connection
+            .query_row(
+                "SELECT limits_json FROM runs WHERE id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let limits: RunLimits = serde_json::from_str(&limits).unwrap();
+        assert_eq!(
+            limits.max_total_tokens,
+            Some(u64::from(expected)),
+            "effective limits must be durable: user_prompt={user_prompt}"
+        );
+        let goal = crate::sessions::goals::load_live(&connection, session_id)
+            .unwrap()
+            .unwrap();
+        if raised {
+            assert!(
+                limits
+                    .max_duration_ms
+                    .is_some_and(|duration| duration > 110_000 && duration <= 125_000),
+                "raised deadline must recover its allowance: user_prompt={user_prompt}, strict={strict}, limits={limits:?}"
+            );
+        }
+        assert_eq!(goal.counters.runs, 1);
+        assert_eq!(
+            goal.counters.usage,
+            Some(if raised {
+                usage(1, 1)
+            } else {
+                usage(8001, 1001)
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() {
+    struct Router(Arc<AtomicUsize>, bool, Arc<tokio::sync::Notify>);
+    impl TaskRouter for Router {
+        fn identity(&self) -> &'static str {
+            "fixture/goal-expiry"
+        }
+        fn configuration_identity(&self) -> &str {
+            "fixture/goal-expiry"
+        }
+        fn max_cost_usd_nanos(&self) -> Option<u64> {
+            self.2.notify_one();
+            if self.1 { None } else { Some(37) }
+        }
+        fn route(&self, _: String) -> TaskRoutingFuture {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                qq_protocol::RoutingDecision {
+                    model: ModelSelection::default(),
+                    reasoning_effort: None,
+                    outcome: qq_protocol::RoutingOutcome::Fallback,
+                    reason: "retain selected model".to_owned(),
+                    usage: Some(usage(7, 0)),
+                    estimated_cost_usd_nanos: Some(37),
+                }
+            })
+        }
+    }
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                usage: None,
+            })]))
+        }
+    }
+    struct Loader {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        routing: Arc<AtomicUsize>,
+        main: Arc<AtomicUsize>,
+        unknown_cost: bool,
+        admitting: Arc<tokio::sync::Notify>,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let routing = Arc::clone(&self.routing);
+            let main = Arc::clone(&self.main);
+            let unknown_cost = self.unknown_cost;
+            let admitting = Arc::clone(&self.admitting);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(loaded_runtime(
+                    Runtime::new(Model(main), "test-model", 256)
+                        .unwrap()
+                        .with_task_router(Arc::new(Router(routing, unknown_cost, admitting))),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for condition in ["expired", "over_cost", "unknown_cost", "per_run_duration"] {
+        for user_prompt in [true, false] {
+            let directory = TempDir::new().unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let admitting = Arc::new(tokio::sync::Notify::new());
+            let routing = Arc::new(AtomicUsize::new(0));
+            let main = Arc::new(AtomicUsize::new(0));
+            let runtime = SessionRuntime::open(
+                SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+                Arc::new(Loader {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    routing: Arc::clone(&routing),
+                    main: Arc::clone(&main),
+                    unknown_cost: condition == "unknown_cost",
+                    admitting: Arc::clone(&admitting),
+                }),
+            )
+            .await
+            .unwrap();
+            let held = Arc::clone(&runtime.inner.permits)
+                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+                .await
+                .unwrap();
+            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+            let created = create_session(&runtime, workspace_id, None).await;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("session")
+            };
+            let mut events = runtime
+                .subscribe(SubscribeRequest {
+                    workspace_id,
+                    after: created.committed_through,
+                })
+                .unwrap();
+            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"refuse paid routing after expiry",
+            "budget":{"max_goal_runs":10,"deadline_ms":now_ms()+60_000,"max_cost_usd_nanos":if condition=="expired" || condition=="per_run_duration" {None::<u64>} else {Some(100)}}
+        })).unwrap()).await.unwrap();
+            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            let run = if user_prompt {
+                if condition == "per_run_duration" {
+                    let receipt = runtime
+                        .command(
+                            CommandId::generate().unwrap(),
+                            SessionCommand::SubmitPrompt {
+                                session_id,
+                                input: vec![InputPart::text("explicit task")],
+                                limits: RunLimits {
+                                    max_duration_ms: Some(1000),
+                                    ..RunLimits::default()
+                                },
+                                correlation: Correlation::default(),
+                                output: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+                        panic!("prompt")
+                    };
+                    run_id
+                } else {
+                    queue_prompt(&runtime, session_id, "explicit task".to_owned()).await
+                }
+            } else {
+                runtime
+                    .inner
+                    .store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, session_id)?
+                            .unwrap()
+                            .pending_run_id
+                            .unwrap())
+                    })
+                    .await
+                    .unwrap()
+            };
+            drop(held);
+            runtime.inner.schedule.send(()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), entered.notified())
+                .await
+                .unwrap();
+            runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    let origin = load_run(connection, run)?.origin;
+                    assert!(if user_prompt {
+                        matches!(origin, Some(qq_protocol::RunOrigin::UserPrompt {}))
+                    } else {
+                        matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+                    });
+                    let mut goal =
+                        crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                    if condition == "expired" {
+                        goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                    } else if condition == "per_run_duration" {
+                        if !user_prompt {
+                            goal.budget.per_run.max_duration_ms = Some(1);
+                        }
+                    } else {
+                        goal.budget.max_cost_usd_nanos = Some(30);
+                    }
+                    crate::sessions::goals::save(connection, &goal)
+                })
+                .await
+                .unwrap();
+            if condition == "per_run_duration" && user_prompt {
+                let store = runtime.inner.store.clone();
+                let held_writer = Arc::new(tokio::sync::Notify::new());
+                let writer_entered = Arc::clone(&held_writer);
+                let (unblock, blocked) = std::sync::mpsc::channel();
+                let holding = tokio::spawn(async move {
+                    store
+                        .call(Priority::Control, move |_| {
+                            writer_entered.notify_one();
+                            blocked
+                                .recv_timeout(Duration::from_secs(3))
+                                .expect("bounded admission hold");
+                            Ok(())
+                        })
+                        .await
+                });
+                tokio::time::timeout(Duration::from_secs(3), held_writer.notified())
+                    .await
+                    .unwrap();
+                release.notify_one();
+                // The router's declared-cost query proves loading has finished
+                // and paid admission is waiting behind the held store worker.
+                tokio::time::timeout(Duration::from_secs(3), admitting.notified())
+                    .await
+                    .unwrap();
+                // lint: allow(sleep) Store worker checks real elapsed time outside Tokio's virtual clock.
+                tokio::time::sleep(Duration::from_millis(1005)).await;
+                unblock.send(()).unwrap();
+                holding.await.unwrap().unwrap();
+            } else {
+                if condition == "per_run_duration" {
+                    // lint: allow(sleep) Refreshed goal duration is checked on the real store worker clock.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                release.notify_one();
+            }
+            let finished = collect_until_run_finished(&mut events, run).await;
+            {
+                let shutdown = runtime.shutdown();
+                tokio::pin!(shutdown);
+                match futures_util::poll!(&mut shutdown) {
+                    std::task::Poll::Ready(result) => result.unwrap(),
+                    std::task::Poll::Pending => {
+                        release.notify_waiters();
+                        release.notify_one();
+                        shutdown.await.unwrap();
+                    }
+                }
+            }
+            assert_eq!(
+                routing.load(Ordering::SeqCst),
+                0,
+                "user_prompt={user_prompt}: expired work must not spend on routing"
+            );
+            assert_eq!(main.load(Ordering::SeqCst), 0);
+            if condition == "expired" || condition == "per_run_duration" {
+                assert!(
+                    matches!(finished_outcome(&finished,run),Some(RunOutcome::BudgetExhausted{exhaustion}) if exhaustion.limit==qq_protocol::BudgetLimitKind::Duration)
+                );
+            } else {
+                assert!(
+                    matches!(finished_outcome(&finished,run),Some(RunOutcome::Failed{failure}) if failure.kind==RunFailureKind::Configuration),
+                    "unusable routing budgets require user configuration"
+                );
+            }
+            let connection =
+                rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+            let untouched:bool = connection.query_row("SELECT routing_json IS NULL AND goal_helper_admitted=0 AND started_at_ms IS NULL FROM runs WHERE id=?1",[run.to_string()],|row|row.get(0)).unwrap();
+            assert!(untouched, "refusal must not durably admit paid routing");
+            let goal = crate::sessions::goals::load_live(&connection, session_id)
+                .unwrap()
+                .unwrap();
+            if condition != "expired" && condition != "per_run_duration" {
+                assert!(matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Configuration { .. }
+                        }
+                    }
+                ));
+            }
+            assert_eq!(goal.counters.runs, 0);
+            assert_eq!(goal.counters.usage, Some(usage(0, 0)));
+            assert_eq!(goal.counters.estimated_cost_usd_nanos, Some(0));
+        }
+    }
+}
+
+#[tokio::test]
+async fn goal_main_output_uses_post_routing_remainder_without_double_charging() {
+    struct Router(Option<u64>);
+    impl TaskRouter for Router {
+        fn identity(&self) -> &'static str {
+            "fixture/goal-routing-remainder"
+        }
+        fn configuration_identity(&self) -> &str {
+            self.identity()
+        }
+        fn max_cost_usd_nanos(&self) -> Option<u64> {
+            Some(37)
+        }
+        fn route(&self, _: String) -> TaskRoutingFuture {
+            let tokens = self.0;
+            Box::pin(async move {
+                qq_protocol::RoutingDecision {
+                    model: ModelSelection::default(),
+                    reasoning_effort: None,
+                    outcome: qq_protocol::RoutingOutcome::Fallback,
+                    reason: "retain selected model".to_owned(),
+                    usage: tokens.map(|tokens| usage(tokens, 0)),
+                    estimated_cost_usd_nanos: Some(37),
+                }
+            })
+        }
+    }
+    struct Model(Arc<StdMutex<Vec<u32>>>);
+    impl Provider for Model {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            self.0.lock().unwrap().push(request.max_output_tokens());
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: "bounded work".to_owned(),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]))
+        }
+    }
+    struct Loader(Arc<StdMutex<Vec<u32>>>, Option<u64>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let requests = Arc::clone(&self.0);
+            let routing_tokens = self.1;
+            Box::pin(async move {
+                Ok(loaded_runtime(
+                    Runtime::new(Model(requests), "test-model", 1024)
+                        .unwrap()
+                        .with_task_router(Arc::new(Router(routing_tokens))),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for routing_tokens in [Some(1000), Some(900), None] {
+        for user_prompt in [false, true] {
+            for strict_output in [false, true] {
+                let directory = TempDir::new().unwrap();
+                let requests = Arc::new(StdMutex::new(Vec::new()));
+                let runtime = SessionRuntime::open(
+                    SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+                    Arc::new(Loader(Arc::clone(&requests), routing_tokens)),
+                )
+                .await
+                .unwrap();
+                let held = Arc::clone(&runtime.inner.permits)
+                    .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+                    .await
+                    .unwrap();
+                let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+                let created = create_session(&runtime, workspace_id, None).await;
+                let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                    panic!("session")
+                };
+                let mut events = runtime
+                    .subscribe(SubscribeRequest {
+                        workspace_id,
+                        after: created.committed_through,
+                    })
+                    .unwrap();
+                runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id":session_id, "objective":"one bounded work slice",
+                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000, "max_total_tokens":1000,
+                    "per_run":{"max_output_tokens":strict_output.then_some(80)}}
+            })).unwrap()).await.unwrap();
+                runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+                let run = if user_prompt {
+                    let receipt = runtime
+                        .command(
+                            CommandId::generate().unwrap(),
+                            SessionCommand::SubmitPrompt {
+                                session_id,
+                                input: vec![InputPart::text("explicit bounded work")],
+                                limits: RunLimits {
+                                    max_output_tokens: strict_output.then_some(80),
+                                    ..RunLimits::default()
+                                },
+                                correlation: Correlation::default(),
+                                output: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
+                        panic!("prompt")
+                    };
+                    run_id
+                } else {
+                    runtime
+                        .inner
+                        .store
+                        .call(Priority::Control, move |connection| {
+                            Ok(crate::sessions::goals::load_live(connection, session_id)?
+                                .unwrap()
+                                .pending_run_id
+                                .unwrap())
+                        })
+                        .await
+                        .unwrap()
+                };
+                drop(held);
+                runtime.inner.schedule.send(()).await.unwrap();
+                let finished = collect_until_run_finished(&mut events, run).await;
+                runtime.shutdown().await.unwrap();
+                if routing_tokens == Some(900) {
+                    assert!(matches!(
+                        finished_outcome(&finished, run),
+                        Some(RunOutcome::Completed)
+                    ));
+                } else {
+                    let expected = if routing_tokens.is_some() {
+                        qq_protocol::BudgetLimitKind::TotalTokens
+                    } else {
+                        qq_protocol::BudgetLimitKind::TokensUnknown
+                    };
+                    assert!(
+                        matches!(finished_outcome(&finished, run), Some(RunOutcome::BudgetExhausted {exhaustion}) if exhaustion.limit == expected)
+                    );
+                }
+                let connection =
+                    rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+                let stored = load_run(&connection, run).unwrap();
+                assert!(if user_prompt {
+                    matches!(stored.origin, Some(qq_protocol::RunOrigin::UserPrompt {}))
+                } else {
+                    matches!(stored.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+                });
+                if routing_tokens == Some(900) {
+                    let encoded: String = connection
+                        .query_row(
+                            "SELECT limits_json FROM runs WHERE id=?1",
+                            [run.to_string()],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    let limits: RunLimits = serde_json::from_str(&encoded).unwrap();
+                    assert_eq!(
+                        limits.max_total_tokens,
+                        Some(1000),
+                        "the meter charges routing within the inclusive allowance"
+                    );
+                }
+                let goal = crate::sessions::goals::load_live(&connection, session_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(goal.counters.runs, u32::from(routing_tokens == Some(900)));
+                assert_eq!(
+                    goal.counters.usage,
+                    routing_tokens.map(|tokens| if tokens == 900 {
+                        usage(901, 1)
+                    } else {
+                        usage(tokens, 0)
+                    }),
+                    "routing is charged exactly once"
+                );
+                assert_eq!(
+                    *requests.lock().unwrap(),
+                    if routing_tokens == Some(900) {
+                        vec![if strict_output { 80 } else { 100 }]
+                    } else {
+                        Vec::new()
+                    },
+                    "user_prompt={user_prompt}, strict_output={strict_output}: routing_tokens={routing_tokens:?}: no main work outside post-routing allowance"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
     for version in [47, 48, 49, 50] {
         let (directory, store, claim) = claimed_store_fixture().await;
@@ -3137,7 +8081,11 @@ async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
         connection.execute("INSERT INTO model_turns(run_id,turn_ordinal,assistant_content_json,notice,tool_results_projection_json) VALUES(?1,1,'[]',?2,?3)", params![run,notice,projection]).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE session_goals;
+                "ALTER TABLE runs DROP COLUMN goal_paid_owner_run_id;
+            ALTER TABLE runs DROP COLUMN goal_request_pending;
+            ALTER TABLE runs DROP COLUMN goal_helper_admitted;
+            ALTER TABLE model_turns DROP COLUMN work_disposition;
+            DROP TABLE session_goals;
             ALTER TABLE runs DROP COLUMN goal_id;
             ALTER TABLE runs DROP COLUMN goal_revision;
             ALTER TABLE runs DROP COLUMN goal_snapshot_json;
@@ -3189,6 +8137,106 @@ async fn goal_upgrade_preserves_deployed_notice_and_projection_bytes() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn paused_goal_fences_preparing_user_prompt_until_cancelled() {
+    let (_directory, store, previous) = model_goal_claim(false).await;
+    let session_id = previous.identity.session_id;
+    store
+        .finish_run(
+            &previous,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("next work")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+    let captured = claim.goal.as_ref().unwrap();
+    let pause = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: captured.goal_id,
+                    revision: captured.revision,
+                },
+                action: qq_protocol::GoalControl::Pause,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = pause.receipt.outcome else {
+        panic!("paused goal")
+    };
+    let run_id = claim.identity.run_id;
+    let cancelled: bool = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT cancel_requested FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let resume = store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::Resume,
+            },
+        )
+        .await;
+    store
+        .finish_reserved_run(&claim, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    if resume.is_err() {
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: qq_protocol::GoalIdentity {
+                        goal_id: goal.goal_id,
+                        revision: goal.revision,
+                    },
+                    action: qq_protocol::GoalControl::Resume,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    assert!(
+        cancelled,
+        "pause must cancel a preparing prompt with captured goal ownership"
+    );
+    assert!(
+        matches!(resume, Err(SessionRuntimeError::GoalCancellationPending)),
+        "resume must wait for the old captured revision to drain"
+    );
 }
 
 #[tokio::test]
@@ -3444,4 +8492,67 @@ async fn goal_write_capacity_wait_obeys_cancellation_and_deadline() {
         assert!(goal.notes.is_empty(), "no waiting write was admitted");
         store.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn recovered_user_prompt_survives_an_active_goal_edit() {
+    let (directory, store, previous) = model_goal_claim(false).await;
+    let session = previous.identity.session_id;
+    store
+        .finish_run(
+            &previous,
+            RunOutcome::Completed,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: session,
+                input: vec![InputPart::text("accepted user work")],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let reserved = store.reserve_next_run(false).await.unwrap().unwrap();
+    let captured = reserved.goal.clone().unwrap();
+    store.close().await.unwrap();
+    let reopened = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    reopened
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":session,"objective":"edited objective",
+                "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reclaimed = reopened
+        .reserve_next_run(false)
+        .await
+        .unwrap()
+        .expect("accepted user prompt remains queued after a normal edit");
+    assert_eq!(reclaimed.identity.run_id, reserved.identity.run_id);
+    assert_eq!(
+        reclaimed.goal.as_deref(),
+        Some(captured.as_ref()),
+        "recovery preserves the frozen claim"
+    );
+    reopened
+        .finish_reserved_run(&reclaimed, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    reopened.close().await.unwrap();
 }

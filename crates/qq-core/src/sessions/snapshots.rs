@@ -415,7 +415,7 @@ pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, d
      )
      SELECT subtree.root, r.session_id, r.status, r.usage_json, r.estimated_cost_usd_nanos,
             EXISTS(SELECT 1 FROM model_turns turn WHERE turn.run_id = r.id),
-            r.started_at_ms, r.routing_json IS NOT NULL
+            r.started_at_ms, r.routing_json IS NOT NULL OR r.goal_helper_admitted OR r.goal_request_pending
      FROM runs r
      JOIN subtree ON subtree.id = r.session_id
      ORDER BY r.rowid";
@@ -470,7 +470,7 @@ pub(super) fn load_accounting_folds(
 
     let mut folds: HashMap<String, SessionAccountingFold> = HashMap::new();
     for row in rows {
-        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, routed) =
+        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, admitted) =
             row?;
         let fold = folds.entry(session_id.clone()).or_default();
         let SessionAccountingFold { direct, inclusive } = fold;
@@ -484,11 +484,14 @@ pub(super) fn load_accounting_folds(
                     | "budget_exhausted"
                     | "paused"
             );
-            // A cancelled run with no committed model turn spent no measured
-            // request and preserves known prior accounting. Other terminal
+            // Cancellation before provider admission preserves known prior
+            // accounting; an admitted goal/helper request remains uncertain.
+            // Other terminal
             // rows without usage stay unknown for legacy/provider-failure
             // compatibility; a committed turn is always an explicit unknown.
-            if routed || saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some())
+            if admitted
+                || saw_turn
+                || (terminal && status != "cancelled" && started_at_ms.is_some())
             {
                 inclusive.mark_unknown();
                 if owner_id == session_id {

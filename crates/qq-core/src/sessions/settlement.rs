@@ -103,7 +103,7 @@ pub(super) fn complete_run(
         now_ms(),
         &mut events,
     )?;
-    events.push(expect_settled(settle_run(
+    events.extend(expect_settled(settle_run(
         &transaction,
         store_id,
         claimed,
@@ -165,7 +165,7 @@ fn settle_abandoned_owned_summary(
     summary.identity.command_id = parse_id(command_id)?;
     summary.identity.kind = RunKind::Compaction;
     summary.goal = None;
-    events.push(expect_settled(settle_run(
+    events.extend(expect_settled(settle_run(
         transaction,
         store_id,
         &summary,
@@ -185,17 +185,15 @@ pub(super) enum SettlementCause {
     Recovery,
 }
 
-/// Result of a settlement attempt: the `RunFinished` envelope when this call
+/// Result of a settlement attempt: goal updates and `RunFinished` when this call
 /// settled the run, `None` when the run already carried an outcome and
 /// nothing was written. A run settles exactly once through any path.
-pub(super) type RunSettled = Option<SessionEventEnvelope>;
+pub(super) type RunSettled = Option<Vec<SessionEventEnvelope>>;
 
 /// For callers that checked `run_is_settled` earlier in the same transaction:
 /// `None` there means the row changed under an open write transaction, which
 /// SQLite forbids.
-pub(super) fn expect_settled(
-    settled: RunSettled,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+pub(super) fn expect_settled<T>(settled: Option<T>) -> Result<T, SessionRuntimeError> {
     settled.ok_or(SessionRuntimeError::CONSTRAINT)
 }
 
@@ -225,15 +223,25 @@ pub(super) fn settle_run(
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
     cause: SettlementCause,
-) -> Result<RunSettled, SessionRuntimeError> {
+) -> Result<Option<Vec<SessionEventEnvelope>>, SessionRuntimeError> {
     let state = transaction
         .query_row(
-            "SELECT outcome_json IS NOT NULL, origin_json FROM runs WHERE id = ?1",
+            "SELECT outcome_json IS NOT NULL, origin_json, goal_request_pending,
+                goal_helper_admitted OR goal_request_pending OR EXISTS(
+                    SELECT 1 FROM model_turns WHERE run_id=runs.id AND work_disposition='uncertain')
+             FROM runs WHERE id = ?1",
             [claimed.identity.run_id.to_string()],
-            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((false, origin_json)) = state else {
+    let Some((false, origin_json, goal_request_pending, goal_spend_admitted)) = state else {
         return Ok(None);
     };
     let origin = origin_json
@@ -256,7 +264,15 @@ pub(super) fn settle_run(
     )?;
     let (run_status, message_state) = outcome_states(&outcome);
     let outcome_json = serde_json::to_string(&outcome)?;
-    let usage = accounting.as_ref().and_then(|accounting| accounting.usage);
+    let pending_goal_request = goal_request_pending
+        && !accounting
+            .as_ref()
+            .is_some_and(|accounting| accounting.goal_request_rejected);
+    let usage = if pending_goal_request {
+        None
+    } else {
+        accounting.as_ref().and_then(|accounting| accounting.usage)
+    };
     let usage_json = usage.as_ref().map(serde_json::to_string).transpose()?;
     let cost = accounting
         .as_ref()
@@ -306,22 +322,31 @@ pub(super) fn settle_run(
         [claimed.identity.session_id.to_string()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
     )?;
-    // Recovery has no executor accumulator. Owned summaries durably record
-    // their aggregate before settlement, including unknown pending requests.
+    // Recovery has no executor accumulator. Goal-bound main runs and owned
+    // summaries retain aggregate spending and chargeable-work proof in storage.
     let (session_cost, session_saw_turn) = if cause == SettlementCause::Recovery {
         transaction
             .query_row(
                 "SELECT estimated_cost_usd_nanos,
-                    usage_json IS NULL OR EXISTS(SELECT 1 FROM model_turns WHERE run_id = runs.id)
-                 FROM runs WHERE id = ?1 AND kind = 'compaction'
-                    AND auto_compaction_for_run_id IS NOT NULL",
+                    CASE WHEN goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL THEN
+                        goal_request_pending OR goal_helper_admitted OR EXISTS(
+                            SELECT 1 FROM model_turns WHERE run_id=runs.id
+                                AND work_disposition IN ('committed','uncertain'))
+                    ELSE usage_json IS NULL OR EXISTS(SELECT 1 FROM model_turns WHERE run_id=runs.id)
+                    END
+                 FROM runs WHERE id=?1 AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL OR
+                    (kind='compaction' AND auto_compaction_for_run_id IS NOT NULL))",
                 [claimed.identity.run_id.to_string()],
                 |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?
-            .unwrap_or((cost, saw_turn))
+            .unwrap_or((cost, saw_turn || goal_spend_admitted))
     } else {
-        (cost, saw_turn)
+        if pending_goal_request {
+            (None, true)
+        } else {
+            (cost, saw_turn || goal_spend_admitted)
+        }
     };
     let (next_cost, next_cost_known) = if session_saw_turn {
         match session_cost.and_then(|cost| current_cost.checked_add(cost)) {
@@ -347,7 +372,7 @@ pub(super) fn settle_run(
     // an unmeasured completed turn explicitly clears it. Recovery never held
     // the accumulator, so the row keeps whatever its last committed turn
     // recorded.
-    let preserve_run_accounting = cause == SettlementCause::Recovery;
+    let preserve_run_accounting = cause == SettlementCause::Recovery || pending_goal_request;
     transaction.execute(
         "UPDATE runs
              SET status = ?2, outcome_json = ?3, finished_at_ms = ?4,
@@ -371,6 +396,15 @@ pub(super) fn settle_run(
             final_output_json,
         ],
     )?;
+    if accounting
+        .as_ref()
+        .is_some_and(|accounting| accounting.goal_request_rejected)
+    {
+        transaction.execute(
+            "UPDATE runs SET goal_request_pending=0 WHERE id=?1 AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL OR goal_helper_admitted=1)",
+            [claimed.identity.run_id.to_string()],
+        )?;
+    }
     let context_tokens = run_context_tokens(transaction, claimed.identity.run_id)?;
     transaction.execute(
         "UPDATE messages SET state = ?2
@@ -420,7 +454,32 @@ pub(super) fn settle_run(
         SettlementCause::Executor => context,
         SettlementCause::Recovery => context.uncaused(),
     };
-    append_event(
+    let mut events = Vec::new();
+    for goal in goals::finalize_spend(
+        transaction,
+        claimed.identity.session_id,
+        claimed.identity.run_id,
+    )? {
+        let goal_context = if goal.session_id == claimed.identity.session_id {
+            context
+        } else {
+            EventContext::for_session(
+                store_id,
+                claimed.identity.workspace_id,
+                goal.session_id,
+                caused_by,
+                now,
+            )
+        };
+        events.push(append_event(
+            transaction,
+            goal_context,
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
+    }
+    events.push(append_event(
         transaction,
         context,
         SessionEvent::RunFinished {
@@ -432,8 +491,8 @@ pub(super) fn settle_run(
             context_tokens,
             final_output,
         },
-    )
-    .map(Some)
+    )?);
+    Ok(Some(events))
 }
 
 /// Cancels a run the caller has just read as `queued` in this transaction.
@@ -444,7 +503,7 @@ pub(super) fn finish_queued_run(
     session_id: SessionId,
     run_id: RunId,
     now: u64,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     expect_settled(finish_queued_run_with_outcome(
         transaction,
         store_id,
@@ -513,9 +572,25 @@ pub(super) fn finish_queued_run_with_outcome(
         .map(|encoded| serde_json::from_str(&encoded))
         .transpose()?;
     let summary = load_session_summary(transaction, session_id)?;
-    append_event(
+    let context = EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now);
+    let mut events = Vec::new();
+    for goal in goals::finalize_spend(transaction, session_id, run_id)? {
+        let goal_context = if goal.session_id == session_id {
+            context
+        } else {
+            EventContext::for_session(store_id, workspace_id, goal.session_id, None, now)
+        };
+        events.push(append_event(
+            transaction,
+            goal_context,
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
+    }
+    events.push(append_event(
         transaction,
-        EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now),
+        context,
         SessionEvent::RunFinished {
             origin,
             session: Box::new(summary),
@@ -526,8 +601,8 @@ pub(super) fn finish_queued_run_with_outcome(
             context_tokens: None,
             final_output: None,
         },
-    )
-    .map(Some)
+    )?);
+    Ok(Some(events))
 }
 
 pub(super) fn finish_reserved_run(
@@ -535,6 +610,8 @@ pub(super) fn finish_reserved_run(
     store_id: StoreId,
     identity: RunIdentity,
     outcome: RunOutcome,
+    goal: Option<&qq_protocol::GoalSnapshot>,
+    goal_initial_notice: Option<&str>,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let state = transaction
@@ -553,7 +630,10 @@ pub(super) fn finish_reserved_run(
     if status != "queued" {
         return Err(SessionRuntimeError::Unavailable);
     }
-    let mut events = vec![expect_settled(finish_queued_run_with_outcome(
+    if goal.is_some() {
+        goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
+    }
+    let mut events = expect_settled(finish_queued_run_with_outcome(
         &transaction,
         store_id,
         identity.workspace_id,
@@ -561,7 +641,7 @@ pub(super) fn finish_reserved_run(
         identity.run_id,
         outcome,
         now_ms(),
-    )?)?];
+    )?)?;
     append_parent_session_update(
         &transaction,
         store_id,
@@ -619,7 +699,7 @@ pub(super) fn finish_prepared_run(
     if recorded != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
-    let mut events = vec![expect_settled(finish_queued_run_with_outcome(
+    let mut events = expect_settled(finish_queued_run_with_outcome(
         &transaction,
         store_id,
         identity.workspace_id,
@@ -627,7 +707,7 @@ pub(super) fn finish_prepared_run(
         identity.run_id,
         outcome,
         now_ms(),
-    )?)?];
+    )?)?;
     append_parent_session_update(
         &transaction,
         store_id,
@@ -719,8 +799,10 @@ pub(super) fn settle_panicked_execution(
         {
             let active_run_id: RunId = parse_id(&active_run)?;
             let active_claim = ClaimedRun {
+                goal_spend_owner: None,
                 goal: None,
                 goal_initial_notice: None,
+                goal_admission: None,
                 origin: None,
                 checkpoint: None,
                 routing: None,
@@ -763,7 +845,7 @@ pub(super) fn settle_panicked_execution(
                 output: None,
                 purpose: original.purpose,
             };
-            events.push(expect_settled(settle_run(
+            events.extend(expect_settled(settle_run(
                 &transaction,
                 store_id,
                 &active_claim,
@@ -780,7 +862,7 @@ pub(super) fn settle_panicked_execution(
         && status == "queued"
         && stored_outcome.is_none()
     {
-        events.push(expect_settled(finish_queued_run_with_outcome(
+        events.extend(expect_settled(finish_queued_run_with_outcome(
             &transaction,
             store_id,
             original.identity.workspace_id,
@@ -951,6 +1033,8 @@ pub(super) fn cancel_owned_child_runs(
         if status == "queued" {
             committed_through = Some(
                 finish_queued_run(transaction, store_id, workspace_id, session_id, run_id, now)?
+                    .last()
+                    .ok_or(SessionRuntimeError::CONSTRAINT)?
                     .cursor,
             );
             settled_queued = true;
@@ -1105,7 +1189,7 @@ pub(super) fn recover_interrupted_runs(
             RunOutcome::Interrupted,
             now_ms(),
         )? {
-            cursors.push(event.cursor);
+            cursors.extend(event.into_iter().map(|event| event.cursor));
         }
     }
     // Reservation is process-local work backed by a queued run. A crash may
@@ -1153,7 +1237,7 @@ pub(super) fn recover_interrupted_runs(
             parse_id(&run)?,
             recovery_started_at,
         )?;
-        cursors.push(event.cursor);
+        cursors.extend(event.into_iter().map(|event| event.cursor));
     }
     let mut statement = transaction.prepare(
         "SELECT r.id, r.session_id, s.workspace_id
@@ -1176,8 +1260,10 @@ pub(super) fn recover_interrupted_runs(
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
         let claimed = ClaimedRun {
+            goal_spend_owner: None,
             goal: None,
             goal_initial_notice: None,
+            goal_admission: None,
             origin: None,
             checkpoint: None,
             routing: None,
@@ -1228,7 +1314,7 @@ pub(super) fn recover_interrupted_runs(
             None,
             SettlementCause::Recovery,
         )?)?;
-        cursors.push(event.cursor);
+        cursors.extend(event.into_iter().map(|event| event.cursor));
     }
     // Runs settle above in no particular order, so a child whose descendants
     // settled after it could not be delivered then; now every run is settled.
