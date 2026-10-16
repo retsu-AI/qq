@@ -2,7 +2,7 @@
 
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
-| Retained install | Preserve executable bytes, atomic selection and recoverable publication | In progress | `fix/retained-install-recovery`, takeover of #287 | Awaiting parent review; no commits or pushes authorized |
+| Retained install | Preserve executable bytes, atomic selection and recoverable publication | In progress | PR #287, `fix/qq-retained-installs-v0.1.6` | Independent static review approved; native macOS and full qualification outstanding |
 
 ## 2026-10-17
 
@@ -28,3 +28,5 @@
 - Parent independently ran the installer suite successfully and corrected the guide's shell placeholder to a quoted variable.
 - Additional `cargo xtask check --full` failed: 2,469/2,471 tests passed; existing qq-core edit-approval and text-only-delegation tests hit elapsed-time deadlines. Failure details remain in `target/qq-check/last.json`; no runtime Rust source changed by this slice. Both failing tests passed in a narrow rerun (2/2). This is not a full-green result and does not justify weakening the tests.
 - Native macOS validation and full-workspace qualification remain outstanding. Linear issue creation paused at the external approval gate; no issue identifier has been assigned.
+
+- User clarified takeover must update existing PRs. Reconciled original #287 head `f267641d` as a merge parent, preserving its history while selecting the reviewed current-main takeover tree; update targets the original branch without force. No replacement PR will be opened.
