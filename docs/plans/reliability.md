@@ -33,7 +33,7 @@ New work records evidence in [reliability](progress/reliability.md).
 | AC12.2 → AC12.3 → AC13 | Complete config/model/reviewer extraction and drive_to_outcome. External host uses only qq-harness plus Tokio, inline RON to outcome in <100 lines; core-only example too. Typed load errors, public limits, gated bench exports, no public rusqlite types; startup/plan_compile gates |
 | AC14 residual | Continuation, loop-guard, report and child-delivery surfaces: reducer tests, headless goldens, TUI snapshots per state. Headless output must also report compaction token usage and pause state; CX4 shipped only compaction activity, not these outcomes. G4 owns goal controls |
 | AC15 | Measure commits/s and WAL bytes/s at 1/8/32/100 streams. Optimize only a demonstrated bottleneck; encoded once in transaction, byte-identical live/catch-up/restart replay including migrations. Any commit-grouping or WAL optimization must keep p95 first-token and delta latency within budget. synchronous changes need an ADR. Measurement-only closure is valid |
-| AC16 / ENG-803 | Simulated-days multi-session retention soak with scheduled deletion: DB+WAL proportional to retained window. Archive alone insufficient; never trim live history or delete active/queued sessions |
+| AC16 / ENG-803 | Accept and implement ADR-0038 first: archive state, automatic idle archival, cursor-safe cascading deletion, approaching-limit signals and protocol/client surfaces. Then simulated-days multi-session retention soak with scheduled deletion: DB+WAL proportional to retained window. Archive alone insufficient; never trim live history or delete active/queued sessions |
 | AC18 / ENG-870 | Incomplete calls get durable synthetic not-executed result and reissue request, never partial execution or duplicate effects. Decide honest non-completed exhaustion outcome first. Test cancellation/deadline, adjacent complete calls, repeat truncation, live/restart/replay equality |
 | AC19 / ENG-874 | Bounded normal-terminal reasoning closure, unambiguous missing-ID repair and display-only reasoning cap; ambiguous/duplicate calls still refuse, authoritative provider/storage bounds preserved |
 | AC20 | Identify an unanswered latency question and consumer, measure bounded overhead first. No persistent stats/wire/schema without benefit; disabled means no hot-path work. May close without code |
@@ -146,3 +146,8 @@ for hot paths. Include all forced type/wire consumers and reconnect snapshots
 in the same PR, not only named starting files. Independent review applies to
 session/store/approval/retry/cache changes. Retire this plan when remaining
 acceptance is resolved, leaving contracts in design and receipts in Git.
+
+Retirement additionally requires ADRs 0048, 0049, 0050 and 0054 to be
+Accepted or explicitly superseded, with corresponding as-built design docs
+updated. ADR-0038 acceptance/implementation remains part of AC16, not only
+a deletion-soak prerequisite assumed complete.

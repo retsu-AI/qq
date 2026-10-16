@@ -15,7 +15,7 @@ and qualified; receipts are in Git history (the plan collapsed to its open items
 | R6-terminal | Persistent terminal/process contract candidate | Planned (gated) | tool-layer T10 | Ships only on T13 / trajectory evidence; H10 is an independent lane per root decision |
 | R7 | Sub-agent economics and provider-aware scheduling | Planned | | H23/H24 shipped the ownership and budget repairs; remaining items are worker-model defaults and queue-wait recording |
 | D6b / ENG-812 | Paired delegation arms/default decisions | Planned (paid gate) | — | ENG-809 authorization required; former delegation plan now owned by R7 |
-| R8 | Remaining prompt-cache determinism measurement | Planned | | Retry (H14), shared messages and encode bench (H18), and cold-path load work (H22.2) shipped in speed-first; what remains here is the prompt-cache determinism measurement |
+| R8 | MCP response bounds (F13) and prompt-cache determinism | Planned | | Retry (H14), shared messages and encode bench (H18), and cold-path load work (H22.2) shipped in speed-first; remaining: bounded MCP response decoding/rendering with peak-RSS tests, plus prompt-cache determinism measurement |
 | TB-pilot | Credentialed Terminal-Bench pilot beyond the first smoke | Planned | | First smoke recorded `9e275be`; Harbor adapter `990df3e`, `af6ed7e`, `9d38c08`, `b80c919` |
 
 ## Entries

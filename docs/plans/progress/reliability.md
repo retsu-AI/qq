@@ -21,7 +21,7 @@ AP5 and G0 review references remain conflict warnings until reconciled.
 | AC13 | Public-surface hygiene (`!`) | Planned | — |  ADR-0050 § 4 |
 | AC14 | Surfaces for new state (was MRC-4) | Planned | — |   |
 | AC15 | Store write amplification | Planned | — |  ADR if `synchronous` changes |
-| AC16 | Retention (ENG-803) | Planned | — | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) Evidence from AC0 |
+| AC16 | Retention (ENG-803) | Planned | — | [ENG-803](https://linear.app/retsu-ai/issue/ENG-803) ADR-0038 archive/idle-archive/cursor-safe deletion/signals/protocol delivery before soak; evidence from AC0 |
 | AC18 | Truncated-call recovery and honest exhaustion outcome (RR8 residuals) | Planned | — | [ENG-870](https://linear.app/retsu-ai/issue/ENG-870) Synthetic re-issue missing; exhaustion still fails; ADR-0048 outcome decision before implementation |
 | AC19 | Bounded stream repair (was RR12) | Planned | — | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) Normal completion, missing ids, reasoning display cap remain |
 | AC20 | Evidence-led latency diagnostics (was RR12) | Planned | — | [ENG-874](https://linear.app/retsu-ai/issue/ENG-874) No permanent stats or wire/schema work without a measured consumer |
@@ -48,3 +48,11 @@ AP5 and G0 review references remain conflict warnings until reconciled.
   slice states and branch/PR references before retiring predecessor ownership.
 - Initial commit full gate: 2471/2471, 14 skips; minimal provider 211/211,
   doctests pass; smoke 6/6. Hosted correctness/smoke passes. Follow-up gate pending.
+
+## Second Codex review
+
+- Restored full AC16 retention implementation and foundational ADR acceptance/
+  supersession gates. R8 retains F13 response-size/decoding and peak-RSS tests.
+- Supplemental full CI-profile run at 7500fccd failed six existing child/report
+  run-finish timeouts (2465/2471, 14 skips); hosted affected CI passes.
+  These failures are not fixed or waived by the documentation changes.

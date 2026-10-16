@@ -244,10 +244,15 @@ sub-agents are permitted only as one serialized `Supervised` child per run
 
 Priority: P2. Start only after end-to-end measurements identify the cost.
 
-Remaining R8 work is provider prompt-cache determinism (ENG-833), with
+Remaining R8 work includes bounded MCP response decoding/rendering (F13)
+and provider prompt-cache determinism (ENG-833), with
 end-to-end evidence and stable serialized prefixes. H14/H18/H22.2/PlanCache
 already delivered retry exposure, shared storage, request encoding and the
-other warm-path candidates; do not rebuild them from the old candidate list.
+other shipped warm-path candidates; do not rebuild them from the old candidate list.
+MCP declaration-count/schema limits do not bound responses: cap text,
+structured and resource content before cloning/serialization or accumulation,
+with oversized/malformed fixtures and peak-RSS tests proving bounded decoding
+and rendering. Core truncation after allocation is insufficient.
 TE7 consumes the existing cache/MCP/credential receipts. Any new cache or
 scheduler requires measured pressure and explicit invalidation/bounds.
 
