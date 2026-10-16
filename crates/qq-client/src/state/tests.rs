@@ -521,6 +521,7 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
         delegated,
     };
     let mut snapshot = SessionSnapshot {
+        goal: None,
         side_questions: Vec::new(),
         summary: SessionSummary {
             pending_holds: vec![hold(true)],
@@ -751,6 +752,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             5,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(idle.clone()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -782,6 +784,7 @@ fn a_finished_idle_run_hands_the_oldest_draft_back_to_the_surface() {
             6,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(idle),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -855,6 +858,7 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running.clone()),
                 run_id: compaction,
                 outcome: RunOutcome::Completed,
@@ -891,6 +895,7 @@ fn compacting_is_the_activity_until_the_run_moves_on_and_an_inner_compaction_kee
             5,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(idle),
                 run_id: prompt,
                 outcome: RunOutcome::Completed,
@@ -926,6 +931,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                     .collect();
                 store.install_session_snapshot(
                     qq_protocol::SessionSnapshot {
+                        goal: None,
                         side_questions: Vec::new(),
                         summary: running.clone(),
                         messages: vec![message(8, session_id, prompt, "work")],
@@ -956,6 +962,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                                 index as u64 + 1,
                                 session_id,
                                 SessionEvent::RunStarted {
+                                    origin: None,
                                     session: Box::new(running.clone()),
                                     run_id,
                                     plan: None,
@@ -986,6 +993,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                         index as u64 + 3,
                         session_id,
                         SessionEvent::RunFinished {
+                            origin: None,
                             session: Box::new(session),
                             run_id,
                             outcome: RunOutcome::Interrupted,
@@ -1032,6 +1040,7 @@ fn an_owned_summary_finish_does_not_submit_the_second_draft() {
                     index as u64 + 1,
                     session_id,
                     SessionEvent::RunStarted {
+                        origin: None,
                         session: Box::new(running.clone()),
                         run_id,
                         plan: None,
@@ -1060,6 +1069,7 @@ fn an_owned_summary_finish_does_not_submit_the_second_draft() {
                     index as u64 + 3,
                     session_id,
                     SessionEvent::RunFinished {
+                        origin: None,
                         session: Box::new(if internal_first && index == 0 {
                             running.clone()
                         } else {
@@ -1095,6 +1105,7 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
     running.status = SessionStatus::Running;
     running.active_run_id = Some(run_id);
     let snapshot = qq_protocol::SessionSnapshot {
+        goal: None,
         side_questions: Vec::new(),
         summary: running,
         messages: vec![message(8, session_id, run_id, "work")],
@@ -1178,6 +1189,7 @@ fn last_queued_cancellation_releases_a_draft_without_run_started() {
             1,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running.clone()),
                 run_id: prompt,
                 outcome: RunOutcome::Completed,
@@ -1210,6 +1222,7 @@ fn last_queued_cancellation_releases_a_draft_without_run_started() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running),
                 run_id: queued,
                 outcome: RunOutcome::Cancelled,
@@ -1258,6 +1271,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
                 1,
                 session_id,
                 SessionEvent::RunStarted {
+                    origin: None,
                     session: Box::new(running.clone()),
                     run_id: prompt,
                     plan: None,
@@ -1277,6 +1291,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
                 2,
                 session_id,
                 SessionEvent::RunFinished {
+                    origin: None,
                     session: Box::new(idle.clone()),
                     run_id: prompt,
                     outcome: RunOutcome::Completed,
@@ -1308,6 +1323,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
             if shown { Vec::new() } else { vec![session_id] }
         );
         let snapshot = qq_protocol::SessionSnapshot {
+                        goal: None,
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
             runs: vec![serde_json::from_value(serde_json::json!({
                 "id":prompt,"session_id":session_id,"status":"completed","outcome":{"type":"completed"},
@@ -1379,6 +1395,7 @@ fn measured_internal_summary_turns_replay_without_taking_over_the_prompt() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running),
                 run_id: compaction,
                 outcome: RunOutcome::Failed {
@@ -1451,6 +1468,7 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running),
                 run_id: compaction,
                 outcome: RunOutcome::Failed {
@@ -1484,10 +1502,11 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(idle),
                 run_id: prompt,
                 outcome: RunOutcome::Paused {
-                    pause: Box::new(qq_protocol::RunPause {
+                    pause: Box::new(qq_protocol::RunPause::ProviderRetry {
                         kind: qq_protocol::RunFailureKind::ProviderUnavailable,
                         message: "in-run compaction summarizer: HTTP 529".to_owned(),
                         turn_ordinal: 9,
@@ -1511,6 +1530,53 @@ fn a_failed_in_run_compaction_step_is_not_reported_as_the_end_of_the_work() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         StateEffect::Notice { level: NoticeLevel::Warning, text, .. } if text.contains("paused after")
+    )));
+}
+
+#[test]
+fn a_no_progress_pause_warns_without_claiming_provider_retries() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let run_id = RunId::from_bytes([4; 16]);
+    let mut store = SessionStore::default();
+    let mut running = summary(session_id);
+    running.status = SessionStatus::Running;
+    running.active_run_id = Some(run_id);
+    store.upsert_summary(running, &[], 0);
+    store.warm_empty(session_id);
+    store.get_mut(&session_id).unwrap().live.active_tool = Some("read_file".to_owned());
+    let mut idle = summary(session_id);
+    idle.status = SessionStatus::Idle;
+    idle.active_run_id = None;
+    let effects = store.reduce_event(
+        &envelope(
+            2,
+            session_id,
+            SessionEvent::RunFinished {
+                origin: None,
+                session: Box::new(idle),
+                run_id,
+                outcome: RunOutcome::Paused {
+                    pause: Box::new(qq_protocol::RunPause::NoProgress {
+                        turn_ordinal: 515,
+                        slices: 2,
+                        calls: 514,
+                    }),
+                },
+                usage: None,
+                context_tokens: None,
+                final_output: None,
+            },
+        ),
+        context(&[]),
+    );
+    assert!(store[&session_id].live.active_tool.is_none());
+    assert!(effects.iter().any(|effect| matches!(effect,
+        StateEffect::Notice { level: NoticeLevel::Warning, text, .. }
+            if text.contains("no progress") && text.contains("514") && !text.contains("provider") && !text.contains("retries")
+    )));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Attention(Attention::RunFinished { .. })
     )));
 }
 
@@ -1543,6 +1609,7 @@ fn cancelling_a_queued_prompt_leaves_the_active_runs_live_state() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(running),
                 run_id: queued,
                 outcome: RunOutcome::Cancelled,
@@ -1571,6 +1638,7 @@ fn a_completed_prompt_after_a_failed_step_still_notifies() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(idle),
                 run_id: prompt,
                 outcome: RunOutcome::Completed,
@@ -1904,4 +1972,147 @@ fn side_questions_are_evicted_with_the_body_and_ignored_while_cold() {
     assert!(view.side_questions.is_empty());
     store.reduce_event(&update(101, 101), context(&[]));
     assert!(store.get(&session).unwrap().side_questions.is_empty());
+}
+
+#[test]
+fn origin_identifies_internal_completion_after_an_idle_summary_only_reconnect() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let owner_run_id = RunId::from_bytes([4; 16]);
+    let run_id = RunId::from_bytes([5; 16]);
+    for warm in [false, true] {
+        let idle = summary(session_id);
+        let mut store = SessionStore::default();
+        store.upsert_summary(idle.clone(), &[], 1);
+        if warm {
+            store.warm_empty(session_id);
+        }
+        store
+            .get_mut(&session_id)
+            .unwrap()
+            .drafts
+            .push_back("next prompt".to_owned());
+        let effects = store.reduce_event(
+            &envelope(
+                2,
+                session_id,
+                SessionEvent::RunFinished {
+                    origin: Some(qq_protocol::RunOrigin::InRunCompaction { owner_run_id }),
+                    session: Box::new(idle),
+                    run_id,
+                    outcome: RunOutcome::Cancelled,
+                    usage: None,
+                    context_tokens: None,
+                    final_output: None,
+                },
+            ),
+            context(&[]),
+        );
+        assert!(
+            effects.is_empty(),
+            "internal receipt has no surface effects: {effects:?}"
+        );
+        let view = store.get(&session_id).unwrap();
+        assert_eq!(view.unread, 0);
+        assert!(!view.finished_unread);
+        assert_eq!(view.drafts.len(), 1);
+    }
+}
+
+#[test]
+fn automatic_compaction_releases_drafts_only_after_its_queued_owner_is_cancelled() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let owner = RunId::from_bytes([4; 16]);
+    let step = RunId::from_bytes([5; 16]);
+    for cancelled in [false, true] {
+        let mut running = summary(session_id);
+        running.status = SessionStatus::Running;
+        running.active_run_id = Some(step);
+        running.queued_prompts = 1;
+        let mut store = SessionStore::default();
+        store.upsert_summary(running.clone(), &[], 0);
+        store.warm_empty(session_id);
+        store
+            .get_mut(&session_id)
+            .unwrap()
+            .drafts
+            .push_back("next prompt".to_owned());
+        store.reduce_event(
+            &envelope(
+                1,
+                session_id,
+                SessionEvent::RunStarted {
+                    origin: Some(qq_protocol::RunOrigin::AutoCompaction {
+                        owner_run_id: owner,
+                    }),
+                    session: Box::new(running.clone()),
+                    run_id: step,
+                    plan: None,
+                },
+            ),
+            context(&[]),
+        );
+        if cancelled {
+            running.queued_prompts = 0;
+            let effects = store.reduce_event(
+                &envelope(
+                    2,
+                    session_id,
+                    SessionEvent::RunFinished {
+                        origin: Some(qq_protocol::RunOrigin::UserPrompt {}),
+                        session: Box::new(running.clone()),
+                        run_id: owner,
+                        outcome: RunOutcome::Cancelled,
+                        usage: None,
+                        context_tokens: None,
+                        final_output: None,
+                    },
+                ),
+                context(&[]),
+            );
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, StateEffect::SubmitDraft { .. }))
+            );
+        }
+        running.active_run_id = None;
+        running.status = if cancelled {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Queued
+        };
+        let effects = store.reduce_event(
+            &envelope(
+                3,
+                session_id,
+                SessionEvent::RunFinished {
+                    origin: Some(qq_protocol::RunOrigin::AutoCompaction {
+                        owner_run_id: owner,
+                    }),
+                    session: Box::new(running),
+                    run_id: step,
+                    outcome: if cancelled {
+                        RunOutcome::Cancelled
+                    } else {
+                        RunOutcome::Completed
+                    },
+                    usage: None,
+                    context_tokens: None,
+                    final_output: None,
+                },
+            ),
+            context(&[]),
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, StateEffect::SubmitDraft { .. }))
+                .count(),
+            usize::from(cancelled)
+        );
+        assert_eq!(
+            store.get(&session_id).unwrap().drafts.len(),
+            usize::from(!cancelled)
+        );
+    }
 }

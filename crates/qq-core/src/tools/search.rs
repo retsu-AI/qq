@@ -14,6 +14,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use regex::bytes::{Regex, RegexBuilder};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::workspace::Workspace;
 
@@ -292,6 +293,7 @@ struct Walker<'a> {
     depth_skipped: usize,
     buffer: Vec<u8>,
     scratch: String,
+    identity: Sha256,
 }
 
 impl Walker<'_> {
@@ -624,6 +626,9 @@ impl Walker<'_> {
             // the body untouched and the cursor pointing at the last shown.
             self.scratch.clear();
             if !file_named {
+                self.identity.update(b"file\0");
+                self.identity.update((path.len() as u64).to_le_bytes());
+                self.identity.update(path.as_bytes());
                 self.scratch.push_str(path);
                 self.scratch.push('\n');
             }
@@ -633,7 +638,13 @@ impl Walker<'_> {
                     let mut number = last_rendered_line + 1;
                     while number <= after_until && number < line_number && offset < line_start {
                         let (_, end) = line_bounds(&buffer, offset);
-                        push_row(&mut self.scratch, number, '-', &buffer[offset..end]);
+                        push_row(
+                            &mut self.scratch,
+                            &mut self.identity,
+                            number,
+                            '-',
+                            &buffer[offset..end],
+                        );
                         last_rendered_line = number;
                         number += 1;
                         offset = end + 1;
@@ -655,11 +666,18 @@ impl Walker<'_> {
                     before_start = start;
                 }
                 for (number, start, end) in befores.into_iter().rev() {
-                    push_row(&mut self.scratch, number, '-', &buffer[start..end]);
+                    push_row(
+                        &mut self.scratch,
+                        &mut self.identity,
+                        number,
+                        '-',
+                        &buffer[start..end],
+                    );
                 }
             }
             push_row(
                 &mut self.scratch,
+                &mut self.identity,
                 line_number,
                 ':',
                 &buffer[line_start..line_end],
@@ -696,7 +714,13 @@ impl Walker<'_> {
                 let mut number = last_rendered_line + 1;
                 while number <= after_until && offset < buffer.len() {
                     let (_, end) = line_bounds(&buffer, offset);
-                    push_row(&mut self.scratch, number, '-', &buffer[offset..end]);
+                    push_row(
+                        &mut self.scratch,
+                        &mut self.identity,
+                        number,
+                        '-',
+                        &buffer[offset..end],
+                    );
                     number += 1;
                     offset = end + 1;
                 }
@@ -743,7 +767,12 @@ fn line_bounds(buffer: &[u8], pos: usize) -> (usize, usize) {
 
 /// `L<n><sep> <text>` with CR stripped and the text clipped at
 /// [`MAX_LINE_BYTES`] on a UTF-8 boundary.
-fn push_row(out: &mut String, number: u32, separator: char, line: &[u8]) {
+fn push_row(out: &mut String, identity: &mut Sha256, number: u32, separator: char, line: &[u8]) {
+    identity.update(b"row\0");
+    identity.update(number.to_le_bytes());
+    identity.update((separator as u32).to_le_bytes());
+    identity.update((line.len() as u64).to_le_bytes());
+    identity.update(line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     out.push('L');
     let _ = std::fmt::Write::write_fmt(out, format_args!("{number}{separator} "));
@@ -782,17 +811,17 @@ pub(super) fn search(
 ) -> ReadSideOutput {
     let started = Instant::now();
     if arguments.query.is_empty() || arguments.query.len() > MAX_QUERY_BYTES {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_query: query must contain between 1 and {MAX_QUERY_BYTES} bytes"
         ));
     }
     if arguments.limit == 0 || arguments.limit > MAX_LIMIT {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_limit: limit must be between 1 and {MAX_LIMIT}"
         ));
     }
     if arguments.max_per_file == 0 || arguments.max_per_file > MAX_PER_FILE {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_max_per_file: max_per_file must be between 1 and {MAX_PER_FILE}"
         ));
     }
@@ -818,13 +847,13 @@ pub(super) fn search(
             .chain(&arguments.exclude)
             .any(|glob| glob.len() > MAX_GLOB_BYTES)
     {
-        return ReadSideOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "bad_glob: at most {MAX_GLOBS} include and {MAX_GLOBS} exclude globs of 1 to {MAX_GLOB_BYTES} bytes"
         ));
     }
     let filter = match PathFilter::new(&arguments.include, &arguments.exclude) {
         Ok(filter) => filter,
-        Err(error) => return ReadSideOutput::error(error.to_string()),
+        Err(error) => return ReadSideOutput::refused(error.to_string()),
     };
     let cursor = match arguments.cursor.as_deref().map(str::trim) {
         // Models routinely send an empty or placeholder cursor on the first
@@ -920,12 +949,14 @@ pub(super) fn search(
         depth_skipped: 0,
         buffer: Vec::new(),
         scratch: String::new(),
+        identity: Sha256::new(),
     };
+    walker.identity.update(b"qq-search-result-v1\0");
     if let Err(message) = run(&mut walker, &root) {
         return ReadSideOutput::error(message);
     }
     if walker.stop == Some(Stop::Cancelled) {
-        return ReadSideOutput::error(CANCELLED_MESSAGE);
+        return ReadSideOutput::interrupted(CANCELLED_MESSAGE);
     }
 
     // A sensitive search that found nothing tells the model what a
@@ -964,6 +995,7 @@ pub(super) fn search(
             depth_skipped: 0,
             buffer: std::mem::take(&mut walker.buffer),
             scratch: String::new(),
+            identity: Sha256::new(),
         };
         if run(&mut counter, &root).is_ok() && counter.total > 0 {
             hint_insensitive = Some((
@@ -1053,18 +1085,27 @@ pub(super) fn search(
     if let Some(next) = next {
         header = header.field("next", next.encode());
     }
+    let mut text = header.into_line();
+    // Primary identity excludes the optional second-walk advisory, which
+    // depends on the remaining deadline rather than the primary query.
+    walker.identity.update(b"rendered\0");
+    walker.identity.update(text.as_bytes());
+    walker.identity.update(walker.body.as_bytes());
+    let digest = walker.identity.finalize().into();
     if let Some((count, more)) = hint_insensitive {
-        header = header.field(
-            "hint",
+        text.pop(); // Header::into_line always appends exactly one newline.
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
             format_args!(
-                "case_insensitive_matches={count}{}",
+                " hint=case_insensitive_matches={count}{}\n",
                 if more { "+" } else { "" }
             ),
         );
     }
-    let mut text = header.into_line();
     text.push_str(&walker.body);
-    ReadSideOutput::with_bounds(text, &SEARCH_BOUNDS, false)
+    let mut result = ReadSideOutput::with_bounds(text, &SEARCH_BOUNDS, false);
+    result.result_digest = Some(digest);
+    result
 }
 
 /// `path_escapes_workspace` for absolute, parent-relative, and symlinked-out
@@ -1167,6 +1208,7 @@ mod tests {
                 last_scanned: None,
                 stop: None,
                 depth_skipped: 0,
+                identity: Sha256::new(),
                 buffer: Vec::new(),
                 scratch: String::new(),
             };

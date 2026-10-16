@@ -143,10 +143,44 @@ pub(super) fn persist_model_turn(
         accounting,
         truncated,
         notice,
+        goal_notices,
+        reserved_goal_notices,
     } = turn;
     if message.role() != Role::Assistant {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
+    let mut goal_notice_bytes = 0_u64;
+    let mut unreserved_goal_notice_bytes = 0_u64;
+    if *reserved_goal_notices > goal_notices.len()
+        || goal_notices
+            .windows(2)
+            .any(|pair| pair[1].preceding_deliveries < pair[0].preceding_deliveries)
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    for (index, atom) in goal_notices.iter().enumerate() {
+        let text = &atom.text;
+        if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+            || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
+        {
+            return Err(SessionRuntimeError::InvalidGoal(
+                goals::GoalValidationError::Notice,
+            ));
+        }
+        let bytes = crate::measure_message(&Message::user(text.as_str()));
+        goal_notice_bytes = goal_notice_bytes.saturating_add(bytes);
+        if index >= *reserved_goal_notices {
+            unreserved_goal_notice_bytes = unreserved_goal_notice_bytes.saturating_add(bytes);
+        }
+    }
+    if goal_notice_bytes > MAX_CONTEXT_BYTES as u64 {
+        return Err(SessionRuntimeError::OutputTooLarge);
+    }
+    let goal_notice_json = if goal_notices.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(goal_notices)?)
+    };
     let content = message
         .content()
         .iter()
@@ -192,7 +226,14 @@ pub(super) fn persist_model_turn(
         usize::try_from(full_message_bytes.saturating_sub(already_reserved_text_bytes))
             .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
     if reserve_context {
-        reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
+        reserve_context_capacity(
+            &transaction,
+            claimed.identity.run_id,
+            non_text_bytes.saturating_add(
+                usize::try_from(unreserved_goal_notice_bytes)
+                    .map_err(|_| SessionRuntimeError::OutputTooLarge)?,
+            ),
+        )?;
     }
     // Completing the turn's message in the same transaction as the turn row
     // keeps message state and turn persistence atomic: after a crash, a
@@ -215,8 +256,8 @@ pub(super) fn persist_model_turn(
     transaction.execute(
         "INSERT INTO model_turns(
                  run_id, turn_ordinal, assistant_content_json, model_json,
-                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice, goal_notice
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             claimed.identity.run_id.to_string(),
             turn_ordinal,
@@ -227,6 +268,7 @@ pub(super) fn persist_model_turn(
             now,
             truncated,
             notice.map(crate::runtime::TurnNotice::as_str),
+            goal_notice_json,
         ],
     )?;
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
@@ -616,6 +658,8 @@ pub(super) fn record_routing_started(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
+    goal: Option<&qq_protocol::GoalSnapshot>,
+    goal_initial_notice: Option<&str>,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let changed = transaction.execute(
@@ -629,6 +673,7 @@ pub(super) fn record_routing_started(
     if changed != 1 {
         return Ok(None);
     }
+    goals::freeze_goal_claim(&transaction, identity, goal, goal_initial_notice)?;
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),

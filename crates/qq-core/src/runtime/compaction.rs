@@ -38,6 +38,7 @@ pub(crate) struct InRunCompactionRequest {
     /// summary it commits and re-bases the run's context reservation to the
     /// total in the marker's transaction (ADR-0048 § 1).
     pub(crate) retained_bytes: u64,
+    pub(crate) goal_notice: Option<Arc<str>>,
     pub(crate) budget: super::ChildBudget,
 }
 

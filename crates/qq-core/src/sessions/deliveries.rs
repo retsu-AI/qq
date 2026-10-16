@@ -80,10 +80,14 @@ pub(super) fn child_answer(
             "the sub-agent run exhausted its budget: {}",
             exhaustion.message
         ))?,
-        RunOutcome::Paused { pause } => error(format!(
-            "the sub-agent run paused on a provider fault after {} retries: {}",
-            pause.attempts, pause.message
-        ))?,
+        RunOutcome::Paused { pause } => error(match pause.as_ref() {
+            qq_protocol::RunPause::ProviderRetry {
+                attempts, message, ..
+            } => format!(
+                "the sub-agent run paused on a provider fault after {attempts} retries: {message}"
+            ),
+            qq_protocol::RunPause::NoProgress { .. } => format!("the sub-agent run {pause}"),
+        })?,
         RunOutcome::Failed { failure } => {
             error(format!("the sub-agent run failed: {}", failure.message))?
         }

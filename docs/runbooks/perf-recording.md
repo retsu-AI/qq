@@ -124,6 +124,18 @@ and real provider latency, and is a standalone diagnostic, not an H0 budget.
 `QQ_BENCH_ITERATIONS` accepts 1–100 (default 3). Comparing tails still needs the
 normal A/B and A/A discipline; three medians do not qualify flatness or a tail.
 
+`QQ_BENCH_GOAL=1` creates an active durable goal before submitting the scripted
+prompt; `0` is the default goal-less mode. Both use the same compiled plan and
+workload. Each receipt records the mode, work requests containing a real goal
+notice, and committed compactions. A bounded observer checks the first block
+of the first two messages in both modes; its cost is included in the gaps.
+This fixture has no interleaved specification edits and measures goal notice
+loading/persistence through the session runtime, not the goal driver, check
+runner, or standalone notice-render latency. Compare modes on the same saved
+optimized binary and retain a goal-less/goal-less control, source/binary
+identities, pressure and all samples. Such a comparison does not establish
+production-commit A/B compatibility or replace the quiet-host/H0 gates.
+
 The outage fixture uses a 1 ms recovery policy, **not** a real ten-minute
 outage. Resource samples are periodic, not an isolated continuous RSS peak.
 Event-envelope bytes are an explicitly labelled persisted-data proxy, not

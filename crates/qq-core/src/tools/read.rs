@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
 
@@ -124,21 +125,21 @@ pub(super) fn read_file(
         !arguments.ranges.is_empty() && (arguments.offset.is_some() || arguments.limit.is_some());
     let ranges = match parse_ranges(&arguments) {
         Ok(ranges) => ranges,
-        Err(error) => return ReadSideOutput::error(error),
+        Err(error) => return ReadSideOutput::refused(error),
     };
     if let Some(since) = &arguments.if_changed_since
         && !(since.len() == SHORT_HASH_LEN + 2
             && since.starts_with("h:")
             && since[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
-        return ReadSideOutput::error("invalid_if_changed_since: expected h:<12 hex digits>");
+        return ReadSideOutput::refused("invalid_if_changed_since: expected h:<12 hex digits>");
     }
     let loaded = match load(workspace, &arguments.path) {
         Ok(loaded) => loaded,
         Err(error) => return ReadSideOutput::error(error),
     };
     if cancelled.is_cancelled() {
-        return ReadSideOutput::error("tool execution was cancelled");
+        return ReadSideOutput::interrupted("tool execution was cancelled");
     }
     let update = loaded.hash.as_ref().map(|hash| FileStateUpdate {
         path: loaded.path.clone(),
@@ -439,6 +440,8 @@ fn lines(
             .saturating_add(total_lines.saturating_mul(width + 1))
             .min(body_budget),
     );
+    let mut identity = Sha256::new();
+    identity.update(b"qq-read-lines-result-v1\0");
     // Keep the header and a possible continuation marker inside the bound.
     let body_line_budget = READ_BOUNDS.max_lines - header_lines - 1;
     let mut body_lines = 0_usize;
@@ -452,7 +455,7 @@ fn lines(
     let mut number_buffer = String::with_capacity(width + 1);
     'ranges: for (index, range) in ranges.iter().enumerate() {
         if cancelled.is_cancelled() {
-            return ReadSideOutput::error("tool execution was cancelled");
+            return ReadSideOutput::interrupted("tool execution was cancelled");
         }
         let mut first_shown = None;
         let mut last_shown = 0_usize;
@@ -465,6 +468,11 @@ fn lines(
             if number < range.start {
                 continue;
             }
+            // Retain identity of the selected observed row before clipping.
+            identity.update(b"row\0");
+            identity.update((number as u64).to_le_bytes());
+            identity.update((line.len() as u64).to_le_bytes());
+            identity.update(line.as_bytes());
             if body_lines >= body_line_budget {
                 stopped = true;
                 line_stopped = true;
@@ -586,11 +594,15 @@ fn lines(
             MAX_READ_SCAN_BYTES / (1024 * 1024)
         );
     }
+    identity.update(b"rendered\0");
+    identity.update(out.as_bytes());
     let bounds = Bounds {
         max_line_bytes: READ_BOUNDS.max_bytes,
         ..READ_BOUNDS
     };
-    ReadSideOutput::with_bounds(out, &bounds, false)
+    let mut result = ReadSideOutput::with_bounds(out, &bounds, false);
+    result.result_digest = Some(identity.finalize().into());
+    result
 }
 
 /// `L<line> <kind> <name>` per item with two-space nesting derived from the

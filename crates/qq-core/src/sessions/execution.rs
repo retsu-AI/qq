@@ -85,6 +85,7 @@ fn session_prompt_prefix_key(
         tools: Some(crate::catalog::StaticFilter {
             spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
             search_history: true,
+            update_goal: claimed.goal.is_some(),
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
@@ -455,6 +456,10 @@ async fn prepare_execution(
         }
         let base = base
             .with_limits(claimed.limits, loaded.resolved_model().pricing.clone())
+            .with_goal(super::goals::GoalRunInput::new(
+                inner.store.clone(),
+                claimed,
+            ))
             .with_history(Arc::new(SessionHistorySearcher::new(
                 Arc::clone(inner),
                 claimed.identity.session_id,
@@ -2536,6 +2541,8 @@ async fn execute_started_run(
                 calls,
                 truncated,
                 notice,
+                goal_notices,
+                reserved_goal_notices,
             })) => {
                 if internal {
                     // Usage, cost, and provider-turn identity persist like
@@ -2584,6 +2591,8 @@ async fn execute_started_run(
                                 accounting: Some(accounting.snapshot()),
                                 truncated,
                                 notice,
+                                goal_notices,
+                                reserved_goal_notices,
                             },
                         )
                         .await
@@ -2671,6 +2680,8 @@ async fn execute_started_run(
                             accounting: Some(turn_accounting),
                             truncated,
                             notice,
+                            goal_notices,
+                            reserved_goal_notices,
                         },
                     )
                     .await
@@ -2693,6 +2704,44 @@ async fn execute_started_run(
                         .await;
                         return;
                     }
+                }
+            }
+            RunInput::Event(Some(RuntimeEvent::ToolCallUnexecuted {
+                id,
+                message,
+                interrupted,
+            })) => {
+                if internal {
+                    continue;
+                }
+                if checkpoint_enforced {
+                    tools_awaiting_checkpoint.insert(id);
+                }
+                let settled = if interrupted {
+                    inner
+                        .store
+                        .interrupt_unstarted_tool_call(&claimed, id, message)
+                        .await
+                } else {
+                    inner.store.deny_tool_call(&claimed, id, message).await
+                };
+                if let Err(error) = settled {
+                    tools_awaiting_checkpoint.remove(&id);
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the refused tool call", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+                if interrupted {
+                    inner.remove_approval(id);
                 }
             }
             // Approval transitions (including denials) are persisted and
@@ -3289,7 +3338,10 @@ async fn execute_started_run(
                     &mut tools_awaiting_checkpoint,
                     &mut checkpoint_in_flight,
                     &mut accounting,
-                    "paused on a provider fault",
+                    match pause.as_ref() {
+                        qq_protocol::RunPause::ProviderRetry { .. } => "paused on a provider fault",
+                        qq_protocol::RunPause::NoProgress { .. } => "paused for no progress",
+                    },
                 )
                 .await
                 {
@@ -4064,4 +4116,6 @@ pub(super) struct ModelTurnCommit {
     /// The runtime notice placed before this turn's request; assembly
     /// replays it before the turn (ADR-0054 § 2).
     pub(super) notice: Option<crate::runtime::TurnNotice>,
+    pub(super) goal_notices: Vec<crate::runtime::OrderedTurnNotice>,
+    pub(super) reserved_goal_notices: usize,
 }

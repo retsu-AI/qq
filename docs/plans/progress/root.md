@@ -707,6 +707,45 @@ Recorder review reproduces materially different included soak fixtures across ea
 
 Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
 
+### 2026-10-13 — G0/AC4 durable goals ownership (ENG-1045)
+
+Full-stack executor owns `.worktrees/autonomous-goals`, `feat/eng-1045-durable-goals`, stacked on recorder #297 at a775cf26. Reserve protocol 32→33, store schema45→46 and descriptor13→14 for one complete G0/AC4 PR; no unrelated slice may take these numbers in this stack. Owned protocol/commands/events/snapshots, session goal history/CAS/claim/transcript/compaction/settlement, serial goal tool/catalog/descriptor, loop guard and pause consumers in client/server/CLI/TUI, goal/autonomous ledgers and required architecture/protocol/tools/transcript amendments. ADR0049 remains Proposed until its implemented acceptance is reviewed; driver/check execution stays G2/G3. Goal-less provider requests must remain byte-identical after the descriptor identity bump. Existing AC3-source diagnostic samples/binaries remain the pre-change baseline; isolated recording38488091601 is still running and is not qualified evidence yet. New failing goal contract tests precede implementation. Independent store/session review and T13 paid ablation remain mandatory before default shipment; no paid execution authorized by this reservation.
+
+### 2026-10-13 — G0 managed check authorization boundary
+
+G0 extends its owned configuration-facing WorkspaceGrantAuthority with an exact-check policy validation future and typed errors; RuntimeFactory mapping in `src/runtime.rs` and bounded hard-deny matching in `qq-core/src/approval` are included in the same G0 PR. Resolve policy outside the store worker, carry failures past CommandId journal lookup, and apply CAS/exact command/Forbidden/policy validation before authority mutation. Goal-less commands perform no policy lookup. G3 retains execution-time rechecks; no protocol/schema/descriptor reservation beyond the existing G0 numbers. Root mapping and matcher are not implemented yet.
+
+### 2026-10-13 — G0 claim snapshot storage within reserved schema46
+
+Extend the existing unshipped G0 schema46 reservation with nullable `runs.goal_snapshot_json`, alongside goal_id/revision. Store the immutable reservation snapshot in the FULL RunStarted transaction; old goal-less rows stay NULL. No second schema/protocol bump and no deployed46 compatibility is claimed. G0 additionally owns explicit ClaimedRun construction in compaction/settlement fixtures and store start forwarding for this concrete claim seam.
+
+### 2026-10-13 — G0 immutable run provenance wire/storage
+
+Within reserved protocol33/schema46, G0 adds nullable runs.origin_json written by each run creation path, optional RunSnapshot/RunStarted/RunFinished origin and a small immutable RunSnapshot goal identity separate from provenance. Historical missing provenance remains unknown. Goal/GoalCheck wire variants round-trip without a driver or check executor. Terminal origin permits cold summary-only clients to identify in-run bookkeeping without a missed RunStarted. Consumer fixture changes belong to this G0 wire slice; no second version bump or independent shipping claim.
+### 2026-10-14 — AC3/main schema integration and G0 reservation shift
+
+Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previously assigned45 to its owner index; preserve main's existing migration and reserve46 for AC3's index. The local unshipped G0 reservation moves46→47 when its parent integrates; protocol33/descriptor14 remain the single G0/AC4 reservations. Root owns the schema/client/TUI/protocol/provider-guide conflict resolutions in `.worktrees/autonomous-core-stack` and qualification before push. No existing main45 data or approval flags may be reset, and no supported deployedG046 store is claimed.
+
+### 2026-10-14 — G0 exact durable notice atoms
+
+Extend unshipped schema47 with nullable exact-text `runs.goal_initial_notice`, `model_turns.goal_notice`, and `session_compactions.goal_notice` within the existing G0 owned claim/transcript/streaming/compaction paths. Freeze each bounded16KiB atom once and persist it in the existing FULL start, output or marker transaction; replay stored bytes rather than current goal/wallclock. Historical goal-less rows stayNULL, and immutable claimed authority stays separate from refreshed display. Same single protocol33/descriptor14 reservation; no supported oldG047 format or additional store hop is claimed. Root remains sole writer; independent storage/session review and goal-less byte parity required before publication.
+
+### 2026-10-14 — AC4 shared design amendment
+
+- Root owns the architecture.md amendment for the implemented observation guard: request-order duplicate barriers, exact quiet pause, separate result/spill identity and durable unstarted settlement. This is within the authorized autonomous-core/G0 stack; no crate boundary or new ADR number is introduced. Full qualification and T13 remain open.
+
+### 2026-10-14 — G0/AC4 recorder-parent merge
+
+- Root integrates published recorderb590823f (AC3e8c52db1/main7de) in the isolated goal worktree. Shared CI/performance files follow that settled parent exactly; ledger histories are retained. Doctor header keeps the goal group's protocol33/descriptor14/schema47. Combined qualification follows; no additional protocol/schema/ADR reservation.
+
+### 2026-10-14 — root authorization: AC4 external observation representation
+
+- Root writer reserves qq-core hosts/lib/run_loop, qq-mcp result rendering/tests and qq-harness MCP bridge for the concrete raw MCP result identity seam. Existing custom host result literals/call implementations stay compatible; default host calls must retain their existing future allocation. Producer digest remains off-wire, with unchanged preview/spill behavior. Independent read-only review and full qualification required; broader autonomous-core scope remains active.
+
+### 2026-10-14 — G0 publication integration with main process receipts
+
+- Main007adcda ships process-context receipts in schema47 and approved-read-image identity in descriptor14. Root moves unshipped goal storage to48 and goal-tool descriptor to15, preserving main47 migration, nullable historical receipts, and legacy13/14 digest domains. Protocol33 remains the goal wire bump. Later unshipped G2 migrations must move to49/50 when integrated.
+- Squash parents296/297 have identical source to the local parent; preserve main's intervening action-bias docs before reconciling their ancestry. Independent read-only integration review checks schema/descriptor/runtime and shell receipt+observation preservation. Fresh workspace qualification precedes publication; quiet-host/T13 and complete-plan acceptance remain open.
 ### 2026-10-14 — AB2 exact tool-turn projection ownership
 
 - Reserve ADR-0061 for the durable model-facing tool projection barrier.
@@ -742,6 +781,10 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   Checkpoint-enabled tool history without the exact barrier fails only its
   reservation; recorded descriptor identity avoids per-turn archive scans.
 
+### 2026-10-14 — G0 integration with deployed action-bias history
+
+- Root owns isolated fix/eng-1045-goal-main-integration at804948b0 integrating main62c65930. Preserve deployed schema47 process receipts,48 experimental root-stall notices,49 projections and50 root-stall codec; reserve goal foundation51 and driver52/53/54 for request proof/anchors/legacy work repair. Preserve main descriptor15 projection identity and G0 protocol33; no canonical field addition justifies another descriptor bump.
+- Merge conflicts are in progress. Driver review fixes are independently qualified against their original stack while full workspace run9712 remains live; no integration qualification or merge readiness claimed.
 ### 2026-10-14 — AB6 expanded execution-context ownership
 
 - User authorizes producer/context capture and verification, with historical
@@ -760,6 +803,27 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 
 - AB6 owns the tools/design cwd-contract amendment alongside shared Launch
   root-underflow validation and the export/recount aggregate-byte budget repair.
+
+### 2026-10-14 — G0 current-main conflict repair
+
+- Root integrates main `9868038c` in isolated `fix/eng-1045-goal-main-sync`; retain both G0 and AB6 ownership records. The only textual conflict was this ledger; Rust changes merged automatically.
+- Current-head workspace qualification follows before publication. Performance acceptance and the remaining autonomous-core scope stay open.
+
+- Current-main integration fixes the G0 pipe-read-failure test call for AB6's producer and call-id arguments. Independent read-only merge review approves; formatting, workspace Clippy and build pass. Full workspace tests currently encounter denied loopback socket binds (`Operation not permitted`); all-target test collection is running. This is not a green full-workspace result.
+
+- Complete `cargo test --workspace --no-fail-fast` reports 2,373 raw passes,163 failures,15 skips. Failure diagnostics:160 denied local socket binds (`Operation not permitted`) and3 OAuth `CallbackUnavailable` cases whose listener cannot start. Core alone1,141/8/4skips; its8 failures all deny loopback binds. Logs `g0-main-sync-all-targets.log`, `g0-main-sync-{clippy,build}.log`. No full-workspace pass is claimed, and workflow's do-not-push-red gate holds publication of local merge `0ed48eab`.
+
+### 2026-10-14 — G0 Git launcher design amendment
+
+- Root-owned architecture amendment records Git as opaque for managed goal-check denies, alongside the existing interpreter/launcher rule. Narrow correction for PR308's reproduced shell-alias bypass; no runtime boundary change.
+
+### 2026-10-14 — controlled recorder result visibility
+
+- Root reserves the existing turn recorder's completion output: emit its six existing A/B and A/A p95/median-change summary rows and existing per-invocation pressure snapshots into Actions logs after durable raw/summary files are written. No new benchmark, fixture, gate or calculation. Current artifact download is blocked by sandbox DNS while connector job logs are available; this makes future recordings concretely reviewable without another transport workaround.
+
+### 2026-10-14 — closed managed-check execution authority
+
+- Root reserves the architecture amendment and AGENTS enforcer row for G0's repeated opaque-execution bypass class. Nonempty managed denies now admit only inspected execution forms; unknown/path-qualified programs, environment assignments and shell login flags refuse authority. Deny selectors and ordinary approvals retain their contracts. Existing parameterized classifier regression enforces the closed default rather than another extensible denylist.
 
 ### 2026-10-14 — ENG-834 inherited performance gate repair
 
@@ -818,6 +882,14 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
   readiness synchronization, paused deadline and all behavioral assertions.
 
 
+### 2026-10-15 — PR308 current-main integration
+
+- Root prioritizes merge-readiness of PR308 then PR309 before publishing further autonomous-core slices. Integrate current main0b4f29e3 into the existing PR308 line; preserve both sides of this append-only ledger. This was the sole textual conflict; Rust and current feedback/performance gate changes merged automatically. Local qualification and publication remain required; no merge-ready or hosted update claim.
+
+- PR308 integration additionally owns xtask/src/legacy-sleeps.txt to transport the existing76 per-site exceptions across G0 line shifts. Compute locations from main-to-feature diff; require byte-identical path/function/sleep statement for every entry. No new exception, removed assertion, sleep addition or ceiling increase. Initial lint failure103reports stale/unregistered positions; qualification follows corrected locations.
+
+- Registry reconciliation also removes the one stale stopped-child-summary exception already absent from current main: main's file had77rows against its unchanged76ceiling. No added sleep statement exists in the G0 test diff. Preserve exact file/function/statement identity and per-group order for the remaining76sites; only locations change.
+
 ### 2026-10-15 — v0.1.7 preparation coordination (ENG-1054)
 
 - User requests reconciliation of release-relevant docs and current-state
@@ -830,3 +902,8 @@ Main7de994b1 includes AC17f3b76376 and schema45 approval_delegated. AC3 previous
 - ADR-0059 is an implemented proposal, not an empty reservation; add the
   missing ADR-0061 allocation. Formal acceptance is not inferred from merge.
   No version/contract bump, tag, generated changelog or guide-pin change.
+
+
+### 2026-10-15 — PR308 release-preparation main update
+
+- Current main advanced to9df32a5 (#316) during qualification. Import its exact remote tree and signed commit through read-only Git data, validating both object SHA values. Integrate docs-only changes: preserve published/open status corrections and all dated G0 evidence; keep goal branch protocol33/schema51 together with the release backup procedure; record strict projection and goal-capable catalog accurately. Legacy76sites retain feature-line locations. No Rust/runtime change; run docs/compatibility checks rather than repeating the unchanged runtime suite.

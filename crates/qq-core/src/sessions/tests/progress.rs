@@ -666,6 +666,8 @@ async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
                 accounting: None,
                 truncated: false,
                 notice: Some(crate::runtime::TurnNotice::RootStallReport),
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
             },
         )
         .await
@@ -719,7 +721,7 @@ async fn ab5_experimental_schema48_root_notice_survives_projection_upgrade() {
                     [],
                     |row| row.get(0),
                 )?;
-                assert_eq!(version, "50");
+                assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
                 let current_id: String = connection.query_row(
                     "SELECT value FROM metadata WHERE key='store_id'",
                     [],

@@ -75,6 +75,7 @@ macro_rules! identifier {
 identifier!(StoreId);
 identifier!(WorkspaceId);
 identifier!(SessionId);
+identifier!(GoalId);
 identifier!(RunId);
 identifier!(MessageId);
 identifier!(ToolCallId);

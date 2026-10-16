@@ -850,7 +850,54 @@ One durable run follows a guarded loop:
    publishing `RunStarted`. This unpublished coordination transaction may use
    WAL `synchronous=NORMAL`: an OS or power loss may discard only the
    reservation pointer, while the already-FULL-committed queued run remains
-   eligible. The store restores `synchronous=FULL` before returning.
+   eligible. The store restores `synchronous=FULL` before returning. The same
+   reservation query captures a session's live active goal into an immutable
+   claim. Preparation does not reload client edits or replacements. The first
+   existing FULL paid-admission transaction (routing, automatic compaction or
+   main start) freezes the prompt owner's optional goal identity, revision and
+   snapshot. SQL NULL means uncaptured; JSON null means captured without a goal.
+   Re-reservation after paid preparation uses this frozen claim rather than a
+   replacement live goal. Repeated admission cannot rebind it. Internal steps
+   have no direct goal binding or mutation capability; their owner supplies
+   attribution. This adds no transaction or store hop to goal-less execution.
+   Run creation separately records user, delegated task/audit, manual
+   compaction, between-run compaction or in-run compaction provenance with
+   its exact owner. Claims and start/finish events preserve that origin; terminal
+   events read the durable row even during panic or restart recovery. Snapshots
+   preserve origin across reopen; historical absence stays unknown. Clients
+   suppress in-run completion independently of reconnect timing. Between-run
+   automatic compaction retains its foreground idle/draft handoff when its
+   queued owner is cancelled.
+   The scoped model-goal writer verifies the running, uncancelled prompt's
+   durable goal binding and origin before editing its still-live active goal.
+   Checklist edits (24 items, 120 bytes each) and 1 KiB notes merge into the
+   current record; status and waits additionally require the claimed revision
+   and goal-run origin. The writer never changes objective, check, budget or
+   authorization. Achievement records bounded evidence and its proposing
+   run/revision as a pending audit, leaving status active until verification.
+   A specification edit clears that proposal. Record and `GoalUpdated` event
+   commit together before the write returns. Every goal write checks the shared
+   notice renderer against 16 KiB with a reserved 4 KiB check-output tail.
+   Runtime goal writes select cancellation, deadline and steering while waiting
+   for bounded store capacity.
+   The queue handoff returns an owned receipt without another await; admitted
+   work then waits for durability even when steering arrives or its receipt
+   is dropped. A steer stops the remaining ordered suffix before new admission.
+   Denying a completion check revokes its authority and pauses an active goal;
+   unrelated paused and blocked states remain stopped. Removing a check from
+   its approval pause leaves a user pause, so edits never implicitly resume it.
+   Under nonempty managed denies, completion checks use a closed set of
+   inspected execution forms: literal terminals, supported transparent
+   launchers and static shells, plus find/fd/sort without executor options.
+   Unknown programs, path-qualified executables, environment assignments and
+   shell login/startup flags refuse authority. Deny selectors still accept
+   arbitrary literal programs such as Cargo; only check execution is restricted.
+   This prevents configured runners and clients such as SQLite from hiding
+   command execution outside the parsed shell syntax. Empty managed policy and
+   ordinary approvals are unchanged. This is syntactic authority checking,
+   not an OS sandbox against replacement of trusted executables or inherited
+   operator configuration. Transparent nice/stdbuf options consume their
+   operands before examining the launched command.
 3. Prepare the runtime and conservatively plan the complete provider request
    under the acquired permit; cancellation remains durable and observable.
    The plan estimates input tokens at four request bytes per token (rounded
@@ -1115,6 +1162,57 @@ where a notice entered the conversation, not every attempt it covered: a
 report retried after a fault or an output-limit cut is placed once and
 stored once. An in-run compaction drops the notice and steering in front of
 its first kept turn along with the summarized span, on both sides.
+
+The run also tracks exact bounded tool observations. A consecutive identical
+executed triple contains the tool, canonical arguments and private result
+identity. After two identical errors or four identical triples, the next
+identical admission receives a not-executed result. Distinct read calls still
+overlap in bounded batches; a duplicate key closes the batch, and completed
+results enter observation history in request order even when their terminal
+events arrive in completion order. Argument hashes are computed once per
+ordinary turn admission.
+
+Novel triples reset quiet attempts. Successful mutations, actual checklist
+changes and applied steering clear both observation windows; spontaneous
+assistant text resets quiet attempts. Runtime-requested report text does not.
+Read-only shell commands and external read hints do not count as mutations;
+those hints never grant execution authority. Confirmed refusals consume quiet
+attempts without inventing executed triples; interruption consumes none, and
+unknown completion cannot prove a consecutive execution streak. The current
+and preceding256-attempt windows retain at most512triple hashes. At512quiet
+attempts, later calls receive durable not-executed results and the run pauses
+with `RunPause::NoProgress`. Report/final-answer and over-cap calls are excluded.
+
+Result identity stays separate from model previews and stored spill hashes.
+External hosts can return transient observation identity alongside the legacy
+rendered result. Legacy hosts retain their original call future without an
+adapter allocation. The MCP bridge uses this path to retain complete ordered
+content blocks and structured content before omitting images/audio or choosing
+text previews; response transport metadata is excluded. Hashing streams into
+constant-size state without another serialized response buffer. Producer
+identity remains off-wire and never grants tool authority.
+Successful observed process results reset the guard only when their executor
+receipt records Work. VerifiedRead receipts retain observation counting;
+lexical command recognition does not establish execution effects.
+Shell hashes observed stdout/stderr bytes separately before capture truncation,
+with terminal status and without elapsed time or hints. A pipe-read failure
+stops and reaps the process group and returns bounded partial output as an
+unobserved error; it never substitutes EOF or a confirmed execution triple. Read/search hash their
+selected raw rows before clipping, within existing scan limits. Search's
+optional case-insensitive advice does not change primary result identity.
+Fetch hashes the final URL, status, media type and bounded raw body before
+conversion or preview clipping; redirect counts do not manufacture novelty.
+Request validation and network policy produce refusal metadata, cancellation
+produces interruption metadata, and incomplete transport/deadline outcomes
+remain unobserved. A complete HTTP error response remains observed.
+Runtime-hosted delegation, history and spill argument/scope refusals likewise
+avoid executed triples; backing-store or child-registry failures remain
+unobserved. Completed missing or evicted spill lookups remain observations.
+Malformed write hashes and edit shapes, counts and hashes produce refusal
+metadata; cancellation before application produces interruption metadata. Completed file lookups and stale
+content checks remain observed outcomes. Unstarted refusals and interruptions
+persist as Denied and Interrupted tool states respectively, before their
+terminal events publish.
 
 Tools stay declared on the checkpoint turn: the persisted turn is the
 boundary, not the model's obedience. A call the model makes anyway is

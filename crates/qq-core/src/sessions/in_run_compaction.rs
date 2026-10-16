@@ -93,6 +93,7 @@ async fn compact_in_run(
         RunAccountingAccumulator::new(resolved_model.pricing.clone(), basis);
     let turn_cutoff = request.turn_cutoff;
     let retained_bytes = request.retained_bytes;
+    let goal_notice = request.goal_notice;
     let started = inner
         .store
         .start_in_run_compaction(prompt_run, resolved_model, turn_cutoff)
@@ -242,6 +243,8 @@ async fn compact_in_run(
                     .persist_in_run_summary_turn(
                         &compaction,
                         ModelTurnCommit {
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
                             turn_ordinal: ordinal,
                             message,
                             calls: Vec::new(),
@@ -316,6 +319,7 @@ async fn compact_in_run(
             Some(accounting),
             record_budget(resolved_model.context_window),
             retained_bytes,
+            goal_notice,
         )
         .await;
     match committed {
