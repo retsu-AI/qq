@@ -18,8 +18,9 @@ use std::{
 use qq_auth::{AuthError, CredentialStore};
 use qq_config::{ConfigSnapshot, McpServerConfig, McpTransport};
 use qq_core::{
-    ExternalToolHost, HostCallError, HostCallFuture, HostCatalog, HostReadiness,
-    HostShutdownFuture, HostTool, HostToolResult, RunCancellation, ToolHints,
+    ExternalToolHost, HostCallError, HostCallFuture, HostCallObservation, HostCatalog,
+    HostReadiness, HostShutdownFuture, HostTool, HostToolResult, ObservedHostToolResult,
+    RunCancellation, ToolHints,
     plan::{CredentialReference, McpServerDescriptor, McpTransportKind},
 };
 use qq_mcp::{McpBearer, McpCallFailure, McpManager, McpServerSettings, McpTransportSettings};
@@ -134,16 +135,33 @@ impl ExternalToolHost for WiredMcpRegistry {
     }
 
     fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture {
+        match self.call_observed(name, arguments, cancelled) {
+            HostCallObservation::Rendered(future) => future,
+            HostCallObservation::Observed(future) => {
+                Box::pin(async move { future.await.map(|observed| observed.result) })
+            }
+        }
+    }
+
+    fn call_observed(
+        &self,
+        name: String,
+        arguments: String,
+        cancelled: RunCancellation,
+    ) -> HostCallObservation {
         let manager = Arc::clone(&self.manager);
-        Box::pin(async move {
+        HostCallObservation::Observed(Box::pin(async move {
             // qq-mcp takes a plain future so it stays free of core's token
             // type; the token's wait is that future.
             let signal = Box::pin(async move { cancelled.cancelled().await });
             let outcome = manager.call(&name, &arguments, signal).await;
             match outcome.failure {
-                None => Ok(HostToolResult {
-                    content: outcome.content,
-                    is_error: outcome.is_error,
+                None => Ok(ObservedHostToolResult {
+                    result: HostToolResult {
+                        content: outcome.content,
+                        is_error: outcome.is_error,
+                    },
+                    result_digest: outcome.result_digest,
                 }),
                 Some(McpCallFailure::Timeout) => Err(HostCallError::Timeout),
                 Some(McpCallFailure::Cancelled) => Err(HostCallError::Cancelled),
@@ -159,7 +177,7 @@ impl ExternalToolHost for WiredMcpRegistry {
                 Some(McpCallFailure::UnknownTool) => Err(HostCallError::UnknownTool(name)),
                 Some(McpCallFailure::ShutDown) => Err(HostCallError::ShutDown),
             }
-        })
+        }))
     }
 
     fn readiness(&self) -> HostReadiness {

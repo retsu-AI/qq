@@ -103,8 +103,8 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-The current contracts are protocol 32, capabilities 1, plan descriptor 15,
-and session-store schema 50. Upgrade clients and restart long-running servers
+The current contracts are protocol 33, capabilities 1, plan descriptor 15,
+and session-store schema 55. Upgrade clients and restart long-running servers
 together: clients refuse a different server protocol. Store migration is
 forward-only; older binaries cannot open upgraded stores. Before upgrading,
 stop all QQ processes and back up the database and any adjacent WAL/SHM files

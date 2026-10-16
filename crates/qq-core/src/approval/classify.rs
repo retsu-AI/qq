@@ -149,7 +149,7 @@ pub(crate) fn classify_command(command: &str, workspace: Option<&std::path::Path
     // Every simple command anywhere in the tree, wrappers peeled.
     let mut commands = Vec::new();
     let mut expansion_overflow = false;
-    let mut collector = Collector {
+    let mut collector = Collector::<false> {
         source: command.as_bytes(),
         commands: &mut commands,
         expansion_overflow: &mut expansion_overflow,
@@ -247,8 +247,12 @@ fn launcher_words(program: &str, args: &[Option<String>]) -> Option<usize> {
             &["--preserve-status"],
             &["--signal=", "--kill-after="],
         ),
-        "nice" => (&["-n"], &[], &["--adjustment="]),
-        "stdbuf" => (&["-i", "-o", "-e"], &[], &["-i", "-o", "-e"]),
+        "nice" => (&["-n", "--adjustment"], &[], &["--adjustment="]),
+        "stdbuf" => (
+            &["-i", "-o", "-e", "--input", "--output", "--error"],
+            &[],
+            &["-i", "-o", "-e", "--input=", "--output=", "--error="],
+        ),
         "time" => (&[], &["-p"], &[]),
         "nohup" => (&[], &[], &[]),
         _ => return None,
@@ -334,6 +338,216 @@ fn parser() -> Parser {
         .set_language(language)
         .expect("the bundled bash grammar matches the tree-sitter runtime");
     parser
+}
+
+/// Matches managed denies against every visible shell command, including
+/// wrappers and nested shell payloads. Unresolved syntax refuses authority.
+/// This is independent of ordinary prefix grants and is used only for checks.
+#[must_use]
+pub fn goal_check_shell_denied(command: &str, denied_prefixes: &[String]) -> bool {
+    if denied_prefixes.is_empty() {
+        return false;
+    }
+    if command.len() > 1024
+        || denied_prefixes.len() > 256
+        || denied_prefixes.iter().map(String::len).sum::<usize>() > 16 * 1024
+    {
+        return true;
+    }
+    let Some(commands) = goal_policy_commands(command) else {
+        return true;
+    };
+    for simple in &commands {
+        if simple.argv.iter().any(Option::is_none)
+            || !simple.assignments.is_empty()
+            || simple
+                .argv
+                .first()
+                .and_then(Option::as_deref)
+                .is_some_and(|program| program.contains(['/', '\\']))
+        {
+            return true;
+        }
+        match simple.program() {
+            Some(
+                "xargs" | "ionice" | "chrt" | "taskset" | "setsid" | "unbuffer" | "command"
+                | "builtin" | "exec" | "sudo" | "doas" | "su" | "pkexec" | "watch" | "strace"
+                | "ltrace",
+            ) => return true,
+            Some("find")
+                if simple.args().iter().any(|arg| {
+                    matches!(
+                        arg.as_deref(),
+                        Some("-exec" | "-execdir" | "-ok" | "-okdir")
+                    )
+                }) =>
+            {
+                return true;
+            }
+            Some("fd" | "fdfind")
+                if simple.args().iter().any(|arg| {
+                    arg.as_deref().is_some_and(|arg| {
+                        matches!(arg, "--exec" | "--exec-batch" | "--list-details")
+                            || arg.starts_with("--exec=")
+                            || arg.starts_with("--exec-batch=")
+                            || (arg.starts_with('-')
+                                && !arg.starts_with("--")
+                                && arg.contains(['x', 'X', 'l']))
+                    })
+                }) =>
+            {
+                return true;
+            }
+            Some("sort")
+                if simple.args().iter().any(|arg| {
+                    arg.as_deref().is_some_and(|arg| {
+                        let option = arg.split('=').next().unwrap_or(arg);
+                        option.starts_with("--")
+                            && option.len() > 2
+                            && "--compress-program".starts_with(option)
+                    })
+                }) =>
+            {
+                return true;
+            }
+            Some(program @ ("timeout" | "nice" | "time" | "nohup" | "stdbuf"))
+                if launcher_words(program, simple.args()).is_none() =>
+            {
+                return true;
+            }
+            Some("env") => {
+                let mut args = simple.args().iter();
+                while let Some(Some(word)) = args.next() {
+                    match word.as_str() {
+                        "--" => break,
+                        "-i" | "--ignore-environment" => {}
+                        "-u" | "--unset" => {
+                            if args.next().is_none() {
+                                return true;
+                            }
+                        }
+                        word if word.starts_with("--unset=") => {}
+                        word if word.starts_with('-') => return true,
+                        word if word.contains('=') => return true,
+                        _ => break,
+                    }
+                }
+            }
+            Some("eval" | "source" | ".") => return true,
+            Some("sh" | "bash" | "zsh" | "dash" | "ksh") => {
+                let mut static_command = false;
+                for arg in simple.args() {
+                    match arg.as_deref() {
+                        Some("-c") => {
+                            static_command = true;
+                            break;
+                        }
+                        Some(
+                            "--norc" | "--noprofile" | "--posix" | "--restricted" | "--verbose"
+                            | "-e" | "-u" | "-v" | "-x",
+                        ) => {}
+                        _ => return true,
+                    }
+                }
+                if !static_command {
+                    return true;
+                }
+            }
+            Some(
+                "printf" | "echo" | "true" | "false" | "pwd" | "test" | "[" | "find" | "fd"
+                | "fdfind" | "sort" | "timeout" | "nice" | "time" | "nohup" | "stdbuf",
+            ) => {}
+            // Grant only execution forms inspected above. A new program may
+            // interpret configuration or arguments as commands of its own.
+            _ => return true,
+        }
+    }
+    for prefix in denied_prefixes {
+        let Some(prefix_commands) = goal_policy_commands(prefix) else {
+            return true;
+        };
+        let [prefix] = prefix_commands.as_slice() else {
+            return true;
+        };
+        if prefix.argv.is_empty() || prefix.argv.iter().any(Option::is_none) {
+            return true;
+        }
+        if commands.iter().any(|simple| {
+            simple.argv.len() >= prefix.argv.len()
+                && simple.argv.iter().zip(&prefix.argv).enumerate().all(
+                    |(index, (word, denied))| {
+                        if index == 0 {
+                            word.as_deref()
+                                .zip(denied.as_deref())
+                                .is_some_and(|(word, denied)| {
+                                    goal_program_name(word)
+                                        .eq_ignore_ascii_case(goal_program_name(denied))
+                                })
+                        } else {
+                            word == denied
+                        }
+                    },
+                )
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn goal_program_name(program: &str) -> &str {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let suffix = name.len().saturating_sub(4);
+    if name
+        .get(suffix..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".exe"))
+    {
+        &name[..suffix]
+    } else {
+        name
+    }
+}
+
+fn goal_policy_commands(source: &str) -> Option<Vec<SimpleCommand>> {
+    if source.len() > 1024 {
+        return None;
+    }
+    let mut parser = parser();
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    if !goal_policy_syntax_resolved(root, source.as_bytes()) {
+        return None;
+    }
+    let mut commands = Vec::new();
+    let mut unresolved = false;
+    Collector::<true> {
+        source: source.as_bytes(),
+        commands: &mut commands,
+        expansion_overflow: &mut unresolved,
+        nested_shells: 0,
+    }
+    .collect(root, false);
+    if unresolved { None } else { Some(commands) }
+}
+
+fn goal_policy_syntax_resolved(root: Node<'_>, source: &[u8]) -> bool {
+    // Unfamiliar escape spellings are prompt shapes in ordinary approval,
+    // but must not be mistaken for literal argv when enforcing hard denies.
+    let mut nodes = vec![root];
+    while let Some(node) = nodes.pop() {
+        if node.kind() == "ansi_c_string"
+            || (matches!(node.kind(), "word" | "string_content")
+                && source[node.byte_range()].contains(&b'\\'))
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        nodes.extend(node.named_children(&mut cursor));
+    }
+    true
 }
 
 /// `program` → `list`/`pipeline`/`command` chains of literal words only.
@@ -455,15 +669,19 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
     (literal, raw)
 }
 
-struct Collector<'a> {
+struct Collector<'a, const KEEP_LAUNCHERS: bool> {
     source: &'a [u8],
     commands: &'a mut Vec<SimpleCommand>,
     expansion_overflow: &'a mut bool,
     nested_shells: usize,
 }
 
-impl Collector<'_> {
+impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
     fn collect(&mut self, node: Node<'_>, nested: bool) {
+        if KEEP_LAUNCHERS && (*self.expansion_overflow || self.commands.len() >= 256) {
+            *self.expansion_overflow = true;
+            return;
+        }
         match node.kind() {
             "command" => self.simple(node, nested),
             "redirected_statement" => {
@@ -614,6 +832,10 @@ impl Collector<'_> {
     /// (judged Forbidden by the rules), and a launcher with a foreign option.
     /// `sh -c STRING` parses the string as a program of its own.
     fn peel(&mut self, command: SimpleCommand, depth: usize) {
+        if KEEP_LAUNCHERS && (*self.expansion_overflow || self.commands.len() >= 256) {
+            *self.expansion_overflow = true;
+            return;
+        }
         let program = command.program().map(str::to_owned);
         // `depth` wrappers are already peeled. Past the limit, a command that
         // would itself be peeled is too deep to see through: it is nested, so
@@ -674,6 +896,9 @@ impl Collector<'_> {
             .and_then(|program| launcher_words(program, command.args()))
         {
             if bare {
+                if KEEP_LAUNCHERS {
+                    self.commands.push(command.clone());
+                }
                 // The launcher changes how long, how nicely, or how buffered
                 // the inner command runs, never what it does, so it adds no
                 // tier.
@@ -947,7 +1172,10 @@ impl Collector<'_> {
                 for arg in args {
                     match arg {
                         Some(word)
-                            if word == "-c" || (word.starts_with('-') && word.contains('c')) =>
+                            if word == "-c"
+                                || (word.starts_with('-')
+                                    && word.contains('c')
+                                    && !word.starts_with("--")) =>
                         {
                             saw_c = true;
                         }
@@ -957,13 +1185,16 @@ impl Collector<'_> {
                                 let mut parser = parser();
                                 if let Some(tree) = parser.parse(word, None) {
                                     let root = tree.root_node();
-                                    let mut sub = Collector {
+                                    let mut sub = Collector::<KEEP_LAUNCHERS> {
                                         source: word.as_bytes(),
                                         commands: self.commands,
                                         expansion_overflow: self.expansion_overflow,
                                         nested_shells: self.nested_shells,
                                     };
-                                    if root.has_error() {
+                                    if root.has_error()
+                                        || (KEEP_LAUNCHERS
+                                            && !goal_policy_syntax_resolved(root, word.as_bytes()))
+                                    {
                                         sub.commands.push(SimpleCommand {
                                             argv: vec![None],
                                             redirects: Vec::new(),
@@ -974,6 +1205,8 @@ impl Collector<'_> {
                                     }
                                     sub.collect(root, true);
                                 }
+                            } else if KEEP_LAUNCHERS {
+                                *self.expansion_overflow = true;
                             }
                             break;
                         }
@@ -1001,12 +1234,263 @@ impl Collector<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shell_long_options_do_not_hide_forbidden_inline_commands() {
+        for command in [
+            "bash --rcfile /dev/null -c 'sudo true'",
+            "bash --norc -x -c 'sudo true'",
+            "bash --noprofile -c 'sudo true'",
+        ] {
+            assert_eq!(
+                classify_command(command, None).decision,
+                Decision::Forbidden,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_check_denies_cover_shell_members_wrappers_and_unresolved_commands() {
+        let prefixes = vec!["cargo test".to_owned()];
+        for command in [
+            "env -C ./ cargo test",
+            "env --chdir /tmp cargo test",
+            "xargs -a /dev/null cargo test",
+            "cargo test --workspace",
+            "true; cargo test",
+            "printf ok | cargo test",
+            "env X=1 cargo test",
+            "sh -c 'cargo test'",
+            "/usr/bin/cargo test",
+            "nice timeout 5 cargo test",
+            "env --split-string='cargo test'",
+            "sh -c \"$CHECK\"",
+            "c\\argo test",
+            "$'cargo' test",
+            "eval 'cargo test'",
+            "sh check.sh",
+            "bash --rcfile /dev/null -c 'cargo test'",
+            "bash --norc -x -c 'cargo test'",
+            "python3.12 -c '__import__(\"subprocess\").run([\"cargo\",\"test\"])'",
+            "PYTHON3.12.EXE -c 'import subprocess; subprocess.run([\"cargo\",\"test\"])'",
+            "cargo.exe test",
+            "python3 -c '__import__(\"subprocess\").run([\"cargo\",\"test\"])'",
+            "fish -c 'cargo test'",
+            "busybox sh -c 'cargo test'",
+            "(",
+        ] {
+            assert!(goal_check_shell_denied(command, &prefixes), "{command}");
+        }
+        for command in [
+            "printf safe",
+            "true",
+            "printf '$CHECK'",
+            "sh -c 'printf safe'",
+        ] {
+            assert!(!goal_check_shell_denied(command, &prefixes), "{command}");
+        }
+        assert!(goal_check_shell_denied("nice true", &["nice".to_owned()]));
+        assert!(goal_check_shell_denied(&"x".repeat(1025), &prefixes));
+        assert!(!goal_check_shell_denied("sh -c \"$CHECK\"", &[]));
+        let mut nested = "cargo test".to_owned();
+        for _ in 0..6 {
+            nested = format!("sh -c {}", serde_json::to_string(&nested).unwrap());
+        }
+        assert!(goal_check_shell_denied(&nested, &prefixes));
+        assert!(goal_check_shell_denied(
+            &format!("{}cargo test", "taskset ".repeat(40)),
+            &prefixes
+        ));
+    }
+
+    #[test]
+    fn goal_check_denies_cover_find_executors_and_launcher_operands() {
+        let denied = vec!["cargo test".to_owned()];
+        for command in [
+            "find . -maxdepth 0 -exec cargo test ';'",
+            "find . -execdir cargo test '{}' +",
+            "find . -ok cargo test ';'",
+            "find . -okdir cargo test ';'",
+            "env X=1 find . -exec cargo test ';'",
+            "find . -exec true ';' -exec cargo test ';'",
+            "fd --exec cargo test",
+            "fd -X cargo test",
+            "/usr/bin/nice --adjustment 5 cargo test",
+            "nice --adjustment=5 cargo test",
+            "nice -n 5 cargo test",
+            "stdbuf --output L cargo test",
+            "ionice --class 2 cargo test",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+        }
+        for command in [
+            "find . -name Cargo.toml",
+            "nice --adjustment 5 printf safe",
+            "stdbuf --output L printf safe",
+        ] {
+            assert!(!goal_check_shell_denied(command, &denied), "{command}");
+        }
+    }
+
+    #[test]
+    fn goal_check_denies_refuse_text_processing_command_interpreters() {
+        let denied = vec!["cargo test".to_owned()];
+        for command in [
+            r#"awk 'BEGIN {system("cargo test")}'"#,
+            r#"gawk 'BEGIN {system("cargo test")}'"#,
+            r#"mawk 'BEGIN {system("cargo test")}'"#,
+            r#"nawk 'BEGIN {system("cargo test")}'"#,
+            r#"/usr/bin/awk 'BEGIN {system("cargo test")}'"#,
+            "printf x | sed -n 'e cargo test'",
+            "sed -n '1e cargo test' Cargo.toml",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+        }
+        assert!(!goal_check_shell_denied(
+            r#"awk 'BEGIN {system("cargo test")}'"#,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn goal_check_denies_refuse_git_shell_aliases_and_external_subcommands() {
+        let denied = vec!["cargo test".to_owned()];
+        for command in [
+            "git -c alias.qqprobe='!cargo test' qqprobe",
+            "/usr/bin/git -c alias.qqprobe='!cargo test' qqprobe",
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.qqprobe GIT_CONFIG_VALUE_0='!cargo test' git qqprobe",
+            "git --config-env=alias.qqprobe=CHECK_ALIAS qqprobe",
+            "git qqprobe",
+            "nice git qqprobe",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+            assert!(
+                !goal_check_shell_denied(command, &[]),
+                "empty managed policy: {command}"
+            );
+        }
+        assert!(!goal_check_shell_denied("printf safe", &denied));
+    }
+
+    #[test]
+    fn goal_check_denies_cover_configured_helpers_and_implicit_executor_options() {
+        for (prefix, command) in [
+            (
+                "cargo test",
+                "tar --checkpoint=1 --checkpoint-action=exec='cargo test' -cf - --files-from /dev/null",
+            ),
+            (
+                "cargo test",
+                "tar -xf archive.tar --to-command='cargo test'",
+            ),
+            (
+                "cargo test",
+                "tar -I 'cargo test' -cf archive.tar README.md",
+            ),
+            (
+                "cargo test",
+                "tar --rsh-command='cargo test' -tf host:archive.tar",
+            ),
+            ("echo", "rg --pre echo '^README[.]md$' README.md"),
+            ("echo", "rg --pre=echo marker README.md"),
+            ("echo", "sort --compress-program=echo -S1b README.md"),
+            ("echo", "sort --compress-program echo -S1b README.md"),
+            ("echo", "sort --co=echo -S1b README.md"),
+            ("ls", "fd -l '^README[.]md$' ."),
+            ("ls", "fd --list-details '^README[.]md$' ."),
+            ("ls", "fd -Hl '^README[.]md$' ."),
+        ] {
+            assert!(
+                goal_check_shell_denied(command, &[prefix.to_owned()]),
+                "{command}"
+            );
+            assert!(
+                !goal_check_shell_denied(command, &[]),
+                "empty policy: {command}"
+            );
+        }
+        for command in ["sort README.md", "fd README .", "find . -name README.md"] {
+            assert!(
+                !goal_check_shell_denied(command, &["cargo test".to_owned()]),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_check_denies_refuse_uninspectable_execution_sources() {
+        let denied = vec!["cargo test".to_owned()];
+        for command in [
+            "sqlite3 -cmd '.shell cargo test' :memory:",
+            "sqlite3 :memory: '.system cargo test'",
+            "/usr/bin/sqlite3 -cmd '.shell cargo test' :memory:",
+            "SQLITE3.EXE -cmd '.shell cargo test' :memory:",
+            "psql -c '\\! cargo test'",
+            "mysql -e '\\! cargo test'",
+            "qq-custom-check --execute 'cargo test'",
+            "/tmp/printf 'cargo test'",
+            "./sort README.md",
+            "/tmp/nice printf safe",
+            "PATH=/tmp printf safe",
+            "env BASH_ENV=checks.sh bash -c 'printf safe'",
+            "bash -lc 'printf safe'",
+            "bash --login -c 'printf safe'",
+            "make --eval='all:;cargo test' all",
+            "gmake --eval='all:;cargo test' all",
+            "bmake -f checks.mk all",
+            "/usr/bin/make --eval='all:;cargo test' all",
+            "MAKE.EXE --eval='all:;cargo test' all",
+            "nice make --eval='all:;cargo test' all",
+            "ninja -f checks.ninja",
+            "samu -f checks.ninja",
+            "just --justfile checks.just all",
+            "task --taskfile checks.yml all",
+            "cmake --build build",
+            "ctest --test-dir build",
+            "cargo --config 'alias.qqprobe=\"test\"' qqprobe",
+            "npm exec -- cargo test",
+            "npx cargo test",
+            "pnpm exec cargo test",
+            "yarn exec cargo test",
+            "uv run -- cargo test",
+            "poetry run cargo test",
+            "pipx run cargo test",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+            assert!(
+                !goal_check_shell_denied(command, &[]),
+                "empty policy: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_check_denies_match_literal_word_boundaries_through_launchers() {
+        let denied = vec!["printf test".to_owned()];
+        for command in [
+            "printf test",
+            "nice --adjustment 5 printf test",
+            "stdbuf --output L printf test",
+            "sh -c 'printf test'",
+        ] {
+            assert!(goal_check_shell_denied(command, &denied), "{command}");
+        }
+        for command in [
+            "printf testify",
+            "nice --adjustment 5 printf testify",
+            "stdbuf --output L printf testify",
+            "sh -c 'printf testify'",
+        ] {
+            assert!(!goal_check_shell_denied(command, &denied), "{command}");
+        }
+    }
+
     fn commands(command: &str) -> Vec<Vec<Option<String>>> {
         let mut parser = parser();
         let tree = parser.parse(command, None).unwrap();
         let mut out = Vec::new();
         let mut expansion_overflow = false;
-        let mut collector = Collector {
+        let mut collector = Collector::<false> {
             source: command.as_bytes(),
             commands: &mut out,
             expansion_overflow: &mut expansion_overflow,

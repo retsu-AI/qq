@@ -547,6 +547,22 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
+    SetGoal {
+        session_id: SessionId,
+        objective: String,
+        #[serde(default)]
+        check: Option<crate::GoalCheck>,
+        budget: Box<crate::GoalBudget>,
+        #[serde(default)]
+        expected: Option<crate::GoalIdentity>,
+        #[serde(default)]
+        replace: bool,
+    },
+    GoalControl {
+        session_id: SessionId,
+        expected: crate::GoalIdentity,
+        action: crate::GoalControl,
+    },
     CancelSideQuestion {
         side_question_id: RunId,
     },
@@ -683,6 +699,8 @@ impl SessionCommand {
     #[must_use]
     pub const fn kind(&self) -> SessionCommandKind {
         match self {
+            Self::SetGoal { .. } => SessionCommandKind::SetGoal,
+            Self::GoalControl { .. } => SessionCommandKind::GoalControl,
             Self::CancelSideQuestion { .. } => SessionCommandKind::CancelSideQuestion,
             Self::SubmitSideQuestion { .. } => SessionCommandKind::SubmitSideQuestion,
             Self::ResolveWorkspace { .. } => SessionCommandKind::ResolveWorkspace,
@@ -709,6 +727,8 @@ impl SessionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCommandKind {
+    SetGoal,
+    GoalControl,
     CancelSideQuestion,
     SubmitSideQuestion,
     ResolveWorkspace,
@@ -730,7 +750,9 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
+        Self::SetGoal,
+        Self::GoalControl,
         Self::CancelSideQuestion,
         Self::SubmitSideQuestion,
         Self::ResolveWorkspace,
@@ -758,7 +780,8 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn creates_work(self) -> bool {
         match self {
-            Self::SubmitSideQuestion
+            Self::SetGoal
+            | Self::SubmitSideQuestion
             | Self::ResolveWorkspace
             | Self::CreateSession
             | Self::SubmitPrompt
@@ -769,7 +792,8 @@ impl SessionCommandKind {
             | Self::SetSessionProfile
             | Self::SetSessionEffort
             | Self::CompactSession => true,
-            Self::CancelSideQuestion
+            Self::GoalControl
+            | Self::CancelSideQuestion
             | Self::CancelRun
             | Self::RespondToolApproval
             | Self::DeleteSession
@@ -784,6 +808,8 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
+            Self::SetGoal => "/v1/sessions/goal",
+            Self::GoalControl => "/v1/sessions/goal/control",
             Self::CancelSideQuestion => "/v1/sessions/side-questions/cancel",
             Self::SubmitSideQuestion => "/v1/sessions/side-questions",
             Self::ResolveWorkspace => "/v1/workspaces/resolve",
@@ -807,8 +833,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 17] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 17];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 19] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 19];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -836,6 +862,15 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
+    GoalUpdated {
+        session_id: SessionId,
+        goal: Box<crate::GoalSnapshot>,
+    },
+    GoalCleared {
+        session_id: SessionId,
+        goal_id: crate::GoalId,
+        revision: u32,
+    },
     SideQuestionCancelled {
         side_question_id: RunId,
     },
@@ -1173,19 +1208,176 @@ pub enum RunOutcome {
     },
 }
 
-/// Why turn recovery stopped retrying.
+#[cfg(test)]
+mod pause_contract_tests {
+    use super::*;
+
+    #[test]
+    fn reason_tagged_pauses_round_trip_without_borrowing_provider_fields() {
+        let pauses = [
+            RunPause::ProviderRetry {
+                kind: RunFailureKind::ProviderTransport,
+                message: "reset".to_owned(),
+                turn_ordinal: 7,
+                attempts: 5,
+            },
+            RunPause::NoProgress {
+                turn_ordinal: 515,
+                slices: 2,
+                calls: 514,
+            },
+        ];
+        for pause in pauses {
+            let value = serde_json::to_value(&pause).unwrap();
+            match &pause {
+                RunPause::ProviderRetry { .. } => assert_eq!(value["reason"], "provider_retry"),
+                RunPause::NoProgress { .. } => {
+                    assert_eq!(value["reason"], "no_progress");
+                    assert!(value.get("kind").is_none());
+                    assert!(value.get("message").is_none());
+                    assert!(value.get("attempts").is_none());
+                }
+            }
+            assert_eq!(serde_json::from_value::<RunPause>(value).unwrap(), pause);
+        }
+    }
+
+    #[test]
+    fn historical_provider_pause_decodes_but_new_writes_are_reason_tagged() {
+        let pause: RunPause = serde_json::from_value(serde_json::json!({
+            "kind":"provider_transport", "message":"reset", "turn_ordinal":7, "attempts":5
+        }))
+        .unwrap();
+        assert!(matches!(pause, RunPause::ProviderRetry { attempts: 5, .. }));
+        assert_eq!(
+            serde_json::to_value(&pause).unwrap()["reason"],
+            "provider_retry"
+        );
+    }
+
+    #[test]
+    fn unknown_and_mixed_pause_reasons_are_refused() {
+        for value in [
+            serde_json::json!({"reason":"future", "kind":"provider_transport", "message":"reset", "turn_ordinal":7, "attempts":5}),
+            serde_json::json!({"reason":"no_progress", "turn_ordinal":7, "slices":2, "calls":514, "kind":"provider_transport"}),
+            serde_json::json!({"reason":"provider_retry", "kind":"provider_transport", "message":"reset", "turn_ordinal":7, "attempts":5, "calls":514}),
+        ] {
+            assert!(serde_json::from_value::<RunPause>(value).is_err());
+        }
+    }
+}
+
+/// Why execution paused, separate from a terminal failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "reason",
+    rename_all = "snake_case",
+    deny_unknown_fields,
+    from = "StoredRunPause"
+)]
+pub enum RunPause {
+    ProviderRetry {
+        kind: RunFailureKind,
+        message: String,
+        turn_ordinal: u32,
+        attempts: u16,
+    },
+    NoProgress {
+        turn_ordinal: u32,
+        slices: u32,
+        calls: u64,
+    },
+}
+
+impl std::fmt::Display for RunPause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderRetry {
+                message,
+                turn_ordinal,
+                attempts,
+                ..
+            } => write!(
+                formatter,
+                "paused after {attempts} retries of turn {turn_ordinal} on a provider fault: {message}"
+            ),
+            Self::NoProgress {
+                turn_ordinal,
+                slices,
+                calls,
+            } => write!(
+                formatter,
+                "paused for no progress at turn {turn_ordinal} after {calls} eligible tool attempts across {slices} slices"
+            ),
+        }
+    }
+}
+
+// Persisted pre-33 outcomes have no reason tag. New serialization always uses
+// the public tagged enum; legacy decoding is only the old provider shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRunPause {
+    Tagged(TaggedRunPause),
+    Historical(HistoricalProviderPause),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+enum TaggedRunPause {
+    ProviderRetry {
+        kind: RunFailureKind,
+        message: String,
+        turn_ordinal: u32,
+        attempts: u16,
+    },
+    NoProgress {
+        turn_ordinal: u32,
+        slices: u32,
+        calls: u64,
+    },
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunPause {
-    /// The failure kind of the last attempt, always a provider kind that
-    /// recovery considers transient.
-    pub kind: RunFailureKind,
-    /// The last attempt's error text.
-    pub message: String,
-    /// Turn the recovery was retrying (1-based).
-    pub turn_ordinal: u32,
-    /// Retries spent on that turn before pausing.
-    pub attempts: u16,
+struct HistoricalProviderPause {
+    kind: RunFailureKind,
+    message: String,
+    turn_ordinal: u32,
+    attempts: u16,
+}
+
+impl From<StoredRunPause> for RunPause {
+    fn from(stored: StoredRunPause) -> Self {
+        match stored {
+            StoredRunPause::Tagged(TaggedRunPause::ProviderRetry {
+                kind,
+                message,
+                turn_ordinal,
+                attempts,
+            })
+            | StoredRunPause::Historical(HistoricalProviderPause {
+                kind,
+                message,
+                turn_ordinal,
+                attempts,
+            }) => Self::ProviderRetry {
+                kind,
+                message,
+                turn_ordinal,
+                attempts,
+            },
+            StoredRunPause::Tagged(TaggedRunPause::NoProgress {
+                turn_ordinal,
+                slices,
+                calls,
+            }) => Self::NoProgress {
+                turn_ordinal,
+                slices,
+                calls,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1360,6 +1552,12 @@ pub struct PendingHold {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    /// Immutable creation provenance. Missing on historical records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RunOrigin>,
+    /// Immutable goal binding, independent of authority granted by origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::GoalIdentity>,
     pub id: RunId,
     pub session_id: SessionId,
     pub status: RunStatus,
@@ -1403,6 +1601,47 @@ pub struct RunSnapshot {
     /// on settled runs that were submitted with one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<Box<FinalOutput>>,
+}
+
+/// Why a run was created; model arguments cannot supply this authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunOrigin {
+    UserPrompt {},
+    Delegated {
+        owner_run_id: RunId,
+        purpose: SessionPurpose,
+    },
+    ManualCompaction {},
+    AutoCompaction {
+        owner_run_id: RunId,
+    },
+    InRunCompaction {
+        owner_run_id: RunId,
+    },
+    Goal {
+        goal_id: crate::GoalId,
+        revision: u32,
+    },
+    GoalCheck {
+        goal_id: crate::GoalId,
+        revision: u32,
+    },
+}
+
+impl RunOrigin {
+    #[must_use]
+    pub const fn is_in_run_compaction(self) -> bool {
+        match self {
+            Self::InRunCompaction { .. } => true,
+            Self::AutoCompaction { .. }
+            | Self::UserPrompt { .. }
+            | Self::Delegated { .. }
+            | Self::ManualCompaction { .. }
+            | Self::Goal { .. }
+            | Self::GoalCheck { .. } => false,
+        }
+    }
 }
 
 /// How the root run's final answer was audited before it was presented as
@@ -1937,6 +2176,8 @@ pub struct SideQuestionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<Box<crate::GoalSnapshot>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub side_questions: Vec<SideQuestionSnapshot>,
     pub summary: SessionSummary,
@@ -2026,6 +2267,14 @@ pub struct SessionEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    GoalUpdated {
+        goal: Box<crate::GoalSnapshot>,
+    },
+    GoalCleared {
+        session_id: SessionId,
+        goal_id: crate::GoalId,
+        revision: u32,
+    },
     SideQuestionUpdated {
         side_question: Box<SideQuestionSnapshot>,
     },
@@ -2051,6 +2300,8 @@ pub enum SessionEvent {
         queue_position: u16,
     },
     RunStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<RunOrigin>,
         session: Box<SessionSummary>,
         run_id: RunId,
         /// Fixed behavioral identity of the run. Absent only on envelopes
@@ -2303,6 +2554,8 @@ pub enum SessionEvent {
         context_tokens: Option<u64>,
     },
     RunFinished {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<RunOrigin>,
         session: Box<SessionSummary>,
         run_id: RunId,
         outcome: RunOutcome,
@@ -2425,6 +2678,7 @@ mod tests {
         assert_eq!(
             creating,
             [
+                SessionCommandKind::SetGoal,
                 SessionCommandKind::SubmitSideQuestion,
                 SessionCommandKind::ResolveWorkspace,
                 SessionCommandKind::CreateSession,
@@ -2441,6 +2695,7 @@ mod tests {
         assert_eq!(
             control,
             [
+                SessionCommandKind::GoalControl,
                 SessionCommandKind::CancelSideQuestion,
                 SessionCommandKind::CancelRun,
                 SessionCommandKind::RespondToolApproval,
@@ -3680,6 +3935,7 @@ mod tests {
         let workspace_id = id::<WorkspaceId>(2);
         let session_id = id::<SessionId>(3);
         let event = SessionEvent::RunFinished {
+            origin: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3916,6 +4172,7 @@ mod tests {
         );
 
         let finished = SessionEvent::RunFinished {
+            origin: None,
             session: Box::new(SessionSummary {
                 model_is_fallback: false,
                 activity: None,
@@ -3963,6 +4220,8 @@ mod tests {
         );
 
         let run = RunSnapshot {
+            origin: None,
+            goal: None,
             id: id(4),
             session_id: id(3),
             status: RunStatus::Completed,
@@ -4158,7 +4417,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 32);
+        assert_eq!(crate::PROTOCOL_VERSION, 33);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -4266,7 +4525,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 17);
+        assert_eq!(SessionCommandKind::ALL.len(), 19);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),
@@ -4413,6 +4672,7 @@ mod tests {
         };
         assert!(plan.is_none());
         let started = serde_json::to_value(SessionEvent::RunStarted {
+            origin: None,
             session: serde_json::from_value(serde_json::json!({
                 "id": id::<SessionId>(3), "workspace_id": id::<WorkspaceId>(2),
                 "title": "s", "status": "idle", "queued_prompts": 0, "updated_at_ms": 1
@@ -4429,5 +4689,93 @@ mod tests {
             serde_json::to_value(BudgetLimitKind::ToolOutputBytes).unwrap(),
             "tool_output_bytes"
         );
+    }
+    #[test]
+    fn run_lifecycle_events_preserve_origin_without_guessing_legacy_rows() {
+        let session = serde_json::json!({
+            "id":id::<SessionId>(3), "workspace_id":id::<WorkspaceId>(2),
+            "title":"s", "status":"idle", "queued_prompts":0, "updated_at_ms":1
+        });
+        let origin = serde_json::to_value(RunOrigin::InRunCompaction {
+            owner_run_id: id(4),
+        })
+        .unwrap();
+        for kind in ["run_started", "run_finished"] {
+            let mut legacy =
+                serde_json::json!({"type":kind,"session":session,"run_id":id::<RunId>(5)});
+            if kind == "run_finished" {
+                legacy["outcome"] = serde_json::to_value(RunOutcome::Completed).unwrap();
+            }
+            let unknown: SessionEvent = serde_json::from_value(legacy.clone()).unwrap();
+            assert!(
+                serde_json::to_value(unknown)
+                    .unwrap()
+                    .get("origin")
+                    .is_none()
+            );
+            legacy["origin"] = origin.clone();
+            let known: SessionEvent = serde_json::from_value(legacy).unwrap();
+            assert_eq!(
+                serde_json::to_value(known).unwrap()["origin"],
+                origin,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_origins_round_trip_without_conferring_goal_authority_on_prompts() {
+        let goal_id = crate::GoalId::from_bytes([0x51; 16]);
+        let owner_run_id = RunId::from_bytes([0x52; 16]);
+        let origins = [
+            RunOrigin::UserPrompt {},
+            RunOrigin::Delegated {
+                owner_run_id,
+                purpose: SessionPurpose::Task,
+            },
+            RunOrigin::Delegated {
+                owner_run_id,
+                purpose: SessionPurpose::Audit,
+            },
+            RunOrigin::ManualCompaction {},
+            RunOrigin::AutoCompaction { owner_run_id },
+            RunOrigin::InRunCompaction { owner_run_id },
+            RunOrigin::Goal {
+                goal_id,
+                revision: 3,
+            },
+            RunOrigin::GoalCheck {
+                goal_id,
+                revision: 3,
+            },
+        ];
+        for origin in origins {
+            let mut value = serde_json::to_value(origin).unwrap();
+            assert_eq!(
+                serde_json::from_value::<RunOrigin>(value.clone()).unwrap(),
+                origin
+            );
+            value["unexpected_authority"] = true.into();
+            assert!(serde_json::from_value::<RunOrigin>(value).is_err());
+        }
+        let legacy = serde_json::json!({"id":owner_run_id,"session_id":SessionId::from_bytes([0x53;16]),
+            "status":"completed"});
+        let historical = serde_json::from_value::<RunSnapshot>(legacy.clone()).unwrap();
+        assert_eq!(historical.origin, None);
+        assert_eq!(historical.goal, None);
+        assert_eq!(serde_json::to_value(historical).unwrap(), legacy);
+        let mut bound = legacy;
+        bound["origin"] = serde_json::json!({"type":"user_prompt"});
+        bound["goal"] = serde_json::json!({"goal_id":goal_id,"revision":3});
+        let prompt = serde_json::from_value::<RunSnapshot>(bound.clone()).unwrap();
+        assert_eq!(prompt.origin, Some(RunOrigin::UserPrompt {}));
+        assert_eq!(
+            prompt.goal,
+            Some(crate::GoalIdentity {
+                goal_id,
+                revision: 3
+            })
+        );
+        assert_eq!(serde_json::to_value(prompt).unwrap(), bound);
     }
 }

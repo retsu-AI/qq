@@ -4,7 +4,7 @@ use crate::tools::process_context::{
     UnverifiedReason, arguments_digest,
 };
 
-async fn process_call_fixture(
+pub(super) async fn process_call_fixture(
     store: &Store,
     path: &Path,
 ) -> (ClaimedRun, ToolCallId, ExecutionContextReceipt) {
@@ -25,6 +25,7 @@ async fn process_call_fixture(
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -43,6 +44,8 @@ async fn process_call_fixture(
                 accounting: None,
                 truncated: false,
                 notice: None,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
             },
         )
         .await
@@ -243,7 +246,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 |row| row.get::<_, String>(0)
             )
             .unwrap(),
-        "50"
+        crate::sessions::store::STORE_SCHEMA_VERSION.to_string()
     );
 }
 
@@ -285,6 +288,6 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
     drop(connection);
     assert!(
         open_database(&path).is_err(),
-        "schema47 without receipts must not be reinterpreted"
+        "current schema without receipts must not be reinterpreted"
     );
 }

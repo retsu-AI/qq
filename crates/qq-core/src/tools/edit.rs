@@ -213,28 +213,28 @@ pub(super) fn edit_file(
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     if arguments.edits.is_empty() {
-        return ToolOutput::error("invalid_edit: edits must not be empty");
+        return ToolOutput::refused("invalid_edit: edits must not be empty");
     }
     if arguments.edits.len() > MAX_EDITS {
-        return ToolOutput::error(format!("invalid_edit: at most {MAX_EDITS} edits per call"));
+        return ToolOutput::refused(format!("invalid_edit: at most {MAX_EDITS} edits per call"));
     }
     // Phase 1, no lock: resolve, verify currency, and apply every edit in
     // memory in order, so later edits see earlier results.
     let mut planned: BTreeMap<String, Planned> = BTreeMap::new();
     for (index, edit) in arguments.edits.iter().enumerate() {
         if cancelled.is_cancelled() {
-            return ToolOutput::error("tool execution was cancelled");
+            return ToolOutput::interrupted("tool execution was cancelled");
         }
         let form = match edit.form() {
             Ok(form) => form,
-            Err(error) => return ToolOutput::error(format!("edit {index}: {error}")),
+            Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
         };
         if let Some(if_hash) = &edit.if_hash
             && !(if_hash.len() == 14
                 && if_hash.starts_with("h:")
                 && if_hash[2..].bytes().all(|b| b.is_ascii_hexdigit()))
         {
-            return ToolOutput::error(format!(
+            return ToolOutput::refused(format!(
                 "edit {index}: invalid_if_hash: expected h:<12 hex digits>"
             ));
         }
@@ -450,7 +450,7 @@ pub(super) fn edit_file(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ToolOutput::interrupted("tool execution was cancelled");
     }
     for file in planned.values() {
         let current = match read_editable(workspace, &file.path) {
@@ -1498,6 +1498,33 @@ mod tests {
             fs::read_to_string(directory.path().join("b.txt")).unwrap(),
             "beta\nbeta\n"
         );
+        assert_eq!(state.recorded("a.txt"), None);
+    }
+
+    #[test]
+    fn cancellation_after_edit_planning_does_not_apply_or_observe_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("a.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let cancellation = RunCancellation::new();
+        let cancel_after_plan = cancellation.clone();
+        super::on_edit_planned(workspace.path(), move || cancel_after_plan.cancel());
+        let result = execute_blocking(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
+            &ToolCancellation::new(cancellation),
+        );
+        assert_eq!(
+            result.disposition,
+            crate::tools::ResultDisposition::Interrupted
+        );
+        assert!(result.is_error);
+        assert!(result.file_states.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\nbeta\n");
         assert_eq!(state.recorded("a.txt"), None);
     }
 

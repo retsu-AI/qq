@@ -193,6 +193,21 @@ impl SessionStore {
             SessionEvent::SessionUpdated { session } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
             }
+            SessionEvent::GoalUpdated { goal } => {
+                if let Some(view) = self.get_mut(&session_id) {
+                    view.goal = Some(goal.clone());
+                }
+            }
+            SessionEvent::GoalCleared { goal_id, .. } => {
+                if let Some(view) = self.get_mut(&session_id)
+                    && view
+                        .goal
+                        .as_ref()
+                        .is_some_and(|goal| goal.goal_id == *goal_id)
+                {
+                    view.goal = None;
+                }
+            }
             SessionEvent::SessionDeleted { session_id } => {
                 effects.extend(self.remove_session(*session_id, context));
             }
@@ -206,14 +221,18 @@ impl SessionStore {
                 session,
                 run_id,
                 plan,
+                origin,
             } => {
                 self.upsert_summary((**session).clone(), context.models, 0);
                 if let Some(view) = self.get_mut(&session_id) {
                     let stats = view.runs.entry(*run_id).or_default();
                     stats.started_at_ms = Some(envelope.occurred_at_ms);
-                    stats.owned_step = session
-                        .active_run_id
-                        .is_some_and(|active| active != *run_id);
+                    stats.origin = *origin;
+                    stats.owned_step = origin
+                        .is_some_and(qq_protocol::RunOrigin::is_in_run_compaction)
+                        || session
+                            .active_run_id
+                            .is_some_and(|active| active != *run_id);
                     stats.plan = plan.as_deref().map(plan_label);
                     if let Some(messages) = view.messages.as_mut() {
                         for message in messages.iter_mut().filter(|message| {
@@ -686,6 +705,7 @@ impl SessionStore {
                 run_id,
                 outcome,
                 usage,
+                origin,
                 ..
             } => {
                 let shown = context.focused == Some(session_id);
@@ -697,9 +717,10 @@ impl SessionStore {
                 // prompt cancelled or interrupted behind the active run. No
                 // attention, unread count or notice, and the active run's
                 // live tool and approval state stay.
-                let owned_step = session
-                    .active_run_id
-                    .is_some_and(|active| active != *run_id)
+                let owned_step = origin.is_some_and(qq_protocol::RunOrigin::is_in_run_compaction)
+                    || session
+                        .active_run_id
+                        .is_some_and(|active| active != *run_id)
                     || self
                         .get(&session_id)
                         .and_then(|view| view.runs.get(run_id))
@@ -728,6 +749,8 @@ impl SessionStore {
                     view.unread += 1;
                 }
                 let stats = view.runs.entry(*run_id).or_default();
+                stats.origin = (*origin).or(stats.origin);
+                stats.owned_step |= owned_step;
                 stats.finished_at_ms = Some(envelope.occurred_at_ms);
                 stats.outcome = Some(outcome.clone());
                 stats.usage = *usage;
@@ -818,13 +841,21 @@ impl SessionStore {
                         });
                     }
                     RunOutcome::Paused { pause } => {
+                        let text = match pause.as_ref() {
+                            qq_protocol::RunPause::ProviderRetry {
+                                attempts,
+                                turn_ordinal,
+                                message,
+                                ..
+                            } => format!(
+                                "paused after {attempts} retries of turn {turn_ordinal}: {message}"
+                            ),
+                            qq_protocol::RunPause::NoProgress { .. } => pause.to_string(),
+                        };
                         effects.push(StateEffect::Notice {
                             session: Some(session_id),
                             level: NoticeLevel::Warning,
-                            text: format!(
-                                "paused after {} retries of turn {}: {}; send a prompt to continue",
-                                pause.attempts, pause.turn_ordinal, pause.message
-                            ),
+                            text: format!("{text}; send a prompt to continue"),
                         });
                     }
                     RunOutcome::Completed | RunOutcome::Cancelled | RunOutcome::Interrupted => {}

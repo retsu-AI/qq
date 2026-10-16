@@ -2312,7 +2312,27 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
         )
         .await
         .unwrap();
-    let observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    let mut observed = collect_until(&mut harness.events, finished_for(compaction)).await;
+    if !observed
+        .iter()
+        .any(|event| matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==prompt))
+    {
+        observed.extend(collect_until(&mut harness.events, finished_for(prompt)).await);
+    }
+    for run in [prompt, compaction] {
+        assert!(observed.iter().any(|event|matches!(event.event,SessionEvent::RunFinished {run_id,outcome:RunOutcome::Cancelled,..} if run_id==run)),"both owner and helper settle cancelled");
+        assert_eq!(observed.iter().filter(|event|matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==run)).count(),1,"each owner/helper settles once");
+    }
+    assert!(
+        position_of(
+            &observed,
+            |event| matches!(event,SessionEvent::RunFinished {run_id,..} if *run_id==compaction)
+        ) < position_of(
+            &observed,
+            |event| matches!(event,SessionEvent::RunFinished {run_id,..} if *run_id==prompt)
+        ),
+        "owner reservation is released after helper drain"
+    );
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::RunFinished { run_id, outcome: RunOutcome::Cancelled, .. }
@@ -2327,7 +2347,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
             .iter()
             .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    // The compaction settled cancelled and the session ended idle.
+    // The owner settles after its helper drains, leaving the session idle.
     let session = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -2336,7 +2356,7 @@ async fn cancelling_the_queued_prompt_cancels_the_pending_auto_compaction() {
                 outcome: RunOutcome::Cancelled,
                 session,
                 ..
-            } if *run_id == compaction => Some(session.clone()),
+            } if *run_id == prompt => Some(session.clone()),
             _ => None,
         })
         .unwrap();
@@ -4514,6 +4534,180 @@ async fn in_run_compaction_harness(turns: usize, window: u32, summary: &str) -> 
 }
 
 #[tokio::test]
+async fn maximum_goal_is_verbatim_immediately_after_three_in_run_summaries() {
+    let mut harness = in_run_compaction_harness(72, 16 * 1024, "goal progress").await;
+    let held = Arc::clone(&harness.runtime.inner.permits)
+        .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
+    let session = harness.session_id;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id":session, "objective":"é".repeat(1024),
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let goal = harness
+        .runtime
+        .inner
+        .store
+        .call_write(Priority::Control, move |connection| {
+            let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+            goal.check = Some(qq_protocol::GoalCheck {
+                command: "c".repeat(1024),
+                timeout_ms: 3_600_000,
+            });
+            goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::ForGoal);
+            // Explicit prompt work still runs first; preserve a model-style
+            // wait so automatic follow-up cannot consume the single script.
+            let until_ms = now_ms() + 86_000_000;
+            goal.next_run_at_ms = until_ms;
+            goal.wait = Some(qq_protocol::GoalWait {
+                until_ms,
+                reason: "wait after the explicit compaction fixture".to_owned(),
+            });
+            goal.notes = "n".repeat(1024);
+            goal.check_output = Some("o".repeat(4096));
+            goal.checklist = (1..=24)
+                .map(|id| qq_protocol::GoalChecklistItem {
+                    id,
+                    text: "t".repeat(120),
+                    state: qq_protocol::GoalChecklistState::InProgress,
+                })
+                .collect();
+            crate::sessions::goals::save(connection, &goal)?;
+            Ok(goal)
+        })
+        .await
+        .unwrap();
+    let run = queue_prompt(&harness.runtime, session, "work toward the goal".to_owned()).await;
+    drop(held);
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run
+    )), "the multi-window goal run must complete");
+    let compactions = observed
+        .iter()
+        .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        .count();
+    assert!(
+        compactions >= 3,
+        "expected at least three real compactions, got {compactions}"
+    );
+    let (base, summary): (u64, String) = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT r.context_base_bytes, c.summary FROM runs r
+             JOIN session_compactions c ON c.scope_run_id = r.id
+             WHERE r.id = ?1 ORDER BY c.rowid DESC LIMIT 1",
+                [run.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    {
+        let requests = harness.requests.lock().unwrap();
+        let framed_summary = format!(
+            "{}\n\n{summary}",
+            crate::sessions::IN_RUN_COMPACTION_PREAMBLE
+        );
+        let rebased_request = requests
+            .iter()
+            .find(|request| {
+                let texts = request_texts(request);
+                !texts
+                    .last()
+                    .is_some_and(|text| text.contains("Summarize this conversation"))
+                    && texts.iter().any(|text| text == &framed_summary)
+            })
+            .expect("a provider request must follow the latest durable summary");
+        let request_weight = (rebased_request
+            .system()
+            .expect("compiled system prompt")
+            .len() as u64)
+            .saturating_add(crate::CONTEXT_BLOCK_FRAMING_BYTES)
+            .saturating_add(crate::runtime::tool_schema_measurement(rebased_request.tools()).bytes)
+            .saturating_add(crate::measure_messages(rebased_request.messages()));
+        assert_eq!(
+            base, request_weight,
+            "durable rebase must include the post-summary goal notice"
+        );
+        let mut after_summary = 0;
+        for request in requests.iter() {
+            if request_texts(request)
+                .last()
+                .is_some_and(|text| text.contains("Summarize this conversation"))
+            {
+                continue;
+            }
+            let texts = request_texts(request);
+            for (index, text) in texts.iter().enumerate() {
+                if !text.starts_with(crate::sessions::IN_RUN_COMPACTION_PREAMBLE) {
+                    continue;
+                }
+                let notice = texts
+                    .get(index + 1)
+                    .expect("a summary must have a following goal notice");
+                assert!(
+                    notice.starts_with("[QQ runtime notice; not a user instruction]"),
+                    "goal notice must immediately follow summary"
+                );
+                for field in [
+                    &goal.objective,
+                    &goal.notes,
+                    &goal.check.as_ref().unwrap().command,
+                    goal.check_output.as_ref().unwrap(),
+                ] {
+                    assert!(
+                        notice.contains(field),
+                        "maximum goal field must remain verbatim"
+                    );
+                }
+                assert!(notice.contains(&format!("[>] 24 {}", "t".repeat(120))));
+                assert!(notice.len() <= crate::tools::goal::MAX_GOAL_RENDER_BYTES);
+                after_summary += 1;
+            }
+        }
+        assert!(after_summary >= 3);
+    }
+    let expected = {
+        let requests = harness.requests.lock().unwrap();
+        let mut messages = requests.last().unwrap().messages().to_vec();
+        messages.push(Message::assistant("task complete"));
+        messages
+    };
+    let path = harness.workspace_path.join("sessions.sqlite3");
+    harness.runtime.close().await.unwrap();
+    drop(harness.runtime);
+    let reopened = Store::open(path).await.unwrap();
+    let replayed = reopened
+        .call(Priority::Control, move |connection| {
+            let transaction = connection.transaction()?;
+            load_model_context(&transaction, session, u64::MAX)
+        })
+        .await
+        .unwrap();
+    assert!(replayed.first().is_some_and(|message| message.content().iter().any(|block| {
+        matches!(block, ContentBlock::Text { text } if text.starts_with("[QQ runtime notice; not a user instruction]"))
+    })), "reopened context must retain the exact initial goal notice before the accepted prompt");
+    assert_eq!(
+        replayed, expected,
+        "reopened goal context must match the actual model window, including summary notices"
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn one_run_spanning_several_windows_compacts_its_own_turns_and_completes() {
     // F03: a run whose transcript outgrows the window at a later turn used to
     // fail with "compaction runs only between prompts". Its mutating results
@@ -5654,6 +5848,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            goal_notices: Vec::new(),
             strict_projection: true,
             checkpoint_projection_required: false,
             projection_json: None,
@@ -5672,6 +5867,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
         std::collections::VecDeque::from([(4, "steer before four".to_owned())]),
         std::collections::VecDeque::new(),
         Some(InRunCompaction {
+            goal_notice: None,
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
         }),
@@ -5695,6 +5891,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
     live.splice(1..1 + replace_through, [summary]);
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            goal_notices: Vec::new(),
             strict_projection: true,
             checkpoint_projection_required: false,
             projection_json: None,
@@ -5713,6 +5910,7 @@ fn replay_drops_the_notice_and_steering_the_in_run_splice_removed() {
         std::collections::VecDeque::new(),
         std::collections::VecDeque::new(),
         Some(InRunCompaction {
+            goal_notice: None,
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
         }),
@@ -5754,6 +5952,7 @@ fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
 
     let turns = (1..=7)
         .map(|n| StoredTurn {
+            goal_notices: Vec::new(),
             strict_projection: true,
             checkpoint_projection_required: false,
             projection_json: None,
@@ -5776,6 +5975,7 @@ fn replay_drops_and_keeps_delivered_answers_as_the_in_run_splice_did() {
             (None, "answer after the run".to_owned()),
         ]),
         Some(InRunCompaction {
+            goal_notice: None,
             summary: "summary".to_owned(),
             turn_cutoff: replaced_turns,
         }),

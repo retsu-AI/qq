@@ -1020,9 +1020,19 @@ impl Provider for DeadlineProvider {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn duration_expires_during_shell_execution_and_drains_before_session_reuse() {
+    // Native spawn/reap and the store worker use real I/O. Keep the paused
+    // clock from auto-advancing until that work has reached the tested phase.
+    let keep_clock = tokio::spawn(async {
+        let began = std::time::Instant::now();
+        while began.elapsed() < Duration::from_secs(5) {
+            tokio::task::yield_now().await;
+        }
+    });
     let directory = tempfile::tempdir().unwrap();
+    let spawned =
+        crate::tools::observe_shell_spawn(&std::fs::canonicalize(directory.path()).unwrap(), false);
     let requests = Arc::new(AtomicUsize::new(0));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
@@ -1063,6 +1073,11 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
     let CommandOutcome::PromptQueued { run_id, .. } = receipt.outcome else {
         panic!("unexpected receipt")
     };
+    tokio::time::timeout(Duration::from_secs(2), spawned)
+        .await
+        .expect("the process must reach actual spawn")
+        .unwrap();
+    tokio::time::advance(Duration::from_millis(300)).await;
     let mut tool_started = false;
     let terminal = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1108,4 +1123,5 @@ async fn duration_expires_during_shell_execution_and_drains_before_session_reuse
         }
     )));
     runtime.shutdown().await.unwrap();
+    keep_clock.abort();
 }

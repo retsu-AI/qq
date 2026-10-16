@@ -10,6 +10,7 @@ use serde::Deserialize;
 use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
+use sha2::{Digest, Sha256};
 
 use crate::{
     RunCancellation,
@@ -205,7 +206,7 @@ pub(crate) async fn execute_with_images(
     call_id: Option<qq_protocol::ToolCallId>,
 ) -> ToolOutput {
     if arguments.len() > MAX_ARGUMENT_BYTES {
-        return ToolOutput::error("tool arguments exceed the 64 KiB limit");
+        return ToolOutput::refused("tool arguments exceed the 64 KiB limit");
     }
     let cancelled = ToolCancellation::new(cancelled);
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
@@ -217,7 +218,7 @@ pub(crate) async fn execute_with_images(
     if BuiltInTool::from_name(&name) == Some(BuiltInTool::Fetch) {
         let args: super::fetch::FetchArgs = match serde_json::from_str(&arguments) {
             Ok(args) => args,
-            Err(error) => return ToolOutput::error(format!("invalid arguments: {error}")),
+            Err(error) => return ToolOutput::refused(format!("invalid arguments: {error}")),
         };
         let lease = tasks.enter();
         return match tokio::spawn(async move {
@@ -227,7 +228,7 @@ pub(crate) async fn execute_with_images(
         .await
         {
             Ok(result) => result,
-            Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
+            Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
         };
     }
     // Shell executes on the async runtime directly: it awaits a child process
@@ -240,14 +241,14 @@ pub(crate) async fn execute_with_images(
         let shell_arguments = match (is_exec, serde_json::from_str::<ShellArgs>(&arguments)) {
             (false, Ok(arguments)) => Some(arguments),
             (false, Err(error)) => {
-                return ToolOutput::error(format!("invalid arguments: {error}"));
+                return ToolOutput::refused(format!("invalid arguments: {error}"));
             }
             (true, _) => None,
         };
         let exec_arguments = match (is_exec, serde_json::from_str::<ExecArgs>(&arguments)) {
             (true, Ok(arguments)) => Some(arguments),
             (true, Err(error)) => {
-                return ToolOutput::error(format!("invalid arguments: {error}"));
+                return ToolOutput::refused(format!("invalid arguments: {error}"));
             }
             (false, _) => None,
         };
@@ -275,12 +276,12 @@ pub(crate) async fn execute_with_images(
         .await
         {
             Ok(result) => result,
-            Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
+            Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
         };
     }
     let permit = match blocking_permits().acquire_owned().await {
         Ok(permit) => permit,
-        Err(_) => return ToolOutput::error("tool executor is unavailable"),
+        Err(_) => return ToolOutput::refused("tool executor is unavailable"),
     };
     let lease = tasks.enter();
     match tokio::task::spawn_blocking(move || {
@@ -291,7 +292,7 @@ pub(crate) async fn execute_with_images(
     .await
     {
         Ok(result) => result,
-        Err(_) => ToolOutput::error("tool execution stopped unexpectedly"),
+        Err(_) => ToolOutput::unobserved("tool execution stopped unexpectedly"),
     }
 }
 
@@ -309,8 +310,21 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
 /// model context; `ui_payload` is persisted for clients and never sent back
 /// to the model. Constructors are the one bounding boundary: they mask
 /// secrets, then bound the text to the tool's [`Bounds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResultDisposition {
+    Observed,
+    Refused,
+    /// No response proves whether an external operation ran.
+    Unobserved,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolOutput {
+    pub(crate) disposition: ResultDisposition,
+    /// Result identity before masking, output bounds or citations.
+    /// Constructors hash their input; producers that clip earlier override it.
+    pub(crate) result_digest: [u8; 32],
     pub(crate) model_text: String,
     pub(crate) is_error: bool,
     pub(crate) ui_payload: Option<ToolCallDisplay>,
@@ -329,6 +343,8 @@ pub(crate) struct ToolOutput {
 /// note before masking and bounding once; a clipped preview is never treated
 /// as complete input for another bound.
 pub(super) struct ReadSideOutput {
+    pub(super) result_digest: Option<[u8; 32]>,
+    disposition: ResultDisposition,
     text: String,
     bounds: Bounds,
     pub(super) is_error: bool,
@@ -350,8 +366,22 @@ impl ReadSideOutput {
         Self::with_bounds(message.into(), &Bounds::DEFAULT, true)
     }
 
+    pub(super) fn refused(message: impl Into<String>) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = ResultDisposition::Refused;
+        result
+    }
+
+    pub(super) fn interrupted(message: impl Into<String>) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = ResultDisposition::Interrupted;
+        result
+    }
+
     pub(super) fn with_bounds(text: String, bounds: &Bounds, is_error: bool) -> Self {
         Self {
+            result_digest: None,
+            disposition: ResultDisposition::Observed,
             text,
             bounds: *bounds,
             is_error,
@@ -390,23 +420,44 @@ impl ToolOutput {
         Self::bounded(message.into(), &Bounds::DEFAULT, true)
     }
 
+    pub(crate) fn refused(message: impl Into<String>) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = ResultDisposition::Refused;
+        result
+    }
+
+    pub(crate) fn unobserved(message: impl Into<String>) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = ResultDisposition::Unobserved;
+        result
+    }
+
+    pub(crate) fn interrupted(message: impl Into<String>) -> Self {
+        let mut result = Self::error(message);
+        result.disposition = ResultDisposition::Interrupted;
+        result
+    }
+
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
         // The complete text is kept only when the size alone says a cut may
         // happen: cloning every small result would cost on the hot path for
         // nothing. It is kept unmasked — an explicit `read_tool_result` is
         // the model asking for exact bytes of something it produced — while
         // the inline preview is masked as before.
+        let digest = Sha256::digest(text.as_bytes());
         let spill_source =
             (text.len() > bounds.max_bytes || text.len() > bounds.max_lines).then(|| text.clone());
         let bounded = bound_text(mask_secrets(text), bounds, None);
         let spill = spill_source
             .filter(|text| bounded.omitted_bytes > 0 && text.len() <= MAX_SPILL_ITEM_BYTES)
             .map(|text| SpillRecord {
-                digest: crate::workspace::content_hash(text.as_bytes()),
+                digest: format!("{digest:x}"),
                 text,
                 omitted_from_line: bounded.omitted_from_line,
             });
         Self {
+            disposition: ResultDisposition::Observed,
+            result_digest: digest.into(),
             model_text: bounded.text,
             is_error,
             ui_payload: None,
@@ -421,6 +472,8 @@ impl ToolOutput {
     /// spills — the page is itself bounded on whole lines by its renderer.
     pub(crate) fn exact(text: String, bounds: &Bounds) -> Self {
         Self {
+            disposition: ResultDisposition::Observed,
+            result_digest: Sha256::digest(text.as_bytes()).into(),
             model_text: bound_text(text, bounds, None).text,
             is_error: false,
             ui_payload: None,
@@ -434,6 +487,8 @@ impl ToolOutput {
     /// (denials, interruption) whose text is a constant.
     pub(crate) fn verbatim_error(message: String) -> Self {
         Self {
+            disposition: ResultDisposition::Refused,
+            result_digest: Sha256::digest(message.as_bytes()).into(),
             model_text: message,
             is_error: true,
             ui_payload: None,
@@ -476,11 +531,11 @@ pub(super) fn execute_blocking(
     cancelled: &ToolCancellation,
 ) -> ToolOutput {
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ToolOutput::interrupted("tool execution was cancelled");
     }
     match BuiltInTool::from_name(name) {
         Some(BuiltInTool::ReadFile) => deserialize_read_only(name, arguments).map_or_else(
-            ToolOutput::error,
+            ToolOutput::refused,
             |(args, notes)| {
                 let note_bytes = if notes.is_empty() {
                     0
@@ -494,40 +549,42 @@ pub(super) fn execute_blocking(
             },
         ),
         Some(BuiltInTool::Tree) => deserialize_read_only(name, arguments)
-            .map_or_else(ToolOutput::error, |(args, notes)| {
+            .map_or_else(ToolOutput::refused, |(args, notes)| {
                 with_argument_notes(tree(workspace, args, cancelled), &notes)
             }),
         Some(BuiltInTool::Search) => deserialize_read_only(name, arguments)
-            .map_or_else(ToolOutput::error, |(args, notes)| {
+            .map_or_else(ToolOutput::refused, |(args, notes)| {
                 with_argument_notes(search(workspace, args, cancelled), &notes)
             }),
         // The applied change travels as a UI payload (the unified diff of what
         // actually changed on disk); the model gets the header summary.
         Some(BuiltInTool::EditFile) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| {
+            .map_or_else(ToolOutput::refused, |args| {
                 edit_file(workspace, file_state, &args, cancelled)
             }),
         Some(BuiltInTool::WriteFile) => deserialize(arguments)
-            .map_or_else(ToolOutput::error, |args| {
+            .map_or_else(ToolOutput::refused, |args| {
                 write_file(workspace, file_state, &args, cancelled)
             }),
         #[cfg(feature = "tool-fetch")]
-        Some(BuiltInTool::Fetch) => ToolOutput::error("network tools must execute asynchronously"),
+        Some(BuiltInTool::Fetch) => {
+            ToolOutput::refused("network tools must execute asynchronously")
+        }
         Some(BuiltInTool::Shell | BuiltInTool::Exec) => {
-            ToolOutput::error("network and shell tools must execute asynchronously")
+            ToolOutput::refused("network and shell tools must execute asynchronously")
         }
         // A well-formed `ask_user` never reaches dispatch: the gate holds it
         // and the answer is its result. Only malformed calls fall through,
         // so this is where the model learns what was wrong.
         Some(BuiltInTool::AskUser) => match super::ask::parse(arguments) {
-            Ok(_) => ToolOutput::error("ask_user was not put to the user"),
-            Err(error) => ToolOutput::error(error.to_string()),
+            Ok(_) => ToolOutput::refused("ask_user was not put to the user"),
+            Err(error) => ToolOutput::refused(error.to_string()),
         },
         #[cfg(test)]
         Some(BuiltInTool::TestDelay) => {
             let arguments: TestDelayArgs = match deserialize(arguments) {
                 Ok(arguments) => arguments,
-                Err(error) => return ToolOutput::error(error),
+                Err(error) => return ToolOutput::refused(error),
             };
             TEST_EXECUTIONS_STARTED.fetch_add(1, Ordering::Release);
             if arguments.synchronize {
@@ -537,7 +594,7 @@ pub(super) fn execute_blocking(
             }
             for _ in 0..arguments.delay_ms {
                 if cancelled.is_cancelled() {
-                    return ToolOutput::error("tool execution was cancelled");
+                    return ToolOutput::interrupted("tool execution was cancelled");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -547,12 +604,12 @@ pub(super) fn execute_blocking(
         Some(BuiltInTool::TestMutate) => {
             let arguments: TestMutateArgs = match deserialize(arguments) {
                 Ok(arguments) => arguments,
-                Err(error) => return ToolOutput::error(error),
+                Err(error) => return ToolOutput::refused(error),
             };
             TEST_EXECUTIONS_STARTED.fetch_add(1, Ordering::Release);
             for _ in 0..arguments.delay_ms {
                 if cancelled.is_cancelled() {
-                    return ToolOutput::error("tool execution was cancelled");
+                    return ToolOutput::interrupted("tool execution was cancelled");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -560,7 +617,7 @@ pub(super) fn execute_blocking(
         }
         #[cfg(test)]
         Some(BuiltInTool::TestShell) => ToolOutput::success("shell ran".to_owned()),
-        None => ToolOutput::error(format!("unknown tool {name:?}")),
+        None => ToolOutput::refused(format!("unknown tool {name:?}")),
     }
 }
 
@@ -701,6 +758,10 @@ fn with_argument_notes(mut output: ReadSideOutput, notes: &[&str]) -> ToolOutput
         }
     }
     let mut result = ToolOutput::bounded(output.text, &output.bounds, output.is_error);
+    result.disposition = output.disposition;
+    if let Some(digest) = output.result_digest {
+        result.result_digest = digest;
+    }
     result.ui_payload = output.ui_payload;
     result.file_states = output.file_states;
     result

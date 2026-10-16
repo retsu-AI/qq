@@ -122,7 +122,12 @@ impl Provider for Scripted {
                 }),
                 Ok(ProviderEvent::ToolCallArgumentsDelta {
                     id: id.clone(),
-                    json: (*json).to_owned(),
+                    json: if (*name, *json) == READ {
+                        serde_json::json!({"path":"note.txt","offset":first+offset+1,"limit":1})
+                            .to_string()
+                    } else {
+                        (*json).to_owned()
+                    },
                 }),
                 Ok(ProviderEvent::ToolCallCompleted { id }),
             ]);
@@ -164,7 +169,13 @@ async fn run(
     let requests = Arc::clone(&provider.requests);
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
@@ -501,7 +512,7 @@ async fn a_call_on_the_final_answer_turn_never_runs_and_the_child_completes() {
         "the final turn's call never ran"
     );
     let rejected = events.iter().any(|event| {
-        matches!(event, RuntimeEvent::ToolCallFinished { result, is_error: true, .. }
+        matches!(event, RuntimeEvent::ToolCallUnexecuted { message: result, interrupted: false, .. }
             if result == SUBAGENT_FINAL_ANSWER_REJECTION)
     });
     assert!(rejected, "the call settles with a not-executed result");
@@ -572,7 +583,13 @@ async fn denied_calls_count_toward_the_report() {
     let requests = Arc::clone(&provider.requests);
     let runtime = Runtime::new(provider, "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     struct DenyAll;
@@ -660,7 +677,13 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
@@ -751,7 +774,13 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
@@ -856,7 +885,13 @@ async fn an_interrupted_final_answer_stays_final() {
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
@@ -974,7 +1009,13 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
     }
     let runtime = Runtime::new(CostlyFinal(Scripted::new(reads(400))), "gpt-test", 256).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "hello\n").unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        (0..1_000)
+            .map(|index| format!("observation {index}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     std::fs::create_dir(directory.path().join("sub")).unwrap();
     std::fs::write(directory.path().join("sub/f.rs"), "x\n").unwrap();
     let events = runtime
@@ -1077,7 +1118,18 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
         contract: crate::ReadImageContract::SelfContainedReadV1,
     }])
     .unwrap();
-    let mut provider = Scripted::new(vec![("exec", r#"{"program":"grep","args":["x","f"]}"#); 64]);
+    // This fixture runs in its own child process; retain the bounded script
+    // for the provider's static input lifetime without changing other fixtures.
+    let mut provider = Scripted::new(
+        (0..64)
+            .map(|index| {
+                let arguments =
+                    serde_json::json!({"program":"grep", "args":[format!("x{index}"),"f"]})
+                        .to_string();
+                ("exec", &*Box::leak(arguments.into_boxed_str()))
+            })
+            .collect(),
+    );
     provider.calls_per_turn = 1;
     let requests = provider.requests.clone();
     let runtime = Runtime::new(provider, "gpt-test", 256)

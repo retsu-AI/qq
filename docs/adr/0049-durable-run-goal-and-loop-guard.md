@@ -375,6 +375,10 @@ a goal.
      configuration, or rejected credentials. The goal becomes
      `paused { needs_user }` with the cause. After three consecutive failed
      goal runs of any other kind, it becomes `blocked { repeated_failure }`.
+     Per-run budget exhaustion with no committed model work contributes to
+     that same streak, so preparation that repeatedly consumes the duration
+     cannot queue uncharged attempts indefinitely. A committed-work exhaustion
+     resets the streak; overall goal exhaustion takes precedence.
    - **Approvals nobody answers.** A goal run whose tool call is held for
      approval waits at most `min(goal_approval_wait, time to the goal
      deadline)`, where `goal_approval_wait` defaults to 10 min. When that
@@ -421,17 +425,21 @@ a goal.
    (decision 1), and publishes `goal_cleared`. A run already executing for
    that goal still charges its committed spend to the historical row (§ 4),
    but cannot change its status or schedule more work.
-8. **Loop guard, for every run.** This decision is unchanged from the first
-   draft of this ADR.
+8. **Loop guard, for every run.** The observation windows are independent of
+   runtime checkpoints: a checkpoint can occur before 256 calls when the next
+   turn's capacity is reserved. This proposed clarification is tracked in
+   [decision 13](../plans/progress/decisions-needed.md).
    - **Observed results only.** The guard never predicts a result it hasn't
      seen. It keeps two structures:
      - a repeat counter for the current run of identical executed
        `(tool name, canonical-argument hash, result hash)` triples;
-     - a seen set of every triple observed in the current slice, capped at
-       4 096 hashes, with an evicted hash still counted as seen. The seen
-       set is cleared only at a slice boundary or by a *mutation event*: a
-       successful non-`ReadOnly` call, a checklist change, or an applied
-       steer.
+     - exact triple hashes in the current and preceding 256-eligible-attempt
+       observation windows, at most 512 entries in total. Repeated hashes
+       occupy one entry in each window; no hash is evicted while its window
+       remains relevant. Expiring an older window does not count as progress.
+       A *mutation event* clears both windows and the quiet-attempt count:
+       a successful non-`ReadOnly` call, a checklist change, or an applied
+       steer. Runtime report/checkpoint turns do not clear them.
    - **Novelty is the read-side progress signal.** A triple not in the seen
      set is novel. A large read-only audit keeps producing novel triples; a
      short cycle stops being novel after one pass.
@@ -439,12 +447,27 @@ a goal.
      returned the identical error, the next identical call is rejected
      instead of executed. The same happens after four consecutive identical
      triples.
-   - **Pausing.** After two slices (512 calls) with no novel triple, no
-     mutation event and no new assistant text, the run settles
+   - **Pausing.** A novel executed triple, mutation event or spontaneous
+     assistant text resets the quiet-attempt count. An eligible repeated-call
+     attempt without novelty increases it, including a guard rejection so
+     rejecting a loop cannot wedge the run. Report and over-cap attempts do
+     not contribute. An eligible attempt is an ordinary tool admission within
+     the executable per-turn cap that reaches a result boundary, including
+     malformed-argument and approval-denial results. Those unexecuted results
+     can consume quiet attempts but cannot introduce an executed triple or
+     trigger an execution-repeat threshold. An interrupted attempt does not
+     advance this count: cancellation/deadline settlement already stops its
+     run. Report, final-answer and over-cap rejections are excluded explicitly,
+     rather than inferred from an error flag.
+     After 512 consecutive quiet eligible attempts, the run settles
      `paused` with `RunPause::NoProgress`. Text written in a
      runtime-requested report turn (ADR-0054 § 2) is not "new assistant
      text" for this rule, so answering reports does not keep a stuck run
      alive.
+     The 512-call fixture starts after its initial novel warm-up and records
+     quiet attempts separately from total attempts. Exact bounded windows
+     preserve alternating-loop detection without treating first-time reads
+     as no progress.
 
 ## Consequences
 

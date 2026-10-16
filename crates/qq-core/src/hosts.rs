@@ -113,6 +113,22 @@ pub struct HostToolResult {
 
 pub type HostCallFuture =
     Pin<Box<dyn Future<Output = Result<HostToolResult, HostCallError>> + Send + 'static>>;
+/// Transient producer evidence, excluded from model text and durable spill identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedHostToolResult {
+    pub result: HostToolResult,
+    pub result_digest: Option<[u8; 32]>,
+}
+
+pub type ObservedHostCallFuture =
+    Pin<Box<dyn Future<Output = Result<ObservedHostToolResult, HostCallError>> + Send + 'static>>;
+
+/// Legacy hosts return their original future without another allocation.
+pub enum HostCallObservation {
+    Rendered(HostCallFuture),
+    Observed(ObservedHostCallFuture),
+}
+
 pub type HostShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// An external source of tools as the plan compiler and run loop see them.
@@ -149,6 +165,18 @@ pub trait ExternalToolHost: Send + Sync {
     /// without wedging shared state. Dropping the future must be safe.
     fn call(&self, name: String, arguments: String, cancelled: RunCancellation) -> HostCallFuture;
 
+    /// Carries identity of a complete observed representation before preview
+    /// conversion. Hosts with lossy previews override this; legacy hosts use
+    /// their rendered content, retaining their original future allocation.
+    fn call_observed(
+        &self,
+        name: String,
+        arguments: String,
+        cancelled: RunCancellation,
+    ) -> HostCallObservation {
+        HostCallObservation::Rendered(self.call(name, arguments, cancelled))
+    }
+
     fn readiness(&self) -> HostReadiness;
 
     /// Stops serving calls and releases backends. Calls in flight settle as
@@ -159,7 +187,18 @@ pub trait ExternalToolHost: Send + Sync {
 
 /// Renders a host failure as the bounded tool error the model sees.
 pub(crate) fn host_error_result(error: &HostCallError) -> crate::tools::ToolOutput {
-    crate::tools::bounded_result(error.to_string(), true)
+    let mut result = crate::tools::bounded_result(error.to_string(), true);
+    result.disposition = match error {
+        HostCallError::Cancelled => crate::tools::ResultDisposition::Interrupted,
+        HostCallError::Refused(_) | HostCallError::UnknownTool(_) | HostCallError::Overloaded => {
+            crate::tools::ResultDisposition::Refused
+        }
+        HostCallError::Timeout
+        | HostCallError::Unavailable(_)
+        | HostCallError::InvalidResult(_)
+        | HostCallError::ShutDown => crate::tools::ResultDisposition::Unobserved,
+    };
+    result
 }
 
 pub mod embedded;

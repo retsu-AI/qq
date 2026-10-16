@@ -93,6 +93,7 @@ async fn compact_in_run(
         RunAccountingAccumulator::new(resolved_model.pricing.clone(), basis);
     let turn_cutoff = request.turn_cutoff;
     let retained_bytes = request.retained_bytes;
+    let goal_notice = request.goal_notice;
     let started = inner
         .store
         .start_in_run_compaction(prompt_run, resolved_model, turn_cutoff)
@@ -242,6 +243,9 @@ async fn compact_in_run(
                     .persist_in_run_summary_turn(
                         &compaction,
                         ModelTurnCommit {
+                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            goal_notices: Vec::new(),
+                            reserved_goal_notices: 0,
                             turn_ordinal: ordinal,
                             message,
                             calls: Vec::new(),
@@ -283,6 +287,46 @@ async fn compact_in_run(
         // The compaction run is settled before the loop's backoff, so a retry
         // never stacks a second running row; if that write fails the runtime
         // is marked failed and the next attempt returns `Unavailable`.
+        Err(crate::runtime::SummarizeError::RejectedBeforeWork { kind, message }) => {
+            let mut accounting = observed_accounting.snapshot();
+            if !accounting.saw_turn {
+                accounting.usage = Some(TokenUsage::default());
+                accounting.estimated_cost_usd_nanos = Some(0);
+            }
+            let usage = accounting.usage;
+            let estimated_cost_usd_nanos = accounting.estimated_cost_usd_nanos;
+            let outcome = RunOutcome::Failed {
+                failure: RunFailure {
+                    kind,
+                    message: truncate_utf8(message.clone(), MAX_FAILURE_MESSAGE_BYTES),
+                },
+            };
+            match inner
+                .store
+                .finish_rejected_in_run_compaction(&compaction, outcome, accounting)
+                .await
+            {
+                Ok(events) => {
+                    for event in events {
+                        inner.notify(event.cursor);
+                    }
+                }
+                Err(error) => {
+                    inner.failed.send_replace(true);
+                    return Err(Error::Persistence(error.to_string()));
+                }
+            }
+            return Err(if crate::recoverable_turn_fault(kind) {
+                Error::SummarizerUnavailable {
+                    kind,
+                    message,
+                    usage,
+                    estimated_cost_usd_nanos,
+                }
+            } else {
+                Error::SummarizerFailed(message)
+            });
+        }
         Err(crate::runtime::SummarizeError::Transient { kind, message }) => {
             settle_failed_with(
                 inner,
@@ -316,6 +360,7 @@ async fn compact_in_run(
             Some(accounting),
             record_budget(resolved_model.context_window),
             retained_bytes,
+            goal_notice,
         )
         .await;
     match committed {

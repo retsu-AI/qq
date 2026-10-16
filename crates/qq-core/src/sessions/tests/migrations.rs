@@ -1474,7 +1474,7 @@ async fn every_persistence_fault_variant_is_reachable() {
         .await
         .unwrap();
     let constraint = store
-        .append_run_activity(&claimed, RunActivity::WaitingForProvider)
+        .append_run_activity(&claimed, RunActivity::WaitingForProvider, false)
         .await
         .unwrap_err();
     assert_eq!(
@@ -1986,6 +1986,7 @@ fn version_twenty_two_migration_adds_truncation_state_as_never_truncated() {
     let mut context = Vec::new();
     append_run_turns(
         vec![StoredTurn {
+            goal_notices: Vec::new(),
             strict_projection: true,
             checkpoint_projection_required: false,
             projection_json: None,
@@ -3160,6 +3161,7 @@ fn version_thirty_nine_gains_the_turn_notice_as_null_and_rejects_a_bad_shape() {
         let mut context = Vec::new();
         append_run_turns(
             vec![StoredTurn {
+                goal_notices: Vec::new(),
                 strict_projection: true,
                 checkpoint_projection_required: false,
                 projection_json: None,
@@ -3563,7 +3565,7 @@ fn ab5_schema_forty_five_migrates_once_to_fifty() {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "50"
+            STORE_SCHEMA_VERSION.to_string()
         );
     }
 }
@@ -3622,33 +3624,41 @@ fn ab5_schema_forty_nine_notice_migration_preserves_structure_and_store_identity
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "50");
+        assert_eq!(version, STORE_SCHEMA_VERSION.to_string());
     }
 }
 
 #[test]
 fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let (connection, _) = open_database(&path).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE tool_calls DROP COLUMN execution_context_json",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    assert!(matches!(
-        open_database(&path),
-        Err(SessionRuntimeError::CONSTRAINT)
-    ));
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    let version: String = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key='schema_version'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(version, "50");
+    for previous in [50, STORE_SCHEMA_VERSION] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let (connection, _) = open_database(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                [previous.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "ALTER TABLE tool_calls DROP COLUMN execution_context_json",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            open_database(&path),
+            Err(SessionRuntimeError::CONSTRAINT)
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, previous.to_string());
+    }
 }

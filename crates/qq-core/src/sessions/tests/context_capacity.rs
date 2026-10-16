@@ -407,6 +407,9 @@ async fn admitted_tool_calls_store_their_effect_class() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -585,7 +588,7 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
             output: None,
         },
         None,
-        &WorkspaceGrantSeed::default(),
+        &CommandAdmission::default(),
         CommandOrigin::Client,
     )
     .unwrap();

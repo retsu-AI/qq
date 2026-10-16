@@ -417,6 +417,21 @@ pub type GrantSeedFuture = Pin<Box<dyn Future<Output = WorkspaceGrantSeed> + Sen
 pub type GrantPromotionFuture =
     Pin<Box<dyn Future<Output = WorkspaceGrantOutcome> + Send + 'static>>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GoalCheckPolicyError {
+    #[error("the check is denied by managed shell policy")]
+    ManagedDenied,
+    #[error("check policy could not be loaded: {0}")]
+    Configuration(#[source] RuntimeLoadError),
+    #[error("check policy validation stopped unexpectedly")]
+    Unavailable,
+    #[error("too many check policy validations are active; retry the request")]
+    Overloaded,
+}
+
+pub type GoalCheckPolicyFuture =
+    Pin<Box<dyn Future<Output = Result<(), GoalCheckPolicyError>> + Send + 'static>>;
+
 /// The configuration-facing seam for workspace-lifetime grants, provided at
 /// runtime construction. qq-core stays configuration-agnostic: the embedding
 /// application implements both directions against its config layer.
@@ -430,6 +445,13 @@ pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
     /// Failures are data ([`WorkspaceGrantOutcome::Failed`]), never errors:
     /// a promotion must not fail the approval that requested it.
     fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture;
+
+    /// Validate the current managed hard denies before issuing exact check
+    /// authority. An authority must implement this rather than silently
+    /// granting checks when its configured policy cannot be consulted.
+    fn validate_goal_check(&self, _workspace: &Path, _command: &str) -> GoalCheckPolicyFuture {
+        Box::pin(std::future::ready(Err(GoalCheckPolicyError::Unavailable)))
+    }
 }
 
 /// Bounds on the context a review request carries. The reviewer sees only
@@ -956,6 +978,40 @@ impl SessionRuntime {
             }
             _ => WorkspaceGrantSeed::default(),
         };
+        let goal_check_policy = match (&command, &self.inner.grant_authority) {
+            (
+                SessionCommand::GoalControl {
+                    session_id,
+                    action: qq_protocol::GoalControl::ApproveCheck { command, .. },
+                    ..
+                },
+                Some(authority),
+            ) => {
+                let session = *session_id;
+                let path = self
+                    .inner
+                    .store
+                    .call(store::Priority::Control, move |connection| {
+                        Ok(connection.query_row(
+                        "SELECT w.path FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
+                         WHERE s.id = ?1",
+                        [session.to_string()], |row| row.get::<_, String>(0),
+                    )?)
+                    })
+                    .await;
+                // Carry failures past journal lookup: committed approvals
+                // replay even when current policy or the workspace is gone.
+                Some(match path {
+                    Ok(path) => {
+                        authority
+                            .validate_goal_check(Path::new(&path), command)
+                            .await
+                    }
+                    Err(_) => Err(GoalCheckPolicyError::Unavailable),
+                })
+            }
+            _ => None,
+        };
         let lifecycle = self.inner.lifecycle.read().await;
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
@@ -963,10 +1019,14 @@ impl SessionRuntime {
         let applied = self
             .inner
             .store
-            .command_with_seed(
+            .command_with_admission(
                 command_id,
                 command,
-                seed,
+                CommandAdmission {
+                    goal_work_present: false,
+                    seed,
+                    goal_check_policy,
+                },
                 Some(self.inner.grant_promotions.clone()),
             )
             .await?;
@@ -1442,6 +1502,30 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error("goal identity or revision conflicts with the current goal")]
+    GoalConflict {
+        current: Option<qq_protocol::GoalIdentity>,
+    },
+    #[error("goal was not found")]
+    GoalNotFound,
+    #[error("an achieved goal cannot be edited or resumed; clear or replace it")]
+    GoalImmutable,
+    #[error("goal cancellation is still draining")]
+    GoalCancellationPending,
+    #[error("goal check authorization is required")]
+    GoalCheckApprovalRequired,
+    #[error("goal has no check to authorize")]
+    GoalCheckMissing,
+    #[error("approval command does not match the goal's current check")]
+    GoalCheckCommandMismatch,
+    #[error("goal check is forbidden by shell policy")]
+    GoalCheckForbidden,
+    #[error(transparent)]
+    GoalCheckPolicy(#[from] GoalCheckPolicyError),
+    #[error("goal budget or deadline has been spent")]
+    GoalBudgetSpent,
+    #[error("invalid goal: {0}")]
+    InvalidGoal(GoalValidationError),
     #[error(
         "tool projection for run {run} is unresolved: it lacks the exact tool-result projection needed to preserve its history; start a new session to continue without changing this history"
     )]

@@ -1,4 +1,5 @@
 // Execution stays pull-driven: dropping the stream drops its in-flight work.
+use super::loop_guard::{CallKey, LoopGuard};
 use crate::*;
 
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
@@ -24,11 +25,64 @@ struct RunScope {
     live_turns: Vec<u32>,
     summarizer_rejected_turns: u8,
     stall: runtime::StallScope,
+    loop_guard: LoopGuard,
+    guard_eligible: Vec<(ToolCallId, CallKey)>,
+    slices: u32,
     pins: catalog::PinSet,
     tool_specs: Arc<[ToolSpec]>,
     tool_schema: runtime::ToolSchemaMeasurement,
     prompt_identity: Option<Arc<RunPromptIdentity>>,
     call_effects: HashMap<String, catalog::EffectClass>,
+}
+
+impl RunScope {
+    fn admission_key(&self, id: ToolCallId) -> Option<CallKey> {
+        self.guard_eligible
+            .iter()
+            .find_map(|(candidate, key)| (*candidate == id).then_some(*key))
+    }
+
+    fn observe_tool(
+        &mut self,
+        call: &RuntimeToolCall,
+        result: &RetainedResult,
+        network: &NetworkPolicy,
+        entry: Option<&catalog::ToolEntry>,
+    ) {
+        let Some(key) = self.admission_key(call.id) else {
+            return;
+        };
+        match result.disposition {
+            tools::ResultDisposition::Observed => {
+                self.loop_guard
+                    .executed_digest(key, result.result_digest, result.is_error);
+                let mutation =
+                    match approval::classify(call.effect, &call.name, &call.arguments, network) {
+                        approval::ToolClass::Mutating => true,
+                        approval::ToolClass::External => {
+                            !entry.is_some_and(|entry| entry.hints.read_only)
+                        }
+                        approval::ToolClass::Shell { .. } => result.process_work,
+                        approval::ToolClass::ReadOnly
+                        | approval::ToolClass::Interactive { .. }
+                        | approval::ToolClass::Network { .. } => false,
+                    };
+                if !result.is_error && mutation {
+                    self.loop_guard.mutation();
+                }
+            }
+            tools::ResultDisposition::Refused => {
+                self.loop_guard.unexecuted();
+            }
+            tools::ResultDisposition::Unobserved => {
+                self.loop_guard.unobserved();
+            }
+            tools::ResultDisposition::Interrupted => {}
+        }
+        if result.human_input {
+            self.loop_guard.mutation();
+        }
+    }
 }
 
 /// Live context accounting for the current window. Stubbing remeasures both
@@ -52,6 +106,9 @@ struct SliceScope {
     continuing_slice: bool,
     placed_report: Option<runtime::TurnNotice>,
     pending_notice: Option<runtime::TurnNotice>,
+    pending_goal_notices: Vec<runtime::OrderedTurnNotice>,
+    pending_deliveries: usize,
+    pending_reserved_goal_notices: usize,
 }
 
 /// Cross-attempt turn recovery. Fault-free attempts clear retries; non-truncated
@@ -92,6 +149,8 @@ struct RunEnvironment {
     file_state: Arc<workspace::FileState>,
     spawner: Option<Arc<dyn SubagentSpawner>>,
     history: Option<Arc<dyn HistorySearcher>>,
+    goal: Option<sessions::GoalRunInput>,
+    goal_spend_tracking: bool,
     spills: Option<Arc<dyn runtime::SpillReader>>,
     compactor: Option<Arc<dyn runtime::InRunCompactor>>,
     audit_hook: Option<Arc<dyn runtime::AuditHook>>,
@@ -131,6 +190,7 @@ struct CompactedTurn {
 }
 /// Fresh provider-attempt state; recreated even on retries or reactive overflow.
 struct AttemptScope {
+    rejected_before_work: bool,
     activity: RunActivity,
     pending_calls: Vec<PendingToolCall>,
     calls_by_provider_id: HashMap<String, usize>,
@@ -139,6 +199,7 @@ struct AttemptScope {
     terminal_usage: Option<qq_protocol::TokenUsage>,
     completed: bool,
     reasoning_bytes: usize,
+    reasoning_observed: bool,
     open_reasoning: Option<qq_provider::ReasoningKind>,
     interrupted_turn: bool,
     truncated_turn: bool,
@@ -173,11 +234,9 @@ struct WaitScope {
     delivery_retry: Duration,
 }
 
-/// Fresh tool-turn state. Approval/execution interruption persists through cleanup;
-/// pin changes are accumulated only while selecting tools in this turn.
+/// Fresh tool-turn state. Approval/execution interruption persists through cleanup.
 struct ToolScope {
     interrupted: bool,
-    pins_changed: bool,
 }
 /// Fresh ordered-call state. Output closure disables only the delta receive arm.
 struct ExecutionScope {
@@ -426,6 +485,8 @@ impl plan::CompiledAgentPlan {
                        execution_started: _,
                        pricing,
                        history,
+                       goal,
+                       goal_spend_tracking,
                        spills,
                        steering,
                        compactor,
@@ -442,7 +503,7 @@ impl plan::CompiledAgentPlan {
                    let handled_interrupt = steering
                        .as_ref()
                        .map_or(0, |steering| *steering.interrupts.borrow());
-                   let max_output_tokens = max_output_tokens
+                   let mut max_output_tokens = max_output_tokens
                        .unwrap_or(model_max_output_tokens)
                        .min(model_max_output_tokens);
                    // Empty truncations raise the cap toward `output_ceiling` once
@@ -462,6 +523,24 @@ impl plan::CompiledAgentPlan {
                        budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
                    }
                    yield TurnStep::Emit( RuntimeEvent::Started);
+                   if (goal.is_some() || goal_spend_tracking) && routing_spend.is_some() {
+                       let now = tokio::time::Instant::now();
+                       match budget.remaining(now) {
+                           Ok(remaining) => {
+                               if let Some(tokens) = [remaining.max_total_tokens, remaining.max_output_tokens]
+                                   .into_iter().flatten().min()
+                               {
+                                   max_output_tokens = max_output_tokens.min(u32::try_from(tokens).unwrap_or(u32::MAX));
+                               }
+                           }
+                           Err(kind) => {
+                               yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
+                                   exhaustion: budget.exhaustion(kind, false, now),
+                               });
+                               yield TurnStep::Stop; return;
+                           }
+                       }
+                   }
 
                    // Completed turns can persist an assistant message with no model-visible
                    // content (reasoning-only or a call-less empty completion). Live turns
@@ -590,6 +669,7 @@ impl plan::CompiledAgentPlan {
                            tools: allow_tools.then_some(catalog::StaticFilter {
                                spawn_agent: spawner.is_some(),
                                search_history: history.is_some(),
+                               update_goal: goal.is_some(),
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
@@ -653,7 +733,11 @@ impl plan::CompiledAgentPlan {
                    // Only the transcript preceding the accepted prompt can be
                    // replaced by a between-run compaction. Everything appended by
                    // this run is irreducible until the run settles.
-                   let reducible_messages = messages.len().saturating_sub(1);
+                   if let Some(goal) = &goal {
+                       let notice_index = messages.len().saturating_sub(1);
+                       Arc::make_mut(&mut messages).insert(notice_index, Message::user(goal.initial_notice()));
+                   }
+                   let reducible_messages = messages.len().saturating_sub(1 + usize::from(goal.is_some()));
                    let reducible_message_bytes = measure_messages(&messages[..reducible_messages]);
                    let irreducible_message_bytes =
                        measure_messages(&messages[reducible_messages..]);
@@ -743,6 +827,9 @@ impl plan::CompiledAgentPlan {
                        live_turns,
                        summarizer_rejected_turns,
                        stall,
+                       loop_guard: LoopGuard::default(),
+                       guard_eligible: Vec::new(),
+                       slices: 1,
                        pins,
                        tool_specs,
                        tool_schema,
@@ -760,6 +847,9 @@ impl plan::CompiledAgentPlan {
                        continuing_slice,
                        placed_report,
                        pending_notice,
+                       pending_goal_notices: Vec::new(),
+                       pending_deliveries: 0,
+                       pending_reserved_goal_notices: 0,
                    };
                    let recovery = TurnScope {
                        turn_retries,
@@ -773,7 +863,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
         });
                }
     }
@@ -785,10 +875,34 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<PreparedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { spawner, system, system_prompt_hash, allow_tools, .. } = env;
+                    let RunEnvironment { spawner, system, system_prompt_hash, allow_tools, goal, cancelled, deadline, .. } = env;
                     let allow_tools = *allow_tools;
                     let system_prompt_hash = *system_prompt_hash;
 
+                        if let Some(goal) = goal {
+                            let refreshed = tokio::select! {
+                                biased;
+                                () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
+                                () = runtime::RunDeadline::wait(*deadline) => {
+                                    yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion: deadline.expect("only a finite deadline wakes").exhaustion() });
+                                    yield TurnStep::Stop; return;
+                                },
+                                refreshed = goal.refresh_notice() => refreshed,
+                            };
+                            match refreshed {
+                                Ok(Some(text)) => {
+                                    let notice = Message::user(text.clone());
+                                    window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&notice));
+                                    Arc::make_mut(messages).push(notice);
+                                    slice.pending_goal_notices.push(runtime::OrderedTurnNotice { text, preceding_deliveries: slice.pending_deliveries });
+                                }
+                                Ok(None) => {},
+                                Err(error) => {
+                                    yield TurnStep::Emit(RuntimeEvent::Failed { kind: RunFailureKind::Server, message: format!("refresh goal notice: {error}") });
+                                    yield TurnStep::Stop; return;
+                                }
+                            }
+                        }
 
                         // Settled detached children answer here, at the one boundary
                         // every turn passes: after the previous turn's results and
@@ -803,7 +917,8 @@ impl RunState {
                         if let Some(spawner) = &spawner
                             && !delivered_by_wait
                             && spawner.outstanding_detached() > 0
-                            && let Err(error) = deliver_children(
+                        {
+                            match deliver_children(
                                 spawner,
                                 Boundary { turn_ordinal, reports: runtime::ReportDelivery::Always },
                                 Arc::make_mut(messages),
@@ -812,10 +927,13 @@ impl RunState {
                                 &mut run.stall,
                                 run.checkpoint_context.as_mut(),
                             )
-                            .await
-                        {
-                            yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
-                            yield TurnStep::Stop; return;
+                            .await {
+                                Ok(delivered) => { slice.pending_deliveries += delivered.answers + delivered.reports; },
+                                Err(error) => {
+                                    yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Server, message: error.to_string() });
+                                    yield TurnStep::Stop; return;
+                                }
+                            }
                         }
                         // Caller budgets are decided at the turn boundary, before any
                         // provider request. A spent work budget grants one final
@@ -895,6 +1013,11 @@ impl RunState {
                             window.irreducible_message_bytes =
                                 window.irreducible_message_bytes.saturating_add(measure_message(&message));
                             Arc::make_mut(messages).push(message);
+                            if goal.is_some() {
+                                slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                                    text: notice.text().to_owned(), preceding_deliveries: slice.pending_deliveries,
+                                });
+                            }
                             slice.pending_notice = Some(notice);
                         }
                         let request_system: Arc<str> = if budget_final_turn {
@@ -939,8 +1062,8 @@ impl RunState {
         prepared: PreparedTurn,
     ) -> impl futures_util::Stream<Item = TurnStep<CompactedTurn>> + Send + '_ {
         stream! {
-                    let Self { env, messages, run, window, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
+                    let Self { env, messages, run, window, slice, recovery, .. } = self;
+                    let RunEnvironment { plan, compactor, goal, system, reducible_messages, model_max_output_tokens, inherited_effects, cancelled, deadline, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let model_max_output_tokens = *model_max_output_tokens;
                     let deadline = *deadline;
@@ -1060,7 +1183,7 @@ impl RunState {
                                 window.irreducible_message_bytes,
                             ));
                         if still_overflows && let Some(compactor) = compactor.as_ref() {
-                            let run_start = reducible_messages.saturating_add(1);
+                            let run_start = reducible_messages.saturating_add(1 + usize::from(goal.is_some()));
                             let boundary = sessions::in_run_compaction_boundary(
                                 &messages[run_start..],
                                 sessions::CONTEXT_PRUNE_KEEP_TURNS,
@@ -1125,11 +1248,14 @@ impl RunState {
                                 // What the next request carries besides the
                                 // summary; the store adds the summary and
                                 // re-bases the reservation to the sum.
+                                let goal_notice = goal.as_ref().and_then(|goal| goal.post_summary_notice()).map(Arc::<str>::from);
+                                let post_summary_notice = goal_notice.as_ref().map(|text| Message::user(text.as_ref()));
                                 let retained_bytes = system_bytes
                                     .saturating_add(tool_schema_bytes)
                                     .saturating_add(window.reducible_message_bytes)
                                     .saturating_add(measure_messages(&messages[reducible_messages..run_start]))
-                                    .saturating_add(measure_messages(&messages[cut..]));
+                                    .saturating_add(measure_messages(&messages[cut..]))
+                                    .saturating_add(post_summary_notice.as_ref().map_or(0, measure_message));
                                 // The summarizer is one silent provider turn; this
                                 // run's next turn reports `WaitingForProvider` again.
                                 yield TurnStep::Emit(RuntimeEvent::ActivityChanged {
@@ -1160,6 +1286,7 @@ impl RunState {
                                             system: Arc::clone(system),
                                             tools: Arc::clone(&run.tool_specs),
                                             retained_bytes,
+                                            goal_notice: goal_notice.clone(),
                                             budget: allowance,
                                         })
                                         .await;
@@ -1185,7 +1312,7 @@ impl RunState {
                                     };
                                     if summarizer_retries >= MAX_TURN_RETRIES {
                                         yield TurnStep::Emit(RuntimeEvent::Paused {
-                                            pause: Box::new(qq_protocol::RunPause {
+                                            pause: Box::new(qq_protocol::RunPause::ProviderRetry {
                                                 kind,
                                                 message: format!("in-run compaction summarizer: {message}"),
                                                 turn_ordinal,
@@ -1226,7 +1353,14 @@ impl RunState {
                                             sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
                                         ));
                                         let live = Arc::make_mut(messages);
-                                        live.splice(run_start..run_start + replace_through, [summary]);
+                                        match post_summary_notice {
+                                            Some(notice) => {
+                                                live.splice(run_start..run_start + replace_through, [summary, notice]);
+                                            }
+                                            None => {
+                                                live.splice(run_start..run_start + replace_through, [summary]);
+                                            }
+                                        }
                                         run.live_turns.drain(..replaced_turns);
                                         // A new window: the measured chain covered
                                         // the replaced turns (the next provider usage
@@ -1235,6 +1369,7 @@ impl RunState {
                                         window.compatible_request = None;
                                         window.model_text_bytes = 0;
                                         window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                                        slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
                                         if let Err(kind) = run.budget.remaining(tokio::time::Instant::now()) {
                                             yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
@@ -1293,6 +1428,9 @@ impl RunState {
 
         let CompactedTurn { prepared, message_bytes, compatible_input_tokens } = compacted;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
+                        if turn_ordinal == 1 {
+                            slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
+                        }
                         yield TurnStep::Emit( RuntimeEvent::Prepared {
                             turn_ordinal,
                             identity: run.prompt_identity.take(),
@@ -1337,6 +1475,7 @@ impl RunState {
                         yield TurnStep::Emit( RuntimeEvent::ActivityChanged { activity });
                         let mut provider_events = provider.stream(request);
                     let mut attempt = AttemptScope {
+                        rejected_before_work: false,
                         activity,
                         pending_calls: Vec::<PendingToolCall>::new(),
                         calls_by_provider_id: HashMap::<String, usize>::new(),
@@ -1345,6 +1484,7 @@ impl RunState {
                         terminal_usage: None,
                         completed: false,
                         reasoning_bytes: 0_usize,
+                        reasoning_observed: false,
                         open_reasoning: None,
                         interrupted_turn: false,
                         truncated_turn: false,
@@ -1393,6 +1533,7 @@ impl RunState {
                                     attempt.replay = Some(data);
                                 }
                                 Ok(ProviderEvent::ReasoningStarted { kind }) => {
+                                    attempt.reasoning_observed = true;
                                     if attempt.open_reasoning.is_some() {
                                         yield TurnStep::Emit( RuntimeEvent::Failed {
                                             kind: RunFailureKind::ProviderProtocol,
@@ -1669,6 +1810,16 @@ impl RunState {
                                     break;
                                 }
                                 Err(error) => {
+                                    attempt.rejected_before_work = matches!(&error,
+                                        qq_provider::ProviderError::Api { .. }
+                                        | qq_provider::ProviderError::Configuration(_)
+                                        | qq_provider::ProviderError::CredentialsUnavailable(_))
+                                        && attempt.blocks.is_empty() && attempt.pending_calls.is_empty()
+                                        && attempt.reasoning_bytes == 0 && !attempt.reasoning_observed
+                                        && attempt.replay.is_none();
+                                    if attempt.rejected_before_work && env.goal_spend_tracking {
+                                        yield TurnStep::Emit(RuntimeEvent::GoalRequestRejected);
+                                    }
                                     let kind = run_failure_kind(error.kind());
                                     // The provider's window verdict overrides the
                                     // estimate. With turns to compact and a compactor
@@ -1680,6 +1831,8 @@ impl RunState {
                                         && recovery.reactive_compaction_turn != Some(turn_ordinal)
                                         && attempt.blocks.is_empty()
                                         && attempt.pending_calls.is_empty()
+                                        && !attempt.reasoning_observed
+                                        && attempt.replay.is_none()
                                         && sessions::in_run_compaction_boundary(
                                             &messages[reducible_messages.saturating_add(1)..],
                                             sessions::CONTEXT_PRUNE_KEEP_TURNS,
@@ -1800,7 +1953,7 @@ impl RunState {
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
-                    let AttemptScope { pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, .. } = attempt;
+                    let AttemptScope { rejected_before_work, reasoning_bytes, reasoning_observed, pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, .. } = attempt;
                         window.compatible_request = terminal_usage.map(|usage| {
                             (
                                 system_bytes,
@@ -1813,6 +1966,14 @@ impl RunState {
                             )
                         });
 
+                        let model_work = if rejected_before_work {
+                            runtime::ModelWorkDisposition::RejectedBeforeWork
+                        } else if (completed && turn_fault.is_none() && !interrupted_turn)
+                            || !blocks.is_empty() || !pending_calls.is_empty() || reasoning_bytes > 0 || reasoning_observed || replay.is_some() || terminal_usage.is_some() {
+                            runtime::ModelWorkDisposition::Committed
+                        } else {
+                            runtime::ModelWorkDisposition::Uncertain
+                        };
                         let assistant_content = blocks
                             .into_iter()
                             .filter_map(|block| match block {
@@ -1834,6 +1995,11 @@ impl RunState {
                             })
                             .collect::<Vec<_>>();
                         let mut assistant = Message::new(Role::Assistant, assistant_content);
+                        if !checkpoint_turn && !final_answer_turn && !budget_final_turn && summarizer.is_none()
+                            && assistant.content().iter().any(|block| matches!(block, ContentBlock::Text { text } if !text.trim().is_empty())) {
+                            run.loop_guard.spontaneous_text();
+                        }
+                        run.guard_eligible.clear();
                         if completed && !interrupted_turn && !truncated_turn && turn_fault.is_none()
                             && let Some(data) = replay {
                             assistant = assistant.with_replay(data);
@@ -1866,6 +2032,9 @@ impl RunState {
                             if rejection.is_none() {
                                 run.call_effects.insert(pending.provider_call_id.clone(), effect);
                             }
+                            if !checkpoint_turn && !final_answer_turn && summarizer.is_none() && index < MAX_TOOL_CALLS_PER_TURN {
+                                run.guard_eligible.push((id, CallKey::new(&pending.name, &pending.arguments)));
+                            }
                             calls.push(RuntimeToolCall {
                                 id,
                                 turn_ordinal,
@@ -1890,6 +2059,7 @@ impl RunState {
                         {
                             for call in &mut calls {
                                 if call.rejection.is_none() {
+                                    run.guard_eligible.retain(|(id, _)| *id != call.id);
                                     call.rejection = Some(runtime::CallRejection::Runtime(
                                         "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone".to_owned()));
                                 }
@@ -1909,6 +2079,7 @@ impl RunState {
                                     // Tool-checkpoint enforcement admitted at most one
                                     // executable call above, which always fits this bound.
                                     debug_assert!(!reviews_tools);
+                                    run.guard_eligible.retain(|(id, _)| *id != call.id);
                                     call.rejection = Some(runtime::CallRejection::OutputBudget);
                                     // Streaming counted this request before final admission.
                                     slice.slice_tool_calls -= 1;
@@ -1917,15 +2088,20 @@ impl RunState {
                         }
                         // The completed turn and its requested calls travel on one event
                         // so the store can persist them atomically.
+                        slice.pending_deliveries = 0;
                         yield TurnStep::Emit( RuntimeEvent::AssistantTurnCompleted {
-                            turn_ordinal,
+                            model_work,                            turn_ordinal,
                             message: assistant.clone(),
                             usage: terminal_usage,
                             calls: calls.clone(),
                             truncated: truncated_turn,
                             notice: slice.pending_notice.take(),
+                            goal_notices: std::mem::take(&mut slice.pending_goal_notices),
+                            reserved_goal_notices: std::mem::take(&mut slice.pending_reserved_goal_notices),
                         });
-                        run.budget.charge_turn(terminal_usage);
+                        if !env.goal_spend_tracking || model_work != runtime::ModelWorkDisposition::RejectedBeforeWork {
+                            run.budget.charge_turn(terminal_usage);
+                        }
                         run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
                         if summarizer.is_some() && !calls.is_empty() {
                             run.summarizer_rejected_turns += 1;
@@ -1945,7 +2121,7 @@ impl RunState {
                             // deadline both cut the sleep short.
                             if recovery.turn_retries >= MAX_TURN_RETRIES {
                                 yield TurnStep::Emit( RuntimeEvent::Paused {
-                                    pause: Box::new(qq_protocol::RunPause {
+                                    pause: Box::new(qq_protocol::RunPause::ProviderRetry {
                                         kind,
                                         message,
                                         turn_ordinal,
@@ -2132,6 +2308,7 @@ impl RunState {
                             // queued means the client raced a finishing run; continue
                             // with the next turn so the model resumes from its text.
                             if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                 for steer in applied {
                                     yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
                                         message_id: steer.message_id,
@@ -2202,6 +2379,7 @@ impl RunState {
                             // count alone, since its calls still ran in this slice.
                             if slice_report {
                                 slice.slice_tool_calls = 0;
+                                run.slices = run.slices.saturating_add(1);
                             }
                             run.stall.reported();
                             slice.placed_report = None;
@@ -2223,6 +2401,7 @@ impl RunState {
                                 // here, before the continuation notice, exactly as at
                                 // any other turn boundary.
                                 if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                     for steer in applied {
                                         yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
                                             message_id: steer.message_id,
@@ -2243,7 +2422,7 @@ impl RunState {
         settled: SettledTurn,
     ) -> impl futures_util::Stream<Item = TurnStep<TurnRoute>> + Send + '_ {
         stream! {
-                    let Self { env, messages, steering, run, window, recovery, .. } = self;
+                    let Self { env, messages, steering, run, window, recovery, slice, .. } = self;
                     let RunEnvironment { plan, file_state, spawner, .. } = env;
                     let workspace = &plan.workspace;
 
@@ -2253,6 +2432,7 @@ impl RunState {
                             // dropped: the run continues with it instead of
                             // completing, exactly as if the model had called a tool.
                             if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                 // A reply the run continues past stays in context, so
                                 // it must be provider-valid: an empty one takes the
                                 // placeholder assembly fills the gap with on replay.
@@ -2317,6 +2497,7 @@ impl RunState {
                                         .as_ref()
                                         .map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
                                     if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                         for steer in applied {
                                             yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
                                                 message_id: steer.message_id,
@@ -2345,6 +2526,7 @@ impl RunState {
                                         // only one, so it spends one budget and
                                         // precedes any steering, as replay places it.
                                         Ok(delivered) if delivered.answers > 0 => {
+                                            slice.pending_deliveries += delivered.answers + delivered.reports;
                                             recovery.wait_delivered_for = Some(turn_ordinal.saturating_add(1));
                                             break;
                                         }
@@ -2494,6 +2676,7 @@ impl RunState {
                             run.live_turns.push(turn_ordinal);
                             yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
                             if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                 for steer in applied {
                                     yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments });
                                 }
@@ -2519,6 +2702,7 @@ impl RunState {
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
                     if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                         window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(messages).split_off(keep);
@@ -2657,6 +2841,7 @@ impl RunState {
                                     run.live_turns.push(turn_ordinal);
                                     yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
                                     if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                                         for steer in applied {
                                             yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments });
                                         }
@@ -2705,6 +2890,7 @@ impl RunState {
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
                     if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                         window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
                         let queued = Arc::make_mut(messages).split_off(keep);
@@ -2728,7 +2914,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, spills, audit_hook, tool_tasks, output: _, limits, base_specs, static_filter, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -2750,119 +2936,8 @@ impl RunState {
                         // arguments never reach the gate: there is nothing executable
                         // to approve, so they short-circuit to their tool error below.
                         let mut results: Vec<Option<RetainedResult>> = vec![None; calls.len()];
-                        let mut tool_scope = ToolScope { interrupted: false, pins_changed: false };
-                        for (index, call) in calls.iter().enumerate() {
-                            if call.rejection.is_some() {
-                                continue;
-                            }
-                            if tool_scope.interrupted {
-                                // Calls behind an interrupted approval wait never
-                                // execute; they settle like calls behind a cancel.
-                                results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
-                                continue;
-                            }
-                            // An approval wait is a boundary too: an interrupting
-                            // steer withdraws the pending request instead of leaving
-                            // the user to answer a question the steer made moot.
-                            let decision = {
-                                let interrupt = interrupt_requested(steering, run.handled_interrupt);
-                                tokio::select! {
-                                    biased;
-                                    () = interrupt => None,
-                                    decision = gate.resolve(call) => Some(decision),
-                                }
-                            };
-                            let Some(decision) = decision else {
-                                tool_scope.interrupted = true;
-                                results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
-                                continue;
-                            };
-                            // Reviewer spend is charged whatever the verdict; the
-                            // wrapped decision is then applied like any other.
-                            let decision = match decision {
-                                GateDecision::Reviewed { decision, spend } => {
-                                    run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
-                                    yield TurnStep::Emit( RuntimeEvent::ReviewCharged {
-                                        usage: spend.usage,
-                                        cost_usd_nanos: spend.cost_usd_nanos,
-                                    });
-                                    *decision
-                                }
-                                decision => decision,
-                            };
-                            match decision {
-                                GateDecision::Execute => {}
-                                GateDecision::Deny { message } => {
-                                    // A denied call counts toward the stall report:
-                                    // a run that keeps asking for denied calls is
-                                    // not producing anything either.
-                                    run.stall.settled(false);
-                                    results[index] = Some(RetainedResult::error(message.clone()));
-                                    yield TurnStep::Emit( RuntimeEvent::ToolCallDenied { id: call.id, message });
-                                }
-                                // The gate persisted and published the answered call;
-                                // the answer is the result and nothing executes.
-                                GateDecision::Answered { result } => {
-                                    // The human answered: new input, like a steer.
-                                    run.stall.progress();
-                                    results[index] = Some(RetainedResult::answered(result.clone()));
-                                    yield TurnStep::Emit( RuntimeEvent::ToolCallAnswered { id: call.id, result });
-                                }
-                                GateDecision::Fail { kind, message } => {
-                                    yield TurnStep::Emit( RuntimeEvent::Failed { kind, message });
-                                    yield TurnStep::Stop; return;
-                                }
-                                GateDecision::Reviewed { .. } => {
-                                    unreachable!("reviewed decisions are unwrapped once, never nested")
-                                }
-                            }
-                        }
-                        let approved = calls
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| results[*index].is_none() && !tool_scope.interrupted)
-                            .map(|(_, call)| call.clone())
-                            .collect::<Vec<_>>();
-                        for call in &approved {
-                            yield TurnStep::Emit( RuntimeEvent::ToolCallStarted { id: call.id });
-                        }
-
-                        // `select_tools` mutates run state (the pin set), so it
-                        // executes here, before the concurrent dispatch below, in
-                        // request order. It is read-only and instantaneous.
-                        tool_scope.pins_changed = false;
-                        for (index, call) in calls.iter().enumerate() {
-                            if results[index].is_some() || call.rejection.is_some() {
-                                continue;
-                            }
-                            if !matches!(
-                                catalog.lookup(&call.name).map(|entry| entry.host),
-                                Some(catalog::ToolHost::SelectTools)
-                            ) {
-                                continue;
-                            }
-                            let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools"));
-                            run.stall.settled(false);
-                            tool_scope.pins_changed |= changed;
-                            results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
-                            yield TurnStep::Emit( RuntimeEvent::ToolCallFinished {
-                                id: call.id,
-                                result: result.model_text,
-                                is_error: result.is_error,
-                                file_states: Vec::new(),
-                                display: result.ui_payload,
-                                spill: None,
-                                    execution_context: None,
-                            });
-                        }
-                        if tool_scope.pins_changed {
-                            run.tool_specs = catalog.specs_with_pins(base_specs, &run.pins, static_filter.as_ref().expect("pins require tools"));
-                            run.tool_schema = catalog.schema_measurement(&run.tool_specs);
-                        }
-                        let approved = approved
-                            .into_iter()
-                            .filter(|call| results[usize::from(call.call_ordinal - 1)].is_none())
-                            .collect::<Vec<_>>();
+                        let mut started_calls = vec![false; calls.len()];
+                        let mut tool_scope = ToolScope { interrupted: false };
                         let bounded_child_spend = limits.max_cost_usd_nanos.is_some()
                             || limits.max_total_tokens.is_some()
                             || limits.max_input_tokens.is_some()
@@ -2876,7 +2951,7 @@ impl RunState {
                         let execute_one = |call: RuntimeToolCall,
                                            output: Option<
                             tokio::sync::mpsc::Sender<String>,
-                        >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>| {
+                        >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>, offered: bool| {
                             let workspace = (*workspace).clone();
                             let file_state = Arc::clone(file_state);
                             let cancelled = cancelled.clone();
@@ -2896,8 +2971,6 @@ impl RunState {
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
                             // way to make it available.
-                            let offered = catalog.exposure() == catalog::Exposure::Full
-                                || run.pins.names().contains(&call.name);
                             async move {
                                 // `Some` when a sub-agent ran: its spend (or unknown
                                 // spend) is charged to the parent's budgets.
@@ -2937,10 +3010,7 @@ impl RunState {
                                                 &call.arguments,
                                             ) {
                                                 Ok(arguments) if arguments.task.trim().is_empty() => {
-                                                    tools::bounded_result(
-                                                        "task must not be empty".to_owned(),
-                                                        true,
-                                                    )
+                                                    tools::ToolOutput::refused("task must not be empty".to_owned())
                                                 }
                                                 Ok(mut arguments) => {
                                                     arguments.model = arguments.model.and_then(|model| {
@@ -2962,13 +3032,12 @@ impl RunState {
                                                         reasoning_effort,
                                                     );
                                                     match (child_limits, resolution) {
-                                                        (_, Err(message)) => tools::bounded_result(message, true),
-                                                        (Err(kind), Ok(_)) => tools::bounded_result(
+                                                        (_, Err(message)) => tools::ToolOutput::refused(message),
+                                                        (Err(kind), Ok(_)) => tools::ToolOutput::refused(
                                                             format!(
                                                                 "this run cannot afford a sub-agent: its {} budget is spent; continue with what you have",
                                                                 kind.as_str()
                                                             ),
-                                                            true,
                                                         ),
                                                         (Ok(child_budget), Ok((model, child_effort))) => {
                                                             let outcome = spawner
@@ -2996,14 +3065,11 @@ impl RunState {
                                                         }
                                                     }
                                                 }
-                                                Err(error) => tools::bounded_result(
-                                                    format!("invalid arguments: {error}"),
-                                                    true,
-                                                ),
+                                                Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                             }
                                         }
                                         None => {
-                                            tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true)
+                                            tools::ToolOutput::refused(SPAWN_UNAVAILABLE_RESULT)
                                         }
                                     },
                                     // Waiting and cancelling act on this run's own
@@ -3013,37 +3079,28 @@ impl RunState {
                                     None if host == Some(catalog::ToolHost::WaitAgents) => match &spawner {
                                         Some(spawner) => match serde_json::from_str::<tools::WaitAgentsArgs>(&call.arguments) {
                                             Ok(arguments) if !(1..=tools::MAX_WAIT_AGENTS_SECS).contains(&arguments.timeout_seconds) => {
-                                                tools::bounded_result(
-                                                    format!("timeout_seconds must be between 1 and {}", tools::MAX_WAIT_AGENTS_SECS),
-                                                    true,
-                                                )
+                                                tools::ToolOutput::refused(format!("timeout_seconds must be between 1 and {}", tools::MAX_WAIT_AGENTS_SECS))
                                             }
                                             Ok(arguments) if arguments.ids.as_ref().is_some_and(|ids| ids.len() > usize::from(sessions::MAX_SPAWNED_CHILDREN_PER_RUN)) => {
-                                                tools::bounded_result(
-                                                    format!("ids may name at most {} sub-agents", sessions::MAX_SPAWNED_CHILDREN_PER_RUN),
-                                                    true,
-                                                )
+                                                tools::ToolOutput::refused(format!("ids may name at most {} sub-agents", sessions::MAX_SPAWNED_CHILDREN_PER_RUN))
                                             }
                                             Ok(arguments) => match arguments
                                                 .ids
                                                 .map(|ids| ids.iter().map(|id| id.trim().parse::<qq_protocol::SessionId>()).collect::<Result<Vec<_>, _>>())
                                                 .transpose()
                                             {
-                                                Err(_) => tools::bounded_result(
-                                                    "ids must be sub-agent ids from spawn_agent results".to_owned(),
-                                                    true,
-                                                ),
+                                                Err(_) => tools::ToolOutput::refused("ids must be sub-agent ids from spawn_agent results".to_owned()),
                                                 Ok(ids) => match spawner
                                                     .wait_children(ids, Duration::from_secs(arguments.timeout_seconds))
                                                     .await
                                                 {
                                                     Ok(report) => tools::bounded_result(report.render(arguments.timeout_seconds), false),
-                                                    Err(error) => tools::bounded_result(error.to_string(), true),
+                                                    Err(error) => tools::ToolOutput::unobserved(error.to_string()),
                                                 },
                                             },
-                                            Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                            Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                         },
-                                        None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                                        None => tools::ToolOutput::refused(SPAWN_UNAVAILABLE_RESULT),
                                     },
                                     None if host == Some(catalog::ToolHost::CancelAgent) => match &spawner {
                                         Some(spawner) => match serde_json::from_str::<tools::CancelAgentArgs>(&call.arguments) {
@@ -3053,16 +3110,13 @@ impl RunState {
                                                         let (text, is_error) = outcome.render(id);
                                                         tools::bounded_result(text, is_error)
                                                     }
-                                                    Err(error) => tools::bounded_result(error.to_string(), true),
+                                                    Err(error) => tools::ToolOutput::unobserved(error.to_string()),
                                                 },
-                                                Err(_) => tools::bounded_result(
-                                                    "id must be a sub-agent id from a spawn_agent result".to_owned(),
-                                                    true,
-                                                ),
+                                                Err(_) => tools::ToolOutput::refused("id must be a sub-agent id from a spawn_agent result".to_owned()),
                                             },
-                                            Err(error) => tools::bounded_result(format!("invalid arguments: {error}"), true),
+                                            Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                         },
-                                        None => tools::bounded_result(SPAWN_UNAVAILABLE_RESULT.to_owned(), true),
+                                        None => tools::ToolOutput::refused(SPAWN_UNAVAILABLE_RESULT),
                                     },
                                     // Full-transcript recall dispatches to the session
                                     // layer; the tool is declared only when a searcher
@@ -3071,7 +3125,7 @@ impl RunState {
                                         let history = history.expect("the history searcher was just checked");
                                         match serde_json::from_str::<SearchHistoryArgs>(&call.arguments) {
                                             Ok(arguments) if arguments.query.trim().is_empty() => {
-                                                tools::bounded_result("query must not be empty".to_owned(), true)
+                                                tools::ToolOutput::refused("query must not be empty")
                                             }
                                             Ok(arguments) => {
                                                 let limit = arguments.limit.clamp(1, crate::runtime::MAX_HISTORY_MATCHES);
@@ -3080,13 +3134,10 @@ impl RunState {
                                                         render_history_matches(&arguments.query, &search),
                                                         false,
                                                     ),
-                                                    Err(error) => tools::bounded_result(error, true),
+                                                    Err(error) => tools::ToolOutput::unobserved(error),
                                                 }
                                             }
-                                            Err(error) => tools::bounded_result(
-                                                format!("invalid arguments: {error}"),
-                                                true,
-                                            ),
+                                            Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                         }
                                     }
                                     // A stored complete output, read back exactly and
@@ -3096,19 +3147,13 @@ impl RunState {
                                         let spills = spills.expect("the spill reader was just checked");
                                         match serde_json::from_str::<ReadToolResultArgs>(&call.arguments) {
                                             Ok(arguments) => match runtime::SpillHandle::parse(&arguments.handle) {
-                                                None => tools::bounded_result(
-                                                    "handle_invalid: expected t:<tool>:<call8>:<digest8>".to_owned(),
-                                                    true,
-                                                ),
-                                                Some(handle) if handle.call_prefix == "00000000" && handle.digest_prefix == "00000000" => tools::bounded_result(
-                                                    "handle_placeholder: t:<tool>:<call8>:<digest8> is the example shape; copy the handle from the …[qq: … t:…]… marker of the result you want".to_owned(),
-                                                    true,
-                                                ),
+                                                None => tools::ToolOutput::refused("handle_invalid: expected t:<tool>:<call8>:<digest8>".to_owned()),
+                                                Some(handle) if handle.call_prefix == "00000000" && handle.digest_prefix == "00000000" => tools::ToolOutput::refused("handle_placeholder: t:<tool>:<call8>:<digest8> is the example shape; copy the handle from the …[qq: … t:…]… marker of the result you want".to_owned()),
                                                 Some(handle) => match spills.read(handle).await {
                                                     Ok(runtime::SpillRead::Found { text, .. }) => {
                                                         match render_tool_result(&arguments.handle, &arguments, &text) {
                                                             Ok(page) => tools::ToolOutput::exact(page, &runtime::READ_TOOL_RESULT_BOUNDS),
-                                                            Err(error) => tools::bounded_result(error, true),
+                                                            Err(error) => tools::ToolOutput::refused(error),
                                                         }
                                                     }
                                                     Ok(runtime::SpillRead::Missing) => tools::bounded_result(
@@ -3119,17 +3164,11 @@ impl RunState {
                                                         format!("spill_evicted: the stored output for {} was reclaimed by the session's 64 MiB cap", arguments.handle),
                                                         true,
                                                     ),
-                                                    Ok(runtime::SpillRead::ForeignSession) => tools::bounded_result(
-                                                        "handle_foreign_session: stored outputs are readable only by the session that produced them".to_owned(),
-                                                        true,
-                                                    ),
-                                                    Err(error) => tools::bounded_result(error, true),
+                                                    Ok(runtime::SpillRead::ForeignSession) => tools::ToolOutput::refused("handle_foreign_session: stored outputs are readable only by the session that produced them".to_owned()),
+                                                    Err(error) => tools::ToolOutput::unobserved(error),
                                                 },
                                             },
-                                            Err(error) => tools::bounded_result(
-                                                format!("invalid arguments: {error}"),
-                                                true,
-                                            ),
+                                            Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                         }
                                     }
                                     // The model asked for a disclosed skill body. Same
@@ -3152,10 +3191,7 @@ impl RunState {
                                                 }
                                                 Err(error) => tools::bounded_result(error.to_string(), true),
                                             },
-                                            Err(error) => tools::bounded_result(
-                                                format!("invalid arguments: {error}"),
-                                                true,
-                                            ),
+                                            Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
                                         }
                                     }
                                     // External calls dispatch to their host by index;
@@ -3165,21 +3201,27 @@ impl RunState {
                                     None if let Some(catalog::ToolHost::External { .. }) = host
                                         && !offered =>
                                     {
-                                        tools::bounded_result(
+                                        tools::ToolOutput::refused(
                                             format!(
                                                 "{} is not available in this run yet; call {} with keywords \
                                                  describing it first",
                                                 call.name, catalog::SELECT_TOOLS_TOOL
                                             ),
-                                            true,
                                         )
                                     }
                                     None if let Some(catalog::ToolHost::External { host: index }) = host => {
-                                        match hosts[index]
-                                            .call(call.name.clone(), call.arguments.clone(), cancelled)
-                                            .await
-                                        {
-                                            Ok(outcome) => tools::bounded_result(outcome.content, outcome.is_error),
+                                        let outcome = match hosts[index].call_observed(
+                                            call.name.clone(), call.arguments.clone(), cancelled,
+                                        ) {
+                                            hosts::HostCallObservation::Rendered(future) => future.await.map(|result| (result, None)),
+                                            hosts::HostCallObservation::Observed(future) => future.await.map(|observed| (observed.result, observed.result_digest)),
+                                        };
+                                        match outcome {
+                                            Ok((outcome, identity)) => {
+                                                let mut result = tools::bounded_result(outcome.content, outcome.is_error);
+                                                if let Some(identity) = identity { result.result_digest = identity; }
+                                                result
+                                            }
                                             Err(error) => hosts::host_error_result(&error),
                                         }
                                     }
@@ -3216,7 +3258,7 @@ impl RunState {
                         let overlaps = |call: &RuntimeToolCall| {
                             !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
-                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent)
+                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
                             })
                             && matches!(
                                 approval::classify(call.effect, &call.name, &call.arguments, network_policy),
@@ -3232,13 +3274,132 @@ impl RunState {
                         // read child may overlap: a write child is a mutation, and
                         // finite spend cannot be granted independently to overlapping
                         // children.
-                        let leading_reads = approved.iter().take_while(|call| overlaps(call)).count();
-                        let mut ordered = approved;
-                        let overlapped: Vec<RuntimeToolCall> = ordered.drain(..leading_reads).collect();
-                        if !overlapped.is_empty() {
-                            let child_limits = run.budget.child_budget(tokio::time::Instant::now());
+                        let mut cursor = 0_usize;
+                        let mut serial_suffix = false;
+                        while cursor < calls.len() && !tool_scope.interrupted {
+                            let call = &calls[cursor];
+                            let admission_key = run.admission_key(call.id);
+                            if run.loop_guard.no_progress() {
+                                for (index, remaining) in calls.iter().enumerate().skip(cursor) {
+                                    if results[index].is_none() {
+                                        let message = "not executed: run paused after 512 quiet tool attempts without progress".to_owned();
+                                        results[index] = Some(RetainedResult::error(message.clone()));
+                                        yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: remaining.id, message, interrupted: false });
+                                    }
+                                }
+                                break;
+                            }
+                            if let Some(result) = &results[cursor] {
+                                if result.human_input { run.stall.progress(); } else { run.stall.settled(false); }
+                                run.observe_tool(call, result, network_policy, catalog.lookup(&call.name));
+                                cursor += 1;
+                                continue;
+                            }
+                            if let Some(rejection) = &call.rejection {
+                                let message = rejection.clone().into_message();
+                                let result = RetainedResult::error(message.clone());
+                                run.observe_tool(call, &result, network_policy, catalog.lookup(&call.name));
+                                results[cursor] = Some(result);
+                                yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: call.id, message: message.clone(), interrupted: false });
+                                cursor += 1;
+                                continue;
+                            }
+                            if admission_key.is_some_and(|key| run.loop_guard.reject(key)) {
+                                let message = "not executed: identical tool results repeated without progress; change the approach or inputs".to_owned();
+                                let result = RetainedResult::error(message.clone());
+                                run.observe_tool(call, &result, network_policy, catalog.lookup(&call.name));
+                                run.stall.settled(false);
+                                results[cursor] = Some(result);
+                                yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: call.id, message, interrupted: false });
+                                cursor += 1;
+                                continue;
+                            }
+                            let batch_start = cursor;
+                            let read_only = overlaps(&calls[cursor]);
+                            let reading = !serial_suffix && read_only;
+                            if !read_only && catalog.lookup(&calls[cursor].name).map(|entry| entry.host) != Some(catalog::ToolHost::SelectTools) {
+                                serial_suffix = true;
+                            }
+                            let mut keys = Vec::new();
+                            let capacity = if reading { usize::from(512_u16.saturating_sub(run.loop_guard.quiet_attempts())).min(MAX_PARALLEL_READS) } else { 1 };
+                            while cursor < calls.len() && cursor - batch_start < capacity {
+                                let call = &calls[cursor];
+                                let key = run.admission_key(call.id).unwrap_or_else(|| CallKey::new(&call.name, &call.arguments));
+                                if results[cursor].is_some() || call.rejection.is_some()
+                                    || (reading && !overlaps(call)) || keys.contains(&key)
+                                    || (run.admission_key(call.id).is_some() && run.loop_guard.reject(key)) {
+                                    break;
+                                }
+                                let index = cursor;
+                            // An approval wait is a boundary too: an interrupting
+                            // steer withdraws the pending request instead of leaving
+                            // the user to answer a question the steer made moot.
+                            let decision = {
+                                let interrupt = interrupt_requested(steering, run.handled_interrupt);
+                                tokio::select! {
+                                    biased;
+                                    () = interrupt => None,
+                                    decision = gate.resolve(call) => Some(decision),
+                                }
+                            };
+                            let Some(decision) = decision else {
+                                tool_scope.interrupted = true;
+                                break;
+                            };
+                            // Reviewer spend is charged whatever the verdict; the
+                            // wrapped decision is then applied like any other.
+                            let decision = match decision {
+                                GateDecision::Reviewed { decision, spend } => {
+                                    run.budget.charge_child(spend.usage, spend.cost_usd_nanos);
+                                    yield TurnStep::Emit( RuntimeEvent::ReviewCharged {
+                                        usage: spend.usage,
+                                        cost_usd_nanos: spend.cost_usd_nanos,
+                                    });
+                                    *decision
+                                }
+                                decision => decision,
+                            };
+                            match decision {
+                                GateDecision::Execute => {}
+                                GateDecision::Deny { message } => {
+                                    // A denied call counts toward the stall report:
+                                    // a run that keeps asking for denied calls is
+                                    // not producing anything either.
+                                    results[index] = Some(RetainedResult::error(message.clone()));
+                                    yield TurnStep::Emit( RuntimeEvent::ToolCallDenied { id: call.id, message });
+                                }
+                                // The gate persisted and published the answered call;
+                                // the answer is the result and nothing executes.
+                                GateDecision::Answered { result } => {
+                                    // The human answered: new input, like a steer.
+                                    results[index] = Some(RetainedResult::answered(result.clone()));
+                                    yield TurnStep::Emit( RuntimeEvent::ToolCallAnswered { id: call.id, result });
+                                }
+                                GateDecision::Fail { kind, message } => {
+                                    yield TurnStep::Emit( RuntimeEvent::Failed { kind, message });
+                                    yield TurnStep::Stop; return;
+                                }
+                                GateDecision::Reviewed { .. } => {
+                                    unreachable!("reviewed decisions are unwrapped once, never nested")
+                                }
+                            }
+                                if results[index].is_some() { break; }
+                                keys.push(key);
+                                cursor += 1;
+                            }
+                            if tool_scope.interrupted { break; }
+                            if cursor == batch_start { continue; }
+                            if reading {
+                                let child_limits = run.budget.child_budget(tokio::time::Instant::now());
+                                let overlapped = calls[batch_start..cursor].iter().map(|call| {
+                                    (call.clone(), catalog.exposure() == catalog::Exposure::Full || run.pins.names().contains(&call.name))
+                                }).collect::<Vec<_>>();
+                                for (admitted, _) in &overlapped {
+                                    started_calls[usize::from(admitted.call_ordinal - 1)] = true;
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id });
+                                }
                             let mut executions = futures_stream::iter(
-                                overlapped.into_iter().map(|call| execute_one(call, None, child_limits)),
+                                overlapped.into_iter().map(|(call, offered)| execute_one(call, None, child_limits, offered)),
                             )
                                 .buffer_unordered(MAX_PARALLEL_READS);
                             loop {
@@ -3293,9 +3454,118 @@ impl RunState {
                                     execution_context: result.execution_context,
                                 });
                             }
-                        }
-                        if !tool_scope.interrupted {
-                            for call in ordered {
+                            for index in batch_start..cursor {
+                                if let Some(result) = &results[index] {
+                                    run.observe_tool(&calls[index], result, network_policy, catalog.lookup(&calls[index].name));
+                                }
+                            }
+                            continue;
+                            }
+                            let call = calls[batch_start].clone();
+                            started_calls[usize::from(call.call_ordinal - 1)] = true;
+                            yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: call.id });
+                            if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::SelectTools) {
+                                let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools"));
+                                run.stall.settled(false);
+                                let retained = RetainedResult::retain(&result, &call.name, call.id);
+                                run.observe_tool(&call, &retained, network_policy, catalog.lookup(&call.name));
+                                results[usize::from(call.call_ordinal - 1)] = Some(retained);
+                                if changed {
+                                    run.tool_specs = catalog.specs_with_pins(base_specs, &run.pins, static_filter.as_ref().expect("pins require tools"));
+                                    run.tool_schema = catalog.schema_measurement(&run.tool_specs);
+                                }
+                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, });
+                                continue;
+                            }
+
+                                // Session goal edits are serial despite needing no
+                                // workspace approval. Keep their position among
+                                // ordinary reads and mutations in this batch.
+                                if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::UpdateGoal) {
+                                    let index = usize::from(call.call_ordinal - 1);
+                                    // An atomic store write already admitted stays
+                                    // owned. At the next call boundary, stop before
+                                    // admitting any edit from the obsolete suffix.
+                                    if steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > run.handled_interrupt) {
+                                        tool_scope.interrupted = true;
+                                        results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                        yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
+                                            id:call.id, result:INTERRUPTED_TOOL_RESULT.to_owned(), is_error:true,
+                                            file_states:Vec::new(), display:None, spill:None,
+                                         execution_context: None, });
+                                        break;
+                                    }
+                            let result = match serde_json::from_str::<tools::goal::UpdateGoalArgs>(&call.arguments) {
+                                Err(error) => tools::ToolOutput::refused(format!("invalid arguments: {error}")),
+                                Ok(arguments) => match goal {
+                                    None => tools::ToolOutput::refused("goal_not_claimed: this run has no goal capability"),
+                                    Some(goal) => {
+                                        let interrupt = interrupt_requested(steering, run.handled_interrupt);
+                                        let admitted = tokio::select! {
+                                            biased;
+                                            () = cancelled.cancelled() => { yield TurnStep::Stop; return; },
+                                            () = runtime::RunDeadline::wait(*deadline) => {
+                                                yield TurnStep::Emit(RuntimeEvent::BudgetExhausted { exhaustion: deadline.expect("only a finite deadline wakes").exhaustion() });
+                                                yield TurnStep::Stop; return;
+                                            },
+                                            () = interrupt => None,
+                                            receipt = goal.admit_update(arguments) => Some(receipt),
+                                        };
+                                        match admitted {
+                                            None => {
+                                                tool_scope.interrupted = true;
+                                                tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned())
+                                            }
+                                            Some(admitted) => {
+                                                // Queue handoff owns the write. Await its
+                                                // durability even if steering arrives now.
+                                                let updated = match admitted {
+                                                    Err(error) => Err(error),
+                                                    Ok(receipt) => match receipt.await {
+                                                        Ok(updated) => updated,
+                                                        Err(_) => Err(sessions::SessionRuntimeError::Unavailable),
+                                                    },
+                                                };
+                                                match updated {
+                                        Err(error) => {
+                                            yield TurnStep::Emit(RuntimeEvent::Failed { kind:RunFailureKind::Server, message:format!("persist goal update: {error}") });
+                                            yield TurnStep::Stop; return;
+                                        }
+                                        Ok(updated) => {
+                                            if updated.checklist_changed { run.loop_guard.mutation(); }
+                                            match serde_json::to_string(&updated) {
+                                            Ok(text) => {
+                                                if updated.added == 0 && updated.changed == 0 && updated.dropped == 0 && !updated.notes_applied && !updated.status_applied && !updated.wait_applied && !updated.rejected.is_empty() {
+                                                    tools::ToolOutput::refused(text)
+                                                } else {
+                                                    tools::bounded_result(text, !updated.rejected.is_empty())
+                                                }
+                                            },
+                                            Err(error) => {
+                                                yield TurnStep::Emit(RuntimeEvent::Failed { kind:RunFailureKind::Server, message:format!("encode goal update result: {error}") });
+                                                yield TurnStep::Stop; return;
+                                            }
+                                        }
+                                        }
+
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            run.stall.settled(!result.is_error);
+                            run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
+                            results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
+                            yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
+                                id:call.id, result:result.model_text, is_error:result.is_error,
+                                file_states:Vec::new(), display:result.ui_payload, spill:None,
+                             execution_context: None, });
+                                    if tool_scope.interrupted {
+                                        break;
+                                    }
+                                    continue;
+                                }
                                 // Live output chunks (shell) interleave with execution:
                                 // drain the channel while the call runs so long
                                 // commands render as they print.
@@ -3303,7 +3573,8 @@ impl RunState {
                                 let mut call_id_holder = Some(call.clone());
                                 let (delta_sender, mut deltas) =
                                     tokio::sync::mpsc::channel::<String>(SHELL_OUTPUT_QUEUE_CAPACITY);
-                                let mut execution = Box::pin(execute_one(call, Some(delta_sender), run.budget.child_budget(tokio::time::Instant::now())));
+                                let offered = catalog.exposure() == catalog::Exposure::Full || run.pins.names().contains(&call.name);
+                                let mut execution = Box::pin(execute_one(call, Some(delta_sender), run.budget.child_budget(tokio::time::Instant::now()), offered));
                                 let mut execution_scope = ExecutionScope { output_closed: false };
                                 let (call, result, child_spend) = loop {
                                     let interrupt = interrupt_requested(steering, run.handled_interrupt);
@@ -3326,7 +3597,7 @@ impl RunState {
                                                     }
                                                 }
                                             }
-                                            break (call_id_holder.take().expect("call retained"), tools::ToolOutput::verbatim_error(INTERRUPTED_TOOL_RESULT.to_owned()), None);
+                                            break (call_id_holder.take().expect("call retained"), tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()), None);
                                         }
                                         chunk = deltas.recv(), if !execution_scope.output_closed => match chunk {
                                             Some(chunk) => {
@@ -3370,6 +3641,7 @@ impl RunState {
                                         && child_spend.is_none();
                                     run.stall.settled(!receipt && runtime::is_progress(&call, entry, &result));
                                 }
+                                run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
                                 let result = cite_spill(result, &call.name, call.id, spills.is_some());
                                 results[usize::from(call.call_ordinal - 1)] =
                                     Some(RetainedResult::retain(&result, &call.name, call.id));
@@ -3386,7 +3658,6 @@ impl RunState {
                                     tool_scope.interrupted = true;
                                     break;
                                 }
-                            }
                         }
                         if tool_scope.interrupted {
                             if let Err(error) = tool_tasks.drain().await {
@@ -3409,7 +3680,8 @@ impl RunState {
                             // transcript stays provider-valid: one result per call.
                             for (index, call) in calls.iter().enumerate() {
                                 if results[index].is_none() {
-                                    results[index] = Some(RetainedResult::error(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                    results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                    if started_calls[index] {
                                     yield TurnStep::Emit( RuntimeEvent::ToolCallFinished {
                                         id: call.id,
                                         result: INTERRUPTED_TOOL_RESULT.to_owned(),
@@ -3419,6 +3691,9 @@ impl RunState {
                                         spill: None,
                                     execution_context: None,
                                     });
+                                    } else {
+                                        yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: call.id, message: INTERRUPTED_TOOL_RESULT.to_owned(), interrupted: true });
+                                    }
                                 }
                             }
                             yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
@@ -3646,6 +3921,7 @@ impl RunState {
                         // the next request has not been built. Steering joins here as
                         // a user message after the tool results.
                         if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        run.loop_guard.mutation();
                             for steer in applied {
                                 yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
                                     message_id: steer.message_id,
@@ -3655,6 +3931,12 @@ impl RunState {
                             }
                         }
 
+                        if run.loop_guard.no_progress() {
+                            yield TurnStep::Emit(RuntimeEvent::Paused { pause: Box::new(qq_protocol::RunPause::NoProgress {
+                                turn_ordinal, slices: run.slices, calls: run.loop_guard.eligible_attempts(),
+                            }) });
+                            yield TurnStep::Stop; return;
+                        }
         yield TurnStep::NextTurn;
                 }
     }
