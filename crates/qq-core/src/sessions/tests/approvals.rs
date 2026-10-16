@@ -4030,7 +4030,7 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
     struct Loader {
         inner: DepthLoader,
@@ -4090,14 +4090,6 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
     )
     .await
     .unwrap();
-    // Real Store I/O must not let paused Tokio time advance before the
-    // child has actually requested approval. The keeper is wall-clock bounded.
-    let keeper = tokio::spawn(async {
-        let until = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < until {
-            tokio::task::yield_now().await;
-        }
-    });
     let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
     let created = create_session(&runtime, workspace, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
@@ -4116,7 +4108,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
                 "type":"set_goal","session_id":session_id,
                 "objective":"wait for the sponsored child's explicit answer",
                 "budget":{"max_goal_runs":10,"max_total_tokens":1_000_000,
-                    "deadline_ms":start+1000}
+                    "deadline_ms":start+3_600_000}
             }))
             .unwrap(),
         )
@@ -4152,11 +4144,12 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
     assert_eq!(child_requests.lock().unwrap().len(), 1);
     // The finite token allowance keeps the read child blocking. Both model
     // requests and the actual held call precede the only time advance.
-    epoch.advance(start + 1001);
-    tokio::time::advance(Duration::from_millis(1001)).await;
+    tokio::time::pause();
+    epoch.advance(start + 3_600_001);
+    tokio::time::advance(Duration::from_millis(3_600_001)).await;
+    tokio::time::resume();
     let completed = collect_until_run_finished(&mut events, parent).await;
     runtime.shutdown().await.unwrap();
-    keeper.abort();
     let snapshot = runtime
         .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 16))
         .await
