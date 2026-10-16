@@ -2631,7 +2631,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
                 .inner
                 .check_policy_slots
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-            let permit = match Arc::clone(slots).try_acquire_owned() {
+            let permit = match Arc::clone(slots).acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => return Err(qq_core::GoalPolicyError::Overloaded),
             };
