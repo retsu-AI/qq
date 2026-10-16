@@ -1,4 +1,5 @@
 ---
+name: design-skill-or-pack
 description: Design a new QQ skill or agent pack: decide which you need, write the manifest and SKILL.md correctly, and validate it loads. Use when asked to create, extend, or fix a skill or pack.
 ---
 

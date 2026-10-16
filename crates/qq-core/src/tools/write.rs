@@ -50,7 +50,7 @@ pub(super) fn write_file(
             && if_hash.starts_with("h:")
             && if_hash[2..].bytes().all(|b| b.is_ascii_hexdigit()))
     {
-        return ToolOutput::error("invalid_if_hash: expected h:<12 hex digits>");
+        return ToolOutput::refused("invalid_if_hash: expected h:<12 hex digits>");
     }
     let (path, missing_parents) = match resolve_write_path(workspace, &arguments.path) {
         Ok(resolved) => resolved,
@@ -63,7 +63,7 @@ pub(super) fn write_file(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if cancelled.is_cancelled() {
-        return ToolOutput::error("tool execution was cancelled");
+        return ToolOutput::interrupted("tool execution was cancelled");
     }
     let (created, before) = match workspace.root().symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
@@ -81,10 +81,12 @@ pub(super) fn write_file(
             match (&arguments.if_hash, file_state.recorded(&key)) {
                 (Some(if_hash), _) => {
                     if if_hash[2..] != current_hash[..12] {
+                        // The current hash is not named (ADR-0058): passed
+                        // back as if_hash it would authorize an overwrite of
+                        // content the model never saw.
                         return ToolOutput::error(format!(
-                            "stale_file: {} is h:{} now, not {if_hash}; read it again",
-                            arguments.path,
-                            &current_hash[..12]
+                            "stale_file: {} is not {if_hash} now; read_file it again",
+                            arguments.path
                         ));
                     }
                 }

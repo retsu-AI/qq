@@ -82,9 +82,10 @@ fn from_git() -> Option<(String, String, String)> {
             && output.status.success()
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if root.join(&path).is_file() {
-                println!("cargo:rerun-if-changed={path}");
-            } else if let Ok(output) = Command::new("git")
+            // A packed branch update creates this loose ref; watch it even
+            // before it exists, as well as packed-refs for repacks.
+            println!("cargo:rerun-if-changed={path}");
+            if let Ok(output) = Command::new("git")
                 .args(["rev-parse", "--git-path", "packed-refs"])
                 .current_dir(root)
                 .output()
@@ -97,13 +98,20 @@ fn from_git() -> Option<(String, String, String)> {
             }
         }
     }
-    // `git describe --dirty` covers tracked changes only. Watch the index and
-    // every tracked path so an incremental build cannot retain a clean source
-    // revision after one of those inputs becomes dirty (or vice versa).
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--git-path", "index"])
-        .current_dir(root)
-        .output()
+    // `git describe --dirty` covers tracked changes only. Release builds (and
+    // `QQ_EXACT_REVISION=1`) watch the index and every tracked path so an
+    // incremental build cannot retain a clean source revision after one of
+    // those inputs becomes dirty (or vice versa). Debug builds skip this:
+    // watching every tracked file relinks `qq` on any edit, docs included, so
+    // a dev binary's `-dirty` flag may lag until the next commit or checkout.
+    println!("cargo:rerun-if-env-changed=QQ_EXACT_REVISION");
+    let exact = env::var("PROFILE").as_deref() == Ok("release")
+        || env::var("QQ_EXACT_REVISION").as_deref() == Ok("1");
+    if exact
+        && let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--git-path", "index"])
+            .current_dir(root)
+            .output()
         && output.status.success()
     {
         let index = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -111,10 +119,11 @@ fn from_git() -> Option<(String, String, String)> {
             println!("cargo:rerun-if-changed={index}");
         }
     }
-    if let Ok(output) = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output()
+    if exact
+        && let Ok(output) = Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(root)
+            .output()
         && output.status.success()
     {
         for path in output

@@ -11,45 +11,22 @@ Accepted by every command:
 | `--model PROVIDER/MODEL` | override the configured route for this invocation |
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
-| `--credential-diagnostics PATH` | opt in to bounded credential-read attribution in a new private JSONL file |
-| `-V`, `--version` | `qq 0.1.5 (abc1234 2026-09-29)` |
+| `--approve-self-contained-read-image FAMILY:SHA256` | attest exact self-contained native read behavior for progress/audit accounting; repeat for up to ten families |
+| `-V`, `--version` | `qq 0.1.7 (dc41c33 2026-10-15)` |
 
-### Credential-read attribution
+Read-image approvals are process-start host decisions for `ask`, `run`, `serve`
+and interactive execution. The flag attests read behavior for admitted
+argv/stdin in a C/POSIX or unset locale, independent of HOME/TERM and without
+executable helpers or configuration-driven code. Approvals remain immutable
+through profile, child and cached plans. Existing-server attachment and the
+isolated TUI QA fixture reject nonempty approvals explicitly.
 
-Diagnostics are off by default. To observe existing runtime and advisory
-credential reads, add `--credential-diagnostics` to the command being investigated:
-
-```sh
-qq --credential-diagnostics /private/tmp/qq-credential-new.jsonl serve
-```
-
-Choose a fresh output path each time. On Unix, QQ exclusively creates the final
-file with mode `0600` and validates its descriptor and path before runtime
-construction. Existing files, symlinks, directories, devices, invalid identities,
-and permission failures reject activation without replacing the target. Other
-platforms refuse activation until private output is supported. Restart the same
-command without the flag to deactivate it; it is not a persisted setting.
-
-The trace contains process-local opaque IDs, the real PID, monotonic timing,
-allowlisted route/endpoint classes, and typed outcomes. The runtime store and
-existing separate advisory store share one diagnostic session. Credential
-names, URLs, secret values, and raw errors are excluded. Routes without exact
-supported hooks remain silent. Enabling diagnostics preserves existing
-credential reads, authentication results, prompts, and cancellation behavior.
-
-Each line is at most 512 bytes; the whole output is bounded to 256 records and
-128 KiB, including a reserved summary of ordinary emitted bytes and dropped
-records. Queue pressure and output budgets can drop events. Shutdown waits at
-most 250 ms for the writer; output failures or a timeout print
-`[diagnostic] output incomplete; the command result is unchanged`, while
-preserving the original command result. Treat that trace as incomplete even
-if a summary was already written.
-
-`BackendReadReturned` records a genuine synchronous operation return. An
-aborted wait can leave that operation running, and a missing return event can
-also reflect dropped or incomplete output. Use the trace to attribute the
-observed operation; authentication, provider execution, and visible session
-acceptance each require their own actual checks.
+Verified reads currently require literal Linux exec, an approved self-contained
+static native image, a held workspace cwd and sealed image binding. Supported
+families are cat, head, tail, wc, grep, nl, cut, pwd, echo and uniq. Other process
+contexts count as Work. Ordinary approval policy still controls execution;
+built-in reads keep their existing accounting. See [ADR-0060](../adr/0060-process-context-for-progress.md)
+for the host contract and receipt boundary.
 
 ## `qq` — interactive
 
@@ -57,13 +34,14 @@ acceptance each require their own actual checks.
 | --- | --- |
 | `qq` | open the TUI in the current directory; start a new session |
 | `qq --session ID` | open the TUI on an existing session of this workspace |
-| `qq --tui-qa-root DIR` | isolated, credential-free diagnostic fixture ([`../runbooks/tui-qa.md`](../runbooks/tui-qa.md)) |
+| `qq --tui-qa-root PATH` | isolated, credential-free diagnostic fixture ([`../runbooks/tui-qa.md`](../runbooks/tui-qa.md)) |
 
 Requires a terminal on stdin and stdout; in a pipe use `qq ask` or `qq run`.
 
 ## `qq ask PROMPT`
 
-One streamed answer, no tools, no session. [Headless](headless.md#qq-ask--one-answer).
+One streamed answer with workspace read tools and configuration-granted external
+tools; no approval questions or persisted session. [Headless](headless.md#qq-ask--one-answer).
 
 ## `qq run [FLAGS] PROMPT`
 

@@ -246,6 +246,8 @@ pub enum McpBearer {
 /// The outcome of one MCP tool call; failures are `is_error` outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpCallOutcome {
+    /// Complete observed response identity before preview conversion; absent on host failures.
+    pub result_digest: Option<[u8; 32]>,
     pub content: String,
     pub is_error: bool,
     /// Which failure class produced an `is_error` outcome that the server
@@ -275,6 +277,7 @@ impl McpCallOutcome {
             content: content.into(),
             is_error: true,
             failure: Some(failure),
+            result_digest: None,
         }
     }
 }
@@ -918,6 +921,7 @@ impl ServerHandle {
             Ok(result) => render_result(result),
             // A JSON-RPC error is the server answering; keep the connection.
             Err(ServiceError::McpError(error)) => McpCallOutcome {
+                result_digest: None,
                 content: format!("MCP server returned an error: {error}"),
                 is_error: true,
                 failure: None,
@@ -948,7 +952,35 @@ fn parse_arguments(
     }
 }
 
+struct ResponseIdentity(Sha256);
+impl std::io::Write for ResponseIdentity {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn render_result(result: CallToolResult) -> McpCallOutcome {
+    let mut identity = ResponseIdentity(Sha256::new());
+    identity.0.update(b"qq.mcp-observed-result.v1\0");
+    if let Err(error) = serde_json::to_writer(
+        &mut identity,
+        &(
+            &result.content,
+            &result.structured_content,
+            result.is_error.unwrap_or(false),
+        ),
+    ) {
+        return McpCallOutcome::error(
+            format!("MCP response could not be represented: {error}"),
+            McpCallFailure::InvalidResult,
+        );
+    }
+    let result_digest = Some(identity.0.finalize().into());
+
     let mut content = String::new();
     for block in &result.content {
         let rendered = match block {
@@ -977,6 +1009,7 @@ fn render_result(result: CallToolResult) -> McpCallOutcome {
         content,
         is_error: result.is_error.unwrap_or(false),
         failure: None,
+        result_digest,
     }
 }
 

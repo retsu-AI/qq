@@ -370,6 +370,9 @@ async fn recovery_interrupts_only_the_current_turns_message() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -405,6 +408,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
             "noted\n".to_owned(),
             false,
             Vec::new(),
+            None,
             None,
             None,
         )
@@ -533,6 +537,9 @@ async fn recovery_interrupts_running_tools_without_reexecuting_them() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -691,6 +698,9 @@ async fn orphaned_tool_call_blocks_replay_with_synthesized_interrupted_results()
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,
@@ -2002,6 +2012,8 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -2074,6 +2086,8 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,
@@ -2279,8 +2293,17 @@ async fn reservation_is_publicly_queued_exclusive_and_cancel_wins_before_start()
             .start_reserved_run(&claimed, test_prepared_audit(&claimed), None)
             .await
             .unwrap()
+            .unwrap()
             .is_none()
     );
+    assert!(
+        store.reserve_next_run(false).await.unwrap().is_none(),
+        "cancelled preparation still owns its reservation"
+    );
+    store
+        .finish_reserved_run(&claimed, RunOutcome::Cancelled)
+        .await
+        .unwrap();
     let run = store
         .call(Priority::Control, move |connection| {
             load_run(connection, run_id)
@@ -2397,6 +2420,12 @@ async fn delayed_old_panic_cannot_settle_a_newer_auto_compaction() {
             CommandId::generate().unwrap(),
             SessionCommand::CancelRun { run_id: old_id },
         )
+        .await
+        .unwrap();
+
+    assert!(store.reserve_next_run(false).await.unwrap().is_none());
+    store
+        .finish_reserved_run(&old, RunOutcome::Cancelled)
         .await
         .unwrap();
 
@@ -2726,6 +2755,9 @@ async fn version_sixteen_active_auto_compaction_backfills_exact_attempt_ownershi
             "ALTER TABLE runs DROP COLUMN context_compaction_attempted",
             [],
         )
+        .unwrap();
+    connection
+        .execute("DROP INDEX runs_owned_compaction", [])
         .unwrap();
     connection
         .execute(
@@ -3100,11 +3132,14 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
         )
         .await
         .unwrap();
-    let observed = collect_until(&mut events, finished_for(run_id)).await;
-    assert!(observed.iter().all(|event| !matches!(
-        event.event,
-        SessionEvent::RunStarted { run_id: started, .. } if started == run_id
-    )));
+    let mut observed=collect_until(&mut events,|event|matches!(event,SessionEvent::CancellationRequested {run_id:cancelled,..} if *cancelled==run_id)).await;
+    assert!(observed.iter().all(|event|!matches!(event.event,SessionEvent::RunFinished {run_id:finished,..} if finished==run_id)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), events.next())
+            .await
+            .is_err(),
+        "the loader still owns preparation; no terminal event may release it"
+    );
 
     let mut shutdown = Box::pin(runtime.shutdown());
     assert!(
@@ -3117,6 +3152,10 @@ async fn blocked_preparation_stays_queued_and_shutdown_waits_for_its_permit() {
         .await
         .expect("shutdown must finish after preparation exits")
         .unwrap();
+    observed.extend(collect_until(&mut events, finished_for(run_id)).await);
+    assert_eq!(observed.iter().filter(|event|matches!(event.event,SessionEvent::RunFinished {run_id:finished,..} if finished==run_id)).count(),1);
+    assert!(observed.iter().any(|event|matches!(event.event,SessionEvent::RunFinished {run_id:finished,outcome:RunOutcome::Cancelled,..} if finished==run_id)));
+    assert!(observed.iter().all(|event|!matches!(event.event,SessionEvent::RunStarted {run_id:started,..} if started==run_id)));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     assert!(
         runtime
@@ -3261,6 +3300,8 @@ async fn schedules_ready_sessions_fairly() {
         SessionRuntimeOptions {
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
+            max_active_side_queries: None,
+            side_query_limits: SideQueryLimits::default(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             delegate_timeout: DEFAULT_DELEGATE_TIMEOUT,
             grant_authority: None,

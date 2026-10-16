@@ -55,8 +55,8 @@ a paid run or any new runtime default.
 
 ## Evidence / references
 
-- [Baseline inventory](../design/token-efficiency.md), source `8089a0e`.
-- [Delegation evaluation](../plans/supervised-delegation.md), ENG-812.
+- [Baseline inventory](../research/token-efficiency.md), source `8089a0e`.
+- [Delegation evaluation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md), ENG-812.
 - [Tool ablations](../plans/tool-layer.md), ENG-813.
 - [Evaluation program](https://linear.app/retsu-ai/issue/ENG-809).
 - No new benchmark, live qualification or implemented saving is claimed.

@@ -4,10 +4,11 @@ Messages you may see, what they mean, and the fix. Quoted text is what QQ
 prints; `…` stands for a path or name specific to your machine.
 
 First stop for anything: `qq doctor`. It runs every local readiness check and
-puts the fix next to whatever failed:
+puts the fix next to whatever failed. Its header reports the build and
+compatibility versions, also available from `qq version`:
 
 ```
-qq 0.1.5 (1a2b3c4 2026-09-29) · protocol 31 · capabilities 1 · descriptor 13 · store schema 43
+qq <version> (<commit> <build date>) · protocol 33 · capabilities 1 · descriptor 15 · store schema 55
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5

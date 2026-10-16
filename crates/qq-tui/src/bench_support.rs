@@ -44,6 +44,7 @@ impl BenchHarness {
             .map(|index| summary(session_id(index), SessionStatus::Idle))
             .collect();
         let focused = SessionSnapshot {
+            side_questions: Vec::new(),
             messages: (0..messages)
                 .map(|index| {
                     let mut message = assistant_message(session_id(0), index, PARAGRAPH);
@@ -77,6 +78,7 @@ impl BenchHarness {
         self.apply(
             index,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session_id(index), SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -164,6 +166,7 @@ impl BenchHarness {
     /// through an included body, as the client's pre-warm does.
     pub fn warm_session(&mut self, index: u8, messages: u8) {
         let body = SessionSnapshot {
+            side_questions: Vec::new(),
             messages: (0..messages)
                 .map(|row| {
                     let mut message = assistant_message(session_id(index), row, PARAGRAPH);
@@ -368,6 +371,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -788,6 +792,7 @@ impl BenchHarness {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         );
         // Sessions 2 and 3 stream prose; the rail shows the tails.
@@ -801,6 +806,7 @@ impl BenchHarness {
             self.apply(
                 index,
                 SessionEvent::RunStarted {
+                    origin: None,
                     session: Box::new(session),
                     run_id: run_id(index),
                     plan: None,
@@ -834,6 +840,7 @@ impl BenchHarness {
         self.apply(
             4,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(titled(4, "Refactor", SessionStatus::Running, None)),
                 run_id: run_id(4),
                 plan: None,
@@ -842,6 +849,7 @@ impl BenchHarness {
         self.apply(
             4,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(finished),
                 run_id: run_id(4),
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -877,6 +885,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -897,6 +906,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Idle)),
                 run_id,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -924,6 +934,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id: run_id(0),
                 plan: None,
@@ -940,6 +951,7 @@ impl BenchHarness {
                 }),
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         );
     }
@@ -969,6 +981,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,
@@ -1000,6 +1013,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Idle)),
                 run_id,
                 outcome: qq_protocol::RunOutcome::Completed,
@@ -1018,6 +1032,7 @@ impl BenchHarness {
         self.apply(
             0,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary(session, SessionStatus::Running)),
                 run_id,
                 plan: None,

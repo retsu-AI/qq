@@ -237,6 +237,7 @@ fn a_command_past_the_grant_cap_approves_once_and_says_why() {
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
             },
         )
     });
@@ -365,6 +366,7 @@ fn a_fetch_hold_renders_the_url_and_grants_the_host_for_the_session() {
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         )
     });
@@ -434,6 +436,7 @@ fn a_question_hold_collects_one_answer_per_question_and_sends_them_together() {
                     ],
                 })),
                 fetch: None,
+                delegated: false,
             },
         )
     };
@@ -527,6 +530,7 @@ fn approval_previews_are_kept_only_while_the_approval_is_pending() {
             }),
             question: None,
             fetch: None,
+            delegated: false,
         },
     ));
     assert_eq!(
@@ -1264,6 +1268,7 @@ fn context_usage_uses_last_turn_tokens_live_updates_and_the_model_limit() {
             3,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -1327,6 +1332,7 @@ fn prompt_start_and_streaming_do_not_recalculate_session_context() {
     app.apply_live_event(envelope(
         3,
         SessionEvent::RunStarted {
+            origin: None,
             session: Box::new(summary),
             run_id,
             plan: None,
@@ -1436,6 +1442,7 @@ fn compaction_run_usage_does_not_become_session_context() {
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(compacted.clone()),
                 run_id: id(8, RunId::from_bytes),
                 outcome: RunOutcome::Completed,
@@ -2432,6 +2439,8 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
+        goal: None,
+        side_questions: Vec::new(),
         summary: summary.clone(),
         messages: vec![MessageSnapshot {
             id: id(summary.id.as_bytes()[0], MessageId::from_bytes),
@@ -2621,6 +2630,7 @@ fn live_status_tracks_cold_sessions_and_activity_seeds_from_snapshots() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
 
     let live = &app.sessions[&child.id].live;
@@ -2754,6 +2764,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
     summary.active_run_id = None;
     let requests = app
         .apply_client_update(event(SessionEvent::RunFinished {
+            origin: None,
             session: Box::new(summary),
             run_id,
             outcome: RunOutcome::Completed,
@@ -2764,7 +2775,7 @@ fn enter_during_a_run_queues_the_draft_and_it_submits_when_the_run_ends() {
         .into_requests();
     assert!(matches!(
         requests.as_slice(),
-        [ClientRequest::Command(CommandRequest {
+        [ClientRequest::Snapshot(_), ClientRequest::Command(CommandRequest {
             command: SessionCommand::SubmitPrompt { input, .. },
             ..
         })] if input.as_slice() == [qq_protocol::InputPart::text("follow up")]
@@ -3021,6 +3032,206 @@ fn two_session_app() -> (App, SessionId, SessionId) {
 }
 
 #[test]
+fn background_terminal_receipt_refresh_keeps_focus_and_replays_newer_events() {
+    let (mut app, first, other) = two_session_app();
+    let run = id(0x75, qq_protocol::RunId::from_bytes);
+    let mut idle = app.sessions[&other].summary.clone();
+    idle.status = qq_protocol::SessionStatus::Idle;
+    idle.active_run_id = None;
+    let effects = app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        other,
+        SessionEvent::RunFinished {
+            origin: None,
+            session: Box::new(idle.clone()),
+            run_id: run,
+            outcome: qq_protocol::RunOutcome::Completed,
+            usage: None,
+            context_tokens: None,
+            final_output: None,
+        },
+    )));
+    assert!(
+        effects
+            .requests()
+            .any(|request| matches!(request, ClientRequest::Snapshot(request)
+        if request.focused_session_id.is_none() && request.include_sessions == [other]))
+    );
+    assert_eq!(app.sessions[&other].unread, 1);
+    assert!(app.sessions[&other].finished_unread);
+    let mut newer = idle.clone();
+    newer.title = "newer title".to_owned();
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        other,
+        SessionEvent::SessionUpdated {
+            session: Box::new(newer),
+        },
+    )));
+    let mut body = body_for(&idle, "other body");
+    body.runs.push(
+        serde_json::from_value(serde_json::json!({
+            "id":run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+            "estimated_cost_usd_nanos":150,"correlation":{}
+        }))
+        .unwrap(),
+    );
+    let mut response = snapshot();
+    response.cursor = fixtures::cursor(2);
+    response.focused = None;
+    response.included = vec![body];
+    app.apply_snapshot(response);
+    assert_eq!(app.focused(), Some(first));
+    assert_eq!(app.sessions[&other].unread, 1);
+    assert!(app.sessions[&other].finished_unread);
+    assert_eq!(app.sessions[&other].summary.title, "newer title");
+    assert_eq!(app.sessions[&other].runs[&run].cost_usd_nanos, Some(150));
+    assert!(app.focus_session(other).requests().next().is_none());
+}
+
+#[test]
+fn delayed_background_receipt_replay_does_not_submit_another_draft() {
+    for evict in [false, true] {
+        let (mut app, first, other) = two_session_app();
+        app.sessions
+            .get_mut(&other)
+            .unwrap()
+            .drafts
+            .extend(["first", "second", "third"].map(str::to_owned));
+        let first_run = id(0x75, qq_protocol::RunId::from_bytes);
+        let second_run = id(0x76, qq_protocol::RunId::from_bytes);
+        let idle = app.sessions[&other].summary.clone();
+        let finish = |sequence, run_id| {
+            fixtures::envelope(
+                sequence,
+                other,
+                SessionEvent::RunFinished {
+                    origin: None,
+                    session: Box::new(idle.clone()),
+                    run_id,
+                    outcome: qq_protocol::RunOutcome::Completed,
+                    usage: None,
+                    context_tokens: None,
+                    final_output: None,
+                },
+            )
+        };
+        app.apply_client_update(ClientUpdate::Event(finish(2, first_run)));
+        assert_eq!(app.sessions[&other].drafts, ["second", "third"]);
+        let mut response = snapshot();
+        response.cursor = fixtures::cursor(2);
+        response.focused = None;
+        response.included = vec![body_for(&idle, "other body")];
+        if evict {
+            app.sessions.get_mut(&other).unwrap().evict_body();
+        }
+        let mut running = idle.clone();
+        running.status = qq_protocol::SessionStatus::Running;
+        running.active_run_id = Some(second_run);
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            3,
+            other,
+            SessionEvent::RunStarted {
+                origin: None,
+                session: Box::new(running),
+                run_id: second_run,
+                plan: None,
+            },
+        )));
+        app.apply_client_update(ClientUpdate::Event(finish(4, second_run)));
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+        let unread = app.sessions[&other].unread;
+        let effects = app.apply_snapshot(response.clone());
+        assert_eq!(app.focused(), Some(first));
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+        assert_eq!(app.sessions[&other].unread, unread);
+        let requests = effects.requests().collect::<Vec<_>>();
+        assert_eq!(requests.len(), usize::from(evict));
+        if evict {
+            assert!(matches!(requests[0], ClientRequest::Snapshot(request)
+                if request.focused_session_id.is_none() && request.include_sessions == [other]));
+        }
+        let mut latest_body = body_for(&idle, "other body");
+        latest_body.runs.push(
+            serde_json::from_value(serde_json::json!({
+                "id":second_run,"session_id":other,"status":"completed","outcome":{"type":"completed"},
+                "estimated_cost_usd_nanos":250,"correlation":{}
+            }))
+            .unwrap(),
+        );
+        let mut latest = snapshot();
+        latest.cursor = fixtures::cursor(4);
+        latest.focused = None;
+        latest.included = vec![latest_body];
+        app.apply_snapshot(latest);
+        assert_eq!(
+            app.sessions[&other].runs[&second_run].cost_usd_nanos,
+            Some(250)
+        );
+        app.apply_snapshot(response);
+        assert_eq!(
+            app.sessions[&other].runs[&second_run].cost_usd_nanos,
+            Some(250)
+        );
+        assert_eq!(app.sessions[&other].drafts, ["third"]);
+    }
+}
+
+#[test]
+fn snapshot_headers_cannot_downgrade_a_newer_retained_body() {
+    for evict in [false, true] {
+        let (mut app, first, other) = two_session_app();
+        app.last_sequence = 101;
+        let run = id(0x78, qq_protocol::RunId::from_bytes);
+        let mut newer = app.sessions[&other].summary.clone();
+        newer.status = qq_protocol::SessionStatus::Running;
+        newer.active_run_id = Some(run);
+        newer.estimated_cost_usd_nanos = Some(250);
+        let mut latest = snapshot();
+        latest.cursor = fixtures::cursor(105);
+        latest.focused = None;
+        latest.sessions = vec![newer.clone()];
+        latest.included = vec![body_for(&newer, "newer body")];
+        app.apply_snapshot(latest);
+        if evict {
+            app.sessions.get_mut(&other).unwrap().evict_body();
+        }
+        let mut older = newer.clone();
+        older.status = qq_protocol::SessionStatus::Idle;
+        older.active_run_id = None;
+        older.estimated_cost_usd_nanos = Some(100);
+        let mut stale = snapshot();
+        stale.cursor = fixtures::cursor(103);
+        stale.focused = None;
+        stale.sessions = vec![older.clone()];
+        stale.included = vec![body_for(&older, "older body")];
+        app.apply_snapshot(stale);
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(
+            app.sessions[&other].summary.active_run_id,
+            newer.active_run_id
+        );
+        assert_eq!(
+            app.sessions[&other].summary.estimated_cost_usd_nanos,
+            Some(250)
+        );
+        for sequence in 102..=105 {
+            app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+                sequence,
+                other,
+                SessionEvent::SessionUpdated {
+                    session: Box::new(older.clone()),
+                },
+            )));
+        }
+        assert_eq!(app.last_sequence, 105);
+        assert_eq!(app.focused(), Some(first));
+        assert_eq!(app.sessions[&other].summary.status, newer.status);
+        assert_eq!(app.sessions[&other].summary.active_run_id, Some(run));
+    }
+}
+
+#[test]
 fn the_shown_session_is_pinned_warm_while_others_evict() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
@@ -3044,6 +3255,58 @@ fn the_shown_session_is_pinned_warm_while_others_evict() {
     assert!(!app.sessions[&ids[0]].is_warm(), "oldest unshown evicts");
     let warm = app.sessions.values().filter(|s| s.is_warm()).count();
     assert_eq!(warm, WARM_BODY_LIMIT);
+}
+
+#[test]
+fn an_included_body_older_than_live_events_is_caught_up_by_replay() {
+    // Regression (PR #289 review): a snapshot that installs another
+    // session's body replaces its hold state as of the snapshot's cursor.
+    // Events after that cursor already applied must be replayed for every
+    // installed body, not only the focused one, or a hold requested while
+    // the snapshot was in flight disappears.
+    let (mut app, _, other) = two_session_app();
+    let base = app.last_sequence;
+    let run_id = id(4, RunId::from_bytes);
+    let held = ToolCallSnapshot {
+        run_id,
+        call_ordinal: 0,
+        provider_call_id: "c".to_owned(),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(0x75, ToolCallId::from_bytes), other, "shell")
+    };
+    app.apply_live_event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        ..fixtures::envelope(
+            base + 1,
+            other,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: held,
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: false,
+            },
+        )
+    });
+    assert!(matches!(
+        app.sessions.activity(),
+        qq_client::state::StoreActivity::Blocked { .. }
+    ));
+
+    // A snapshot cut before that event arrives with the other body included.
+    let summary = app.sessions[&other].summary.clone();
+    let mut stale = snapshot();
+    stale.cursor.sequence = base;
+    stale.included.push(body_for(&summary, "other body"));
+    app.apply_snapshot(stale);
+    assert!(
+        matches!(
+            app.sessions.activity(),
+            qq_client::state::StoreActivity::Blocked { .. }
+        ),
+        "the replayed request outlives the older body"
+    );
 }
 
 #[test]
@@ -3102,6 +3365,35 @@ fn deleting_the_shown_session_moves_to_its_neighbour() {
     assert_eq!(app.focused(), Some(other));
     // The replacement is warm, so nothing is fetched.
     assert!(effects.requests().next().is_none());
+}
+
+#[test]
+fn late_snapshot_replay_keeps_the_only_deleted_session_unfocused() {
+    for side_view in [false, true] {
+        let mut app = App::new(TuiOptions::default());
+        let initial = snapshot();
+        let deleted = initial.sessions[0].id;
+        let late = initial.clone();
+        app.apply_snapshot(initial);
+        if side_view {
+            app.execute(Command::ShowSideQuestions);
+        }
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            deleted,
+            SessionEvent::SessionDeleted {
+                session_id: deleted,
+            },
+        )));
+        assert_eq!(app.view(), View::Transcript(None));
+        app.apply_snapshot(late);
+        assert!(app.sessions.is_empty());
+        assert_eq!(
+            app.view(),
+            View::Transcript(None),
+            "replayed deletion clears surface focus"
+        );
+    }
 }
 
 #[test]
@@ -3198,6 +3490,7 @@ fn a_single_theme_makes_the_picker_a_notice_instead() {
 fn attention_is_requested_only_while_the_terminal_is_unfocused() {
     let (mut app, session_id, run_id, mut event) = running_app();
     let finish = |run_id| SessionEvent::RunFinished {
+        origin: None,
         session: Box::new(SessionSummary {
             model_is_fallback: false,
             status: SessionStatus::Idle,
@@ -3247,6 +3540,7 @@ fn attention_is_requested_only_while_the_terminal_is_unfocused() {
         edit: None,
         question: None,
         fetch: None,
+        delegated: false,
     }));
     assert!(matches!(
         attention(effects),
@@ -3345,6 +3639,7 @@ fn the_reducer_returns_notices_and_attention_as_effects_instead_of_mutating_them
             2,
             session_id,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -4637,8 +4932,8 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
 
     assert_eq!(app.mode(), Mode::Compose);
     assert!(app.pending_trust.is_empty());
-    assert!(app.model.model.is_none());
-    assert!(app.models.is_empty());
+    assert_eq!(app.model, selection);
+    assert_eq!(app.models.len(), 1);
     assert_eq!(app.unauthenticated_providers.len(), 1);
     assert_eq!(
         app.visible_status(),
@@ -4654,24 +4949,8 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
             Effect::Send(ClientRequest::Models(selection.clone())),
         ]
     );
-    // Before the server answers Models, Alt-N cannot create from the
-    // configured route that was sent as request metadata.
-    let requests = app
-        .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
-        .into_requests();
-    assert!(requests.is_empty());
-
-    app.apply_client_update(ClientUpdate::Models {
-        models: vec![ModelDescriptor {
-            provider: "anthropic".to_owned(),
-            model: "claude-sonnet-5".to_owned(),
-            name: None,
-            context_window: Some(200_000),
-            reasoning_efforts: Vec::new(),
-            selection: selection.clone(),
-        }],
-        selected: Some(selection.clone()),
-    });
+    // With a usable model in hand, Alt-N creates a session as after an
+    // ordinary start.
     let requests = app
         .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
         .into_requests();
@@ -4693,4 +4972,375 @@ fn resolved_trust_drops_the_prompt_applies_the_catalog_and_refreshes_the_server_
         Some(("trusted for this session", NoticeLevel::Info))
     );
     assert_eq!(app.startup_guidance().as_deref(), Some(CHOOSE_MODEL_NOTICE));
+}
+
+#[test]
+fn side_aliases_never_submit_or_steer_main_even_while_running() {
+    for (alias, reset) in [("/btw", false), ("/ask", false), ("/btw-new", true)] {
+        let mut app = App::new(TuiOptions::default());
+        let mut initial = snapshot();
+        initial.focused.as_mut().unwrap().summary.active_run_id = Some(RunId::generate().unwrap());
+        app.apply_snapshot(initial);
+        let id = app.focused().unwrap();
+        app.composer.text = format!("{alias} what changed?");
+        let (_, requests) = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .split();
+        assert!(
+            matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitSideQuestion { session_id, question, new_thread }, ..
+        })] if *session_id == id && question == "what changed?" && *new_thread == reset)
+        );
+        assert!(app.composer.text.is_empty());
+        assert!(app.sessions[&id].summary.active_run_id.is_some());
+    }
+}
+
+#[test]
+fn empty_side_command_opens_separate_view_and_escape_returns() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(requests.is_empty());
+    assert_eq!(app.view(), View::SideQuestions(id));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focused(), Some(id));
+}
+
+#[test]
+fn side_cancel_targets_side_id_and_not_main_run() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let body = initial.focused.as_mut().unwrap();
+    let id = RunId::generate().unwrap();
+    body.summary.active_run_id = Some(RunId::generate().unwrap());
+    body.side_questions.push(qq_protocol::SideQuestionSnapshot {
+        id,
+        thread_id: id,
+        session_id: body.summary.id,
+        question: "why?".to_owned(),
+        answer: "partial".to_owned(),
+        state: qq_protocol::SideQuestionState::Running,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 0,
+        created_at_ms: 0,
+        finished_at_ms: None,
+    });
+    app.apply_snapshot(initial);
+    app.execute(Command::ShowSideQuestions);
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(
+        matches!(requests.as_slice(), [ClientRequest::Command(CommandRequest {
+        command: SessionCommand::CancelSideQuestion { side_question_id }, ..
+    })] if *side_question_id == id)
+    );
+}
+
+fn side_item(
+    session_id: SessionId,
+    id: RunId,
+    state: qq_protocol::SideQuestionState,
+) -> qq_protocol::SideQuestionSnapshot {
+    qq_protocol::SideQuestionSnapshot {
+        id,
+        thread_id: id,
+        session_id,
+        question: "why?".to_owned(),
+        answer: String::new(),
+        state,
+        usage: None,
+        estimated_cost_usd_nanos: None,
+        model_turns: 0,
+        created_at_ms: 0,
+        finished_at_ms: None,
+    }
+}
+
+fn side_update(sequence: u64, item: qq_protocol::SideQuestionSnapshot) -> ClientUpdate {
+    ClientUpdate::Event(fixtures::envelope(
+        sequence,
+        item.session_id,
+        SessionEvent::SideQuestionUpdated {
+            side_question: Box::new(item),
+        },
+    ))
+}
+
+fn submitted_receipt(command_id: CommandId, side_question_id: RunId) -> ClientUpdate {
+    ClientUpdate::CommandResult {
+        command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id,
+            outcome: CommandOutcome::SideQuestionSubmitted {
+                side_question_id,
+                thread_id: side_question_id,
+            },
+            committed_through: fixtures::cursor(1),
+        }),
+    }
+}
+
+fn only_command(effects: Effects) -> CommandRequest {
+    let (_, requests) = effects.split();
+    let [ClientRequest::Command(request)] = <[ClientRequest; 1]>::try_from(requests)
+        .unwrap_or_else(|requests| panic!("expected one command, got {requests:?}"))
+    else {
+        panic!("expected a command request")
+    };
+    request
+}
+
+fn press(app: &mut App, code: KeyCode) -> Effects {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+#[test]
+fn rejected_side_commands_stay_visible_in_the_side_view() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw what changed?".to_owned();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert_eq!(app.view(), View::SideQuestions(id));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("a side question is already running")),
+    });
+    assert_eq!(app.composer.text, "/btw what changed?");
+    assert_eq!(
+        app.visible_status(),
+        Some(("a side question is already running", NoticeLevel::Error))
+    );
+
+    app.composer.clear();
+    let running = RunId::generate().unwrap();
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, running, qq_protocol::SideQuestionState::Running),
+    ));
+    let request = only_command(app.execute(Command::CancelSideQuestion));
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Err(ClientFailure::new("server unavailable")),
+    });
+    assert_eq!(app.view(), View::SideQuestions(id));
+    assert_eq!(
+        app.visible_status(),
+        Some(("server unavailable", NoticeLevel::Error))
+    );
+}
+
+#[test]
+fn side_view_keeps_session_commands_on_its_source_session() {
+    let selection = ModelSelection {
+        model_is_fallback: false,
+        model: Some("anthropic/claude-sonnet-5".to_owned()),
+        max_output_tokens: Some(8_192),
+        organization: None,
+    };
+    let mut app = App::new(TuiOptions {
+        models: vec![ModelOption {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            name: None,
+            context_window: Some(200_000),
+            reasoning_efforts: Vec::new(),
+            selection: selection.clone(),
+        }],
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.apply_client_update(ClientUpdate::Capabilities(capabilities_with_profiles()));
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    assert_eq!(app.view(), View::SideQuestions(id));
+    assert_eq!(app.focused(), Some(id));
+
+    // `/models` repoints the source session instead of creating a root.
+    app.open_models();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SetSessionModel { session_id, .. } if session_id == id
+    ));
+
+    // `/approval` changes the source session, not the next-session default.
+    app.open_approval_modes();
+    press(&mut app, KeyCode::Char('r'));
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SetApprovalMode { session_id, mode: ApprovalMode::ReadOnly }
+            if session_id == id
+    ));
+    // Still on the side view; Esc returns to the unchanged transcript.
+    assert_eq!(app.view(), View::SideQuestions(id));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view(), View::Transcript(Some(id)));
+}
+
+#[test]
+fn side_view_does_not_capture_input_for_its_sources_approval() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(ToolCallId::from_bytes([7; 16]), id, "write_file")
+    });
+    assert_eq!(app.mode(), Mode::Approval);
+    app.execute(Command::ShowSideQuestions);
+    // The side view never renders the approval block, so typing asks a
+    // side question rather than answering an approval the user cannot see.
+    assert_eq!(app.mode(), Mode::Compose);
+    app.composer.text = "why?".to_owned();
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SubmitSideQuestion { session_id, .. } if session_id == id
+    ));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode(), Mode::Approval);
+}
+
+#[test]
+fn side_cancel_uses_the_acknowledged_id_before_its_update_arrives() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw slow?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    // The receipt beats the SSE update: the reduced list is still empty.
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    assert!(app.sessions[&id].side_questions.is_empty());
+    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    assert!(matches!(
+        cancel.command,
+        SessionCommand::CancelSideQuestion { side_question_id } if side_question_id == side
+    ));
+
+    // The running update then its terminal update arrive late; the terminal
+    // one releases the acknowledged id so nothing stale is cancelled.
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, side, qq_protocol::SideQuestionState::Running),
+    ));
+    app.apply_client_update(side_update(
+        3,
+        side_item(id, side, qq_protocol::SideQuestionState::Cancelled),
+    ));
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+    assert_eq!(
+        app.visible_status(),
+        Some(("no side question is running", NoticeLevel::Info))
+    );
+}
+
+#[test]
+fn a_cancel_that_loses_the_race_releases_the_acknowledged_id() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    app.composer.text = "/btw slow?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    let cancel = only_command(app.execute(Command::CancelSideQuestion));
+    // The question completed before the cancel committed.
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: cancel.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: cancel.command_id,
+            outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                side_question_id: side,
+                state: qq_protocol::SideQuestionState::Completed,
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert_eq!(
+        app.visible_status(),
+        Some(("side question already finished", NoticeLevel::Info))
+    );
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn a_receipt_after_the_terminal_update_is_not_retained_for_cancel() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.composer.text = "/btw quick?".to_owned();
+    let submit = only_command(press(&mut app, KeyCode::Enter));
+    let side = RunId::generate().unwrap();
+    // Replayed events land first; the receipt follows a finished question.
+    app.apply_client_update(side_update(
+        2,
+        side_item(id, side, qq_protocol::SideQuestionState::Running),
+    ));
+    app.apply_client_update(side_update(
+        3,
+        side_item(id, side, qq_protocol::SideQuestionState::Completed),
+    ));
+    app.apply_client_update(submitted_receipt(submit.command_id, side));
+    let (_, requests) = app.execute(Command::CancelSideQuestion).split();
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn btw_new_autocomplete_leaves_the_command_for_its_question() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    for accept in [KeyCode::Tab, KeyCode::Enter] {
+        app.composer.replace("/btw-n".to_owned());
+        let (_, requests) = press(&mut app, accept).split();
+        assert!(requests.is_empty());
+        assert_eq!(app.composer.text, "/btw-new ");
+        assert_eq!(app.view(), View::Transcript(Some(id)));
+    }
+    app.composer.text.push_str("fresh start?");
+    let request = only_command(press(&mut app, KeyCode::Enter));
+    assert!(matches!(
+        request.command,
+        SessionCommand::SubmitSideQuestion { new_thread: true, ref question, .. }
+            if question == "fresh start?"
+    ));
+
+    // A bare `/btw-new` never opens a view that would continue the thread.
+    press(&mut app, KeyCode::Esc);
+    app.composer.replace("/btw-new".to_owned());
+    let (_, requests) = app.submit_prompt().split();
+    assert!(requests.is_empty());
+    assert_eq!(app.view(), View::Transcript(Some(id)));
+
+    // `/btw` and `/ask` still open the side view on accept.
+    for alias in ["/btw", "/as"] {
+        press(&mut app, KeyCode::Esc);
+        app.composer.replace(alias.to_owned());
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view(), View::SideQuestions(id), "{alias}");
+        assert!(app.composer.text.is_empty());
+    }
+}
+
+#[test]
+fn deleting_the_side_views_source_leaves_the_view() {
+    let mut app = App::new(TuiOptions::default());
+    app.apply_snapshot(snapshot());
+    let id = app.focused().unwrap();
+    app.execute(Command::ShowSideQuestions);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        id,
+        SessionEvent::SessionDeleted { session_id: id },
+    )));
+    assert_eq!(app.view(), View::Transcript(None));
 }

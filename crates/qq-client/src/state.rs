@@ -16,10 +16,10 @@ use std::{
 
 use qq_protocol::{
     AgentProfileId, ApprovalResolution, DelegateIdentity, EditPreview, FetchPreview, MessageId,
-    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, QuestionPreview, RunActivity,
-    RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
-    ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot, ToolCallState,
-    WorkspaceId,
+    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, PendingHold, QuestionPreview,
+    RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot,
+    ToolCallState, WorkspaceId,
 };
 
 mod reduce;
@@ -262,6 +262,20 @@ impl SessionStore {
         self.index().depth.get(&id).copied().unwrap_or(0)
     }
 
+    /// The root of `id`'s tree, `id` itself for a root. `None` when `id` or
+    /// an ancestor is not loaded, so a caller never mistakes a child for a
+    /// root. Bounded by the tree depth.
+    #[must_use]
+    pub fn root_of(&self, mut id: SessionId) -> Option<SessionId> {
+        for _ in 0..=self.depth(id) {
+            match self.get(&id)?.summary.parent_id {
+                Some(parent) => id = parent,
+                None => return Some(id),
+            }
+        }
+        None
+    }
+
     /// Direct children of `parent`, oldest-first.
     #[must_use]
     pub fn children_of(&self, parent: SessionId) -> &[SessionId] {
@@ -291,6 +305,48 @@ impl SessionStore {
             .copied()
             .filter(|id| !self.sessions[id].live.awaiting_approval.is_empty())
             .collect()
+    }
+
+    /// One state for everything this store follows, most urgent wins: any
+    /// hold waiting for a human, else any session running, queued, or
+    /// answering a side question, else idle. Holds an approval delegate is
+    /// still deciding count as work. Reads only summary-level state, which
+    /// the server projects for every session, and every stored session,
+    /// including children whose parent is not loaded. A block names the most
+    /// recently updated blocked session, so the message is deterministic.
+    #[must_use]
+    pub fn activity(&self) -> StoreActivity {
+        let mut working = false;
+        let mut blocked: Option<&SessionView> = None;
+        for view in self.sessions.values() {
+            let live = &view.live;
+            // `with_delegate` is a subset of `awaiting_approval`.
+            if live.awaiting_approval.len() > live.with_delegate.len() {
+                if blocked.is_none_or(|current| {
+                    (view.summary.updated_at_ms, view.summary.id)
+                        > (current.summary.updated_at_ms, current.summary.id)
+                }) {
+                    blocked = Some(view);
+                }
+                continue;
+            }
+            working |= !live.awaiting_approval.is_empty()
+                || view.summary.running_side_question.is_some()
+                || matches!(
+                    view.summary.status,
+                    SessionStatus::Running | SessionStatus::Queued
+                );
+        }
+        if let Some(view) = blocked {
+            return StoreActivity::Blocked {
+                session_title: view.summary.title.clone(),
+            };
+        }
+        if working {
+            StoreActivity::Working
+        } else {
+            StoreActivity::Idle
+        }
     }
 
     /// Sessions that need the user, most urgent first and then in tree
@@ -364,6 +420,14 @@ impl SessionStore {
         view.live = LiveStatus::from_body(&messages, &tool_calls, self.sanitizer);
         for run in &snapshot.runs {
             let stats = view.runs.entry(run.id).or_default();
+            // A running run outside the session's active slot is internal.
+            // Keep that identity if the prompt settles before its step does.
+            stats.origin = run.origin;
+            stats.owned_step = run
+                .origin
+                .is_some_and(qq_protocol::RunOrigin::is_in_run_compaction)
+                || (run.status == qq_protocol::RunStatus::Running
+                    && view.summary.active_run_id != Some(run.id));
             stats.outcome = run.outcome.clone();
             stats.usage = run.usage;
             stats.cost_usd_nanos = run.estimated_cost_usd_nanos;
@@ -388,6 +452,22 @@ impl SessionStore {
             .rev()
             .collect();
         if let Some(previous) = previous {
+            if view.foreground_run_id.is_none() {
+                view.foreground_run_id = previous.foreground_run_id;
+            }
+            for (run_id, observed) in &previous.runs {
+                if let Some(stats) = view.runs.get_mut(run_id) {
+                    stats.started_at_ms = observed.started_at_ms;
+                    stats.first_token_at_ms = observed.first_token_at_ms;
+                    stats.finished_at_ms = observed.finished_at_ms;
+                    stats.turns = observed.turns;
+                    stats.live_cost_usd_nanos = observed.live_cost_usd_nanos;
+                    stats.owned_step |= observed.owned_step;
+                    stats.origin = stats.origin.or(observed.origin);
+                }
+            }
+            view.unread = previous.unread;
+            view.finished_unread = previous.finished_unread;
             view.last_focused = previous.last_focused;
             view.drafts = previous.drafts;
             // Live tool output for calls this body no longer reports as
@@ -400,6 +480,11 @@ impl SessionStore {
             });
             view.approval_previews = previous.approval_previews;
         }
+        // The summary's holds are exact at this snapshot's cursor; the
+        // body's bounded tool-call window may not reach every one.
+        view.live.set_holds(&view.summary.pending_holds);
+        view.side_questions = snapshot.side_questions;
+        view.goal = snapshot.goal;
         view.messages = Some(messages);
         view.tool_calls = Some(tool_calls);
         self.insert(session_id, view);
@@ -667,6 +752,10 @@ impl Reasoning {
 /// outcome and usage until the protocol records run timing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
+    pub origin: Option<qq_protocol::RunOrigin>,
+    /// An internal step observed outside the session's active-run slot.
+    /// Its finish remains bookkeeping after the active prompt settles.
+    pub owned_step: bool,
     pub started_at_ms: Option<u64>,
     /// When the first assistant text of the run arrived: time to first token.
     pub first_token_at_ms: Option<u64>,
@@ -676,7 +765,7 @@ pub struct RunStats {
     /// Tool calls the run made, counted as their finished events arrive or
     /// from the loaded body.
     pub tool_calls: u32,
-    /// Estimated cost of the run, when the accounting delta was observable.
+    /// Authoritative aggregate cost from the run snapshot; unknown until loaded.
     pub cost_usd_nanos: Option<u64>,
     /// Highest model turn committed so far, from `ModelTurnCompleted`; zero
     /// for historical runs loaded from a snapshot.
@@ -688,7 +777,7 @@ pub struct RunStats {
     /// it. Shown only when it differs from the session's selected model.
     pub resolved_route: Option<String>,
     /// Cost accumulated from committed turns while the run is active. Shown
-    /// until `RunFinished` settles `cost_usd_nanos` from the session totals.
+    /// while active; never substituted for an unknown terminal aggregate.
     pub live_cost_usd_nanos: Option<u64>,
 }
 
@@ -757,6 +846,9 @@ pub struct LiveStatus {
     /// Tool calls awaiting an approval answer. A set rather than a count so
     /// replayed or repeated events cannot drift it.
     pub awaiting_approval: BTreeSet<ToolCallId>,
+    /// The subset of `awaiting_approval` an approval delegate is deciding;
+    /// a hold leaves it when the delegate escalates to the human.
+    pub with_delegate: BTreeSet<ToolCallId>,
 }
 
 /// What one `ToolApprovalRequested` event said the call would do.
@@ -787,7 +879,12 @@ pub struct ApprovalEscalation {
 /// the warm body, live status, and per-run detail a transcript shows.
 #[derive(Debug, Clone)]
 pub struct SessionView {
+    pub goal: Option<Box<qq_protocol::GoalSnapshot>>,
+    pub side_questions: Vec<qq_protocol::SideQuestionSnapshot>,
     pub summary: SessionSummary,
+    /// The last foreground slot identity, retained across idle summaries so
+    /// late internal completions remain bookkeeping after summary-only load.
+    pub foreground_run_id: Option<RunId>,
     /// `Some` only while the body is warm; `None` means summary-only.
     pub messages: Option<Vec<MessageSnapshot>>,
     pub tool_calls: Option<Vec<ToolCallSnapshot>>,
@@ -829,6 +926,18 @@ pub struct SessionView {
     pub finished_unread: bool,
 }
 
+/// What a store's sessions amount to for an external status line: see
+/// [`SessionStore::activity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreActivity {
+    Idle,
+    Working,
+    /// A held call waits for a human in the named session.
+    Blocked {
+        session_title: String,
+    },
+}
+
 /// Why a session needs the user, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Need {
@@ -866,13 +975,19 @@ impl SessionView {
         loaded_through: u64,
     ) -> Self {
         let activity = summary.active_run_id.zip(summary.activity);
+        let foreground_run_id = summary.active_run_id;
+        let mut live = LiveStatus::default();
+        live.set_holds(&summary.pending_holds);
         Self {
+            side_questions: Vec::new(),
+            goal: None,
             summary,
+            foreground_run_id,
             messages: None,
             tool_calls: None,
             context_window,
             activity,
-            live: LiveStatus::default(),
+            live,
             reasoning: HashMap::new(),
             runs: HashMap::new(),
             last_focused: 0,
@@ -927,6 +1042,9 @@ impl SessionView {
     /// summary carries it or the run changed; a live event already applied
     /// for the same run is kept when the summary is silent.
     pub fn set_summary(&mut self, summary: SessionSummary, context_window: Option<u32>) {
+        if let Some(run_id) = summary.active_run_id {
+            self.foreground_run_id = Some(run_id);
+        }
         match (summary.active_run_id, summary.activity) {
             (Some(run_id), Some(activity)) => self.activity = Some((run_id, activity)),
             (Some(run_id), None) => {
@@ -936,6 +1054,7 @@ impl SessionView {
             }
             (None, _) => self.activity = None,
         }
+        self.live.set_holds(&summary.pending_holds);
         self.summary = summary;
         self.context_window = context_window;
     }
@@ -977,6 +1096,7 @@ impl SessionView {
     pub fn evict_body(&mut self) {
         self.messages = None;
         self.tool_calls = None;
+        self.side_questions = Vec::new();
         self.live_tool_output.clear();
         self.approval_previews.clear();
         self.tool_timing.clear();
@@ -1047,6 +1167,17 @@ impl LiveStatus {
         }
     }
 
+    /// Replace the hold sets with a summary's projection, which is exact at
+    /// the summary's cursor; events after it move the sets on.
+    pub fn set_holds(&mut self, holds: &[PendingHold]) {
+        self.awaiting_approval = holds.iter().map(|hold| hold.tool_call_id).collect();
+        self.with_delegate = holds
+            .iter()
+            .filter(|hold| hold.delegated)
+            .map(|hold| hold.tool_call_id)
+            .collect();
+    }
+
     pub fn note_tool_call(&mut self, call: &ToolCallSnapshot) {
         match call.state {
             ToolCallState::AwaitingApproval => {
@@ -1055,6 +1186,7 @@ impl LiveStatus {
             }
             ToolCallState::Running | ToolCallState::Requested => {
                 self.awaiting_approval.remove(&call.id);
+                self.with_delegate.remove(&call.id);
                 self.active_tool = Some(call.name.clone());
             }
             ToolCallState::Completed
@@ -1062,6 +1194,7 @@ impl LiveStatus {
             | ToolCallState::Denied
             | ToolCallState::Interrupted => {
                 self.awaiting_approval.remove(&call.id);
+                self.with_delegate.remove(&call.id);
                 if self.active_tool.as_deref() == Some(call.name.as_str()) {
                     self.active_tool = None;
                 }

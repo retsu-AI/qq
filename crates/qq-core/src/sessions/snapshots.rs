@@ -114,13 +114,23 @@ impl SnapshotBudget {
 
     /// Charges one row whose variable text totals `text_bytes` (escaped) and
     /// says whether it fits. The check never reserves a partial row.
-    fn admit(&mut self, text_bytes: usize) -> bool {
+    pub(super) fn admit(&mut self, text_bytes: usize) -> bool {
         let cost = text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES);
         if cost > self.remaining {
             return false;
         }
         self.remaining -= cost;
         true
+    }
+
+    pub(super) const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Charges rows admitted against a separate reserve.
+    pub(super) fn charge(&mut self, text_bytes: usize, rows: usize) {
+        let cost = text_bytes.saturating_add(rows.saturating_mul(SNAPSHOT_ROW_OVERHEAD_BYTES));
+        self.remaining = self.remaining.saturating_sub(cost);
     }
 }
 
@@ -131,6 +141,9 @@ pub(super) fn load_session_snapshot(
     budget: &mut SnapshotBudget,
 ) -> Result<SessionSnapshot, SessionRuntimeError> {
     let summary = load_session_summary(transaction, session_id)?;
+    // Side questions draw first from a reserved share so a long transcript
+    // cannot starve a running question out of a reconnect snapshot.
+    let side_questions = side_questions::load_side_snapshots(transaction, session_id, budget)?;
     // Messages order by run first, then by ordinal within the run, so a
     // prompt queued while a run streams does not interleave with that run's
     // later per-turn messages (which receive higher session ordinals).
@@ -148,39 +161,93 @@ pub(super) fn load_session_snapshot(
     drop(statement);
     let mut has_older_messages = message_ids.len() > usize::from(message_limit);
     message_ids.truncate(usize::from(message_limit));
-    // Ids arrive newest-first; rows are admitted in that order so a budget
-    // cut drops the oldest, then the kept rows are put back in reading order.
+    // A displayed message and its authoritative run receipt are admitted together.
+    // Reserve active-run metadata first; bounded bodies never contain orphan messages.
+    let mut wanted_receipts = Vec::with_capacity(message_ids.len());
+    if message_limit > 0
+        && let Some(active) = summary.active_run_id
+        && budget.admit(0)
+    {
+        wanted_receipts.push(active);
+    }
     let mut messages = Vec::with_capacity(message_ids.len());
     for id in message_ids {
         let message = load_message(transaction, parse_id(&id)?)?;
-        if !budget.admit(escaped_len(&message.output).saturating_add(escaped_len(&message.refusal)))
-        {
+        let needs_receipt = !wanted_receipts.contains(&message.run_id);
+        if needs_receipt && wanted_receipts.len() == usize::from(message_limit) {
             has_older_messages = true;
             break;
+        }
+        let text_bytes = escaped_len(&message.output).saturating_add(escaped_len(&message.refusal));
+        let reserved_bytes = if needs_receipt {
+            text_bytes.saturating_add(SNAPSHOT_ROW_OVERHEAD_BYTES)
+        } else {
+            text_bytes
+        };
+        if !budget.admit(reserved_bytes) {
+            has_older_messages = true;
+            break;
+        }
+        if needs_receipt {
+            wanted_receipts.push(message.run_id);
         }
         messages.push(message);
     }
     messages.reverse();
+    if wanted_receipts.is_empty() && message_limit > 0 {
+        // Standalone compaction can have no transcript messages at all.
+        let terminal = transaction
+            .query_row(
+                "SELECT id FROM runs WHERE session_id = ?1 AND outcome_json IS NOT NULL
+                 AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
+             ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1",
+                [session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(terminal) = terminal
+            && budget.admit(0)
+        {
+            wanted_receipts.push(parse_id(&terminal)?);
+        }
+    }
+    let remaining_runs = usize::from(message_limit).saturating_sub(wanted_receipts.len());
     let mut statement = transaction.prepare(
-        "SELECT id FROM runs WHERE session_id = ?1
-             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?2",
+        "WITH pinned AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id IN (SELECT value FROM json_each(?2))
+         ), recent AS (
+             SELECT id, created_at_ms, rowid AS creation_order FROM runs
+             WHERE session_id = ?1 AND id NOT IN (SELECT id FROM pinned)
+             ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3
+         )
+         SELECT id, precharged FROM (
+             SELECT id, created_at_ms, creation_order, 1 AS precharged FROM pinned
+             UNION ALL
+             SELECT id, created_at_ms, creation_order, 0 AS precharged FROM recent
+         ) ORDER BY created_at_ms DESC, creation_order DESC",
     )?;
-    let mut run_ids = statement
-        .query_map(params![session_id.to_string(), message_limit], |row| {
-            row.get::<_, String>(0)
-        })?
+    let run_ids = statement
+        .query_map(
+            params![
+                session_id.to_string(),
+                serde_json::to_string(&wanted_receipts)?,
+                remaining_runs
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    // Run rows are small and fixed-shape; they are charged at the row
-    // overhead only so a session's run list is never cut by its transcript.
-    run_ids.reverse();
-    let mut runs = Vec::with_capacity(run_ids.len());
-    for id in run_ids {
-        if !budget.admit(0) {
-            break;
-        }
-        runs.push(load_run(transaction, parse_id(&id)?)?);
+    if run_ids.iter().filter(|(_, precharged)| *precharged).count() != wanted_receipts.len() {
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
+    let mut runs = Vec::with_capacity(run_ids.len());
+    for (id, precharged) in run_ids {
+        if precharged || budget.admit(0) {
+            runs.push(load_run(transaction, parse_id(&id)?)?);
+        }
+    }
+    runs.reverse();
     let mut statement = transaction.prepare(
         "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
@@ -219,6 +286,8 @@ pub(super) fn load_session_snapshot(
     }
     tool_calls.reverse();
     Ok(SessionSnapshot {
+        goal: goals::load_live(transaction, session_id)?.map(Box::new),
+        side_questions,
         summary,
         messages,
         runs,
@@ -346,7 +415,7 @@ pub(super) const ACCOUNTING_ROWS_SQL: &str = "WITH RECURSIVE subtree(root, id, d
      )
      SELECT subtree.root, r.session_id, r.status, r.usage_json, r.estimated_cost_usd_nanos,
             EXISTS(SELECT 1 FROM model_turns turn WHERE turn.run_id = r.id),
-            r.started_at_ms, r.routing_json IS NOT NULL
+            r.started_at_ms, r.routing_json IS NOT NULL OR r.goal_helper_admitted OR r.goal_request_pending
      FROM runs r
      JOIN subtree ON subtree.id = r.session_id
      ORDER BY r.rowid";
@@ -401,7 +470,7 @@ pub(super) fn load_accounting_folds(
 
     let mut folds: HashMap<String, SessionAccountingFold> = HashMap::new();
     for row in rows {
-        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, routed) =
+        let (session_id, owner_id, status, encoded_usage, cost, saw_turn, started_at_ms, admitted) =
             row?;
         let fold = folds.entry(session_id.clone()).or_default();
         let SessionAccountingFold { direct, inclusive } = fold;
@@ -415,11 +484,14 @@ pub(super) fn load_accounting_folds(
                     | "budget_exhausted"
                     | "paused"
             );
-            // A cancelled run with no committed model turn spent no measured
-            // request and preserves known prior accounting. Other terminal
+            // Cancellation before provider admission preserves known prior
+            // accounting; an admitted goal/helper request remains uncertain.
+            // Other terminal
             // rows without usage stay unknown for legacy/provider-failure
             // compatibility; a committed turn is always an explicit unknown.
-            if routed || saw_turn || (terminal && status != "cancelled" && started_at_ms.is_some())
+            if admitted
+                || saw_turn
+                || (terminal && status != "cancelled" && started_at_ms.is_some())
             {
                 inclusive.mark_unknown();
                 if owner_id == session_id {
@@ -465,13 +537,25 @@ pub(super) fn load_session_summary_with_accounting(
                      s.queued_prompts, s.model, s.context_tokens, s.updated_at_ms,
                      (SELECT outcome_json FROM runs
                       WHERE session_id = s.id AND outcome_json IS NOT NULL
+                        AND (kind <> 'compaction' OR auto_compaction_for_run_id IS NULL)
                       ORDER BY finished_at_ms DESC, rowid DESC LIMIT 1),
                      s.owner_run_id, s.spawned_by_tool_call_id, s.profile, s.correlation_json,
                      s.approval_mode, s.depth, s.purpose,
                      (SELECT activity FROM runs WHERE id = s.active_run_id), s.model_is_fallback,
-                     s.reasoning_effort, s.approval_delegate
+                     s.reasoning_effort, s.approval_delegate,
+                     (SELECT group_concat(h.id || ':' || h.approval_delegated) FROM (
+                          SELECT id, approval_delegated FROM tool_calls
+                           WHERE run_id = s.active_run_id AND state = 'awaiting_approval'
+                             AND approval_resolution IS NULL
+                           ORDER BY approval_delegated, turn_ordinal, call_ordinal
+                           LIMIT ?2) h),
+                     (SELECT id FROM side_questions
+                       WHERE session_id = s.id AND state = 'running')
               FROM sessions s WHERE s.id = ?1",
-            [session_id.to_string()],
+            params![
+                session_id.to_string(),
+                u64::try_from(MAX_PENDING_HOLDS).expect("hold bound fits u64")
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -495,6 +579,8 @@ pub(super) fn load_session_summary_with_accounting(
                     row.get::<_, bool>(18)?,
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             },
         )
@@ -523,6 +609,8 @@ pub(super) fn load_session_summary_with_accounting(
                 model_is_fallback,
                 reasoning_effort,
                 approval_delegate,
+                holds,
+                running_side_question,
             )| {
                 let direct_cost = accounting.direct.estimated_cost_usd_nanos;
                 let active_run_id: Option<RunId> = active.as_deref().map(parse_id).transpose()?;
@@ -567,6 +655,29 @@ pub(super) fn load_session_summary_with_accounting(
                     last_outcome: last_outcome
                         .as_deref()
                         .map(serde_json::from_str)
+                        .transpose()?,
+                    pending_holds: match holds {
+                        // `id:delegated` pairs; ids are hex and never hold
+                        // the separators.
+                        Some(holds) if active_run_id.is_some() => holds
+                            .split(',')
+                            .map(|hold| match hold.split_once(':') {
+                                Some((id, "0")) => Ok(PendingHold {
+                                    tool_call_id: parse_id(id)?,
+                                    delegated: false,
+                                }),
+                                Some((id, "1")) => Ok(PendingHold {
+                                    tool_call_id: parse_id(id)?,
+                                    delegated: true,
+                                }),
+                                Some(_) | None => Err(SessionRuntimeError::CODEC),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Some(_) | None => Vec::new(),
+                    },
+                    running_side_question: running_side_question
+                        .as_deref()
+                        .map(parse_id)
                         .transpose()?,
                 })
             },

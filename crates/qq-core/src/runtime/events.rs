@@ -43,6 +43,8 @@ pub(crate) enum TurnNotice {
     /// A stall report after calls without progress (ADR-0054 § 2): the same
     /// kind of turn as the slice checkpoint, under its own wording.
     StallReport,
+    /// A root report asks for the next permitted action without changing historical notices.
+    RootStallReport,
     /// The turn after a report: tools are available again.
     Continuation,
     /// A sub-agent's last turn: answer the brief from what it has. The
@@ -56,6 +58,7 @@ impl TurnNotice {
             Self::Report => "report",
             Self::Continuation => "continuation",
             Self::StallReport => "stall_report",
+            Self::RootStallReport => "root_stall_report",
             Self::FinalAnswer => "final_answer",
         }
     }
@@ -65,6 +68,7 @@ impl TurnNotice {
             "report" => Some(Self::Report),
             "continuation" => Some(Self::Continuation),
             "stall_report" => Some(Self::StallReport),
+            "root_stall_report" => Some(Self::RootStallReport),
             "final_answer" => Some(Self::FinalAnswer),
             _ => None,
         }
@@ -75,9 +79,32 @@ impl TurnNotice {
             Self::Report => crate::SLICE_CHECKPOINT_NOTICE,
             Self::Continuation => crate::SLICE_CONTINUATION_NOTICE,
             Self::StallReport => crate::STALL_REPORT_NOTICE,
+            Self::RootStallReport => crate::ROOT_STALL_REPORT_NOTICE,
             Self::FinalAnswer => crate::SUBAGENT_FINAL_ANSWER_NOTICE,
         }
     }
+}
+
+/// A framed boundary notice and the number of child deliveries preceding it
+/// since the previous committed turn. Empty reactive retries retain this order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OrderedTurnNotice {
+    #[serde(deserialize_with = "deserialize_notice_text")]
+    pub(crate) text: String,
+    pub(crate) preceding_deliveries: usize,
+}
+
+fn deserialize_notice_text<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<String, D::Error> {
+    let text = <String as serde::Deserialize>::deserialize(decoder)?;
+    if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+        || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
+    {
+        return Err(serde::de::Error::custom("invalid framed boundary notice"));
+    }
+    Ok(text)
 }
 
 /// Identity of the exact immutable prefix placed before the conversation for
@@ -104,8 +131,16 @@ impl PreparedStaticPrefix {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelWorkDisposition {
+    Committed,
+    RejectedBeforeWork,
+    Uncertain,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RuntimeEvent {
+    GoalRequestRejected,
     Started,
     Prepared {
         turn_ordinal: u32,
@@ -133,6 +168,7 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     AssistantTurnCompleted {
+        model_work: ModelWorkDisposition,
         turn_ordinal: u32,
         message: Message,
         usage: Option<TokenUsage>,
@@ -146,6 +182,8 @@ pub(crate) enum RuntimeEvent {
         truncated: bool,
         /// The runtime notice this turn's request was the first to carry.
         notice: Option<TurnNotice>,
+        goal_notices: Vec<OrderedTurnNotice>,
+        reserved_goal_notices: usize,
     },
     ToolCallStarted {
         id: ToolCallId,
@@ -153,6 +191,12 @@ pub(crate) enum RuntimeEvent {
     ToolCallDenied {
         id: ToolCallId,
         message: String,
+    },
+    /// Not-started result whose refusal or interruption needs persistence.
+    ToolCallUnexecuted {
+        id: ToolCallId,
+        message: String,
+        interrupted: bool,
     },
     /// An `ask_user` call the user answered. Like a denial, the session
     /// layer persisted and published the settled call before this fires;
@@ -168,6 +212,10 @@ pub(crate) enum RuntimeEvent {
         id: ToolCallId,
         chunk: String,
     },
+    ToolResultsProjected {
+        turn_ordinal: u32,
+        projection: Arc<ProjectedToolTurn>,
+    },
     ToolCallFinished {
         id: ToolCallId,
         result: String,
@@ -181,6 +229,7 @@ pub(crate) enum RuntimeEvent {
         /// The complete output when `result` was cut and a session store
         /// will keep it under the handle the marker already names.
         spill: Option<crate::tools::SpillRecord>,
+        execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     },
     CheckpointStarted {
         correlation: String,
@@ -302,6 +351,27 @@ pub(crate) enum RuntimeEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectedToolTurn {
+    pub(crate) message: Message,
+    pub(crate) correction_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallRejection {
+    Runtime(String),
+    OutputBudget,
+}
+
+impl CallRejection {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Runtime(message) => message,
+            Self::OutputBudget => "turn_output_budget: search was not executed; retry the exact same arguments on the next turn".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeToolCall {
     pub(crate) id: ToolCallId,
@@ -318,7 +388,7 @@ pub(crate) struct RuntimeToolCall {
     /// were not valid JSON, or the name is not in the catalog. The call never
     /// reaches the gate; this message is returned to the model as a
     /// retryable tool error instead of failing the run.
-    pub(crate) rejection: Option<String>,
+    pub(crate) rejection: Option<CallRejection>,
 }
 
 pub(crate) struct PendingToolCall {

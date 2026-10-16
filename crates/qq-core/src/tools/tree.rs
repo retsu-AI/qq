@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::workspace::Workspace;
 
 use super::{
-    dispatch::{ToolCancellation, ToolOutput},
+    dispatch::{ReadSideOutput, ToolCancellation},
     output::{Bounds, Header, MARKER_PREFIX},
     search::{CANCELLED_MESSAGE, path_error},
     walk::{
@@ -88,15 +88,15 @@ pub(super) fn tree(
     workspace: &Workspace,
     arguments: TreeArgs,
     cancelled: &ToolCancellation,
-) -> ToolOutput {
+) -> ReadSideOutput {
     let started = Instant::now();
     if arguments.depth == 0 || arguments.depth > MAX_DEPTH {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_depth: depth must be between 1 and {MAX_DEPTH}"
         ));
     }
     if arguments.limit == 0 || arguments.limit > MAX_ENTRIES {
-        return ToolOutput::error(format!(
+        return ReadSideOutput::refused(format!(
             "invalid_limit: limit must be between 1 and {MAX_ENTRIES}"
         ));
     }
@@ -105,7 +105,7 @@ pub(super) fn tree(
     let filter = match arguments.glob.as_ref().filter(|glob| !glob.is_empty()) {
         None => PathFilter::new(&[], &[]),
         Some(glob) if glob.len() > MAX_GLOB_BYTES => {
-            return ToolOutput::error(format!(
+            return ReadSideOutput::refused(format!(
                 "bad_glob: glob must be 1 to {MAX_GLOB_BYTES} bytes"
             ));
         }
@@ -113,15 +113,15 @@ pub(super) fn tree(
     };
     let filter = match filter {
         Ok(filter) => filter,
-        Err(error) => return ToolOutput::error(error.to_string()),
+        Err(error) => return ReadSideOutput::refused(error.to_string()),
     };
     let root = match workspace.contained_path(&arguments.path) {
         Ok(path) => path,
-        Err(error) => return ToolOutput::error(path_error(&arguments.path, &error)),
+        Err(error) => return ReadSideOutput::error(path_error(&arguments.path, &error)),
     };
     let root = relative_string(&root);
     if !workspace.root().is_dir(&root) {
-        return ToolOutput::error("not_a_directory");
+        return ReadSideOutput::error("not_a_directory");
     }
 
     let deadline = started + TREE_DEADLINE;
@@ -136,7 +136,7 @@ pub(super) fn tree(
     queue.push_back((root.clone(), 1, None));
     while let Some((dir, depth, parent)) = queue.pop_front() {
         if cancelled.is_cancelled() {
-            return ToolOutput::error(CANCELLED_MESSAGE);
+            return ReadSideOutput::interrupted(CANCELLED_MESSAGE);
         }
         if stop.is_some() {
             // Never listed: shown as a directory with counts only.
@@ -157,7 +157,7 @@ pub(super) fn tree(
                     nodes[parent].expanded = false;
                     continue;
                 }
-                None => return ToolOutput::error(error.to_string()),
+                None => return ReadSideOutput::error(error.to_string()),
             },
         };
         let mut unlisted = 0_usize;
@@ -236,7 +236,7 @@ pub(super) fn tree(
             "{MARKER_PREFIX}{root_unlisted} more entries; raise limit]…"
         );
     }
-    ToolOutput::bounded(text, &TREE_BOUNDS, false)
+    ReadSideOutput::with_bounds(text, &TREE_BOUNDS, false)
 }
 
 /// `(<files>f <dirs>d)` for one directory from a bounded sub-walk that skips

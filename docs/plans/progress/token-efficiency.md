@@ -5,7 +5,7 @@ is assigned per slice. [Plan](../token-efficiency.md).
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| TE0 | Research, roadmap, proposed ADR and tracker | In review | [#141](https://github.com/retsu-AI/qq/pull/141) / [ENG-887](https://linear.app/retsu-ai/issue/ENG-887) | Docs only; baseline `8089a0e` |
+| TE0 | Research, roadmap, proposed ADR and tracker | Shipped (`8075f05`) | [#141](https://github.com/retsu-AI/qq/pull/141) / [ENG-887](https://linear.app/retsu-ai/issue/ENG-887) | Docs only; baseline `8089a0e` |
 | TE1 | Task-tree efficiency report | In progress | [ENG-888](https://linear.app/retsu-ai/issue/ENG-888) / [#158](https://github.com/retsu-AI/qq/pull/158) | Offline first; no paid-run authorization |
 | TE2 | Tool-schema ergonomics | Planned | [ENG-889](https://linear.app/retsu-ai/issue/ENG-889) | Reconcile ENG-872; no duplicate coercion work |
 | TE3 | Bounded discovery guidance | Planned | [ENG-890](https://linear.app/retsu-ai/issue/ENG-890) | Depends on existing ENG-812 evaluation |

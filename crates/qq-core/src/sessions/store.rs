@@ -283,6 +283,7 @@ struct StoreInner {
     shutdown: Sender<()>,
     closed: watch::Receiver<bool>,
     closing: AtomicBool,
+    goals_present: Arc<AtomicBool>,
     admission: Mutex<()>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -312,7 +313,7 @@ impl Store {
             .ready
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)??;
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
@@ -324,15 +325,37 @@ impl Store {
                 shutdown: started.shutdown,
                 closed: started.closed,
                 closing: AtomicBool::new(false),
+                goals_present: Arc::new(AtomicBool::new(false)),
                 admission: Mutex::new(()),
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
-        })
+        };
+        let present = Arc::clone(&store.inner.goals_present);
+        store
+            .call(Priority::Control, move |connection| {
+                let enabled: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                present.store(enabled, Ordering::Release);
+                Ok(())
+            })
+            .await?;
+        Ok(store)
     }
 
     pub(super) const fn store_id(&self) -> StoreId {
         self.store_id
+    }
+
+    #[cfg(test)]
+    pub(super) async fn hold_control_capacity(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.inner.control_slots)
+            .acquire_many_owned(CONTROL_QUEUE_CAPACITY as u32)
+            .await
+            .expect("test store must remain open")
     }
 
     #[cfg(test)]
@@ -443,6 +466,60 @@ impl Store {
         debug_assert!(!matches!(priority, Priority::Output));
         self.call_with(priority, worker::Joins::AfterGroup, operation)
             .await
+    }
+
+    /// Accepted work stays owned even when a side caller's deadline expires.
+    pub(super) async fn enqueue_side_write<T, F>(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        operation: F,
+    ) -> Result<oneshot::Receiver<Result<T, SessionRuntimeError>>, SessionRuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, SessionRuntimeError> + Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        let job: worker::DatabaseJob = Box::new(move |connection| {
+            let result = operation(connection);
+            worker::JobOutcome {
+                ok: result.is_ok(),
+                settle: Box::new(move |commit| {
+                    let _ = reply.send(commit.and(result));
+                }),
+            }
+        });
+        let acquire = Arc::clone(&self.inner.control_slots).acquire_owned();
+        let permit = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, acquire)
+                .await
+                .map_err(|_| SessionRuntimeError::SideQuestionTimedOut)?,
+            None => acquire.await,
+        }
+        .map_err(|_| SessionRuntimeError::Unavailable)?;
+        // No await from accepted handoff through receipt return: cancellation
+        // can only discard work before it enters the worker queue.
+        let admission = self
+            .inner
+            .admission
+            .lock()
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(SessionRuntimeError::SideQuestionTimedOut);
+        }
+        match self.inner.control.try_send(WorkerMessage::Run {
+            job,
+            joins: worker::Joins::OutputGroup,
+            capacity_permit: Some(permit),
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(SessionRuntimeError::Overloaded),
+            Err(TrySendError::Disconnected(_)) => return Err(SessionRuntimeError::Unavailable),
+        }
+        drop(admission);
+        Ok(response)
     }
 
     async fn call_with<T, F>(
@@ -621,21 +698,21 @@ impl Store {
         command_id: CommandId,
         command: SessionCommand,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
-        self.command_with_seed(command_id, command, WorkspaceGrantSeed::default(), None)
+        self.command_with_admission(command_id, command, CommandAdmission::default(), None)
             .await
     }
 
-    pub(super) async fn command_with_seed(
+    pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         self.command_from(
             command_id,
             command,
-            seed,
+            admission,
             promotion_wakeup,
             CommandOrigin::Client,
         )
@@ -652,7 +729,7 @@ impl Store {
         self.command_from(
             command_id,
             SessionCommand::CancelRun { run_id },
-            WorkspaceGrantSeed::default(),
+            CommandAdmission::default(),
             None,
             CommandOrigin::RuntimeSettlement,
         )
@@ -663,7 +740,7 @@ impl Store {
         &self,
         command_id: CommandId,
         command: SessionCommand,
-        seed: WorkspaceGrantSeed,
+        admission: CommandAdmission,
         promotion_wakeup: Option<mpsc::Sender<()>>,
         origin: CommandOrigin,
     ) -> Result<AppliedCommand, SessionRuntimeError> {
@@ -699,16 +776,23 @@ impl Store {
             }
             _ => None,
         };
+        let creates_goal = matches!(&command, SessionCommand::SetGoal { .. });
+        let present = Arc::clone(&self.inner.goals_present);
         self.call_write(Priority::Control, move |connection| {
+            let mut admission = admission;
+            admission.goal_work_present = present.load(Ordering::Acquire);
             let applied = execute_command(
                 connection,
                 store_id,
                 command_id,
                 command,
                 canonical_workspace,
-                &seed,
+                &admission,
                 origin,
             )?;
+            if creates_goal {
+                present.store(true, Ordering::Release);
+            }
             if applied.grant_promotion_pending
                 && let Some(wakeup) = promotion_wakeup
             {
@@ -747,7 +831,7 @@ impl Store {
                 command_id,
                 SessionCommand::CancelRun { run_id },
                 None,
-                &WorkspaceGrantSeed::default(),
+                &CommandAdmission::default(),
                 CommandOrigin::RuntimeSettlement,
             )
         })
@@ -860,6 +944,32 @@ impl Store {
     /// Reserves the next queued run whose session sits at exactly `depth`
     /// (0 = roots). The scheduler reserves per depth so each permit pool
     /// stays independent.
+    pub(super) fn has_goals(&self) -> bool {
+        self.inner.goals_present.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn drive_goals(
+        &self,
+        now: u64,
+    ) -> Result<goals::GoalSchedule, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let present = Arc::clone(&self.inner.goals_present);
+        self.call_after_group(Priority::AwaitControl, move |connection| {
+            let result = goals::queue_due_goals(connection, store_id, now)?;
+            present.store(result.has_goals, Ordering::Release);
+            Ok(result)
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn queue_due_goals(
+        &self,
+        now: u64,
+    ) -> Result<Option<u64>, SessionRuntimeError> {
+        Ok(self.drive_goals(now).await?.next_wake)
+    }
+
     pub(super) async fn reserve_next_run_at_depth(
         &self,
         depth: u16,
@@ -892,6 +1002,7 @@ impl Store {
         if self
             .start_reserved_run(&claimed, audit, None)
             .await?
+            .map_err(|_| SessionRuntimeError::CONSTRAINT)?
             .is_none()
         {
             return Err(SessionRuntimeError::CONSTRAINT);
@@ -930,7 +1041,7 @@ impl Store {
         claimed: &ClaimedRun,
         audit: PreparedRunAudit,
         resolved_input: Option<Arc<crate::input::ResolvedInput>>,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    ) -> Result<claim::RunStart, SessionRuntimeError> {
         #[cfg(test)]
         if let Some(hook) = take_reserved_start_hold_hook(claimed.identity.run_id) {
             let _ = hook.entered.send(());
@@ -939,12 +1050,26 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        let limits = claimed.limits;
+        let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_reserved_run(
                 connection,
                 store_id,
                 identity,
                 &audit,
+                claim::RunStartMetadata {
+                    goal_spend_owner,
+                    goal: goal.as_deref(),
+                    goal_initial_notice: goal_initial_notice.as_deref(),
+                    origin,
+                    limits,
+                    admission,
+                },
                 resolved_input.as_deref(),
             )
         })
@@ -961,6 +1086,160 @@ impl Store {
         let original = original.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
             start_auto_compaction(connection, store_id, &original, &audit, cutoff_ordinal)
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn side_source(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+    ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
+        let response = self
+            .enqueue_side_admission(session_id, question_id, question, new_thread, None)
+            .await?;
+        response
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?
+    }
+
+    pub(super) async fn enqueue_side_admission(
+        &self,
+        session_id: SessionId,
+        question_id: RunId,
+        question: String,
+        new_thread: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<
+        oneshot::Receiver<Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError>>,
+        SessionRuntimeError,
+    > {
+        let store_id = self.store_id;
+        self.enqueue_side_write(deadline, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let source = side_questions::admit_side_question(
+                &transaction,
+                store_id,
+                session_id,
+                question_id,
+                question,
+                new_thread,
+            )?;
+            transaction.commit()?;
+            Ok(source)
+        })
+        .await
+    }
+
+    /// Persists a side answer update. `usage`/`cost` are the committed totals,
+    /// or `None` while a provider request is in flight (spend unknown). A row
+    /// that is no longer running (cancelled, or deleted with its session)
+    /// takes no update and publishes nothing.
+    pub(super) async fn record_side_turn(
+        &self,
+        id: RunId,
+        text: String,
+        usage: Option<TokenUsage>,
+        cost: Option<u64>,
+        turns: u32,
+    ) -> Result<(), SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let transaction = begin_unit(connection)?;
+            let usage = usage.map(|usage| serde_json::to_string(&usage)).transpose()?;
+            let changed = transaction.execute(
+                "UPDATE side_questions SET answer = ?2, usage_json = ?3,
+                    estimated_cost_usd_nanos = ?4, model_turns = ?5 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), text, usage, cost, turns],
+            )?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
+    /// Settles a running side question and returns its effective state. When
+    /// `spend_known` is false a provider request may have been in flight, so
+    /// persisted usage and cost become unknown. A completion at or past
+    /// `duration_ms` from admission settles as timed out. A row deleted with
+    /// its session (possible only after cancellation released it) reports
+    /// `Cancelled`.
+    pub(super) async fn finish_side_question(
+        &self,
+        id: RunId,
+        state: qq_protocol::SideQuestionState,
+        spend_known: bool,
+        duration_ms: u64,
+    ) -> Result<qq_protocol::SideQuestionState, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            let state = match state {
+                qq_protocol::SideQuestionState::Completed => "completed",
+                qq_protocol::SideQuestionState::Cancelled => "cancelled",
+                qq_protocol::SideQuestionState::TimedOut => "timed_out",
+                qq_protocol::SideQuestionState::Interrupted => "interrupted",
+                qq_protocol::SideQuestionState::Failed => "failed",
+                qq_protocol::SideQuestionState::Running => {
+                    return Err(SessionRuntimeError::CONSTRAINT);
+                }
+            };
+            let transaction = begin_unit(connection)?;
+            let created: Option<u64> = transaction
+                .query_row(
+                    "SELECT created_at_ms FROM side_questions WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(created) = created else {
+                transaction.commit()?;
+                return Ok(qq_protocol::SideQuestionState::Cancelled);
+            };
+            let finished_at_ms = now_ms();
+            let state = if state == "completed"
+                && finished_at_ms.saturating_sub(created) >= duration_ms
+            {
+                "timed_out"
+            } else {
+                state
+            };
+            let changed = transaction.execute(
+                "UPDATE side_questions SET state = ?2, finished_at_ms = ?3,
+                    usage_json = CASE WHEN ?4 THEN usage_json ELSE NULL END,
+                    estimated_cost_usd_nanos = CASE WHEN ?4 THEN estimated_cost_usd_nanos ELSE NULL END
+                 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), state, finished_at_ms, spend_known],
+            )?;
+            if changed != 0 {
+                side_questions::append_side_event(&transaction, store_id, id)?;
+            }
+            let effective = side_questions::load_side_snapshot(&transaction, id)?.state;
+            transaction.commit()?;
+            Ok(effective)
+        })
+        .await
+    }
+
+    pub(super) async fn capture_side_context(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<Message>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            let transaction = connection.transaction()?;
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            transcript::capture_side_context(&transaction, session_id)
         })
         .await
     }
@@ -1055,8 +1334,17 @@ impl Store {
         }
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call_write(Priority::AwaitControl, move |connection| {
-            finish_reserved_run(connection, store_id, identity, outcome)
+            finish_reserved_run(
+                connection,
+                store_id,
+                identity,
+                outcome,
+                goal.as_deref(),
+                goal_initial_notice.as_deref(),
+            )
         })
         .await
     }
@@ -1148,9 +1436,74 @@ impl Store {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            persist_model_turn(connection, store_id, &claimed, &turn)
+            persist_model_turn(connection, store_id, &claimed, &turn, true)
         })
         .await
+    }
+
+    /// Internal summaries never join the prompt transcript. Their own text
+    /// is bounded by the summarizer, not the prompt's context reservation.
+    pub(super) async fn persist_in_run_summary_turn(
+        &self,
+        claimed: &ClaimedRun,
+        turn: ModelTurnCommit,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            if claimed.identity.kind != RunKind::Compaction {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            // The worker executes this check and persistence without another
+            // job interleaving. A dropped executor cannot append after settlement.
+            let running = connection
+                .query_row(
+                    "SELECT status = 'running' AND outcome_json IS NULL
+                     AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL
+                     FROM runs WHERE id = ?1 AND session_id = ?2",
+                    params![
+                        claimed.identity.run_id.to_string(),
+                        claimed.identity.session_id.to_string()
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !running {
+                return Err(SessionRuntimeError::Unavailable);
+            }
+            persist_model_turn(connection, store_id, &claimed, &turn, false)
+        })
+        .await
+    }
+
+    /// A send has not completed yet: any earlier exact usage is only a
+    /// prefix. Keep its turn rows, but mark aggregate spend unknown before
+    /// the provider is called so cancellation/recovery cannot claim zero.
+    pub(super) async fn start_in_run_summary_request(
+        &self,
+        claimed: &ClaimedRun,
+    ) -> Result<(), SessionRuntimeError> {
+        let run_id = claimed.identity.run_id.to_string();
+        self.call(Priority::Output, move |connection| {
+            let updated = connection.execute(
+                "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL, context_tokens = NULL,
+                     goal_request_pending = CASE WHEN EXISTS (
+                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
+                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
+                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
+                     ) THEN 1 ELSE goal_request_pending END,
+                     goal_helper_admitted = CASE WHEN EXISTS (
+                         SELECT 1 FROM runs owner WHERE owner.id=runs.auto_compaction_for_run_id
+                           AND owner.session_id=runs.session_id AND owner.kind='prompt'
+                           AND (owner.goal_id IS NOT NULL OR owner.goal_paid_owner_run_id IS NOT NULL)
+                     ) THEN 1 ELSE goal_helper_admitted END
+                 WHERE id = ?1 AND status = 'running' AND kind = 'compaction' AND auto_compaction_for_run_id IS NOT NULL",
+                [run_id],
+            )?;
+            if updated != 1 { return Err(SessionRuntimeError::Unavailable); }
+            Ok(())
+        }).await
     }
 
     /// Moves the session's prune watermark to `through_turn` of the claimed
@@ -1185,11 +1538,13 @@ impl Store {
         &self,
         claimed: &ClaimedRun,
         activity: RunActivity,
+        rejected: bool,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         self.call(Priority::Output, move |connection| {
-            append_run_activity(connection, store_id, identity, activity)
+            append_run_activity(connection, store_id, identity, activity, goal, rejected)
         })
         .await
     }
@@ -1364,6 +1719,7 @@ impl Store {
         file_states: Vec<FileStateUpdate>,
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
+        execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1378,7 +1734,21 @@ impl Store {
                 file_states,
                 display,
                 spill,
+                execution_context,
             )
+        })
+        .await
+    }
+
+    pub(super) async fn persist_tool_projection(
+        &self,
+        claimed: &ClaimedRun,
+        turn: u32,
+        projection: Arc<crate::runtime::ProjectedToolTurn>,
+    ) -> Result<(), SessionRuntimeError> {
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            super::projection::persist_tool_projection(connection, identity, turn, &projection)
         })
         .await
     }
@@ -1425,6 +1795,27 @@ impl Store {
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
             deny_tool_call(connection, store_id, identity, tool_call_id, &message)
+        })
+        .await
+    }
+
+    pub(super) async fn interrupt_unstarted_tool_call(
+        &self,
+        claimed: &ClaimedRun,
+        tool_call_id: ToolCallId,
+        message: String,
+    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        self.call(Priority::Output, move |connection| {
+            super::tool_calls::settle_unstarted_tool_call(
+                connection,
+                store_id,
+                identity,
+                tool_call_id,
+                &message,
+                true,
+            )
         })
         .await
     }
@@ -1496,14 +1887,61 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
+    pub(super) async fn update_model_goal(
+        &self,
+        claimed: &ClaimedRun,
+        arguments: crate::tools::goal::UpdateGoalArgs,
+    ) -> Result<crate::tools::goal::UpdateGoalResult, SessionRuntimeError> {
+        let store_id = self.store_id;
+        let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        self.call_write(Priority::AwaitControl, move |connection| {
+            goals::update_model(
+                connection,
+                store_id,
+                identity,
+                goal.as_deref(),
+                origin,
+                arguments,
+            )
+        })
+        .await
+    }
+
     pub(super) async fn record_routing_started(
         &self,
         claimed: &ClaimedRun,
-    ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+        paid: bool,
+        maximum_cost: Option<u64>,
+    ) -> Result<claim::RunStart, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
+        let goal = claimed.goal.clone();
+        let origin = claimed.origin;
+        let limits = claimed.limits;
+        let admission = claimed.goal_admission;
+        let goal_spend_owner = claimed.goal_spend_owner;
+        let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
+        let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
-            streaming::record_routing_started(connection, store_id, identity)
+            streaming::record_routing_started(
+                connection,
+                store_id,
+                identity,
+                claim::RunStartMetadata {
+                    goal_spend_owner,
+                    goal: goal.as_deref(),
+                    goal_initial_notice: goal_initial_notice.as_deref(),
+                    origin,
+                    limits,
+                    admission,
+                },
+                paid,
+                tracked,
+                maximum_cost,
+            )
         })
         .await
     }
@@ -1680,6 +2118,8 @@ impl Store {
         summary: String,
         accounting: Option<RunAccounting>,
         record_budget: usize,
+        retained_bytes: u64,
+        goal_notice: Option<Arc<str>>,
     ) -> Result<(Vec<SessionEventEnvelope>, Option<String>), SessionRuntimeError> {
         let store_id = self.store_id;
         let claimed = claimed.clone();
@@ -1688,9 +2128,13 @@ impl Store {
                 connection,
                 store_id,
                 &claimed,
-                summary,
-                accounting,
-                record_budget,
+                compaction::InRunSummaryCommit {
+                    summary,
+                    accounting,
+                    record_budget,
+                    retained_bytes,
+                    goal_notice: goal_notice.as_deref(),
+                },
             )
         })
         .await
@@ -1706,7 +2150,58 @@ impl Store {
         let store_id = self.store_id;
         let claimed = claimed.clone();
         self.call(Priority::Output, move |connection| {
-            complete_run(connection, store_id, &claimed, outcome, None)
+            let (usage_json, estimated_cost_usd_nanos, context_tokens, has_turns): (
+                Option<String>,
+                Option<u64>,
+                Option<u64>,
+                bool,
+            ) = connection.query_row(
+                "SELECT usage_json, estimated_cost_usd_nanos, context_tokens,
+                 EXISTS(SELECT 1 FROM model_turns WHERE run_id = runs.id) FROM runs WHERE id = ?1",
+                [claimed.identity.run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let saw_turn = usage_json.is_none() || has_turns;
+            let usage = usage_json
+                .map(|json| serde_json::from_str(&json))
+                .transpose()?;
+            let accounting = RunAccounting {
+                goal_request_rejected: false,
+                usage,
+                estimated_cost_usd_nanos,
+                context_tokens,
+                saw_turn,
+                request_basis: context_occupancy_basis(
+                    qq_protocol::ContentHash::from_bytes([0; 32]),
+                    crate::runtime::PreparedStaticPrefix::new(
+                        qq_protocol::ContentHash::from_bytes([0; 32]),
+                        None,
+                    ),
+                    0,
+                ),
+                final_output: None,
+            };
+            complete_run(connection, store_id, &claimed, outcome, Some(accounting))
+        })
+        .await
+    }
+
+    /// Typed pre-work rejection restores the exact prefix under the same
+    /// terminal guard that charges the helper's historical owner.
+    pub(super) async fn finish_rejected_in_run_compaction(
+        &self,
+        claimed: &ClaimedRun,
+        outcome: RunOutcome,
+        mut accounting: RunAccounting,
+    ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+        if claimed.identity.kind != RunKind::Compaction || claimed.in_run_turn_cutoff.is_none() {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        accounting.goal_request_rejected = true;
+        let store_id = self.store_id;
+        let claimed = claimed.clone();
+        self.call(Priority::Output, move |connection| {
+            complete_run(connection, store_id, &claimed, outcome, Some(accounting))
         })
         .await
     }

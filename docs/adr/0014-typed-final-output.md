@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-09-12
 **Deciders:** speed-first plan HC3 (headless contract)
-**Implements:** [`headless-contract.md` § Gaps](../design/headless-contract.md#gaps-a-supervisor-currently-works-around)
+**Implements:** [`headless-contract.md` § Supervisor Boundary Notes](../design/headless-contract.md#supervisor-boundary-notes)
 (typed final output), [`architecture.md` § Structured Input And Steering](../design/architecture.md#structured-input-and-steering)
 
 ## Context

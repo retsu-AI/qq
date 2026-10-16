@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 mod capabilities;
+mod goals;
 mod headless;
 mod ids;
 mod input;
@@ -20,11 +21,19 @@ pub use capabilities::{
     PackSummary, ServerCapabilities, SkillCapabilities, SkillSummary, SteeringCapabilities,
     ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
+pub use goals::{
+    DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason, GoalBudget, GoalCheck,
+    GoalCheckAuthorization, GoalCheckScope, GoalChecklistItem, GoalChecklistState, GoalControl,
+    GoalCounters, GoalExhaustion, GoalIdentity, GoalNeedsUser, GoalPauseReason, GoalSnapshot,
+    GoalStatus, GoalWait,
+};
 pub use headless::{
     HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
     HeadlessTrial,
 };
-pub use ids::{CommandId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId};
+pub use ids::{
+    CommandId, GoalId, IdError, MessageId, RunId, SessionId, StoreId, ToolCallId, WorkspaceId,
+};
 pub use input::{
     Correlation, CorrelationError, InputError, InputPart, InputPartKind, LineRange,
     MAX_CORRELATION_BYTES, MAX_CORRELATION_ENTRIES, MAX_CORRELATION_KEY_BYTES,
@@ -55,19 +64,21 @@ pub use sessions::{
     DelegateIdentity, EditPreview, EventCursor, FetchPreview, FinalOutput, GenerationCapabilities,
     GuidanceIdentity, GuidanceKind, InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS,
     MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES,
-    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MessageRole, MessageSnapshot, MessageState,
-    ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
-    OutputContract, PromptCacheCapabilities, PromptVersion, ProviderRequestShapeIdentity,
-    ProviderRequestShapeVersion, Question, QuestionPreview, ResolvedModel, ResolvedModelVersion,
-    RoutingDecision, RoutingOutcome, RunActivity, RunFailure, RunLimits, RunOutcome, RunPause,
-    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
-    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionPurpose, SessionSnapshot,
-    SessionStatus, SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin,
-    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot, ToolCallState,
-    ToolErrorKind, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
+    MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_PENDING_HOLDS, MessageRole,
+    MessageSnapshot, MessageState, ModelCatalogRequest, ModelDescriptor, ModelPricing,
+    ModelPricingTier, ModelSelection, OutputContract, PendingHold, PromptCacheCapabilities,
+    PromptVersion, ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question,
+    QuestionPreview, ResolvedModel, ResolvedModelVersion, RoutingDecision, RoutingOutcome,
+    RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome, RunPause, RunPromptIdentity,
+    RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionCommandKind, SessionEvent,
+    SessionEventEnvelope, SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary,
+    ShellCommandPreview, ShellVerdict, SideQuestionSnapshot, SideQuestionState, SnapshotRequest,
+    SpawnOrigin, SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallSnapshot,
+    ToolCallState, ToolErrorKind, ToolExposure, WorkspaceGrantOutcome, WorkspaceSnapshot,
+    WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 31;
+pub const PROTOCOL_VERSION: u16 = 33;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles
@@ -78,7 +89,11 @@ pub const MAX_TURN_RETRIES: u16 = 5;
 /// Slash commands owned by interactive clients rather than the shared
 /// runtime. Keeping this vocabulary in the transport-neutral protocol avoids
 /// a client/runtime drift where one side forwards a name the other reserves.
-pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 23] = [
+pub const RESERVED_CLIENT_SLASH_COMMANDS: [&str; 27] = [
+    "/btw",
+    "/ask",
+    "/btw-new",
+    "/btw-cancel",
     "/help",
     "/commands",
     "/models",

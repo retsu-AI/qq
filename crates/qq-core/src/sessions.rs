@@ -19,14 +19,15 @@ use qq_protocol::{
     AccountingTotal, AgentProfileId, ApprovalDecision, ApprovalGrant, ApprovalMode,
     ApprovalResolution, AuditOutcome, AuditRecord, CapabilitySupport, CommandId, CommandOutcome,
     CommandReceipt, ContentHash, Correlation, EditPreview, EventCursor, FetchPreview, FinalOutput,
-    InputPart, MessageId, MessageRole, MessageSnapshot, MessageState, ModelPricing, ModelSelection,
-    QuestionPreview, ReasoningEvent, ResolvedModel, RunActivity, RunFailure, RunFailureKind, RunId,
-    RunLimits, RunOutcome, RunPlanIdentity, RunPromptIdentity, RunSnapshot, RunStatus,
-    SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope, SessionId,
-    SessionPurpose, SessionSnapshot, SessionStatus, SessionSummary, ShellCommandPreview,
-    ShellVerdict, SnapshotRequest, SpawnOrigin, StoreId, SubscribeRequest, TextChannel, TokenUsage,
-    ToolCallDisplay, ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceGrantOutcome,
-    WorkspaceId, WorkspaceSnapshot, WorkspaceSummary, validate_input,
+    InputPart, MAX_PENDING_HOLDS, MessageId, MessageRole, MessageSnapshot, MessageState,
+    ModelPricing, ModelSelection, PendingHold, QuestionPreview, ReasoningEvent, ResolvedModel,
+    RunActivity, RunFailure, RunFailureKind, RunId, RunLimits, RunOutcome, RunPlanIdentity,
+    RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand, SessionEvent,
+    SessionEventEnvelope, SessionId, SessionPurpose, SessionSnapshot, SessionStatus,
+    SessionSummary, ShellCommandPreview, ShellVerdict, SnapshotRequest, SpawnOrigin, StoreId,
+    SubscribeRequest, TextChannel, TokenUsage, ToolCallDisplay, ToolCallId, ToolCallSnapshot,
+    ToolCallState, WorkspaceGrantOutcome, WorkspaceId, WorkspaceSnapshot, WorkspaceSummary,
+    validate_input,
 };
 use qq_provider::{ContentBlock, Message, Role};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -57,10 +58,16 @@ mod deliveries;
 mod events;
 mod execution;
 mod feed;
+mod goals;
+pub(crate) use goals::GoalRunInput;
+pub use goals::GoalValidationError;
 mod in_run_compaction;
+mod projection;
 mod runtime;
 mod scheduler;
 mod settlement;
+mod side_questions;
+pub use side_questions::{SideAnswer, SideQueryLimits};
 mod snapshots;
 mod store;
 mod streaming;
@@ -74,14 +81,14 @@ pub use commands::MAX_DESCENDANTS_PER_ROOT;
 pub use feed::PublishedEvent;
 pub use runtime::{
     ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
-    GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_REVIEW_ARGUMENT_BYTES,
-    MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS, PersistenceFault, PublishedEventStream,
-    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
-    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime,
-    SessionRuntimeError, SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture,
-    TaskRouter, TaskRoutingFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
-    WorkspaceGrantSeed,
+    GoalCheckPolicyError, GoalCheckPolicyFuture, GrantPromotionFuture, GrantSeedFuture,
+    LoadedRuntime, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
+    PersistenceFault, PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture,
+    ReviewOrigin, ReviewRequest, ReviewSpend, ReviewVerdict, RoutingSelection, RuntimeLoadError,
+    RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader,
+    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions,
+    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;
@@ -250,6 +257,23 @@ pub mod bench_support {
                 [session_id.to_string()],
             )
             .expect("prune watermark");
+        // These synthetic rows exercise the current strict projector, not
+        // unversioned historical reconstruction.
+        let identity = RunPlanIdentity {
+            profile: AgentProfileId::default(),
+            descriptor_version: crate::plan::DESCRIPTOR_VERSION,
+            digest: qq_protocol::AgentPlanDigest::from_hash(ContentHash::from_bytes([0; 32])),
+            credential_epoch: qq_protocol::CredentialEpoch::NONE,
+        };
+        transaction
+            .execute(
+                "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2",
+                params![
+                    r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+                    serde_json::to_string(&identity).expect("bench plan identity")
+                ],
+            )
+            .expect("bench projection policy");
         transaction.commit().expect("bench seed commits");
         (connection, session_id)
     }

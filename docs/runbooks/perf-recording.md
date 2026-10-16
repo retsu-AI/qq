@@ -29,23 +29,62 @@ cargo xtask perf check --baseline target/qq-perf/<slice>-<date>/baseline.json \
 
 The fixture version is embedded in each report; reports with different fixture
 versions, sample counts, or warmup counts are not comparable. Current fixture
-version: 4.
+version: 5. Version 5 requires exactly `MAX_TURN_RETRIES + 1` entries in every
+always-faulting run. Older aggregate-only retry receipts cannot be compared
+against the current budgets; re-record both arms with the current fixture.
 
 ## Focused fixtures
 
-Use these while iterating; they are faster and isolate one gate. Each is a
-hidden `xtask perf` worker run as a release binary. Run baseline and candidate
-alternately (A, B, A, B, …) for at least 30 pairs.
+The ENG-834 hosted repair job compares merged main `3b763ea1` against the PR
+candidate using the same H0 fixture and toolchain in both arms. The turn
+diagnostic retains common fixture `9868038c` independently of production commits.
+Both immutable
+production checkouts overlay only `xtask/src/perf.rs` from the immutable PR
+head before recording. The artifact retains `fixture-receipt.json` with the
+fixture commit, production commits, original hashes and equal effective hashes;
+the baseline report truthfully records its modified workspace. The repaired
+fixture preserves the average retry metric and requires exactly six sends in
+every always-faulting run. Too few attempts lose recovery; too many exceed it.
+Neither defect can hide among otherwise correct runs.
+Earlier recordings without this check do not prove the per-run invariant. Size ceilings stay
+48,000,000/41,000,000 bytes. Its budget guard permits only the ADR-0040 retry
+correction and fixture-version 4 → 5 transition; all other limits must match
+the pinned baseline. The artifact retains the exact budget file used.
+
+Each arm streams compiler output to the Actions console while retaining its
+complete log artifact. Console groups identify baseline, candidate and control,
+and report each arm's duration and exit code. The recorder announces release
+builds and each workload family with elapsed times; these messages are outside
+individual sample timing regions. A silent step is not evidence of progress.
+
+Its same-binary control repeats the candidate, verifies both default/minimal
+executable hashes, and checks candidate versus control with the same budgets.
+H0's optimized xtask driver uses the same final optimization level as the
+shipped executable. The turn diagnostic sets only its final benchmark target's
+optimization to each arm's `qq` package setting; dependency crates retain their
+normal profile. Artifacts retain the explicit final optimization flag alongside
+Cargo's pre-override profile metadata and the compiled binary hashes.
+
+This tests repeatability of the improved build while still requiring both
+candidate recordings to satisfy absolute limits. Baseline versus candidate
+checks relative regressions against merged main. Neither inherited failures nor
+noisy controls are waived.
+
+Use these while iterating; they are faster and isolate one gate. The worker
+rows are hidden `xtask perf` subcommands that refuse a debug build and run only
+on Linux, so they go through `cargo run --release` rather than the debug
+`cargo xtask` alias. Run baseline and candidate alternately (A, B, A, B, …) for
+at least 30 pairs.
 
 | Gate | Command |
 | --- | --- |
-| Eight-stream output gap, cancellation, control latency | `cargo xtask perf r4-worker --case eight-streams` |
-| One-MiB shell output | `cargo xtask perf r4-worker --case shell` |
-| Reasoning batching | `cargo xtask perf r4-worker --case reasoning` |
-| Restart reconstruction | `cargo xtask perf r4-worker --case restart` |
-| Feed churn / retained RSS | `cargo xtask perf feed-worker --case churn` |
-| Feed attach and replay | `cargo xtask perf feed-worker --case attach-replay` (cold path only; see ADR-0006) |
-| Fan-out at 1/8/32 subscribers | `cargo xtask perf feed-worker --case fan-out` |
+| Eight-stream output gap, cancellation, control latency | `cargo run --release -p xtask -- perf r4-worker --case eight-streams` |
+| One-MiB shell output | `cargo run --release -p xtask -- perf r4-worker --case shell` |
+| Reasoning batching | `cargo run --release -p xtask -- perf r4-worker --case reasoning` |
+| Restart reconstruction | `cargo run --release -p xtask -- perf r4-worker --case restart` |
+| Feed churn / retained RSS | `cargo run --release -p xtask -- perf feed-worker --case churn` |
+| Feed attach and replay | `cargo run --release -p xtask -- perf feed-worker --case attach-replay` (cold path only; see ADR-0006) |
+| Fan-out at 1/8/32 subscribers | `cargo run --release -p xtask -- perf feed-worker --case fan-out` |
 | Store group commit | `cargo bench -p qq-core --bench store_output_batch` |
 | Child admission | `cargo bench -p qq-core --bench child_admission` |
 | Provider compilation | `cargo bench -p qq-provider --bench provider_compiler` |
@@ -85,6 +124,18 @@ and real provider latency, and is a standalone diagnostic, not an H0 budget.
 `QQ_BENCH_ITERATIONS` accepts 1–100 (default 3). Comparing tails still needs the
 normal A/B and A/A discipline; three medians do not qualify flatness or a tail.
 
+`QQ_BENCH_GOAL=1` creates an active durable goal before submitting the scripted
+prompt; `0` is the default goal-less mode. Both use the same compiled plan and
+workload. Each receipt records the mode, work requests containing a real goal
+notice, and committed compactions. A bounded observer checks the first block
+of the first two messages in both modes; its cost is included in the gaps.
+This fixture has no interleaved specification edits and measures goal notice
+loading/persistence through the session runtime, not the goal driver, check
+runner, or standalone notice-render latency. Compare modes on the same saved
+optimized binary and retain a goal-less/goal-less control, source/binary
+identities, pressure and all samples. Such a comparison does not establish
+production-commit A/B compatibility or replace the quiet-host/H0 gates.
+
 The outage fixture uses a 1 ms recovery policy, **not** a real ten-minute
 outage. Resource samples are periodic, not an isolated continuous RSS peak.
 Event-envelope bytes are an explicitly labelled persisted-data proxy, not
@@ -95,6 +146,52 @@ qualification and H0 metric registration remain AC0.2. Store raw logs beneath
 `target/qq-perf/<slice>-<date>/`, never in Git.
 
 ## Same-binary control
+
+### Isolated turn diagnostic recording
+
+The CI workflow accepts an optional `perf_baseline_sha` on manual dispatch.
+Both the baseline and candidate must be immutable forty-hex commits. An optional
+`perf_fixture_sha` pins the common benchmark sources independently; its default
+is the immutable dispatch commit. Dispatch
+the candidate branch with a reviewed baseline:
+
+```sh
+gh workflow run ci.yml --ref ci/eng-1044-turn-overhead-recording \
+  -f perf_baseline_sha=<full-baseline-commit>
+gh run list --workflow ci.yml --branch ci/eng-1044-turn-overhead-recording
+gh run download <run-id> --name turn-overhead-<run-id>-<attempt> \
+  --dir target/qq-perf/<slice>-<date>/isolated-run
+```
+
+The manual turn job uses a separate hosted runner, identical pinned compiler,
+separate build targets and optimized profiles. Both arms overlay only
+`crates/qq-core/benches/turn_overhead.rs` and its included
+`crates/qq-core/tests/support/soak.rs` from the same immutable fixture checkout.
+Receipts preserve original and effective source manifests, production/fixture
+commit identities, and binary hashes. Compiler dep-info must contain exactly
+those direct sources; undeclared includes and production edits refuse. Every
+sample reports the embedded effective source digest, which must match both
+build receipts. Recorder admission requires those verified receipts and checks
+the production commit, complete source manifest and actual binary hash before
+launch. Bare digest arguments alone cannot qualify a recording. Fixture commits without this embedded digest refuse recording.
+Builds finish before recording.
+It saves 30 alternating baseline/candidate pairs, then 30 same-binary
+baseline/baseline pairs, using one benchmark iteration per invocation. Artifacts
+include build logs, compiler/profile identity, executable SHA-256 hashes,
+pressure readings, every sample log, raw receipts and milestone median/p95
+summaries. Interpret p95 as the distribution of diagnostic invocation samples,
+not individual turn latency. Retention is 30 days; download qualifying evidence.
+
+Launch, nonzero-exit, malformed-output, timeout and output-limit failures retain
+partial evidence and fail the job. An incomplete recording has no qualifying
+summary. This job neither registers an H0 budget nor qualifies concurrent
+streams, fsync, real provider outages or the integrated autonomy soak. Inspect
+A/A variation and host pressure before claiming a performance result.
+
+Recordings made before common-fixture verification compared materially different
+included soak sources. Preserve them as whole-build diagnostics; their A/B
+changes cannot be attributed to runtime changes. Do not retrospectively qualify
+them using matching boundary labels, profiles or compiler versions.
 
 Tail gates (p95, p99) on a shared host are frequently not repeatable. For any
 tail gate the slice reports, also run a **same-binary A/A pair**: baseline

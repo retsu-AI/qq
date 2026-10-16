@@ -64,8 +64,10 @@ subsets; the plan keeps the parent row.
   in `progress/root.md` and continue with what does not depend on it.
 - Commit small with Conventional Commits; scope is the crate or area, and the
   body names the slice ID.
-- Run the narrowest useful test while iterating; run the workspace gates
-  before every push. Do not push red.
+- Run the narrowest useful test while iterating; run `cargo xtask check`
+  (the affected-package gate) before every push. Do not push red. The merge
+  queue runs `cargo xtask check --full`
+  ([`../runbooks/testing.md`](../runbooks/testing.md)).
 - Write the design amendment and any ADR in the same PR. Undocumented
   behavior is incomplete.
 - Append to your ledger at least every working session: shipped, in progress,
@@ -74,8 +76,8 @@ subsets; the plan keeps the parent row.
 
 ### 2.3 Finishing
 
-1. Workspace gates green (`AGENTS.md` § Developer Workflow, plus the minimal
-   provider profile when `qq-provider` changed).
+1. `cargo xtask check` green on the final head, with its `--evidence` block
+   in the PR body; `cargo xtask smoke` for user-visible changes.
 2. Post-change measurement for every named gate, recorded next to the
    baseline; A/B and same-binary A/A per the perf runbook when the gate is a
    tail.
@@ -89,8 +91,8 @@ subsets; the plan keeps the parent row.
 
 ### 2.4 Definition of done for a slice
 
-All acceptance items demonstrated by a test or command in the PR; workspace
-gates pass; named performance gates measured before and after with the
+All acceptance items demonstrated by a test or command in the PR;
+`cargo xtask check` passes; named performance gates measured before and after with the
 receipt in the ledger; design docs amended; ADR written when § 4 of
 `docs/adr/README.md` applies; plan status and task index current; Linear
 issue and PR accurate; no secrets, credentials, `target/`, or generated
@@ -98,7 +100,7 @@ evidence committed.
 
 ## 3. Ledgers
 
-`docs/plans/progress/` holds one ledger per plan plus `root.md`,
+`docs/plans/progress/` holds one ledger per active plan plus `root.md`,
 `decisions-needed.md`, and gate evidence files.
 
 Rules:
@@ -121,6 +123,17 @@ Rules:
    lead resolves. Reference an entry in code as `TODO(decision:<n>)`.
 7. Gate files (`g-<name>.md`) record a phase gate run: date, exact `main`
    SHA, commands, counts, pass/fail, and what was not tested.
+
+### 3.1 Consolidating or retiring plans
+
+Keep existing slice IDs, unresolved acceptance and failed gates under one
+current owner. Remove shipped implementation detail; link design instead.
+A user-requested consolidation may mark predecessor ledgers historical and
+link their successor without rewriting dated entries. Retain such ledgers
+only for named ADR/research evidence consumers; new work appends to the
+successor ledger. Completed release checklists and redundant plans are
+deleted, with receipts recoverable in Git. Update navigation and current
+links; do not rewrite accepted ADRs or dated research to erase history.
 
 ## 4. Review
 
@@ -178,7 +191,7 @@ record the blocker in the ledger and stop.
 
 ```text
 Review PR <url> for slice <id> (spec: docs/plans/<plan>.md#<anchor>).
-Check out the PR head in an isolated worktree and run the workspace gates.
+Check out the PR head in an isolated worktree and run `cargo xtask check`.
 Use docs/plans/templates/review-checklist.md. Report blocking, should-fix,
 nits with file:line. Verdict: Approve | Request changes | Escalate.
 ```

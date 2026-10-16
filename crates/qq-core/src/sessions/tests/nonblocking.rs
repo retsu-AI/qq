@@ -1130,6 +1130,7 @@ async fn an_answer_waiting_on_a_grandchild_is_delivered_when_it_settles() {
         .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
         .await
         .unwrap()
+        .unwrap()
         .unwrap();
     let delivered = || {
         store.call(Priority::Control, |connection| {
@@ -2263,7 +2264,16 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
     let parent_turn = Arc::new(tokio::sync::Notify::new());
     let parent: Arc<dyn Provider> = Arc::new(ScriptedParent {
         requests: Arc::clone(&parent_requests),
-        script: vec![ParentTurn::Calls(vec![spawn("a"), spawn("b")])],
+        script: vec![ParentTurn::Calls(vec![
+            (
+                "spawn_agent",
+                r#"{"task":"a","model":"test/child-a"}"#.to_owned(),
+            ),
+            (
+                "spawn_agent",
+                r#"{"task":"b","model":"test/child-b"}"#.to_owned(),
+            ),
+        ])],
         turn: AtomicUsize::new(0),
         turn_started: Arc::clone(&parent_turn),
     });
@@ -2271,13 +2281,19 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
     // durable state directly, as their runs would.
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let started = Arc::new(AtomicUsize::new(0));
-    let child: Arc<dyn Provider> = Arc::new(GatedChild {
+    let b_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let child_a: Arc<dyn Provider> = Arc::new(GatedChild {
         gate: Arc::clone(&gate),
         answer: "a's answer",
         started: Arc::clone(&started),
     });
+    let child_b: Arc<dyn Provider> = Arc::new(GatedChild {
+        gate: Arc::clone(&b_gate),
+        answer: "b's answer",
+        started: Arc::clone(&started),
+    });
     let harness = spawn_harness(
-        vec![("test/child", child)],
+        vec![("test/child-a", child_a), ("test/child-b", child_b)],
         vec![Arc::clone(&parent), parent],
         8,
     )
@@ -2307,7 +2323,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
     let children: Vec<(String, String)> = store
         .call(Priority::Control, move |connection| {
             let mut statement = connection.prepare(
-                "SELECT r.id, r.session_id FROM runs r JOIN sessions s ON s.id = r.session_id
+                "SELECT r.id, s.model FROM runs r JOIN sessions s ON s.id = r.session_id
                  WHERE s.parent_id = ?1 ORDER BY s.created_at_ms, s.rowid",
             )?;
             let rows = statement
@@ -2320,7 +2336,13 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
         .await
         .unwrap();
     assert_eq!(children.len(), 2);
-    let b: RunId = children[1].0.parse().unwrap();
+    let b: RunId = children
+        .iter()
+        .find(|(_, model)| model == "test/child-b")
+        .expect("child B exists")
+        .0
+        .parse()
+        .unwrap();
     report_turn(store, b, 90, "b is halfway", true).await;
     // Release A alone; B stays held. A settles and is delivered: the wake
     // also carries B's report, and the wait ends on A's answer.
@@ -2337,7 +2359,7 @@ async fn an_interim_report_does_not_end_a_tool_free_wait() {
     assert!(answer.is_some(), "{texts:#?}");
     assert!(report.is_some(), "{texts:#?}");
     assert!(answer < report, "answers precede reports at a boundary");
-    delegation.gate.add_permits(1);
+    b_gate.add_permits(1);
     let observed = collect_until_run_finished(&mut delegation.harness.events, run).await;
     assert!(matches!(
         finished_outcome(&observed, run),
@@ -2388,6 +2410,7 @@ async fn a_report_only_delivery_is_not_an_answer() {
     store
         .start_reserved_run(&grandchild, test_prepared_audit(&grandchild), None)
         .await
+        .unwrap()
         .unwrap()
         .unwrap();
     store

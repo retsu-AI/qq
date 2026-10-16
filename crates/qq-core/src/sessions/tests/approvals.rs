@@ -1240,7 +1240,13 @@ async fn shell_approval_requests_carry_the_command_and_auto_mode_asks_for_prompt
     let shell = observed
         .iter()
         .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalRequested { shell, .. } => shell.clone(),
+            SessionEvent::ToolApprovalRequested {
+                shell, delegated, ..
+            } => {
+                // No reviewer configured: the human is asked now.
+                assert!(!delegated);
+                shell.clone()
+            }
             _ => None,
         })
         .expect("shell approval requests carry the command");
@@ -1283,9 +1289,14 @@ async fn reviewer_approval_executes_a_held_call_without_a_client() {
     .await;
     let observed = collect_through_finished(&mut harness.events).await;
     assert!(
-        observed
-            .iter()
-            .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. }))
+        observed.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::ToolApprovalRequested {
+                delegated: true,
+                ..
+            }
+        )),
+        "the request says the reviewer decides first (ENG-1034)"
     );
     assert!(observed.iter().any(|event| matches!(
         &event.event,
@@ -1734,6 +1745,132 @@ async fn reviewer_escalation_leaves_the_call_waiting_for_a_client() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn the_session_summary_says_who_a_hold_waits_on_until_it_settles() {
+    // ENG-1034 (PR #289 review): a client that never loaded the session's
+    // body, or attached after the request event, learns from the summary
+    // alone whether a held call needs a human.
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "unsure".to_owned(),
+    }));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let holds = |snapshot: WorkspaceSnapshot| snapshot.sessions[0].pending_holds.clone();
+    let request = SnapshotRequest {
+        workspace_id: harness.workspace_id,
+        focused_session_id: None,
+        include_sessions: Vec::new(),
+        session_limit: 1,
+        message_limit: 8,
+    };
+    assert_eq!(
+        holds(harness.runtime.snapshot(request.clone()).await.unwrap()),
+        [qq_protocol::PendingHold {
+            tool_call_id: tool_call.id,
+            delegated: true,
+        }],
+        "the reviewer is deciding"
+    );
+
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = harness.events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::ToolApprovalEscalated { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        holds(harness.runtime.snapshot(request.clone()).await.unwrap()),
+        [qq_protocol::PendingHold {
+            tool_call_id: tool_call.id,
+            delegated: false,
+        }],
+        "escalated: a human is asked"
+    );
+
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        tool_call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    // Every summary the run published after the answer is clear of it.
+    for event in &observed {
+        if let SessionEvent::RunFinished { session, .. } = &event.event {
+            assert!(session.pending_holds.is_empty());
+        }
+    }
+    assert!(holds(harness.runtime.snapshot(request).await.unwrap()).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_escalation_write_fails_the_run_instead_of_waiting_unannounced() {
+    // Regression (PR #289 review): the human-wait phase starts only once the
+    // escalation is durable. If its write fails, the row still says the
+    // delegate decides and no client hears otherwise, so waiting on would
+    // leave every surface showing work while QQ waits for a human.
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
+        reason: "unsure".to_owned(),
+    }));
+    let mut harness = approval_harness_with_reviewer(
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+        None,
+        Some(reviewer),
+    )
+    .await;
+    collect_until_approval_requested(&mut harness.events).await;
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            connection
+                .execute_batch(
+                    r#"CREATE TRIGGER reject_escalation BEFORE INSERT ON events
+                       WHEN NEW.envelope_json LIKE '%"type":"tool_approval_escalated"%'
+                       BEGIN SELECT RAISE(ABORT, 'injected escalation failure'); END;"#,
+                )
+                .map_err(|_| SessionRuntimeError::CODEC)
+        })
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalEscalated { .. }))
+    );
+    assert!(matches!(
+        &observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Failed { .. },
+            session,
+            ..
+        } if session.pending_holds.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -2208,8 +2345,16 @@ async fn ask_mode_never_consults_the_reviewer() {
         Some(reviewer),
     )
     .await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
+    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
     assert!(consulted.lock().unwrap().is_empty());
+    // A configured reviewer that is not consulted does not mark the hold.
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalRequested {
+            delegated: false,
+            ..
+        }
+    )));
     respond_approval(
         &harness.runtime,
         harness.run_id,
@@ -3373,6 +3518,9 @@ async fn recovery_marks_awaiting_approval_calls_interrupted() {
         .persist_model_turn(
             &claimed,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::new(
                     Role::Assistant,

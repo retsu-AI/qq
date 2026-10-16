@@ -85,15 +85,12 @@ impl JevApprovalReviewer {
         {
             return Ok(cached.client.clone());
         }
-        let client = typesafe_http_client(
-            &self.factory.inner.credentials,
-            qq_auth::CredentialDiagnosticRoute::OtherKnown,
-        )
-        .map_err(|error| match error {
-            RuntimeBuildError::JevKeyRequired => "no TypeSafe key is stored",
-            RuntimeBuildError::JevKeyInvalid => "the TypeSafe key is not a valid header",
-            _ => "the TypeSafe client could not be constructed",
-        })?;
+        let client =
+            typesafe_http_client(&self.factory.inner.credentials).map_err(|error| match error {
+                RuntimeBuildError::JevKeyRequired => "no TypeSafe key is stored",
+                RuntimeBuildError::JevKeyInvalid => "the TypeSafe key is not a valid header",
+                _ => "the TypeSafe client could not be constructed",
+            })?;
         // Only a built client is cached. A failure (a keyring that was
         // briefly locked, a client builder error, a key added outside the
         // store) is retried at the next opted-in hold rather than pinned for
@@ -411,70 +408,6 @@ fn parse_jev_approval(value: &serde_json::Value) -> JevAnswer {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
-
-    #[test]
-    fn credential_diagnostic_approval_preparation_does_not_claim_checkpoint_reads() {
-        struct UnusedFallback;
-        impl ApprovalReviewer for UnusedFallback {
-            fn review(&self, _: ReviewRequest) -> ReviewFuture {
-                panic!("client preparation must not invoke approval review")
-            }
-        }
-        let fixture = crate::runtime::tests::RuntimeFixture::new();
-        let keyring = Arc::new(crate::runtime::tests::CountingKeyring::default());
-        let events = Arc::new(crate::runtime::tests::DiagnosticEvents::default());
-        let store = CredentialStore::with_backend(
-            qq_auth::CredentialPaths::new(fixture.path("data")),
-            keyring.clone(),
-        )
-        .with_diagnostic_sink(events.clone());
-        store
-            .set_with_metadata(
-                "typesafe-jev",
-                b"fixture-secret",
-                false,
-                Some("typesafe-jev"),
-                Some("https://api.typesafe.ai"),
-            )
-            .unwrap();
-        let factory = fixture.factory_with_credentials(store);
-        let approval = JevApprovalReviewer::new(factory.clone(), Arc::new(UnusedFallback));
-        approval.prepare().unwrap();
-        approval.prepare().unwrap();
-        TypeSafeCheckpointReviewer::from_credentials(
-            &factory.inner.credentials,
-            qq_config::JevReviewMode::Final,
-        )
-        .unwrap();
-        assert_eq!(keyring.read_count(), 1);
-        let events = events.events.lock().unwrap();
-        let starts: Vec<_> = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    qq_auth::CredentialDiagnosticEvent::BackendReadStarted { .. }
-                )
-            })
-            .collect();
-        assert_eq!(starts.len(), 1);
-        assert!(matches!(
-            starts[0],
-            qq_auth::CredentialDiagnosticEvent::BackendReadStarted {
-                route: qq_auth::CredentialDiagnosticRoute::OtherKnown,
-                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
-                ..
-            }
-        ));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            qq_auth::CredentialDiagnosticEvent::CacheHit {
-                route: qq_auth::CredentialDiagnosticRoute::TypesafeReviewer,
-                endpoint: qq_auth::CredentialDiagnosticEndpoint::Typesafe,
-                ..
-            }
-        )));
-    }
 
     fn request() -> ReviewRequest {
         ReviewRequest {

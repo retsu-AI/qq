@@ -6,6 +6,55 @@ of text hides what the agent actually did; a run that reads as a story —
 This document describes the message model and visual system that make qq's
 transcript read as a story.
 
+A prompt with a captured active goal receives a bounded runtime notice before
+its accepted prompt and immediately after each in-run compaction summary.
+The notice renders the captured goal verbatim, including its bounded check
+tail, outside the system prompt. It is derived context rather than a user
+instruction; the window's context measurement includes its bytes. Goal-less
+runs add no notice.
+
+At turn boundaries, a claimed goal run reads the committed current goal for
+display. A changed revision adds one notice in that window, and summaries
+carry the latest display snapshot. Display refresh accepts only the same
+active goal; it cannot borrow a replacement goal or refresh the immutable
+claim's model-control authority. Cancellation and the original deadline
+bound the goal-only store read. Goal-less runs perform no such read.
+
+The claim freezes its exact initial text. Compaction markers retain their
+post-summary notice, and completed model turns retain pending revision
+notices in request order. Reopening replays those stored bytes: initial text
+before the accepted prompt, marker text after its summary, and revision text
+after steering, merged with child deliveries by their persisted positions.
+Compaction drops the first retained turn's notices just as the live splice
+does. Notice reads share the bounded replay allowance with turn envelopes;
+side-question scans include their bytes. An active task's frozen initial goal
+notice and framed prompt are captured as one bounded unit, even after a live
+goal edit; if they cannot fit, both are omitted. Already reserved notice prefixes
+at run start or compaction are persisted without another capacity debit.
+
+Goal-bound turn replay merges exact framed boundary notices with child
+deliveries using each notice's persisted preceding-delivery count. A child
+wait can deliver before a fresh goal notice; an empty reactive retry can
+retain a checkpoint between two revisions without committing an assistant
+turn. Both sequences retain their live order after reopening. Static notices
+retain their typed kind in the turn-notice column for report discovery, even
+when their exact positioned text also appears among goal atoms. Replay renders
+that text once. Goal-less runs retain their existing notice rendering.
+
+A client cancelling a live run bound to the current active goal pauses that
+same goal as a user stop, including after a goal revision edit. Replacement
+goals keep their identity and state. Queued preparation and already running
+paid work retain their reservations until they drain, and Resume refuses
+cancelled obligations that have not drained. Runtime settlement cancellation
+remains neutral. Repeating a cancellation restores signals for durably
+cancelled work without repeating the goal mutation.
+
+Replayed goal commands retain their scheduler wake-up. Their durable receipts
+remain identical, while a restarted caller can restore the wake-up lost after
+the original commit. Provider replay data and reasoning lifecycle markers
+establish model work even without text bytes or a usage receipt; an ensuing
+API fault keeps unknown spend and cannot become a zero-work rejection.
+
 ## Why The Turn Is The Unit
 
 The runtime originally created one assistant message per run and appended
@@ -380,6 +429,11 @@ reports change it (`qq-client` `state::reduce`):
   internal compaction run it starts reports `compacting` as well. That
   report, and the compaction run's own finish, leave the prompt run's
   activity as it is, because the prompt run still holds the session.
+  The reducer remembers a step observed outside the active slot, from its
+  start event or a running snapshot. Its finish remains bookkeeping if
+  cancellation/recovery settles the prompt first: only the prompt raises
+  completion attention or unread state. Unfinished step stats survive the
+  prompt's transcript cleanup and expire when the step settles.
 - On the rail, a running session shows the first of: an approval wait, the
   running tool's verb, the streamed text tail, then the activity. The one
   exception is `compacting context`, which wins over the tail. The text a
@@ -388,4 +442,3 @@ reports change it (`qq-client` `state::reduce`):
 - A compaction produces no transcript row of its own. The summary replaces
   history in the model's context, not on screen; the run's earlier turns
   stay rendered as they were.
-

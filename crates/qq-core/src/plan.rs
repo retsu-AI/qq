@@ -31,7 +31,7 @@ pub use descriptor::{
     AgentPlanDescriptor, AuditDescriptor, AuditModeDescriptor, ContextBudgetDescriptor,
     ContextSourceDescriptor, CredentialReference, DESCRIPTOR_VERSION, FailPolicyDescriptor,
     McpServerDescriptor, McpTransportKind, PackDescriptor, ProviderDescriptor,
-    SkillIndexDescriptor, ToolCatalogDescriptor,
+    SkillIndexDescriptor, ToolCatalogDescriptor, ToolOutputProjection,
 };
 pub use fingerprint::SourceFingerprint;
 
@@ -118,6 +118,8 @@ pub struct AgentProfile {
     task_router: Option<Arc<dyn crate::sessions::TaskRouter>>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
+    approved_read_images: crate::runtime::ApprovedReadImages,
+    process_producer: Arc<crate::ProcessProducer>,
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
@@ -131,6 +133,7 @@ pub struct AgentProfile {
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
     exposed_tools: Option<Vec<String>>,
+    side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
     context_cache: Option<Arc<ContextCache>>,
 }
@@ -165,6 +168,8 @@ impl AgentProfile {
             task_router: None,
             reasoning_effort: None,
             shell: ShellPolicy::default(),
+            approved_read_images: crate::runtime::ApprovedReadImages::default(),
+            process_producer: Arc::default(),
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
@@ -176,6 +181,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            side_question_denies: Vec::new(),
             context_sources: Vec::new(),
             context_cache: None,
         }
@@ -264,6 +270,8 @@ impl AgentProfile {
             task_router: runtime.task_router.clone(),
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
+            approved_read_images: runtime.approved_read_images.as_ref().clone(),
+            process_producer: Arc::clone(&runtime.process_producer),
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
@@ -278,6 +286,7 @@ impl AgentProfile {
             profile_id: AgentProfileId::default(),
             pack: None,
             exposed_tools: None,
+            side_question_denies: Vec::new(),
             context_sources: runtime
                 .context_sources
                 .iter()
@@ -320,6 +329,32 @@ impl AgentProfile {
         self
     }
 
+    /// Managed hard denies a derived side-question plan must honor. Main
+    /// catalogs are unchanged: there managed denies filter grants, not
+    /// exposure (headless contract), so these apply only in
+    /// [`CompiledAgentPlan::side_question_plan`], which grants nothing.
+    #[must_use]
+    pub fn with_side_question_denies(mut self, names: Vec<String>) -> Self {
+        self.side_question_denies = names;
+        self
+    }
+
+    pub fn for_side_question(mut self) -> Self {
+        self.exposed_tools = Some(["read_file", "search", "tree"].map(str::to_owned).to_vec());
+        self.hosts.clear();
+        self.mcp_servers.clear();
+        self.spawn_model_routes.clear();
+        self.context_sources.clear();
+        self.delegation = DelegationRoster::default();
+        self.audit = AuditPolicy::default();
+        self.approval_delegate = crate::approval::ApprovalDelegate::default();
+        self.approval_delegate_identity = None;
+        self.pack = None;
+        self.checkpoint = None;
+        self.task_router = None;
+        self
+    }
+
     /// Adds an external tool host with its already-captured catalog. Hosts
     /// contribute in the order added; earlier hosts win catalog capacity.
     #[must_use]
@@ -357,6 +392,20 @@ impl AgentProfile {
     #[must_use]
     pub const fn with_audit(mut self, audit: AuditPolicy) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Share one host producer's provenance across compiled plans and children.
+    #[must_use]
+    pub fn with_process_producer(mut self, producer: Arc<crate::ProcessProducer>) -> Self {
+        self.process_producer = producer;
+        self
+    }
+
+    /// Exact host-approved self-contained native read implementations.
+    #[must_use]
+    pub fn with_approved_read_images(mut self, images: crate::runtime::ApprovedReadImages) -> Self {
+        self.approved_read_images = images;
         self
     }
 
@@ -486,8 +535,8 @@ pub struct CompiledAgentPlan {
     pub(crate) hosts: Arc<[Arc<dyn ExternalToolHost>]>,
     /// The plan-constant system prompt per capability set, built on first
     /// use and shared by every later run with the same set. Bounded by the
-    /// number of `PromptPrefixKey` values: 2⁵ tool filters plus none, times
-    /// guidance, times three sub-agent states (198). In practice a plan sees a
+    /// number of `PromptPrefixKey` values: 2⁷ tool filters plus none, times
+    /// guidance, times three sub-agent states (774). In practice a plan sees a
     /// handful: roots, read children and write children.
     prompt_prefixes: std::sync::Mutex<Vec<(PromptPrefixKey, Arc<crate::runtime::PromptPrefix>)>>,
     resolved_model: Arc<ResolvedModel>,
@@ -495,6 +544,7 @@ pub struct CompiledAgentPlan {
     descriptor_json: Arc<str>,
     digest: AgentPlanDigest,
     credential_epoch: CredentialEpoch,
+    side_question_denies: Arc<[String]>,
     /// Instruction files plus skill root directories: everything a cache
     /// must `stat` to revalidate the workspace side of this plan.
     sources: Vec<SourceFingerprint>,
@@ -534,7 +584,11 @@ impl CompiledAgentPlan {
             self.workspace.path(),
             base_specs,
             crate::runtime::PromptSections {
-                tool_index: self.catalog.index_text().map(Arc::as_ref),
+                tool_index: key
+                    .tools
+                    .as_ref()
+                    .and_then(|filter| self.catalog.eligible_index_text(filter))
+                    .map(Arc::as_ref),
                 roster: self.roster_text.as_deref(),
                 // Disclosure follows the guidance capability: restricted runs
                 // (compaction, model-authored child tasks) neither list nor
@@ -545,6 +599,8 @@ impl CompiledAgentPlan {
                     None
                 },
                 subagent: key.subagent,
+                read_only: key.tools.is_some_and(|filter| filter.read_only),
+                unattended: key.tools.is_some_and(|filter| filter.unattended),
             },
             &self.instructions,
             self.persona.as_deref(),
@@ -568,6 +624,42 @@ impl fmt::Debug for CompiledAgentPlan {
 }
 
 impl CompiledAgentPlan {
+    pub(crate) async fn side_question_plan(&self) -> Result<Arc<Self>, PlanCompileError> {
+        let mut profile = AgentProfile::new(
+            Arc::clone(&self.runtime.provider),
+            self.descriptor.provider.clone(),
+            self.resolved_model.as_ref().clone(),
+            self.workspace.path().to_owned(),
+        );
+        profile.shell = self.runtime.shell.as_ref().clone();
+        profile.process_producer = Arc::clone(&self.runtime.process_producer);
+        profile.network = self.runtime.network.as_ref().clone();
+        profile.reasoning_effort = self.runtime.reasoning_effort;
+        profile.output_ceiling = self.runtime.output_ceiling;
+        profile.adapter_build = self.descriptor.adapter_build.clone();
+        profile.provenance = self.descriptor.provenance.clone();
+        profile.credential_epoch = self.credential_epoch;
+        profile.profile_id = self.descriptor.profile.clone();
+        let mut profile = profile.for_side_question();
+        // Side authority is an intersection with the effective source catalog
+        // minus managed hard denies: a side question has no grant path, so a
+        // denied built-in is removed outright rather than restored.
+        profile.exposed_tools = Some(
+            ["read_file", "search", "tree"]
+                .into_iter()
+                .filter(|name| {
+                    self.catalog.lookup(name).is_some()
+                        && !self
+                            .side_question_denies
+                            .iter()
+                            .any(|denied| denied == name)
+                })
+                .map(str::to_owned)
+                .collect(),
+        );
+        Self::compile(profile).await
+    }
+
     /// Compiles off the async executor, with at most four concurrent compiler tasks.
     /// Dropping this future does not interrupt filesystem work already started.
     pub async fn compile(profile: AgentProfile) -> Result<Arc<Self>, PlanCompileError> {
@@ -606,6 +698,8 @@ impl CompiledAgentPlan {
             task_router,
             reasoning_effort,
             shell,
+            approved_read_images,
+            process_producer,
             network,
             turn_recovery,
             approval_delegate,
@@ -617,6 +711,7 @@ impl CompiledAgentPlan {
             profile_id,
             pack,
             exposed_tools,
+            side_question_denies,
             context_sources,
             context_cache,
         } = profile;
@@ -637,6 +732,8 @@ impl CompiledAgentPlan {
         .with_delegation(delegation)
         .with_audit(audit)
         .with_shell_policy(shell)
+        .with_approved_read_images(approved_read_images)
+        .with_process_producer(process_producer)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
         .with_approval_delegate(approval_delegate)
@@ -656,19 +753,16 @@ impl CompiledAgentPlan {
         if let Some(cache) = context_cache {
             runtime = runtime.with_context_cache(cache);
         }
-        let mut config_grants = Vec::new();
         let mut host_handles = Vec::with_capacity(hosts.len());
         let mut contributions = Vec::with_capacity(hosts.len());
         for snapshot in hosts {
-            config_grants.extend(snapshot.host.config_grants());
             contributions.push(HostContribution {
                 name: snapshot.host.name().to_owned(),
                 catalog: snapshot.catalog,
+                config_grants: snapshot.host.config_grants(),
             });
             host_handles.push(snapshot.host);
         }
-        config_grants.sort();
-        config_grants.dedup();
         let host_handles: Arc<[Arc<dyn ExternalToolHost>]> = host_handles.into();
         runtime.hosts = Arc::clone(&host_handles);
 
@@ -754,11 +848,17 @@ impl CompiledAgentPlan {
                 });
             }
         }
-        static_tools.push(StaticTool::new(
-            spawn_spec,
-            ToolHost::SpawnAgent,
-            EffectClass::ReadOnly,
-        ));
+        let mut spawn_tool =
+            StaticTool::new(spawn_spec, ToolHost::SpawnAgent, EffectClass::ReadOnly);
+        if runtime.delegation.write_children {
+            let mut read_only_delegation = (*runtime.delegation).clone();
+            read_only_delegation.write_children = false;
+            spawn_tool.read_only_spec = Some(tools::spawn_agent_spec(
+                &runtime.spawn_model_routes,
+                &read_only_delegation,
+            ));
+        }
+        static_tools.push(spawn_tool);
         // Waiting for and cancelling the run's own background children
         // change nothing outside it (ADR-0054 § 4).
         static_tools.push(StaticTool::new(
@@ -774,6 +874,11 @@ impl CompiledAgentPlan {
         static_tools.push(StaticTool::new(
             search_history_spec(),
             ToolHost::SearchHistory,
+            EffectClass::ReadOnly,
+        ));
+        static_tools.push(StaticTool::new(
+            tools::goal::spec(),
+            ToolHost::UpdateGoal,
             EffectClass::ReadOnly,
         ));
         static_tools.push(StaticTool::new(
@@ -854,6 +959,58 @@ impl CompiledAgentPlan {
         {
             static_tools.retain(|tool| !follows_spawn(tool));
         }
+        let has_read_file = static_tools
+            .iter()
+            .any(|tool| tool.spec.name() == "read_file");
+        let has_search = static_tools.iter().any(|tool| tool.spec.name() == "search");
+        let has_tree = static_tools.iter().any(|tool| tool.spec.name() == "tree");
+        let has_shell = static_tools.iter().any(|tool| tool.spec.name() == "shell");
+        for tool in &mut static_tools {
+            let description = match tool.spec.name() {
+                "shell" if !(has_read_file && has_search && has_tree) => {
+                    let read_names: Vec<&str> = [
+                        ("read_file", has_read_file),
+                        ("search", has_search),
+                        ("tree", has_tree),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, present)| present.then_some(name))
+                    .collect();
+                    let guidance = if read_names.is_empty() {
+                        "Use this tool for file inspection or searching when no specialized reader is declared.".to_owned()
+                    } else {
+                        format!(
+                            "For file inspection or searching, prefer {} when those tools cover the operation; otherwise use this tool.",
+                            read_names.join(", ")
+                        )
+                    };
+                    Some(tool.spec.description().replace(
+                        "Not for reading files or searching; use read_file, search, tree.",
+                        &guidance,
+                    ))
+                }
+                "exec" if !has_shell => Some(tool.spec.description()
+                    .replace("no shell interpretation", "arguments are literal")
+                    .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
+                    .replace("; reserve shell for pipelines", "")
+                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
+                "write_file" if !has_read_file => Some(
+                    "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
+                ),
+                "edit_file" if !has_read_file => Some(tool.spec.description().replace(
+                    "hash from its current read_file header",
+                    "current content hash",
+                )),
+                _ => None,
+            };
+            if let Some(description) = description {
+                tool.spec = qq_provider::ToolSpec::from_raw(
+                    tool.spec.name(),
+                    description,
+                    tool.spec.input_schema().to_owned(),
+                );
+            }
+        }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
         let descriptor = AgentPlanDescriptor {
@@ -873,10 +1030,13 @@ impl CompiledAgentPlan {
                 hosts: catalog.hosts().to_vec(),
                 excluded: catalog.excluded().to_vec(),
                 spawn_model_routes: runtime.spawn_model_routes.to_vec(),
-                config_grants,
+                config_grants: catalog.config_grants().map(str::to_owned).collect(),
             },
             delegation: runtime.delegation.as_ref().clone(),
             audit: AuditDescriptor::from(runtime.audit),
+            approved_read_images: (!runtime.approved_read_images.entries().is_empty())
+                .then(|| runtime.approved_read_images.digest()),
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
             approval_delegate: runtime
                 .approval_delegate_identity
@@ -922,9 +1082,11 @@ impl CompiledAgentPlan {
             tools: Some(crate::catalog::StaticFilter {
                 spawn_agent: true,
                 search_history: true,
+                update_goal: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,
+                unattended: false,
             }),
             guidance: true,
             subagent: None,
@@ -937,6 +1099,8 @@ impl CompiledAgentPlan {
                 roster: roster_text.as_deref(),
                 skill_index: skills.disclosure_text(),
                 subagent: None,
+                read_only: false,
+                unattended: false,
             },
             &instructions,
             persona.as_deref(),
@@ -965,6 +1129,7 @@ impl CompiledAgentPlan {
             descriptor: Arc::new(descriptor),
             digest,
             credential_epoch,
+            side_question_denies: side_question_denies.into(),
             sources,
             estimated_bytes,
         }))
@@ -1274,7 +1439,85 @@ mod tests {
         for result in results {
             assert_eq!(result.unwrap().digest(), expected);
         }
-        assert!(COMPILE_SLOTS.try_acquire_many(4).is_ok());
+        // Other tests compile against this same semaphore. Wait fairly for
+        // all slots instead of assuming they stayed idle after our joins.
+        let released = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            COMPILE_SLOTS.acquire_many(4),
+        )
+        .await
+        .expect("cancelled and completed compiles must release their slots")
+        .unwrap();
+        drop(released);
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_preserves_source_tool_exclusions() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_exposed_tools(vec!["search".to_owned(), "tree".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        let mut names = side.catalog().names().collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["search", "tree"]);
+    }
+
+    #[tokio::test]
+    async fn side_question_derivation_cannot_restore_managed_denied_tools() {
+        let workspace = canonical_temp();
+        let source = CompiledAgentPlan::compile(
+            profile(workspace.path())
+                .with_side_question_denies(vec!["read_file".to_owned(), "search".to_owned()]),
+        )
+        .await
+        .unwrap();
+        let side = source.side_question_plan().await.unwrap();
+        assert_eq!(side.catalog().names().collect::<Vec<_>>(), ["tree"]);
+        // Managed denies filter grants on the main run, not exposure: the
+        // main catalog and plan identity are exactly those without them.
+        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        assert!(source.catalog().lookup("read_file").is_some());
+        assert!(source.catalog().lookup("search").is_some());
+        assert_eq!(
+            source.catalog().names().collect::<Vec<_>>(),
+            plain.catalog().names().collect::<Vec<_>>()
+        );
+        assert_eq!(source.digest(), plain.digest());
+    }
+
+    #[test]
+    fn side_question_profile_exposes_only_workspace_inspection() {
+        let workspace = canonical_temp();
+        let pack_dir = canonical_temp();
+        let side = profile(workspace.path())
+            .with_pack(PackSelection {
+                id: "hostile-pack".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_digest: "cd".repeat(32),
+                directory: pack_dir.path().to_owned(),
+                persona: Some("absent-persona.md".to_owned()),
+                skill_roots: vec!["absent-skills".to_owned()],
+                command_roots: vec!["absent-commands".to_owned()],
+                tool_allow: Vec::new(),
+                tool_deny: vec!["read_file".to_owned()],
+            })
+            .for_side_question();
+        assert!(side.pack.is_none());
+        assert!(side.approval_delegate_identity.is_none());
+        assert!(side.hosts.is_empty());
+        assert!(side.context_sources.is_empty());
+        assert!(side.checkpoint.is_none());
+        assert!(side.task_router.is_none());
+        let plan = CompiledAgentPlan::compile_blocking(side).unwrap();
+        assert!(plan.descriptor().pack.is_none());
+        assert_eq!(
+            plan.catalog().names().collect::<Vec<_>>(),
+            ["read_file", "search", "tree"]
+        );
     }
 
     #[test]
@@ -1428,6 +1671,8 @@ mod tests {
                 max_depth: 1,
                 write_children: false,
             },
+            approved_read_images: None,
+            tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
             audit: AuditDescriptor {
                 mode: AuditModeDescriptor::Heuristic,
                 max_revisions: 1,
@@ -1480,28 +1725,85 @@ mod tests {
     }
 
     #[test]
+    fn ab4_inspection_only_descriptor_differs_from_prompt20_identity() {
+        let workspace = canonical_temp();
+        let plan = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_exposed_tools(vec!["read_file".to_owned()]),
+        )
+        .unwrap();
+        let mut predecessor = plan.descriptor().as_ref().clone();
+        predecessor.prompt_version = PromptVersion::new(20).unwrap();
+        assert_ne!(plan.digest(), predecessor.digest().unwrap());
+    }
+
+    #[test]
     fn canonical_encoding_and_digest_are_stable() {
         let descriptor = golden_descriptor();
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v13\0{\"version\":13,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v15\0{\"version\":15,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 13 and prompt 18: capability-aware
-        // sub-agent authority guidance).
+        // changing the encoding (descriptor 15 and prompt 22: strict projection identity and read-only authority, AB4).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "a1b49276d62a65130c359014c3b79d0e3ffae49296af4ab19e7c56882a7ad88c"
+            "d8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683"
         );
         let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v13\0".len()..]).unwrap();
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
         assert_eq!(round_trip, descriptor);
         assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
+    }
+
+    #[test]
+    fn historical_descriptor_13_prompt_20_through_22_digests_are_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 13;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "c566dbbfcab50966123a5fec0fd98b70d1c2e6f7bba11ab60cc7c53b571fed92"
+        );
+        let mut prompt21 = descriptor.clone();
+        prompt21.prompt_version = PromptVersion::new(21).unwrap();
+        assert_eq!(
+            prompt21.digest().unwrap().to_string(),
+            "6ac21a27f741953eb66c4e8f4d92c2ff8d32e46ca23058a2b7d4a5835facaded"
+        );
+        let mut prompt20 = descriptor.clone();
+        prompt20.prompt_version = PromptVersion::new(20).unwrap();
+        assert_eq!(
+            prompt20.digest().unwrap().to_string(),
+            "61a6c7e80a481d54c75388bf14827a15f7cddf8ca839d6850b20bad2a47fd3fb"
+        );
+    }
+
+    #[test]
+    fn historical_descriptor_14_prompt_20_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 14;
+        descriptor.prompt_version = PromptVersion::new(20).unwrap();
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "fde8f5629db25addc1aee4d70eecf124aae9fa608e14aa8e791d11c22f5df963"
+        );
+    }
+
+    #[test]
+    fn historical_descriptor_14_prompt_22_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 14;
+        descriptor.tool_output_projection = None;
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "a18de9830c1a00f80c6806e46ca3774f3d410a768787618efd1a257aa617ee9d"
+        );
     }
 
     #[test]

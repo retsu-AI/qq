@@ -48,15 +48,54 @@ and candidate-configuration fingerprint in its canonical identity; version 10
 adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 11 adds each delegation roster entry's `effort` (RR8.4); version 12 adds
 `approval_delegate`, the identity of the first delegate for held calls (Jev
-approval) when enabled (ADR-0052). None alters the wire envelope version or
-requires a database migration; historical descriptor JSON remains historical
-evidence.
+approval) when enabled (ADR-0052); version 13 changes the encoding for the
+`wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
+catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
+approved self-contained read images (ADR-0060); version 15 records the strict
+model-facing tool-result projection policy (ADR-0061). The goal-capable catalog
+also includes the scoped `update_goal` tool. Descriptor changes do not alter
+the wire envelope version; associated store migrations are documented separately
+below. Historical descriptor JSON remains historical evidence.
 
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 31
+PROTOCOL_VERSION = 33
 ```
+
+Version 33 adds durable goal controls (`set_goal`, `goal_control`), exact
+identity/revision fencing, explicit once/for-goal check authorization, session
+goal snapshots and `goal_updated`/`goal_cleared` events. `RunSnapshot.origin`
+records immutable creation provenance; its separate optional `goal` names the
+claim's goal identity/revision. Start/finish events carry the same optional
+stored origin, including recovery terminals. Historical absence remains unknown.
+A user prompt can bind a goal while retaining user-prompt provenance. The
+`goal` and `goal_check` origin tags are accepted wire vocabulary; queueing and
+executing that work belongs to the goal driver/check runner.
+`GoalSnapshot.achievement_claim`, when present, retains the proposing run,
+claimed revision and evidence. It is a pending proposal, separate from
+verified `achieved` status; specification edits clear it. Absent proposals
+omit the field so existing version-33 goal snapshots retain their encoding.
+
+Version 32 adds isolated side-question submission and cancellation commands,
+separate durable side-question snapshots, and replayable side projection updates.
+Cancelling a question that already settled returns
+`side_question_already_finished` with its effective state and changes
+nothing; an unknown side-question id is a client error. These do not alter
+the main session transcript or accounting. Version 32 also adds
+`delegated: true` to `tool_approval_requested` when an approval delegate
+decides the hold before any human; it is omitted (false) otherwise, so
+every earlier hold encodes unchanged. Session summaries gain
+`pending_holds` (the active run's held calls, each with `delegated` when a
+delegate decides first) and `running_side_question`, both exact at the
+summary's cursor and omitted when empty, so a client knows a session is
+waiting or answering without loading its body or having seen the request
+event.
+
+Golden fixtures for the current version live under
+`crates/qq-protocol/tests/fixtures/v33/`; the `v17`–`v32` directories are
+retained decode-only, and `fixtures/headless/` holds the headless record
+streams.
 
 The counter restarted at 1 on 2026-07-28, before any release; earlier
 values (1–12) belonged to pre-release iterations and no released build
@@ -157,15 +196,29 @@ moves because `InputPart` and the previews are `deny_unknown_fields` and
 older peers would reject the new decision and resolution tags. Version 22
 added the network tool (ADR-0021): the `host` grant shape and an optional
 `fetch` preview (`url`, `host`, `method`) on `tool_approval_requested`; the
-`shell` preview is now boxed in memory, which is wire-identical. Golden
-fixtures live under `crates/qq-protocol/tests/fixtures/v22/`; the
-`v17`–`v21` directories are retained decode-only.
+`shell` preview is boxed in memory, which is wire-identical.
 
 Version 23 adds the durable `checkpoint_reviewed` session event. It correlates
 the pinned JEV outcome to a tool result or final candidate and carries bounded
 feedback plus basis-point confidence. Headless JSONL emits the event and text
-mode renders an explicit GREEN/RED notice; v22 fixtures remain historical wire
-evidence.
+mode renders an explicit GREEN/RED notice.
+
+Version 24 adds `checkpoint_started` and optional typed `spend` on
+`checkpoint_reviewed`. Start is durable before inference; pending spend is
+unknown. A settled receipt and updated run totals commit together. Cancellation
+settles a pending tool or final assessment as unavailable with unknown spend.
+Historical verdicts without `spend` decode as absent, never as a priced receipt.
+
+Version 25 adds `routing_started` and `routing_completed`. Routing occurs before
+`run_started`; a decision carries the selected or fallback model, effort, reason
+and typed usage/cost. Missing spend remains unknown. A cancelled pending request
+may have only `routing_started` followed by `run_finished`; this is not a free
+request or a successful decision. Version 25 also adds optional
+`model_is_fallback` (default false) on model selections and session summaries:
+true identifies a configured fallback eligible for independently opted-in
+routing; false preserves explicit and legacy choices as pins. Store schema 32
+persists the flag; model changes and reconnect snapshots retain it. A TUI model
+pick clears it. The field does not enable Jev or grant access to any model.
 
 Version 26 adds turn recovery (ADR-0040): the `run_turn_retrying` event
 (`run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message`) after a
@@ -178,8 +231,7 @@ Version 27 adds a per-session reasoning-effort pin: optional
 `SessionSummary.reasoning_effort`, and `session_effort_set`. Omission keeps the
 compiled plan's configured or profile choice; an explicit value is applied at
 the next claim. Older clients reject the new command, outcome, and summary
-field. Golden fixtures live under `crates/qq-protocol/tests/fixtures/v27/`;
-`v23`–`v26` are retained decode-only.
+field.
 
 Also in 27, additively: `ModelDescriptor.reasoning_efforts` lists the effort
 values a catalog route advertises, lowest to highest, and is omitted when empty.
@@ -198,25 +250,15 @@ optional `SessionSummary.approval_delegate` that carries the override. Every
 field is optional and omitted when absent; the version moves because older
 clients reject the new command, outcome, and summary field.
 
-Version 29 adds the `max` reasoning effort (above `xhigh`, for routes that
-advertise it). Version 29 and 30 values are accepted in every field of type
-`ReasoningEffort`, which is exactly: `create_session.reasoning_effort`,
+Version 29 adds `max` to the reasoning-effort vocabulary, for models whose top
+rung is above `xhigh`. Version 29 and 30 values are accepted in every field of
+type `ReasoningEffort`, which is exactly: `create_session.reasoning_effort`,
 `set_session_effort.effort`, the `session_effort_set` receipt's `effort`,
 `SessionSummary.reasoning_effort`, `RoutingDecision.reasoning_effort`,
 `ModelDescriptor.reasoning_efforts`, and the capability document's
-`DelegationRosterEntry.effort`. Version 30 adds
-`default`, an explicit "let the provider choose" pin that overrides configured
-effort and is never sent on a provider wire, distinct from an absent pin
-(inherit). Neither adds a field; each moves the version because older decoders
-reject the new enum value. Store schema 37 and 39 gate the same values on disk.
-Golden fixtures live under `crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30`
-are retained decode-only.
-
-Version 29 adds `max` to the reasoning-effort vocabulary (every
-`reasoning_effort` / `effort` field and `ModelDescriptor.reasoning_efforts`),
-for models whose top rung is above `xhigh`. No field was added or renamed;
-the version moves because an older client rejects the new value. Store
-schema 37 persists it.
+`DelegationRosterEntry.effort`. No field was added or renamed; the version
+moves because an older client rejects the new value. Store schema 37 persists
+it.
 
 Version 30 adds `default` to the same vocabulary: an explicit pin meaning
 "override the configured effort and send none", distinct from the absent
@@ -231,16 +273,84 @@ answers of non-blocking sub-agents, and schema 42 `child_reports`, their
 delivered interim reports (ADR-0054 § 4). No wire shape changed: a delivered
 answer or report reaches clients through the child session's own events.
 Schema 43 adds the session's prune watermark (`sessions.prune_through_ordinal`,
-`prune_through_turn`; ADR-0056 § 6); no wire shape changed.
+`prune_through_turn`; ADR-0056 § 6); no wire shape changed. Schema 44 adds
+`side_questions`, the isolated side-question rows behind protocol 32.
+Schema 45 adds `tool_calls.approval_delegated`, behind
+`SessionSummary.pending_holds`; holds written before it read as waiting for
+a human.
+Schema 46 adds the non-unique partial `runs_owned_compaction` index for
+exact owner-run accounting of internal compaction attempts. Completed, failed
+and cancelled attempts enter their owner's child-spend receipt; manual and
+unrelated compactions do not. Unknown usage or cost remains unknown. Internal
+attempts do not consume the child-count or depth allowance. No wire shape changes.
+Schema 51 adds `session_goals` history with one live goal per session and
+nullable run goal identity/revision, full claim snapshot, and immutable origin
+JSON. Creation records origin; reservation freezes an active goal claim so
+pause and replacement see preparing ownership. Goal-less absence freezes at
+first existing FULL routing, automatic compaction or main-start admission. SQL NULL is uncaptured; JSON null is a captured absence. Re-reservation
+uses the frozen claim. Historical rows retain NULL bindings; synthetic/internal
+compaction claims grant no goal mutation capability.
+The same schema stores the exact initial notice in `runs.goal_initial_notice`,
+ordered boundary notices as a JSON list in `model_turns.goal_notice`, and the
+post-summary atom in `session_compactions.goal_notice`. Each atom is framed
+and at most 16KiB. For goal-bound runs, checkpoint/continuation text shares
+the ordered list; each atom records how many child deliveries preceded it
+since the previous committed turn. Empty reactive retries and child waits
+preserve their live interleaving on replay. Goal-less rows retain NULL and
+use the existing static-notice column. Existing start, turn and marker
+transactions commit the text with the work it describes; historical context
+never regenerates notices from newer goals or the current clock.
+
+Schema 47 adds nullable `tool_calls.execution_context_json`, bounded to 16 KiB.
+The process executor's receipt commits with its result and finished event;
+historical rows remain NULL and cannot qualify execution context. No wire
+shape changes. Older binaries refuse the upgraded store at open. Receipt V2
+uses the existing16KiB column: it binds the actual call ID and canonical
+arguments, retains the bounded approved-image manifest and policy digest, and
+records shared producer instance/source/running executable identity. V1 remains
+decodable for recorded accounting; qualification requires V2 and independent
+clean source/binary pins. Readers replaying tools ignore receipt JSON, so V2
+requires no new store schema or descriptor encoding. Work does not attest
+mutation, and absent evidence does not establish that execution never began.
+
+Schema 49 adds nullable `model_turns.tool_results_projection_json`, bounded to
+2 MiB. It commits the exact ordered model-facing tool replies and optional
+correction notice before the next provider request. The internal barrier adds
+no wire event. Descriptor 15 records the strict projector policy; historical
+13/14 encodings remain unchanged. Known pre-AB2 histories use their original
+projector; ambiguous histories require evidence. Checkpoint-enabled tool turns
+without the exact projection refuse reconstruction, including final-only reviewers. The AB2 reader refuses the
+experimental schema-48 AB5 build because it lacks that build's root-notice
+codec. The schema50 reader migrates both experimental48 and projection49,
+adding projection storage and publishing version50 atomically for48 while
+retaining the root-notice codec. A failed48 upgrade leaves its original version
+and structure intact.
+
+Schema 50 adds the replay value `root_stall_report` through a version-only
+migration. Roots receive an action-oriented, authority-neutral notice;
+historical `stall_report` wording remains byte-identical and children retain
+it. Older readers refuse the new store at open before session assembly.
+Schema 52 adds durable request/helper admission evidence and nullable model-turn
+work disposition. Schema 53 binds initial delegated work to its exact paid
+owner run; historical user follow-ups remain unbound. Schema 54 repairs NULL
+work dispositions on unfinished legacy turns using typed stored content, usage
+and truncation evidence. Ambiguous turns remain uncertain; terminal rows and
+aggregates are preserved until ordinary recovery. These store migrations
+do not add another protocol or descriptor change.
+Schema 55 restores unfinished goal dispatch evidence from exact-run ordered
+activity and model-turn completion events. A later provider-wait event keeps
+aggregate spend unknown without losing measured prefix turns. Owned helper
+NULL aggregates retain uncertainty; seeded no-send zero and completed routing
+receipts keep their independently known values. Required events are bounded
+before JSON parsing, checked against run/session/workspace/store identity,
+and decoded as typed envelopes. Invalid evidence rolls back the repair.
+Terminal rows and goal counters change only through ordinary recovery.
 
 Version 31 adds `compacting` to `RunActivity` (`run_activity_changed.activity`
 and `SessionSummary.activity`). A compaction run reports it once, when it
 starts, and nothing else for its life; a prompt run reports it before it
 summarizes its own earlier turns and reports `waiting_for_provider` again at
 its next turn. No field was added; older clients reject the new value.
-Golden fixtures live under
-`crates/qq-protocol/tests/fixtures/v31/`; `v23`–`v30` are retained
-decode-only.
 
 Clients and servers must agree on this value.
 
@@ -433,9 +543,12 @@ POST /v1/workspaces/snapshot
 POST /v1/models
 POST /v1/sessions
 POST /v1/sessions/prompts
+POST /v1/sessions/side-questions
+POST /v1/sessions/side-questions/cancel
 POST /v1/sessions/approval-mode
 POST /v1/sessions/approval-delegate
 POST /v1/sessions/model
+POST /v1/sessions/effort
 POST /v1/sessions/profile
 POST /v1/sessions/delete
 POST /v1/sessions/prune
@@ -968,7 +1081,9 @@ omits it for every other resolution. A reviewer `escalate` leaves the hold
 open for a client, whose wait starts at the escalation. The hold
 (`tool_approval_requested`) is always published before the reviewer is
 consulted, so a client may still answer first; the first durable resolution
-wins. Reviewer spend is charged to the reviewed run.
+wins. It carries `delegated: true` when the reviewer is consulted (protocol
+32): a client then knows the human is asked only after
+`tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
 
 Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
 `full`. `supervised` is never advertised for root sessions and cannot be set by
@@ -1457,14 +1572,14 @@ Every streamed payload is a `SessionEventEnvelope`:
 | `steering_superseded` | `run_id`, `message_id` | Run finished before the steering applied |
 | `run_interrupted` | `run_id`, `turn_ordinal` | An interrupting steer aborted the turn in flight |
 | `run_output_truncated` | `run_id`, `turn_ordinal`, `continuation` | The provider cut the turn at its output token limit; the partial turn is committed and the run resumes on the next turn |
-| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes |
+| `run_turn_retrying` | `run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message` | A transient provider fault ended the turn; the partial turn is committed and the run re-issues it after `delay_ms`. `attempt` is 1-based per turn and resets when a turn completes. The in-run compaction step before a turn is retried the same way with its own count: nothing is committed, the same summarizer request is re-sent, and `message` names the summarizer |
 | `run_audit_started` | `run_id`, `audit_session_id` | A read-only audit child is checking the run's candidate final answer |
 | `run_audit_completed` | `run_id`, `audit` | The audit settled (`pass`, `revised`, or `unavailable`); on `revised` the run continues once with the findings |
 | `assistant_message_started` | `message` | A model turn's message begins streaming |
 | `text_appended` | `message_id`, `channel`, `text` | Output or refusal delta |
 | `model_turn_completed` | `run_id`, `turn_ordinal`, `model`, optional `usage`, optional `estimated_cost_usd_nanos` | A provider inference and its accounting committed |
 | `tool_call_requested` | `tool_call` | Model finished requesting a tool call |
-| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch` | Policy needs a human decision, or (`question`) the model asked one |
+| `tool_approval_requested` | `tool_call`, optional `shell`, optional `edit`, optional `question`, optional `fetch`, optional `delegated` | Policy needs a decision, or (`question`) the model asked one; `delegated` means an approval delegate decides first |
 | `tool_approval_resolved` | `tool_call`, `resolution` | Approval decision recorded |
 | `workspace_grant_promoted` | `grant`, `outcome` | An approve-for-workspace promotion finished (`written`, `already_present`, or non-fatal `failed`) |
 | `tool_call_started` | `tool_call` | Execution began |
@@ -1535,6 +1650,15 @@ activity.
 session. It is absent when unknown. A successful compaction or a model change
 clears it until another prompt turn reports usage; clients must not reconstruct
 it from cumulative run billing.
+
+`pending_holds` lists the active run's calls still awaiting a decision, at
+most 16, calls a human is asked ordered first: `{ "tool_call_id": "...",
+"delegated": true }`, where `delegated` (omitted when false) means an
+approval delegate decides before any human. `running_side_question` is the
+id of the session's running side question. Both are exact at the summary's
+cursor; `tool_approval_*`, `tool_call_*`, `run_finished`, and
+`side_question_updated` events move them on. A client that never loaded the
+session's body uses them to tell idle, working, and waiting apart.
 
 **`RunSnapshot`**
 
@@ -1796,6 +1920,7 @@ server's network policy judged and `method` only when it is `HEAD`.
 {
   "type": "paused",
   "pause": {
+    "reason": "provider_retry",
     "kind": "provider_unavailable",
     "message": "provider returned HTTP 529: overloaded_error",
     "turn_ordinal": 7,
@@ -1811,12 +1936,15 @@ reserved tool-free status turn was granted; it is `false` when the wall clock
 elapsed, when cost became unmeasurable, or when the model requested a tool on
 the final turn.
 
-`paused` settles a run whose turn recovery (ADR-0040) spent its allowance on
-a transient provider fault. It is not `failed` either: every completed turn
-is durable, nothing QQ or the model did was wrong, and the next prompt
-continues the session with a notice naming the pause. `kind` is always one
-of `provider_unavailable`, `provider_rate_limited`, `provider_transport`.
-The run status is also `paused`.
+`paused` carries a reason-tagged `RunPause`. `provider_retry` names turn
+recovery (ADR-0040) that spent its allowance on a transient provider fault;
+its `kind` is `provider_unavailable`, `provider_rate_limited`, or
+`provider_transport`. `no_progress` carries `turn_ordinal`, `slices`, and
+`calls`, the run's eligible tool-attempt count; it carries no provider fault
+or retry count. Clients, headless status and retained context describe that
+reason explicitly. Every completed turn remains durable, and the run status
+is `paused`. The next prompt continues from committed context. Historical
+untagged provider pauses still decode; new writes always include `reason`.
 
 `BudgetLimitKind` values:
 
@@ -1962,6 +2090,12 @@ path (`qq ask` and internal runtime tests):
 - `RunCommand { prompt }`
 - `RunEvent` — `started`, `output_text_delta`, `refusal_delta`, `usage`,
   `completed`, `failed`
+
+Direct requests declare workspace read tools and configuration-granted external
+tools; denied builtin mutation/command/question/network schemas are omitted.
+The gate uses the plan's immutable grant snapshot. Strict read-only session
+requests omit every External schema, regardless of hints or grants. This is
+request visibility behavior; protocol and descriptor encodings are unchanged.
 
 These types are not persisted session state. `qq ask` consumes them entirely
 in-process; use the workspace/session routes or `qq run` for work that must be
@@ -2119,21 +2253,3 @@ reset by an audit revision or steering. The run then settles `completed` with
 No verdict is published for a cancelled, failed, or budget-exhausted run
 (including a repair turn that became the reserved budget-final response). A
 valid document is not a correct answer; the caller still verifies it.
-
-Protocol 24 adds `checkpoint_started` and optional typed `spend` on
-`checkpoint_reviewed`. Start is durable before inference; pending spend is
-unknown. A settled receipt and updated run totals commit together. Cancellation
-settles a pending tool or final assessment as unavailable with unknown spend.
-Historical verdicts without `spend` decode as absent, never as a priced receipt.
-
-Protocol 25 adds `routing_started` and `routing_completed`. Routing occurs before
-`run_started`; a decision carries the selected or fallback model, effort, reason
-and typed usage/cost. Missing spend remains unknown. A cancelled pending request
-may have only `routing_started` followed by `run_finished`; this is not a free
-request or a successful decision. Older versioned event fixtures remain readable.
-
-Model selections and session summaries carry optional `model_is_fallback`
-(default false). True identifies a configured fallback eligible for independently
-opted-in routing. False preserves explicit and legacy choices as pins. Schema 32
-persists the flag; model changes and reconnect snapshots retain it. A TUI model
-pick clears it. This field does not enable Jev or grant access to any model.

@@ -77,6 +77,8 @@ fn summary() -> SessionSummary {
         estimated_cost_usd_nanos: Some(42),
         updated_at_ms: 1_700_000_000_000,
         last_outcome: None,
+        pending_holds: Vec::new(),
+        running_side_question: None,
     }
 }
 
@@ -208,13 +210,103 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 33);
+    check(
+        "outcome_paused_no_progress",
+        &RunOutcome::Paused {
+            pause: Box::new(RunPause::NoProgress {
+                turn_ordinal: 515,
+                slices: 2,
+                calls: 514,
+            }),
+        },
+    );
     let session_id = SessionId::from_bytes([3; 16]);
     let run_id = RunId::from_bytes([4; 16]);
     let command = |byte: u8, command: SessionCommand| CommandRequest {
         command_id: CommandId::from_bytes([byte; 16]),
         command,
     };
+
+    check(
+        "command_cancel_side_question",
+        &command(
+            0x7b,
+            SessionCommand::CancelSideQuestion {
+                side_question_id: run_id,
+            },
+        ),
+    );
+    check(
+        "command_submit_side_question",
+        &command(
+            0x7a,
+            SessionCommand::SubmitSideQuestion {
+                session_id,
+                question: "What does this mean?".to_owned(),
+                new_thread: false,
+            },
+        ),
+    );
+    check(
+        "receipt_side_question",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7a; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            outcome: CommandOutcome::SideQuestionSubmitted {
+                side_question_id: run_id,
+                thread_id: run_id,
+            },
+        },
+    );
+    check(
+        "receipt_side_question_already_finished",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x7b; 16]),
+            committed_through: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 2,
+            },
+            outcome: CommandOutcome::SideQuestionAlreadyFinished {
+                side_question_id: run_id,
+                state: qq_protocol::SideQuestionState::Completed,
+            },
+        },
+    );
+    check(
+        "event_side_question_updated",
+        &SessionEventEnvelope {
+            cursor: EventCursor {
+                store_id: StoreId::from_bytes([1; 16]),
+                workspace_id: WorkspaceId::from_bytes([2; 16]),
+                sequence: 1,
+            },
+            session_id,
+            run_id: None,
+            caused_by: None,
+            occurred_at_ms: 2,
+            event: SessionEvent::SideQuestionUpdated {
+                side_question: Box::new(qq_protocol::SideQuestionSnapshot {
+                    id: run_id,
+                    thread_id: run_id,
+                    session_id,
+                    question: "What does this mean?".to_owned(),
+                    answer: "An isolated answer.".to_owned(),
+                    state: qq_protocol::SideQuestionState::Completed,
+                    usage: None,
+                    estimated_cost_usd_nanos: None,
+                    model_turns: 1,
+                    created_at_ms: 1,
+                    finished_at_ms: Some(2),
+                }),
+            },
+        },
+    );
 
     check(
         "command_create_session",
@@ -496,6 +588,8 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 session: Box::new(summary()),
                 message: message(0x20, false, MessageState::Queued),
                 run: Box::new(RunSnapshot {
+                    origin: None,
+                    goal: None,
                     id: run_id,
                     session_id,
                     status: RunStatus::Queued,
@@ -523,9 +617,41 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             14,
             SessionEvent::RunStarted {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 plan: Some(Box::new(plan_identity())),
+            },
+        ),
+    );
+    check(
+        "event_run_started_in_run_compaction",
+        &envelope(
+            14,
+            SessionEvent::RunStarted {
+                origin: Some(qq_protocol::RunOrigin::InRunCompaction {
+                    owner_run_id: run_id,
+                }),
+                session: Box::new(summary()),
+                run_id: qq_protocol::RunId::from_bytes([5; 16]),
+                plan: None,
+            },
+        ),
+    );
+    check(
+        "event_run_finished_in_run_compaction",
+        &envelope(
+            15,
+            SessionEvent::RunFinished {
+                origin: Some(qq_protocol::RunOrigin::InRunCompaction {
+                    owner_run_id: run_id,
+                }),
+                session: Box::new(summary()),
+                run_id: qq_protocol::RunId::from_bytes([5; 16]),
+                outcome: RunOutcome::Cancelled,
+                usage: None,
+                context_tokens: None,
+                final_output: None,
             },
         ),
     );
@@ -584,6 +710,64 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 edit: None,
                 question: None,
                 fetch: None,
+                delegated: false,
+            },
+        ),
+    );
+    // Version 32: the hold goes to an approval delegate before any human.
+    check(
+        "event_tool_approval_requested_delegated",
+        &envelope(
+            22,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    id: ToolCallId::from_bytes([6; 16]),
+                    session_id,
+                    run_id,
+                    turn_ordinal: 1,
+                    call_ordinal: 1,
+                    provider_call_id: "call_0".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: r#"{"command":"git push"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    result: None,
+                    is_error: false,
+                    display: None,
+                },
+                shell: Some(Box::new(ShellCommandPreview {
+                    command: "git push".to_owned(),
+                    cwd: None,
+                    verdict: Some(ShellVerdict::Prompt),
+                    reasons: vec!["publishes".to_owned()],
+                })),
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
+            },
+        ),
+    );
+    // Version 32: a summary says who each held call waits on and whether a
+    // side question runs, for clients that never load the body.
+    check(
+        "event_session_updated_with_holds",
+        &envelope(
+            22,
+            SessionEvent::SessionUpdated {
+                session: Box::new(SessionSummary {
+                    pending_holds: vec![
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([6; 16]),
+                            delegated: false,
+                        },
+                        qq_protocol::PendingHold {
+                            tool_call_id: ToolCallId::from_bytes([7; 16]),
+                            delegated: true,
+                        },
+                    ],
+                    running_side_question: Some(RunId::from_bytes([8; 16])),
+                    ..summary()
+                }),
             },
         ),
     );
@@ -655,6 +839,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     }],
                 })),
                 fetch: None,
+                delegated: false,
             },
         ),
     );
@@ -686,6 +871,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     host: "docs.rs".to_owned(),
                     method: None,
                 })),
+                delegated: false,
             },
         ),
     );
@@ -735,6 +921,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             19,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -771,6 +958,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             21,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Failed {
@@ -815,10 +1003,11 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             23,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Paused {
-                    pause: Box::new(RunPause {
+                    pause: Box::new(RunPause::ProviderRetry {
                         kind: RunFailureKind::ProviderTransport,
                         message: "provider request failed: response body: connection reset"
                             .to_owned(),
@@ -837,6 +1026,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             25,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -854,6 +1044,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         &envelope(
             26,
             SessionEvent::RunFinished {
+                origin: None,
                 session: Box::new(summary()),
                 run_id,
                 outcome: RunOutcome::Completed,
@@ -918,6 +1109,8 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
     check(
         "snapshot_run_with_plan_identity",
         &RunSnapshot {
+            origin: None,
+            goal: None,
             id: run_id,
             session_id,
             status: RunStatus::Completed,
@@ -1204,6 +1397,8 @@ fn historical_fixtures_still_decode() {
                 decode::<CommandReceipt>(&path, &stored);
             } else if name.starts_with("event_") {
                 decode::<SessionEventEnvelope>(&path, &stored);
+            } else if name.starts_with("outcome_") {
+                decode::<RunOutcome>(&path, &stored);
             } else if name.starts_with("snapshot_") {
                 decode::<RunSnapshot>(&path, &stored);
             } else if name.starts_with("capabilities_request") {
@@ -1252,4 +1447,107 @@ fn model_turn_limits_and_ordinals_accept_the_full_u32_range() {
     let round_trip: MessageSnapshot =
         serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
     assert_eq!(round_trip.turn_ordinal, ABOVE_U16);
+}
+
+#[test]
+fn current_goal_commands_receipts_and_origins_match_goldens() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let goal_id = qq_protocol::GoalId::from_bytes([0x61; 16]);
+    let goal: Box<qq_protocol::GoalSnapshot> = serde_json::from_value(serde_json::json!({
+        "session_id":session_id,"goal_id":goal_id,"revision":3,
+        "objective":"Implement billing migration", "check":null,"check_authorization":null,
+        "budget":{"max_goal_runs":200,"deadline_ms":1_800_000_000_000_u64},
+        "checklist":[],"notes":"", "status":{"type":"active"},
+        "counters":qq_protocol::GoalCounters::default(),"next_run_at_ms":1_700_000_000_000_u64,
+        "wait":null,"audit_pending":false,"audit_revision":null,"pending_run_id":null,"check_output":null
+    })).unwrap();
+    for (name, command_id, command) in [
+        (
+            "command_set_goal",
+            0x62,
+            serde_json::json!({"type":"set_goal","session_id":session_id,
+            "objective":goal.objective,"budget":goal.budget}),
+        ),
+        (
+            "command_goal_approve_once",
+            0x63,
+            serde_json::json!({"type":"goal_control","session_id":session_id,
+            "expected":{"goal_id":goal_id,"revision":3},
+            "action":{"type":"approve_check","scope":"once","command":"cargo test -p billing"}}),
+        ),
+        (
+            "command_goal_approve_for_goal",
+            0x64,
+            serde_json::json!({"type":"goal_control","session_id":session_id,
+            "expected":{"goal_id":goal_id,"revision":3},
+            "action":{"type":"approve_check","scope":"for_goal","command":"cargo test -p billing"}}),
+        ),
+    ] {
+        check(
+            name,
+            &CommandRequest {
+                command_id: CommandId::from_bytes([command_id; 16]),
+                command: serde_json::from_value(command).unwrap(),
+            },
+        );
+    }
+    check(
+        "event_goal_updated",
+        &SessionEventEnvelope {
+            run_id: None,
+            ..envelope(80, SessionEvent::GoalUpdated { goal: goal.clone() })
+        },
+    );
+    check(
+        "event_goal_cleared",
+        &SessionEventEnvelope {
+            run_id: None,
+            ..envelope(
+                81,
+                SessionEvent::GoalCleared {
+                    session_id,
+                    goal_id,
+                    revision: 4,
+                },
+            )
+        },
+    );
+    check(
+        "receipt_goal_updated",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x62; 16]),
+            committed_through: cursor(80),
+            outcome: CommandOutcome::GoalUpdated {
+                session_id,
+                goal: goal.clone(),
+            },
+        },
+    );
+    let run_id = RunId::from_bytes([0x65; 16]);
+    for (name, origin) in [
+        (
+            "snapshot_goal_bound_prompt",
+            qq_protocol::RunOrigin::UserPrompt {},
+        ),
+        (
+            "snapshot_goal_run",
+            qq_protocol::RunOrigin::Goal {
+                goal_id,
+                revision: 3,
+            },
+        ),
+        (
+            "snapshot_goal_check",
+            qq_protocol::RunOrigin::GoalCheck {
+                goal_id,
+                revision: 3,
+            },
+        ),
+    ] {
+        let run: RunSnapshot =
+            serde_json::from_value(serde_json::json!({"id":run_id,"session_id":session_id,
+            "status":"queued","origin":origin,"goal":{"goal_id":goal_id,"revision":3}}))
+            .unwrap();
+        check(name, &run);
+    }
 }

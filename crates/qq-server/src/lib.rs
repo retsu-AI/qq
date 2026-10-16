@@ -795,7 +795,9 @@ async fn session_command(
         SessionCommand::SubmitPrompt { input, .. } | SessionCommand::SteerRun { input, .. } => {
             Some(input.as_slice())
         }
-        SessionCommand::ResolveWorkspace { .. }
+        SessionCommand::CancelSideQuestion { .. }
+        | SessionCommand::SubmitSideQuestion { .. }
+        | SessionCommand::ResolveWorkspace { .. }
         | SessionCommand::CreateSession { .. }
         | SessionCommand::CancelRun { .. }
         | SessionCommand::RespondToolApproval { .. }
@@ -807,7 +809,9 @@ async fn session_command(
         | SessionCommand::DeleteSession { .. }
         | SessionCommand::PruneSessions { .. }
         | SessionCommand::CompactSession { .. }
-        | SessionCommand::RollbackCompaction { .. } => None,
+        | SessionCommand::RollbackCompaction { .. }
+        | SessionCommand::SetGoal { .. }
+        | SessionCommand::GoalControl { .. } => None,
     };
     if let Some(input) = input
         && let Err(error) = validate_input(input)
@@ -2204,6 +2208,39 @@ mod tests {
         let run_id = qq_protocol::RunId::from_bytes([4; 16]);
         let workspace_id = WorkspaceId::from_bytes([5; 16]);
         match kind {
+            SessionCommandKind::SetGoal => SessionCommand::SetGoal {
+                session_id,
+                objective: "finish the task".to_owned(),
+                check: None,
+                budget: Box::new(qq_protocol::GoalBudget {
+                    max_goal_runs: 200,
+                    deadline_ms: 1_800_000_000_000,
+                    max_total_tokens: None,
+                    max_cost_usd_nanos: None,
+                    per_run: qq_protocol::RunLimits {
+                        max_model_turns: Some(64),
+                        ..qq_protocol::RunLimits::default()
+                    },
+                }),
+                expected: None,
+                replace: false,
+            },
+            SessionCommandKind::GoalControl => SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: qq_protocol::GoalId::from_bytes([7; 16]),
+                    revision: 1,
+                },
+                action: qq_protocol::GoalControl::Pause,
+            },
+            SessionCommandKind::CancelSideQuestion => SessionCommand::CancelSideQuestion {
+                side_question_id: run_id,
+            },
+            SessionCommandKind::SubmitSideQuestion => SessionCommand::SubmitSideQuestion {
+                session_id,
+                question: "inspect".to_owned(),
+                new_thread: false,
+            },
             SessionCommandKind::ResolveWorkspace => SessionCommand::ResolveWorkspace {
                 path: "/tmp".to_owned(),
             },

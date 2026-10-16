@@ -438,7 +438,8 @@ closes it on the first visible delta, finish reason, or `[DONE]`, and counts
 the bytes against the output bound like every other adapter. A turn that spends
 its whole output cap thinking is therefore visible as reasoning followed by
 `Incomplete`, never as an empty turn.
-Current strengths:
+
+Coverage:
 
 - OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Google
   GenerateContent have localhost request and stream contract tests.
@@ -452,19 +453,21 @@ Current strengths:
   bounded redacted live probes, including both xAI protocols through `qq-auth`
   and every centrally managed Bedrock authentication path.
 
-Current gaps:
+Limits:
 
-- There is no CI workflow or scheduled live canary.
+- CI (`.github/workflows/ci.yml`) runs the offline workspace tests on push
+  and pull request, but no workflow runs `cargo xtask providers check`, and
+  there is no scheduled live canary.
 - Live results and last-green binaries are not retained for comparison.
 - QQ has no product-default model to compare against the pinned connectivity
-  model; a future registry/default must add that second canary explicitly.
+  model, so there is a single connectivity canary.
 - Connection timing and sanitized provider request IDs are not exposed by the
   neutral provider interface, so result records begin at first token.
 - Bedrock SDK request/replay coverage is less complete than the HTTP codecs.
 - Codex browser and device OAuth have deterministic login tests but no approved
   live release check. The device protocol implementation is therefore separate
   from provider-support and live-headless qualification.
-- Model defaults and provider resolution are not yet owned by a model registry.
+- No model registry owns model defaults and provider resolution.
 
 ## Completion Criteria
 

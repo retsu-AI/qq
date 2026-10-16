@@ -129,8 +129,10 @@ pub(super) fn persist_model_turn(
     store_id: StoreId,
     claimed: &ClaimedRun,
     turn: &ModelTurnCommit,
+    reserve_context: bool,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let ModelTurnCommit {
+        model_work,
         turn_ordinal,
         message,
         calls,
@@ -142,10 +144,44 @@ pub(super) fn persist_model_turn(
         accounting,
         truncated,
         notice,
+        goal_notices,
+        reserved_goal_notices,
     } = turn;
     if message.role() != Role::Assistant {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
+    let mut goal_notice_bytes = 0_u64;
+    let mut unreserved_goal_notice_bytes = 0_u64;
+    if *reserved_goal_notices > goal_notices.len()
+        || goal_notices
+            .windows(2)
+            .any(|pair| pair[1].preceding_deliveries < pair[0].preceding_deliveries)
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    for (index, atom) in goal_notices.iter().enumerate() {
+        let text = &atom.text;
+        if text.len() > crate::tools::goal::MAX_GOAL_RENDER_BYTES
+            || !text.starts_with("[QQ runtime notice; not a user instruction]\n")
+        {
+            return Err(SessionRuntimeError::InvalidGoal(
+                goals::GoalValidationError::Notice,
+            ));
+        }
+        let bytes = crate::measure_message(&Message::user(text.as_str()));
+        goal_notice_bytes = goal_notice_bytes.saturating_add(bytes);
+        if index >= *reserved_goal_notices {
+            unreserved_goal_notice_bytes = unreserved_goal_notice_bytes.saturating_add(bytes);
+        }
+    }
+    if goal_notice_bytes > MAX_CONTEXT_BYTES as u64 {
+        return Err(SessionRuntimeError::OutputTooLarge);
+    }
+    let goal_notice_json = if goal_notices.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(goal_notices)?)
+    };
     let content = message
         .content()
         .iter()
@@ -190,7 +226,16 @@ pub(super) fn persist_model_turn(
     let non_text_bytes =
         usize::try_from(full_message_bytes.saturating_sub(already_reserved_text_bytes))
             .map_err(|_| SessionRuntimeError::OutputTooLarge)?;
-    reserve_context_capacity(&transaction, claimed.identity.run_id, non_text_bytes)?;
+    if reserve_context {
+        reserve_context_capacity(
+            &transaction,
+            claimed.identity.run_id,
+            non_text_bytes.saturating_add(
+                usize::try_from(unreserved_goal_notice_bytes)
+                    .map_err(|_| SessionRuntimeError::OutputTooLarge)?,
+            ),
+        )?;
+    }
     // Completing the turn's message in the same transaction as the turn row
     // keeps message state and turn persistence atomic: after a crash, a
     // streaming message always identifies exactly the turn that never
@@ -212,8 +257,8 @@ pub(super) fn persist_model_turn(
     transaction.execute(
         "INSERT INTO model_turns(
                  run_id, turn_ordinal, assistant_content_json, model_json,
-                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 usage_json, estimated_cost_usd_nanos, completed_at_ms, truncated, notice, goal_notice
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             claimed.identity.run_id.to_string(),
             turn_ordinal,
@@ -224,8 +269,28 @@ pub(super) fn persist_model_turn(
             now,
             truncated,
             notice.map(crate::runtime::TurnNotice::as_str),
+            goal_notice_json,
         ],
     )?;
+    if claimed.goal.is_some() || claimed.goal_spend_owner.is_some() {
+        let disposition = match model_work {
+            crate::runtime::ModelWorkDisposition::Committed => "committed",
+            crate::runtime::ModelWorkDisposition::RejectedBeforeWork => "rejected_before_work",
+            crate::runtime::ModelWorkDisposition::Uncertain => "uncertain",
+        };
+        transaction.execute(
+            "UPDATE model_turns SET work_disposition=?3 WHERE run_id=?1 AND turn_ordinal=?2",
+            params![
+                claimed.identity.run_id.to_string(),
+                turn_ordinal,
+                disposition
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE runs SET goal_request_pending=0 WHERE id=?1",
+            [claimed.identity.run_id.to_string()],
+        )?;
+    }
     let mut events = Vec::with_capacity(persisted_calls.len().saturating_add(3));
     events.push(append_event(
         &transaction,
@@ -374,7 +439,8 @@ pub(super) fn record_checkpoint_started(
     // A crash after dispatch must not leave a known total that omits it.
     // A completed receipt restores totals from the live accumulator atomically.
     transaction.execute(
-        "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL WHERE id = ?1",
+        "UPDATE runs SET usage_json = NULL, estimated_cost_usd_nanos = NULL,
+             goal_helper_admitted = CASE WHEN goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL THEN 1 ELSE goal_helper_admitted END WHERE id = ?1",
         [identity.run_id.to_string()],
     )?;
     let event = append_event(
@@ -533,10 +599,22 @@ pub(super) fn append_run_activity(
     store_id: StoreId,
     identity: RunIdentity,
     activity: RunActivity,
+    goal: bool,
+    rejected: bool,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     // The column and the event commit together, so the summary query reads
     // the same value a replaying client would reconstruct.
+    if goal && (activity == RunActivity::WaitingForProvider || rejected) {
+        let pending = activity == RunActivity::WaitingForProvider;
+        transaction.execute(
+            "UPDATE runs SET goal_request_pending=?2,
+             usage_json=CASE WHEN ?2 THEN NULL ELSE usage_json END,
+             estimated_cost_usd_nanos=CASE WHEN ?2 THEN NULL ELSE estimated_cost_usd_nanos END
+             WHERE id=?1 AND status='running' AND (goal_id IS NOT NULL OR goal_paid_owner_run_id IS NOT NULL)",
+            params![identity.run_id.to_string(), pending],
+        )?;
+    }
     let running = transaction
         .prepare_cached(
             "UPDATE runs SET activity = ?3
@@ -605,26 +683,73 @@ pub(super) fn append_reasoning(
     Ok(event)
 }
 
-// A non-null value proves routing may have spent money before RunStarted.
-// Pending is replaced once by the receipt, never reset for another dispatch.
+// A paid pending route has unknown spend before RunStarted. Skipped routes
+// retain known zero until the decision receipt; neither path dispatches twice.
 const ROUTING_PENDING: &str = "{\"state\":\"pending\"}";
 
 pub(super) fn record_routing_started(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
-) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
+    metadata: claim::RunStartMetadata<'_>,
+    paid: bool,
+    tracked: bool,
+    maximum_cost: Option<u64>,
+) -> Result<claim::RunStart, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    if metadata.goal.is_some() || metadata.goal_spend_owner.is_some() {
+        let refreshed =
+            match claim::refresh_goal_limits(&transaction, identity, &metadata, now_ms())? {
+                Ok(refreshed) => refreshed,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+        if refreshed != metadata.limits {
+            return Ok(Err(claim::GoalStartRefusal::Reprepare {
+                limits: Box::new(refreshed),
+            }));
+        }
+    }
+    if paid
+        && metadata.goal.is_some()
+        && let Some(limit) = metadata.limits.max_cost_usd_nanos
+    {
+        let refusal = match maximum_cost {
+            None => Some(claim::RoutingCostRefusal::Undeclared),
+            Some(cost) if cost > limit => Some(claim::RoutingCostRefusal::AboveAllowance),
+            Some(_) => None,
+        };
+        if let Some(refusal) = refusal {
+            return Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal)));
+        }
+    }
+    let usage = if paid {
+        None
+    } else {
+        Some(serde_json::to_string(&TokenUsage::default())?)
+    };
+    let cost = (!paid).then_some(0_i64);
     let changed = transaction.execute(
-        "UPDATE runs SET routing_json = ?2, usage_json = NULL, estimated_cost_usd_nanos = NULL
+        "UPDATE runs SET routing_json = ?2, usage_json = ?3, estimated_cost_usd_nanos = ?4
          WHERE id = ?1 AND status = 'queued' AND outcome_json IS NULL
            AND cancel_requested = 0 AND routing_json IS NULL
            AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = runs.session_id
                        AND s.preparing_run_id = runs.id)",
-        params![identity.run_id.to_string(), ROUTING_PENDING],
+        params![identity.run_id.to_string(), ROUTING_PENDING, usage, cost],
     )?;
     if changed != 1 {
-        return Ok(None);
+        return Ok(Ok(None));
+    }
+    goals::freeze_goal_claim(
+        &transaction,
+        identity,
+        metadata.goal,
+        metadata.goal_initial_notice,
+    )?;
+    if paid && tracked {
+        transaction.execute(
+            "UPDATE runs SET goal_helper_admitted=1 WHERE id=?1",
+            [identity.run_id.to_string()],
+        )?;
     }
     let event = append_event(
         &transaction,
@@ -634,7 +759,7 @@ pub(super) fn record_routing_started(
         },
     )?;
     transaction.commit()?;
-    Ok(Some(event))
+    Ok(Ok(Some(event)))
 }
 
 /// Retain reported spend before loading the selected provider. The decision

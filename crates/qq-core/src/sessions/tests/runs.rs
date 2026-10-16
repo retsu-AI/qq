@@ -1516,6 +1516,9 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
             .persist_model_turn(
                 &claimed,
                 ModelTurnCommit {
+                    model_work: crate::runtime::ModelWorkDisposition::Committed,
+                    goal_notices: Vec::new(),
+                    reserved_goal_notices: 0,
                     turn_ordinal: 1,
                     message: Message::new(
                         Role::Assistant,
@@ -1546,6 +1549,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                 "tool result\n".to_owned(),
                 false,
                 Vec::new(),
+                None,
                 None,
                 None,
             )
@@ -1616,6 +1620,29 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
 #[tokio::test]
 async fn terminal_runs_project_exact_tool_boundaries_across_restart() {
     let outcomes = [
+        (
+            RunOutcome::Paused {
+                pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+                    kind: RunFailureKind::ProviderTransport,
+                    message: "reset".to_owned(),
+                    turn_ordinal: 7,
+                    attempts: 5,
+                }),
+            },
+            "Tool execution did not start before the run paused on a provider fault.",
+            "The previous run paused after 5 retries of turn 7 on a provider fault (reset); its completed turns stand. Continue from where it stopped.",
+        ),
+        (
+            RunOutcome::Paused {
+                pause: Box::new(qq_protocol::RunPause::NoProgress {
+                    turn_ordinal: 515,
+                    slices: 2,
+                    calls: 514,
+                }),
+            },
+            "Tool execution did not start before the run paused for no progress.",
+            "The previous run paused for no progress at turn 515 after 514 eligible tool attempts across 2 slices; its completed turns stand. Continue from where it stopped.",
+        ),
         (
             RunOutcome::Failed {
                 failure: RunFailure {
@@ -2488,6 +2515,9 @@ async fn manual_and_auto_compaction_share_the_terminal_run_projection() {
         .persist_model_turn(
             &growth_run,
             ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
                 turn_ordinal: 1,
                 message: Message::assistant(over_threshold_output()),
                 calls: Vec::new(),
@@ -3056,63 +3086,117 @@ async fn steering_during_a_slice_report_lands_before_the_continuation_notice() {
 /// reproduces the live order exactly. (AP3a acceptance (k).)
 #[tokio::test]
 async fn a_truncated_slice_report_keeps_its_notice_on_replay() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
-    std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
-    let database = directory.path().join("sessions.sqlite3");
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(database.clone()),
-        Arc::new(TruncatedReportLoader {
-            requests: Arc::clone(&requests),
-            fault: false,
-        }),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("unexpected receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
+    for with_goal in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "tool result\n").unwrap();
+        std::fs::write(directory.path().join("slice-effects.txt"), "seed").unwrap();
+        let database = directory.path().join("sessions.sqlite3");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(database.clone()),
+            Arc::new(TruncatedReportLoader {
+                requests: Arc::clone(&requests),
+                fault: false,
+            }),
+        )
+        .await
         .unwrap();
-    let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
-    let observed = collect_until(&mut events, finished_for(run_id)).await;
-    assert!(matches!(
-        observed.last().map(|event| &event.event),
-        Some(SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        })
-    ));
-    let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
-    assert_eq!(
-        live[live.len() - 5..],
-        [
-            Message::user(crate::SLICE_CHECKPOINT_NOTICE),
-            Message::assistant("report part one"),
-            Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE),
-            Message::assistant(" and part two"),
-            Message::user(crate::SLICE_CONTINUATION_NOTICE),
-        ]
-    );
-    assert_eq!(
-        live.iter()
-            .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
-            .count(),
-        1,
-        "the retried report attempt reuses its notice"
-    );
-    let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
-    collect_until(&mut events, finished_for(follow_up)).await;
-    let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
-    assert_eq!(&replayed[..live.len()], live.as_slice());
-    assert_assembly_matches_reference(&database, session_id);
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("unexpected receipt")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        if with_goal {
+            runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"retain reports through goal notices",
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        }
+        let run_id = queue_prompt(&runtime, session_id, "finish a long task".to_owned()).await;
+        let observed = collect_until(&mut events, finished_for(run_id)).await;
+        assert!(matches!(
+            observed.last().map(|event| &event.event),
+            Some(SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            })
+        ));
+        let live = requests.lock().unwrap().last().unwrap().messages().to_vec();
+        assert_eq!(
+            live[live.len() - 5..],
+            [
+                Message::user(crate::SLICE_CHECKPOINT_NOTICE),
+                Message::assistant("report part one"),
+                Message::user(crate::OUTPUT_TRUNCATED_CONTINUE_NOTICE),
+                Message::assistant(" and part two"),
+                Message::user(crate::SLICE_CONTINUATION_NOTICE),
+            ]
+        );
+        assert_eq!(
+            live.iter()
+                .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+                .count(),
+            1,
+            "the retried report attempt reuses its notice"
+        );
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let (typed, ordered):(String,Option<String>)=connection.query_row(
+            "SELECT notice,goal_notice FROM model_turns WHERE run_id=?1 AND notice='report'",
+            [run_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?)))?;
+                assert_eq!(typed, "report");
+                if with_goal {
+                    let notices: Vec<crate::runtime::OrderedTurnNotice> =
+                        serde_json::from_str(&ordered.unwrap()).unwrap();
+                    assert!(
+                        notices
+                            .iter()
+                            .any(|notice| notice.text == crate::SLICE_CHECKPOINT_NOTICE)
+                    );
+                }
+                assert_eq!(
+                    crate::sessions::deliveries::run_latest_report_text(connection, run_id)?,
+                    Some("report part one and part two".to_owned())
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let answer = runtime
+            .inner
+            .store
+            .child_answer(run_id, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        assert!(answer.content.contains("report part one and part two"));
+        let follow_up = queue_prompt(&runtime, session_id, "and then?".to_owned()).await;
+        collect_until(&mut events, finished_for(follow_up)).await;
+        let replayed = requests.lock().unwrap().last().unwrap().messages().to_vec();
+        assert_eq!(&replayed[..live.len()], live.as_slice());
+        if !with_goal {
+            assert_assembly_matches_reference(&database, session_id);
+        }
+        runtime.shutdown().await.unwrap();
+        let connection = Connection::open(&database).unwrap();
+        let replayed_after_reopen =
+            transcript::load_model_context(&connection, session_id, u64::MAX).unwrap();
+        assert_eq!(
+            replayed_after_reopen
+                .iter()
+                .filter(|message| **message == Message::user(crate::SLICE_CHECKPOINT_NOTICE))
+                .count(),
+            1
+        );
+    }
 }
 
 /// A slice report whose stream fails partway is retried: the partial turn is
@@ -3214,4 +3298,52 @@ async fn a_faulted_slice_report_is_retried_under_one_notice() {
         without_retry_notice.as_slice()
     );
     assert_assembly_matches_reference(&database, session_id);
+}
+
+#[tokio::test]
+async fn repaired_read_arguments_execute_once_and_the_note_is_durable() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::ReadOnly,
+        vec![vec![(
+            "read_file",
+            r#"{"path":"note.txt","ranges":"[\"1\"]","include_ignored":true}"#.to_owned(),
+        )]],
+    )
+    .await;
+    std::fs::write(harness.workspace_path.join("note.txt"), "noted\n").unwrap();
+    submit_prompt(&harness, "read the note").await;
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(&event.event, SessionEvent::ToolCallStarted { .. }))
+            .count(),
+        1
+    );
+    let results = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    let result = results[0].result.as_deref().unwrap();
+    assert!(result.contains("note=ranges_array_coerced,include_ignored_ignored"));
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest {
+            workspace_id: harness.workspace_id,
+            focused_session_id: Some(harness.session_id),
+            include_sessions: Vec::new(),
+            session_limit: 1,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    let focused = snapshot.focused.unwrap();
+    assert_eq!(focused.tool_calls.len(), 1);
+    assert_eq!(focused.tool_calls[0].state, ToolCallState::Completed);
+    assert_eq!(focused.tool_calls[0].result.as_deref(), Some(result));
 }

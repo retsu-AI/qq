@@ -3,12 +3,12 @@
 **Status:** Proposed
 **Date:** 2026-09-30
 **Deciders:** lead; second reviewer required (run loop, sub-agent admission, tool catalog)
-**Implements:** [`autonomous-core.md`](../plans/autonomous-core.md) AP1–AP5 (AP0 is the measurement runbook). Complements ADR-0049 § 8 (loop guard) and takes over ADR-0048 § 2's empty-checkpoint fault
+**Implements:** [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AP1–AP5 (AP0 is the measurement runbook). Complements ADR-0049 § 8 (loop guard) and takes over ADR-0048 § 2's empty-checkpoint fault
 
 ## Context
 
 The session store on the lead's machine has 30 days of real use. The numbers
-come from the [`progress-report.md`](../runbooks/progress-report.md) queries,
+come from the [`run-output-queries.md`](../runbooks/run-output-queries.md) queries,
 for the 30 days ending 2026-10-01, on store schema 39. They show agents doing plenty of work but
 producing almost nothing:
 
@@ -78,6 +78,14 @@ without producing anything.
    - an applied steer;
    - a *report* (decision 2) that contains text;
    - a goal checklist change, once ADR-0049's `update_goal` exists.
+
+   ADR-0060 supersedes lexical shell-read accounting: executed processes
+   count as Work unless the executor verifies a launch bound to an explicitly
+   host-approved self-contained read image. Failed Work also triggers heuristic
+   audits. The bounded command recognizer remains a lexical diagnostic, never
+   an approval grant. Historical command strings cannot verify execution
+   effects. All `sort` forms remain lexical Work because inherited TMPDIR can
+   place spill files in the workspace.
 
    Reads, searches, listings, history searches, spill reads and fetches are
    never progress, whether or not they are novel. Every run keeps
@@ -284,7 +292,7 @@ with the AP0 runbook and changed with evidence.
 
 ## Evidence / references
 
-- Store queries: [`../runbooks/progress-report.md`](../runbooks/progress-report.md);
+- Store queries: [`../runbooks/run-output-queries.md`](../runbooks/run-output-queries.md);
   baseline recorded in `plans/progress/root.md` (2026-09-30).
 - QQ source:
   - `crates/qq-core/src/lib.rs:106–122`, `352–379`, `1712–1731`,

@@ -76,6 +76,7 @@ pub(super) fn finish_tool_call(
     file_states: Vec<FileStateUpdate>,
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
+    execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn) = transaction
@@ -113,9 +114,30 @@ pub(super) fn finish_tool_call(
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
+    let execution_context_json = match execution_context {
+        Some(receipt) => {
+            if !receipt.valid() {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            let arguments: String = transaction.query_row(
+                "SELECT arguments_json FROM tool_calls WHERE id = ?1",
+                [tool_call_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !receipt.bound_to(tool_call_id, &tool_name, &arguments) {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            let json = serde_json::to_string(&receipt)?;
+            if json.len() > crate::tools::process_context::MAX_EXECUTION_CONTEXT_BYTES {
+                return Err(SessionRuntimeError::CONSTRAINT);
+            }
+            Some(json)
+        }
+        None => None,
+    };
     let updated = transaction.execute(
         "UPDATE tool_calls
-             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7
+             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = ?8
              WHERE id = ?1 AND run_id = ?6 AND state = 'running'",
         params![
             tool_call_id.to_string(),
@@ -125,6 +147,7 @@ pub(super) fn finish_tool_call(
             now,
             identity.run_id.to_string(),
             display_json,
+            execution_context_json,
         ],
     )?;
     if updated != 1 {
@@ -437,6 +460,17 @@ pub(super) fn deny_tool_call(
     tool_call_id: ToolCallId,
     message: &str,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    settle_unstarted_tool_call(connection, store_id, identity, tool_call_id, message, false)
+}
+
+pub(super) fn settle_unstarted_tool_call(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    message: &str,
+    interrupted: bool,
+) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, first_result_in_turn) = transaction
         .query_row(
@@ -448,8 +482,8 @@ pub(super) fn deny_tool_call(
                           AND previous.result IS NOT NULL
                     )
              FROM tool_calls current
-             WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'requested'",
-            params![tool_call_id.to_string(), identity.run_id.to_string()],
+             WHERE current.id = ?1 AND current.run_id = ?2 AND (current.state = 'requested' OR (?3 AND current.state = 'awaiting_approval'))",
+            params![tool_call_id.to_string(), identity.run_id.to_string(), interrupted],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()?
@@ -464,13 +498,15 @@ pub(super) fn deny_tool_call(
     let now = now_ms();
     let updated = transaction.execute(
         "UPDATE tool_calls
-             SET state = 'denied', result = ?2, is_error = 1, finished_at_ms = ?3
-             WHERE id = ?1 AND run_id = ?4 AND state = 'requested'",
+             SET state = ?5, result = ?2, is_error = 1, finished_at_ms = ?3
+             WHERE id = ?1 AND run_id = ?4 AND (state = 'requested' OR (?6 AND state = 'awaiting_approval'))",
         params![
             tool_call_id.to_string(),
             message,
             now,
             identity.run_id.to_string(),
+            if interrupted { "interrupted" } else { "denied" },
+            interrupted,
         ],
     )?;
     if updated != 1 {
@@ -494,6 +530,8 @@ pub(crate) struct ApprovalPreviews {
     pub(crate) edit: Option<EditPreview>,
     pub(crate) question: Option<QuestionPreview>,
     pub(crate) fetch: Option<FetchPreview>,
+    /// An approval delegate decides before any human is asked.
+    pub(crate) delegated: bool,
 }
 
 pub(super) fn request_tool_approval(
@@ -508,13 +546,18 @@ pub(super) fn request_tool_approval(
         edit,
         question,
         fetch,
+        delegated,
     } = previews;
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
-        "UPDATE tool_calls SET state = 'awaiting_approval'
+        "UPDATE tool_calls SET state = 'awaiting_approval', approval_delegated = ?3
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
-        params![tool_call_id.to_string(), identity.run_id.to_string()],
+        params![
+            tool_call_id.to_string(),
+            identity.run_id.to_string(),
+            delegated
+        ],
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
@@ -529,6 +572,7 @@ pub(super) fn request_tool_approval(
             edit,
             question: question.map(Box::new),
             fetch: fetch.map(Box::new),
+            delegated,
         },
     )?;
     transaction.commit()?;
@@ -749,6 +793,11 @@ pub(super) fn escalate_tool_approval(
     if !awaiting {
         return Ok(None);
     }
+    // A human is asked from here on; summaries project that.
+    transaction.execute(
+        "UPDATE tool_calls SET approval_delegated = 0 WHERE id = ?1",
+        [tool_call_id.to_string()],
+    )?;
     let event = append_event(
         &transaction,
         EventContext::for_run(store_id, identity, now_ms()),
@@ -1030,9 +1079,14 @@ pub(super) fn interrupt_active_tool_calls(
         RunOutcome::BudgetExhausted { .. } => {
             "Tool execution did not start before the run exhausted its budget."
         }
-        RunOutcome::Paused { .. } => {
-            "Tool execution did not start before the run paused on a provider fault."
-        }
+        RunOutcome::Paused { pause } => match pause.as_ref() {
+            qq_protocol::RunPause::ProviderRetry { .. } => {
+                "Tool execution did not start before the run paused on a provider fault."
+            }
+            qq_protocol::RunPause::NoProgress { .. } => {
+                "Tool execution did not start before the run paused for no progress."
+            }
+        },
         RunOutcome::Failed { .. } => "Tool execution did not start before the run failed.",
     };
     for (id, execution_started) in ids {

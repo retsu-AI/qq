@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-10-02
 **Deciders:** lead; second reviewer required (session store, compaction commit)
-**Implements:** [`compaction.md`](../plans/compaction.md) CX1–CX3. Amends how the summarizer request of [ADR-0039](0039-in-run-compaction.md) § 3 and the between-run step are built; the marker, ownership and fail-closed rules of ADR-0039 are unchanged
+**Implements:** [`compaction.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/compaction.md) CX1–CX3. Amends how the summarizer request of [ADR-0039](0039-in-run-compaction.md) § 3 and the between-run step are built; the marker, ownership and fail-closed rules of ADR-0039 are unchanged
 
 ## Context
 

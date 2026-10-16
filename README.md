@@ -23,7 +23,7 @@ release's `SHA256SUMS`, and installs to `~/.local/bin`. Other routes:
 
 | | |
 | --- | --- |
-| Homebrew | `brew install retsu-ai/qq/qq` (once the tap is published) |
+| Homebrew | `brew install retsu-ai/qq/qq` |
 | Nix | `nix run github:retsu-AI/qq` or `nix profile install github:retsu-AI/qq` |
 | cargo-binstall | `cargo binstall --git https://github.com/retsu-AI/qq qq` |
 | From source | `cargo install --git https://github.com/retsu-AI/qq --locked qq` |
@@ -62,6 +62,7 @@ resuming sessions, and cloned projects that ship their own `.qq/config.ron`.
 | | |
 | --- | --- |
 | [Install](docs/guide/install.md) · [Quickstart](docs/guide/quickstart.md) | get running |
+| [Concepts and glossary](docs/guide/concepts.md) | sessions, runs, grants, approval modes |
 | [Providers and credentials](docs/guide/providers.md) | OpenAI, Anthropic, Google, xAI, Codex, Bedrock, gateways, local models |
 | [Permissions and trust](docs/guide/permissions.md) | approval modes, the shell classifier, grants, project trust |
 | [The TUI](docs/guide/tui.md) · [Headless](docs/guide/headless.md) · [MCP servers](docs/guide/mcp.md) | the three surfaces and extra tools |

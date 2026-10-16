@@ -1,9 +1,9 @@
-# Isolated TUI QA fixture
+# Runbook: isolated TUI QA fixture
 
 Use this profile to inspect the real QQ TUI without reading the user's QQ
 configuration, credential index, session database, or server-discovery file.
-It is a local diagnostic fixture, not an Astra, JEV, authentication, or
-production acceptance test.
+It is a local diagnostic fixture, not a Jev, authentication, or production
+acceptance test.
 
 ## Prepare the fixture
 

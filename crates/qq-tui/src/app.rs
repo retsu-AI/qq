@@ -15,9 +15,9 @@ use qq_client::state::{
 use qq_protocol::{
     AgentProfileId, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
     ApprovalResolution, CommandId, CommandOutcome, CommandRequest, ModelSelection, QuestionPreview,
-    ReasoningEffort, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
-    SessionId, SessionStatus, SteeringCapabilities, ToolCallSnapshot, ToolCallState, WorkspaceId,
-    WorkspaceSnapshot,
+    ReasoningEffort, RunId, ServerCapabilities, SessionCommand, SessionEvent, SessionEventEnvelope,
+    SessionId, SessionStatus, SideQuestionState, SteeringCapabilities, ToolCallSnapshot,
+    ToolCallState, WorkspaceId, WorkspaceSnapshot,
 };
 use thiserror::Error;
 
@@ -92,9 +92,8 @@ pub enum TrustChoice {
     Session,
 }
 
-/// What a resolved trust choice unlocked: catalog request metadata and
-/// credential state the client skipped at startup because configuration would
-/// not load. The usable model still comes from the server's Models update.
+/// What a resolved trust choice unlocked: the catalog and credential state
+/// the client skipped at startup because the configuration would not load.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustResolved {
     /// Paths now trusted, for the confirmation notice.
@@ -290,6 +289,15 @@ fn has_mention_syntax(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum PendingIntent {
+    /// A side question in flight; `text` returns to the composer if the
+    /// server refuses it.
+    Side {
+        session_id: SessionId,
+        text: String,
+    },
+    CancelSide {
+        session_id: SessionId,
+    },
     Create,
     Prompt {
         session_id: SessionId,
@@ -452,6 +460,10 @@ pub(crate) struct App {
     recent_events: VecDeque<SessionEventEnvelope>,
     pending: HashMap<CommandId, PendingIntent>,
     answered_approvals: std::collections::HashSet<qq_protocol::ToolCallId>,
+    /// The side question each session's submission receipt acknowledged, so
+    /// `/btw-cancel` can target it before its first update is reduced. At
+    /// most one per session; dropped when a terminal update for it arrives.
+    acknowledged_side_questions: HashMap<SessionId, RunId>,
 }
 
 impl App {
@@ -512,6 +524,7 @@ impl App {
             recent_events: VecDeque::new(),
             pending: HashMap::new(),
             answered_approvals: std::collections::HashSet::new(),
+            acknowledged_side_questions: HashMap::new(),
         }
     }
 
@@ -530,8 +543,8 @@ impl App {
     }
 
     /// The trust prompt's answer, resolved by the composition root. Applies
-    /// credential remedies while retaining the
-    /// configured route only as request metadata, then drops the prompt, so
+    /// what the now-loadable configuration provides (the client default
+    /// model, the catalog, the credential remedies) and drops the prompt, so
     /// the OB1/OB2 guidance takes over exactly as if the TUI had started
     /// with a trusted project.
     pub fn apply_trust_resolved(
@@ -542,13 +555,9 @@ impl App {
         self.trust_resolving = false;
         self.pending_trust.clear();
         self.unauthenticated_providers = resolved.unauthenticated_providers;
-        // Keep the configured route as request metadata only. The app's
-        // usable/default model remains empty until the server's Models update
-        // returns its authoritative selected value.
-        let requested_selection = resolved.model;
-        // Trust resolution is not a server catalog response. Keep rows empty
-        // until ClientUpdate::Models supplies authoritative options/selection.
-        self.apply_model_options(Vec::new(), None);
+        // Through the catalog path so the sort, per-session context windows,
+        // and an open picker are refreshed like a server catalog update.
+        self.apply_model_options(resolved.models, Some(resolved.model));
         self.set_info(match choice {
             TrustChoice::Persist => format!(
                 "trusted {} file{}",
@@ -562,7 +571,7 @@ impl App {
         // refresh the catalog the same way bootstrap does so provider
         // discovery replaces the root's static list.
         let mut effects = Effects::send_now(ClientRequest::Capabilities);
-        effects.push(Effect::Send(ClientRequest::Models(requested_selection)));
+        effects.push(Effect::Send(ClientRequest::Models(self.model.clone())));
         effects
     }
 
@@ -678,6 +687,13 @@ impl App {
                         {
                             self.adopt_created_session(session_id);
                         }
+                        if let CommandOutcome::SideQuestionSubmitted {
+                            side_question_id, ..
+                        } = receipt.outcome
+                            && let Some(PendingIntent::Side { session_id, .. }) = intent.as_ref()
+                        {
+                            self.acknowledge_side_question(*session_id, side_question_id);
+                        }
                         if let Some(PendingIntent::Cancel { session_id }) = intent.as_ref() {
                             self.set_info_for(
                                 Some(*session_id),
@@ -711,6 +727,10 @@ impl App {
                                 .to_owned(),
                             );
                         }
+                        let cancel_side_session = match intent.as_ref() {
+                            Some(PendingIntent::CancelSide { session_id }) => Some(*session_id),
+                            _ => None,
+                        };
                         if matches!(receipt.outcome, CommandOutcome::RunAlreadyFinished { .. }) {
                             // A steer that lost the race to the finishing run was never
                             // applied; hand the text back rather than losing it.
@@ -728,6 +748,21 @@ impl App {
                             }
                         }
                         match &receipt.outcome {
+                            CommandOutcome::SideQuestionCancelled { side_question_id } => {
+                                self.acknowledged_side_questions
+                                    .retain(|_, id| id != side_question_id);
+                            }
+                            CommandOutcome::SideQuestionAlreadyFinished {
+                                side_question_id,
+                                ..
+                            } => {
+                                self.acknowledged_side_questions
+                                    .retain(|_, id| id != side_question_id);
+                                self.set_info_for(
+                                    cancel_side_session,
+                                    "side question already finished".to_owned(),
+                                );
+                            }
                             CommandOutcome::CompactionQueued { session_id, .. } => {
                                 self.set_info_for(
                                     Some(*session_id),
@@ -829,7 +864,7 @@ impl App {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) -> Effects {
+    fn apply_snapshot(&mut self, mut snapshot: WorkspaceSnapshot) -> Effects {
         let initial = self.workspace_id.is_none();
         if self
             .workspace_id
@@ -838,7 +873,28 @@ impl App {
             self.set_warning("server returned a snapshot for another workspace".to_owned());
             return Effects::redraw(Redraw::Scheduled);
         }
+        // A replaced body already loaded through a newer cursor needs no
+        // replay from this older response; keep its authoritative receipt.
+        let body_is_current = |body: &qq_protocol::SessionSnapshot| {
+            self.sessions
+                .get(&body.summary.id)
+                .is_none_or(|view| view.loaded_through <= snapshot.cursor.sequence)
+        };
+        snapshot.included.retain(body_is_current);
+        if snapshot
+            .focused
+            .as_ref()
+            .is_some_and(|body| !body_is_current(body))
+        {
+            snapshot.focused = None;
+        }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
+        let installed_sessions: Vec<_> = snapshot
+            .included
+            .iter()
+            .map(|body| body.summary.id)
+            .chain(snapshot_focus)
+            .collect();
         // A late snapshot for a session no longer shown is stale navigation
         // output; installing it would yank focus back.
         if !initial
@@ -857,13 +913,32 @@ impl App {
             return Effects::redraw(Redraw::Scheduled);
         }
 
+        let mut rewarmed_sessions = installed_sessions
+            .iter()
+            .copied()
+            .filter(|session| {
+                self.sessions
+                    .get(session)
+                    .is_none_or(|view| !view.is_warm())
+            })
+            .collect::<Vec<_>>();
         let snapshot_sequence = snapshot.cursor.sequence;
+        // Every body this snapshot installs replaces live state with a view
+        // as of its cursor; events after it that already reached the store
+        // are replayed below so a stale body never wins over them.
         if initial {
             self.workspace_id = Some(snapshot.workspace.id);
             self.workspace_path = snapshot.workspace.path;
         }
         if initial || snapshot_sequence >= self.last_sequence {
             for summary in snapshot.sessions {
+                if self
+                    .sessions
+                    .get(&summary.id)
+                    .is_some_and(|view| view.loaded_through > snapshot_sequence)
+                {
+                    continue;
+                }
                 self.sessions
                     .upsert_summary(summary, &self.models, snapshot_sequence);
             }
@@ -879,7 +954,11 @@ impl App {
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
-            if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
+            // A side view over this session keeps showing side questions.
+            let side_view = self.view() == View::SideQuestions(focused_id);
+            if !side_view
+                && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
+            {
                 self.set_focus(focused_id);
             } else {
                 self.set_focus_clock(focused_id);
@@ -898,13 +977,45 @@ impl App {
             .iter()
             .filter(|event| {
                 event.cursor.sequence > snapshot_sequence
-                    && snapshot_focus.is_some_and(|focused| event.session_id == focused)
+                    && installed_sessions.contains(&event.session_id)
             })
             .cloned()
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
         for event in replay {
-            effects.extend(self.reduce_event(&event));
+            let replayed = self.sessions.replay_event(
+                &event,
+                ReduceContext {
+                    focused: self.view().transcript(),
+                    attentive: self.terminal_focused,
+                    workspace_id: self.workspace_id,
+                    capabilities: self.capabilities.as_ref(),
+                    models: &self.models,
+                    caused_by_me: false,
+                },
+            );
+            for effect in replayed {
+                match effect {
+                    StateEffect::RequestSnapshot(request) => {
+                        if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        } else if let Some(index) = rewarmed_sessions
+                            .iter()
+                            .position(|session| *session == event.session_id)
+                        {
+                            // One latest body fetch covers all retained terminal events.
+                            rewarmed_sessions.swap_remove(index);
+                            effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                        }
+                    }
+                    structural => {
+                        effects.extend(self.apply_state_effects(std::iter::once(structural)))
+                    }
+                }
+            }
+            if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
+                self.refresh_session_picker();
+            }
         }
         effects
     }
@@ -920,7 +1031,9 @@ impl App {
         let reduced = self.sessions.reduce_event(
             envelope,
             ReduceContext {
-                focused: self.focused(),
+                // Only a shown transcript reads its events; a side view
+                // leaves the source session's arrivals unread.
+                focused: self.view().transcript(),
                 attentive: self.terminal_focused,
                 workspace_id: self.workspace_id,
                 capabilities: self.capabilities.as_ref(),
@@ -928,6 +1041,36 @@ impl App {
                 caused_by_me,
             },
         );
+        let effects = self.apply_state_effects(reduced);
+        if let SessionEvent::SideQuestionUpdated { side_question } = &envelope.event
+            && side_question.state != SideQuestionState::Running
+            && self
+                .acknowledged_side_questions
+                .get(&side_question.session_id)
+                == Some(&side_question.id)
+        {
+            self.acknowledged_side_questions
+                .remove(&side_question.session_id);
+        }
+        // Summaries and deletions reshape the tree the picker lists.
+        if matches!(
+            envelope.event,
+            SessionEvent::SessionCreated { .. }
+                | SessionEvent::SessionUpdated { .. }
+                | SessionEvent::SessionDeleted { .. }
+                | SessionEvent::PromptQueued { .. }
+                | SessionEvent::RunStarted { .. }
+                | SessionEvent::CancellationRequested { .. }
+                | SessionEvent::SessionCompacted { .. }
+                | SessionEvent::SessionCompactionRolledBack { .. }
+                | SessionEvent::RunFinished { .. }
+        ) {
+            self.refresh_session_picker();
+        }
+        effects
+    }
+
+    fn apply_state_effects(&mut self, reduced: impl IntoIterator<Item = StateEffect>) -> Effects {
         let mut effects = Effects::none();
         for effect in reduced {
             match effect {
@@ -949,6 +1092,12 @@ impl App {
                     session_id,
                     tool_call_ids,
                 } => {
+                    self.acknowledged_side_questions.remove(&session_id);
+                    // The reducer only refocuses a shown transcript; a side
+                    // view over the deleted session gives way here.
+                    if self.view() == View::SideQuestions(session_id) {
+                        effects.extend(self.leave_workspace_view());
+                    }
                     for call in tool_call_ids {
                         self.answered_approvals.remove(&call);
                     }
@@ -965,21 +1114,6 @@ impl App {
                     }
                 }
             }
-        }
-        // Summaries and deletions reshape the tree the picker lists.
-        if matches!(
-            envelope.event,
-            SessionEvent::SessionCreated { .. }
-                | SessionEvent::SessionUpdated { .. }
-                | SessionEvent::SessionDeleted { .. }
-                | SessionEvent::PromptQueued { .. }
-                | SessionEvent::RunStarted { .. }
-                | SessionEvent::CancellationRequested { .. }
-                | SessionEvent::SessionCompacted { .. }
-                | SessionEvent::SessionCompactionRolledBack { .. }
-                | SessionEvent::RunFinished { .. }
-        ) {
-            self.refresh_session_picker();
         }
         effects
     }
@@ -1173,7 +1307,9 @@ impl App {
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
-            Some(PendingIntent::Prompt { session_id, .. })
+            Some(PendingIntent::Side { session_id, .. })
+            | Some(PendingIntent::CancelSide { session_id })
+            | Some(PendingIntent::Prompt { session_id, .. })
             | Some(PendingIntent::Cancel { session_id })
             | Some(PendingIntent::Steer { session_id, .. })
             | Some(PendingIntent::Compact { session_id })
@@ -1193,7 +1329,8 @@ impl App {
             Some(PendingIntent::Create | PendingIntent::Prune) | None => self.focused(),
         };
         match intent {
-            Some(PendingIntent::Prompt { session_id, text })
+            Some(PendingIntent::Side { session_id, text })
+            | Some(PendingIntent::Prompt { session_id, text })
             | Some(PendingIntent::Steer { session_id, text })
                 if self.focused() == Some(session_id) && self.composer.text.is_empty() =>
             {
@@ -1299,7 +1436,10 @@ impl App {
                     return Effects::redraw(Redraw::Immediate);
                 }
                 // A workspace view returns to the session it replaced.
-                if matches!(self.view(), View::Attention | View::Changes) {
+                if matches!(
+                    self.view(),
+                    View::Attention | View::Changes | View::SideQuestions(_)
+                ) {
                     return self.leave_workspace_view();
                 }
                 // A sticky error notice dismisses first: acknowledging the
@@ -1579,6 +1719,18 @@ impl App {
     /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
+            Command::ShowSideQuestions => match self.focused().or(self.view_return) {
+                Some(session_id) => self.show_workspace_view(View::SideQuestions(session_id)),
+                None => {
+                    self.set_warning("create a session before asking a side question".to_owned());
+                    Effects::redraw(Redraw::Immediate)
+                }
+            },
+            Command::NewSideThread => {
+                self.composer.replace("/btw-new ".to_owned());
+                Effects::redraw(Redraw::Immediate)
+            }
+            Command::CancelSideQuestion => self.cancel_side_question(),
             Command::OpenHelp => self.open_commands(true),
             Command::OpenCommands => self.open_commands(false),
             Command::SearchHistory => self.open_history(),
@@ -1839,9 +1991,54 @@ impl App {
     }
 
     fn submit_prompt(&mut self) -> Effects {
-        let prompt = self.composer.expanded().trim().to_owned();
+        let mut prompt = self.composer.expanded().trim().to_owned();
+        if matches!(self.view(), View::SideQuestions(_))
+            && !prompt.is_empty()
+            && !prompt.starts_with('/')
+        {
+            prompt = format!("/btw {prompt}");
+        }
         if prompt.is_empty() {
             return Effects::none();
+        }
+        let (name, question) = prompt
+            .split_once(char::is_whitespace)
+            .unwrap_or((&prompt, ""));
+        if matches!(name, "/btw" | "/ask" | "/btw-new") {
+            let Some(session_id) = self.focused().or(self.view_return) else {
+                self.set_warning("create a session before asking a side question".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            };
+            let question = question.trim();
+            // A bare `/btw-new` has nothing to start the thread with; opening
+            // the view would let the next question continue the old thread.
+            if question.is_empty() && name == "/btw-new" {
+                self.set_warning("use /btw-new QUESTION to start a new side thread".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            }
+            if question.is_empty() {
+                self.composer.clear();
+                return self.execute(Command::ShowSideQuestions);
+            }
+            if question.len() > 8192 {
+                self.set_warning("use /btw QUESTION (at most 8 KiB)".to_owned());
+                return Effects::redraw(Redraw::Immediate);
+            }
+            self.composer.clear();
+            if self.view() != View::SideQuestions(session_id) {
+                self.show_workspace_view(View::SideQuestions(session_id));
+            }
+            return self.send(
+                PendingIntent::Side {
+                    session_id,
+                    text: prompt.clone(),
+                },
+                SessionCommand::SubmitSideQuestion {
+                    session_id,
+                    question: question.to_owned(),
+                    new_thread: name == "/btw-new",
+                },
+            );
         }
         // Reserved composer commands stay client-side. Every other leading
         // slash is submitted through the ordinary command path so the shared
@@ -2231,6 +2428,58 @@ impl App {
         )
     }
 
+    /// Remember the side question a submission receipt acknowledged, unless
+    /// its terminal update already arrived (events may precede receipts).
+    fn acknowledge_side_question(&mut self, session_id: SessionId, side_question_id: RunId) {
+        let settled = self.sessions.get(&session_id).is_some_and(|session| {
+            session
+                .side_questions
+                .iter()
+                .any(|item| item.id == side_question_id && item.state != SideQuestionState::Running)
+        });
+        if !settled {
+            self.acknowledged_side_questions
+                .insert(session_id, side_question_id);
+        }
+    }
+
+    /// Cancel the focused session's running side question: the newest one the
+    /// reduced projection shows running, else the one a receipt acknowledged
+    /// before its update arrived (SSE lag or a reconnect).
+    fn cancel_side_question(&mut self) -> Effects {
+        let Some(session_id) = self.focused().or(self.view_return) else {
+            self.set_warning("create a session before cancelling a side question".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        let items = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.side_questions.as_slice())
+            .unwrap_or_default();
+        let running = items
+            .iter()
+            .rev()
+            .find(|item| item.state == SideQuestionState::Running)
+            .map(|item| item.id);
+        let acknowledged = self
+            .acknowledged_side_questions
+            .get(&session_id)
+            .copied()
+            .filter(|id| {
+                !items
+                    .iter()
+                    .any(|item| item.id == *id && item.state != SideQuestionState::Running)
+            });
+        let Some(side_question_id) = running.or(acknowledged) else {
+            self.set_info("no side question is running".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        self.send(
+            PendingIntent::CancelSide { session_id },
+            SessionCommand::CancelSideQuestion { side_question_id },
+        )
+    }
+
     fn cancel_run(&mut self) -> Effects {
         let Some(session_id) = self.focused() else {
             self.set_warning("focused session has no active run".to_owned());
@@ -2250,9 +2499,11 @@ impl App {
         )
     }
 
-    /// The focused session's oldest unanswered tool approval, if any.
+    /// The shown transcript's oldest unanswered tool approval, if any. A side
+    /// view does not render the approval block, so it never captures input
+    /// there; the banner and background chords answer it instead.
     pub(crate) fn pending_approval(&self) -> Option<&ToolCallSnapshot> {
-        let session = self.sessions.get(&self.focused()?)?;
+        let session = self.sessions.get(&self.view().transcript()?)?;
         session.tool_calls.as_ref()?.iter().find(|tool_call| {
             tool_call.state == ToolCallState::AwaitingApproval
                 && !self.answered_approvals.contains(&tool_call.id)
@@ -2335,7 +2586,8 @@ impl App {
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
         let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
-            Some(*id) != self.focused() && !self.sessions[id].live.awaiting_approval.is_empty()
+            Some(*id) != self.view().transcript()
+                && !self.sessions[id].live.awaiting_approval.is_empty()
         }) else {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);
@@ -2773,6 +3025,8 @@ impl App {
                 | PendingIntent::SetEffort { .. }
                 | PendingIntent::SetDelegate { .. }
                 | PendingIntent::Delete { .. }
+                | PendingIntent::Side { .. }
+                | PendingIntent::CancelSide { .. }
                 | PendingIntent::Prune => None,
             })
     }
@@ -2815,19 +3069,20 @@ impl App {
     /// Ctrl-G always lands on the most urgent thing.
     fn next_session_needing_attention(&self) -> Option<SessionId> {
         let waiting = self.sessions_needing_attention();
+        // A side view does not show its source's transcript, so that
+        // session is a valid jump target from there.
+        let shown = self.view().transcript();
         let others: Vec<SessionId> = waiting
             .iter()
             .copied()
-            .filter(|id| Some(*id) != self.focused())
+            .filter(|id| Some(*id) != shown)
             .collect();
         if others.is_empty() {
             return None;
         }
-        // Cycle: the item after the focused one in the priority list, or the
-        // first when the focused session is not in the list.
-        let position = self
-            .focused()
-            .and_then(|focused| waiting.iter().position(|id| *id == focused));
+        // Cycle: the item after the shown one in the priority list, or the
+        // first when the shown session is not in the list.
+        let position = shown.and_then(|shown| waiting.iter().position(|id| *id == shown));
         match position {
             Some(index) => waiting
                 .iter()
@@ -2835,7 +3090,7 @@ impl App {
                 .skip(index + 1)
                 .take(waiting.len())
                 .copied()
-                .find(|id| Some(*id) != self.focused()),
+                .find(|id| Some(*id) != shown),
             None => others.first().copied(),
         }
     }
@@ -2972,7 +3227,11 @@ impl App {
     /// session in transcript order (the order the server persisted them).
     /// From no selection, up starts at the newest call and down at the oldest.
     fn move_transcript_cursor(&mut self, down: bool) -> bool {
-        let Some(session) = self.focused().and_then(|id| self.sessions.get(&id)) else {
+        let Some(session) = self
+            .view()
+            .transcript()
+            .and_then(|id| self.sessions.get(&id))
+        else {
             return false;
         };
         let Some(calls) = session.tool_calls.as_ref() else {
@@ -3006,6 +3265,10 @@ impl App {
         }
         if self.pending_approval().is_some() {
             return ComposerMode::Approval;
+        }
+        // Enter in the side view asks a side question, whatever the run does.
+        if matches!(self.view(), View::SideQuestions(_)) {
+            return ComposerMode::Send;
         }
         let running = self
             .focused()

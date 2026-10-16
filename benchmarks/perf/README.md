@@ -1,7 +1,14 @@
-# Phase 0 Performance Baseline
+# Performance baseline
 
-QQ's Phase 0 performance harness records the current default release artifact
-and deterministic end-to-end runtime paths before extension work begins. Raw
+QQ's performance harness records the current default release artifact and
+deterministic end-to-end runtime paths. Codes such as H0, R4, R5, AC0.1, and
+AC0.2 name the plan slices that introduced or own a measurement: H0 is the
+speed constitution (this harness and its fixture) in
+[`speed-first.md`](../../docs/plans/speed-first.md); R4 (linear, fair durable
+streaming) and R5 (resolved model, context planning, run budgets) are
+readiness milestones from `terminal-bench.md`, recorded in the historical
+speed-first ledger; AC0.1 and AC0.2 are the soak and resource characterization
+now owned by [`reliability.md`](../../docs/plans/reliability.md). Raw
 reports and dependency trees are generated under `target/qq-perf/` and remain
 untracked. `--output` is deliberately restricted to a new `.json` file in that
 directory. Capability-relative create-new file handles stay open for the full
@@ -12,10 +19,12 @@ Fixture version 4 establishes live subscriber attachment with a FIFO store
 barrier and observes fan-out subscribers concurrently. Earlier fixtures used
 a timed readiness assumption and waited for each subscriber's terminal event
 sequentially, which mixed persistence latency into later delivery samples.
-Re-record both baseline and candidate with version 4; version 3 fan-out
-samples are retained as historical evidence and are not comparable to the
-corrected metric. The focused feed worker declares `feed_fixture_version: 2`
-and `h0_fixture_version: 4`.
+Version 5 additionally requires exactly `MAX_TURN_RETRIES + 1` provider entries
+in every always-faulting run. Re-record both baseline and candidate with version
+5; earlier retry receipts do not prove this per-run recovery invariant. Version
+3 fan-out samples remain historical and are not comparable to the corrected
+metric. The focused feed worker declares `feed_fixture_version: 2` and
+`h0_fixture_version: 5`.
 
 ## Record A Baseline
 
@@ -104,6 +113,14 @@ sample. Re-record the reference report on the same quiet machine class and
 review intentional budget changes rather than copying local measurements into
 source control.
 
+The faulting-provider retry metric counts one send plus the run's five retries
+under ADR-0040: 6,000 milli entries per exhausted logical turn. Its absolute
+ceiling is 6,300 milli (the fixture's existing 5% allowance), while the relative
+regression allowance remains zero. The metric retains its average across runs;
+a separate correctness check requires exactly six sends on every sampled run
+and retains each count. Too few attempts lose recovery; too many exceed the
+policy. Either defect in any one run fails the contract.
+
 ## Measurement Inventory
 
 | Area | Metrics | Boundary |
@@ -121,7 +138,7 @@ source control.
 | State/replay | snapshot, runtime cursor replay, authenticated HTTP/SSE reconnect replay | Public runtime and `qq-client` APIs through a known terminal cursor |
 | Tools | `read_file` and one-shot `shell` two-turn runs | Durable prompt through tool dispatch and final completion |
 | Cancellation | cancel call through committed terminal event | Hanging deterministic provider, bounded by the runtime timeout |
-| Retry amplification | provider stream entries per logical turn (`provider_retry_amplification_milli`) | Every fake-provider stream fails before its first event; the provider is the single retry owner, so the runtime must add no sends (gate below 1.05) |
+| Retry amplification | provider stream entries per logical turn (`provider_retry_amplification_milli`) | Every fake-provider stream fails before its first event; ADR-0040 permits the run's five turn retries after the initial entry (6,000 milli entries), with a 6,300-milli absolute ceiling and zero relative regression allowance; provider-internal send retries remain provider-owned |
 | Subscriber fan-out | delta to the slowest of 1, 8, and 32 live subscribers; command ack under each | Committed events reach subscribers from a per-workspace broadcast of the store's own encoding; no store read per event once attached |
 | Busy-workspace ack | `SetSessionModel` acknowledgement with an active run and 500+ committed events | The published summary reads `runs.activity` instead of scanning the event log |
 | Stream scaling | 64 KiB, 512 KiB, 1 MiB and 1 MiB/512 KiB ratio | 1 KiB fake-provider deltas through durable completion |
@@ -131,6 +148,7 @@ source control.
 | Restart reconstruction | open-to-snapshot, replay, temporary RSS | Byte-identical one MiB snapshot and exact event-envelope digest after final close and reopen |
 | Load | ack, completion, batch, spread, throughput, active runs, RSS for 1/10/100 sessions | Concurrent admitted sessions with the default eight-run cap |
 | Autonomous-core diagnostic (AC0.1) | requested/reached turns, executed/settled calls, committed compactions, RSS and DB/WAL samples, work-turn gaps at 10/100/1,000 | Standalone `cargo test -p qq-core --test soak` / `cargo bench -p qq-core --bench turn_overhead`; immediate local provider, public durable runtime, no H0 report or budget entry yet |
+| Controlled turn recording (AC0.2.1) | 30 alternating A/B and 30 same-binary A/A invocation samples at 10/100/1,000, median/p95, pressure and artifact identity | Manually dispatched CI `perf_baseline_sha`; separate build targets and hosted runner; see [perf recording](../../docs/runbooks/perf-recording.md#isolated-turn-diagnostic-recording). Diagnostic only, no H0 registration or automatic budget waiver |
 
 AC0.1 is a characterization baseline, not autonomous-run qualification.
 Known failures are asserted by the default fixtures; explicit completion
@@ -140,7 +158,7 @@ RSS and WAL high-water samples do not claim continuous peaks or fsync counts.
 See the [recording procedure](../../docs/runbooks/perf-recording.md#autonomous-core-characterization-ac0).
 AC0.2 owns the full concurrency/fsync recording and H0 registration; a new
 budget is added only alongside the metric emitter and a comparable fixture
-version. Existing H0 fixture version 4 and budgets are unchanged.
+version. AC0.1 adds no H0 metrics or budgets; the current H0 fixture is version 5.
 
 The deterministic runtime loader carries a known version-2 provider
 request-shape identity. Provider-handoff and completion samples therefore

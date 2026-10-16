@@ -636,9 +636,21 @@ async fn routing_spend_survives_preparation_cancellation_and_recovery() {
                 .await
                 .unwrap();
             let run = store.reserve_next_run(false).await.unwrap().unwrap();
-            assert!(store.record_routing_started(&run).await.unwrap().is_some());
             assert!(
-                store.record_routing_started(&run).await.unwrap().is_none(),
+                store
+                    .record_routing_started(&run, true, None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                store
+                    .record_routing_started(&run, true, None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none(),
                 "a routing request cannot dispatch twice"
             );
             let decision = qq_protocol::RoutingDecision {
@@ -691,7 +703,14 @@ async fn routing_spend_survives_preparation_cancellation_and_recovery() {
                     .await
                     .unwrap();
             }
-            assert!(store.record_routing_started(&run).await.unwrap().is_none());
+            assert!(
+                store
+                    .record_routing_started(&run, true, None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 store
                     .record_routing_completed(&run, decision)

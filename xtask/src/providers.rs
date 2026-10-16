@@ -216,6 +216,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Task {
+    /// Fast affected-only gate: fmt, lint, clippy, and nextest on the
+    /// packages your change can affect. `--full` is the merge gate.
+    Check(crate::check::CheckArgs),
+    /// Repository rules rustfmt and Clippy cannot see (`AGENTS.md` § Rules → enforcers).
+    Lint,
+    /// Drive the real `qq` binary end to end against a loopback fake provider.
+    Smoke(crate::smoke::SmokeArgs),
+    /// Export and recount fixed action-bias observation cohorts without model calls.
+    ActionBias(crate::action_bias::ActionBiasArgs),
     /// Run provider validation tasks.
     Providers(ProvidersArgs),
     /// Run and inspect reproducible Harbor evaluations.
@@ -421,6 +430,10 @@ enum SetupError {
 #[derive(Debug, Error)]
 enum XtaskError {
     #[error(transparent)]
+    ActionBias(#[from] crate::action_bias::ActionBiasError),
+    #[error("action-bias qualification task stopped unexpectedly")]
+    ActionBiasTask(#[source] tokio::task::JoinError),
+    #[error(transparent)]
     Eval(#[from] crate::eval::EvalError),
     #[error(transparent)]
     Perf(#[from] crate::perf::PerfError),
@@ -428,6 +441,14 @@ enum XtaskError {
     Release(#[from] crate::release::ReleaseError),
     #[error(transparent)]
     Homebrew(#[from] crate::homebrew::HomebrewError),
+    #[error(transparent)]
+    Check(#[from] crate::check::CheckError),
+    #[error("check or lint task stopped unexpectedly")]
+    CheckTask(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Lint(#[from] crate::lint::LintError),
+    #[error(transparent)]
+    Smoke(#[from] crate::smoke::SmokeError),
     #[error("choose one or more --provider values or --all, but not both")]
     InvalidSelection,
     #[error("live provider checks require {LIVE_OPT_IN}=1")]
@@ -458,6 +479,22 @@ pub async fn run() -> ExitCode {
 
 async fn try_run(cli: Cli) -> Result<(), XtaskError> {
     match cli.command {
+        Task::Check(args) => tokio::task::spawn_blocking(move || crate::check::run(args))
+            .await
+            .map_err(XtaskError::CheckTask)?
+            .map_err(Into::into),
+        Task::Lint => tokio::task::spawn_blocking(|| crate::lint::run(&crate::smoke::root()))
+            .await
+            .map_err(XtaskError::CheckTask)?
+            .map(|_| ())
+            .map_err(Into::into),
+        Task::Smoke(args) => crate::smoke::run(args).await.map_err(Into::into),
+        Task::ActionBias(args) => {
+            tokio::task::spawn_blocking(move || crate::action_bias::run(args))
+                .await
+                .map_err(XtaskError::ActionBiasTask)?
+                .map_err(Into::into)
+        }
         Task::Providers(args) => match args.command {
             ProvidersCommand::Check(args) => match args.mode {
                 CheckMode::Offline => run_offline().await,
@@ -918,6 +955,53 @@ fn git_commit() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ab6_qualification_commands_require_an_explicit_cohort_and_files() {
+        use clap::Parser;
+        assert!(
+            super::Cli::try_parse_from([
+                "cargo xtask",
+                "action-bias",
+                "export",
+                "--store",
+                "store.sqlite",
+                "--start",
+                "2026-09-13",
+                "--end",
+                "2026-10-13",
+                "--cutoff",
+                "2026-10-14",
+                "--output",
+                "cohort.jsonl"
+            ])
+            .is_ok()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "cargo xtask",
+                "action-bias",
+                "recount",
+                "--input",
+                "cohort.jsonl",
+                "--output",
+                "receipt.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "cargo xtask",
+                "action-bias",
+                "export",
+                "--store",
+                "store.sqlite",
+                "--output",
+                "cohort.jsonl"
+            ])
+            .is_err()
+        );
+    }
+
     use std::collections::BTreeSet;
 
     use futures_util::stream;
