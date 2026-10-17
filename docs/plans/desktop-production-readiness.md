@@ -1,6 +1,6 @@
 # Desktop production readiness
 
-Status: implementation complete; release and live qualification in progress (2026-10-17).
+Status: implemented locally and release built; connected live qualification blocked (2026-10-17).
 Ledger: [receipts](progress/desktop-production-readiness.md).
 Constraints: ADR-0062, the shared native reducer and local server, separate
 desktop Cargo workspace, no push or PR mutations. Preserve the pre-existing
@@ -12,7 +12,8 @@ Source inspection on 2026-10-17 after `git pull --ff-only` reported all five
 clones current. Paths below are relative to `../refs/<column>/`; QQ paths
 are relative to this checkout. P = present, L = partial, A = absent in the
 inspected surface. Terminal features do not establish a desktop capability.
-Codex revision ce0323f2; Gemini ed96faed; Crush 12f96b4a.
+Codex revision ce0323f2; Goose bfcc6ee; OpenCode 8c173a8;
+Gemini ed96faed; Crush 12f96b4a.
 
 | Feature | QQ desktop at baseline | QQ TUI | Codex | Goose | OpenCode | Gemini CLI | Crush (ideas only) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
