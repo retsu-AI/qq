@@ -295,7 +295,14 @@ impl plan::CompiledAgentPlan {
             )
         });
         let plan = Arc::clone(self);
-        let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = NEXT_DIAGNOSTIC_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let current_span = tracing::Span::current();
+        let run_span = if current_span.metadata().is_some_and(|metadata| {
+            metadata.target() == "qq::diagnostic" && metadata.name() == "run"
+        }) {
+            current_span
+        } else {
+            tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = next_diagnostic_run())
+        };
         let run_parent = run_span.clone();
         let events: RuntimeStream = Box::pin(stream! {
 

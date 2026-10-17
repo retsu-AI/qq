@@ -405,6 +405,7 @@ impl SessionRuntime {
         }
     }
 
+    #[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
     async fn execute_side_question(
         &self,
         launch: SideLaunch,
