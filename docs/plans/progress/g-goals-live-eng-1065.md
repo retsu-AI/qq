@@ -1,11 +1,12 @@
 # G5 — subscription-only live goal evaluation
 
-Status: six trials settled; the seventh is active. The sixth has final-runtime
-source and admission isolation evidence, but stopped after 30.5 minutes. **G5
-remains open** because no current-runtime trial has met the single multi-hour
-duration requirement. Production CLI endurance work is in progress. ENG-1065 / ENG-809.
+Status: seven evaluation trials settled; an eighth admission was aborted for a
+recorder error. The ninth is active. **G5 remains open**: the seventh finished
+its useful local task in 104.8 minutes without compactions, so it meets neither
+live duration nor compaction acceptance. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
-stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
+stores remain outside Git under `/tmp/qq-goal-delivery-20261015/` and
+`/tmp/qq-goal-delivery-20261017/`.
 
 ## First trial source and authorization
 
@@ -476,3 +477,97 @@ long internal-fixture captures cannot prove that boundary. Work stops when done
 or genuinely blocked; no padding, repeated passing arms, synthetic outer
 compactions or combining durations across trials. G5 stays open pending an
 independent terminal audit and publication of the supported result.
+
+
+## Seventh trial — terminal result
+
+The unchanged final-runtime trial settled **budget_exhausted / exit 8** at its
+original eight-run cap after **6,287.074 goal-event seconds (104.8 minutes)**.
+There were 133 completed model turns, one model audit and no completed compactions.
+All 11 checklist items were marked done. Usage exactly matches durable counters:
+9,979,400 fresh input + 6,103,040 cache-read input + 63,712 output tokens;
+cache-write 0. Estimated cost is null; isolated subscription routing establishes
+paid API spend USD 0, while subscription value is unknown.
+
+The hardened audit passes every check except the 7,200-second duration and three
+real compactions. Runtime, admission isolation, identity, unchanged bounds,
+complete terminal stream/process agreement and usage all pass. **This trial does
+not qualify G5.** No resume, limit extension or combining trial durations occurred.
+
+```sh
+python3 -B benchmarks/goals/audit_live.py \
+  /tmp/qq-goal-delivery-20261017/g5-cli-endurance \
+  e84e3552ad567b72f4c72178b02ba81a9edc89e5
+```
+
+Useful local task commit `5a6b5468` retains both production CLI captures, each
+independently audited to 2,000 work turns, 5,000 unique actual effects, two process
+kills, three reaps and three 600-second refusing-provider windows. Public/candidate
+elapsed times are 2,580.519 / 2,560.325 seconds; both reached achieved with one
+independent native check. These are recovery observations, not performance or
+compaction qualification. Each frozen fake produced prohibited checkpoint and
+compaction suggestions; the runtime refused them without executing effects.
+Both captures have zero completed compactions and one failed scripted compaction.
+Original raw data and failed audit attempts remain unchanged.
+
+Root reproduced and repaired the fake separately with failing-then-passing tests:
+explicit `tool_choice: none`, compaction instructions retaining cached tool schemas,
+and tool-free runtime checkpoints. The repaired fixture's short-outage real CLI
+pilot achieves 2,000 turns / 5,000 effects with one completed compaction and zero
+compaction tool suggestions. A separate checkpoint pilot achieves 360 turns /
+900 effects with zero checkpoint denials. Twelve combined fixture/auditor tests
+pass. These local fixture fixes do not change public QQ runtime code or qualify
+outer G5. A full statistical/resource comparison remains separate and incomplete.
+
+## Eighth admission — recorder error; excluded
+
+A brief admission on the same public runtime was stopped after 47 seconds when
+root found that a configuration-fragment loop shadowed the launcher's expected
+binary-hash variable. The executable had passed the pre-launch hash assertion,
+but `g5-launch.json` recorded a configuration string in `binary_sha256`. The
+original receipt is preserved under `g5-bounded-foreground/`, with a separate
+aborted-admission record. It was not repaired in place or counted as qualified.
+Seven model turns were observed; Ctrl-C settled paused/user with exit 130. Its
+small working-context attempt also refused one nonshrinking compaction. No code
+changes from that admission were retained. No old goal was resumed or extended.
+
+## Ninth trial — bounded foreground comparison admission
+
+Started **2026-10-17T03:24:32.129025+00:00** on the same immutable public
+`e84e3552` executable and verified SHA-256
+`5b7635e2b7649510803f4f0552255fb5ebd75b1e12c195e25af24e1595475040`.
+The launch receipt and pre-admission isolation snapshot both record the verified
+hash. Private evidence is under
+`/tmp/qq-goal-delivery-20261017/g5-bounded-foreground-corrected/`.
+Task source begins at `559e67fc3d626bc58a0f799da52fb672a335a9b6`.
+
+The fresh home was initialized with the authorized OAuth credential files,
+reviewed project trust/author configuration and explicit evaluation settings.
+No prior session state was copied. Actual effective configuration is hashed
+with the CLI model override applied. Exact route remains subscription-only
+`openai-codex/gpt-6.1-sol`; API-key environment names, paid fallback, Jev and
+delegation are absent/disabled. The isolation snapshot is fsynced before admission.
+
+Declared limits are 2.5 hours / 64 charged runs, each bounded to 8 model turns,
+375,000 tokens and 30 minutes. Model-turn/token aggregate ceilings remain
+512 / 24,000,000, matching the prior 8 × 64 / 8 × 3,000,000 envelope; the absolute
+deadline and per-run duration are lower. The working request ceiling is 49,152
+with 8,192 output tokens. This is an explicit resource ceiling below the shipped
+272K catalog capacity. Small run units make earlier units summarizable; the
+48K ceiling gives bootstrap reads more room than the aborted 32K attempt.
+No predecessor limits or receipts change.
+
+The real remaining task builds the missing final-source **production CLI**
+A/A/A/B measurement pipeline and collects its registered comparison under the
+fixed allowance. Earlier comparison data used an internal fixture and older
+integrated source. Full qualification still needs the declared matched samples
+and other prerequisites; partial data never becomes H0 acceptance. No long
+passing outage arm is repeated merely for the small fake-provider fixes.
+External work is bounded to a recorded cutoff before the goal deadline, with
+owned-process cleanup. No padding, dummy context, manual outer compactions or
+new tasks to occupy time.
+
+The supervisor identity, authorized model turns and first real compaction are
+verified. All 14 checklist identities survive that compaction; the goal recovered
+from an initial context refusal and continued productive work. **The trial is
+active; terminal duration, compactions, accounting and publication remain open.**

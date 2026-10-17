@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Sixth final-runtime trial passes isolation/source but misses duration; seventh active; subscription only, no paid API fallback |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Seventh misses duration/compactions; eighth aborted for recorder error; ninth active; subscription only, no paid API fallback |
 
 ## Entries
 
@@ -1206,3 +1206,27 @@ publication and thread resolution remain pending.
   internal-fixture captures. No padding, manufactured compactions, combining trial
   durations or gate waiver. #332 stays draft and ENG-1065 In Progress. Terminal
   audit and publication remain required; the delivery goal is active. No merge.
+
+
+### 2026-10-17 — seventh closed; corrected bounded admission active
+
+- Seventh final-runtime trial settles budget_exhausted/exit 8 at the original
+  eight-run cap: 6,287.074 event seconds, 133 model turns, zero compactions and
+  one audit. All 11 checklist states are done. Usage: 9,979,400 fresh input +
+  6,103,040 cache-read input + 63,712 output; estimated/subscription value unknown,
+  isolated paid API spend USD 0. Only duration/compaction acceptance fails.
+- Useful local commit `5a6b5468` retains independently audited public/candidate
+  production captures (2,000 turns, 5,000 effects, three real outages, two kills
+  each), with fake-provider limitations explicit. Separate fixture repairs pass
+  twelve tests and real compaction/checkpoint pilots. No public runtime change.
+- Eighth admission is preserved as aborted: a recorder variable collision wrote
+  the wrong hash field; stopped after 47 seconds, paused/user/exit 130. No receipt
+  was corrected into a pass and no old limits were reset or extended.
+- Ninth admission uses unchanged public `e84e3552` / hash `5b7635e2`, with correct
+  hash and actual effective-config/credential isolation recorded first. Fresh
+  limits: 2.5h / 64 runs; each 8 turns / 375K tokens / 30min, 48K working context.
+  Aggregate model/token bounds remain 512 / 24M. First real compaction retains
+  all 14 checklist identities; goal is active after recovering a context refusal.
+- Remaining useful work is final-source foreground comparison, not another PR.
+  #332 remains draft, ENG-1065 In Progress; terminal qualification and publication
+  are still required. No paid fallback, padded time, manual compaction or merge.
