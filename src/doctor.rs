@@ -468,11 +468,11 @@ fn credential_check(
                 }
             }
             config::HttpCredential::XAi { api_key, profile } => match api_key {
-                Some(secret) => reference(secret, Some(config::XAI_CREDENTIAL_ENDPOINT)),
+                Some(secret) => reference(secret, Some(auth::XAI_CREDENTIAL_ENDPOINT)),
                 None => stored_then_env(
                     &format!("xai/{}", profile.as_deref().unwrap_or("default")),
                     &["XAI_API_KEY"],
-                    Some(config::XAI_CREDENTIAL_ENDPOINT),
+                    Some(auth::XAI_CREDENTIAL_ENDPOINT),
                 ),
             },
         },

@@ -25,7 +25,7 @@ use qq_provider::{
 };
 
 pub(super) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub(crate) const CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
+use super::OPENAI_CODEX_CREDENTIAL_ENDPOINT as CREDENTIAL_ENDPOINT;
 
 const ISSUER: &str = "https://auth.openai.com";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";

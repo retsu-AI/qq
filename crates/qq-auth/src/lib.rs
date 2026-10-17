@@ -35,6 +35,11 @@ use oauth::OAuthProvider;
 pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
 
+/// Credential audience (endpoint binding) of stored OpenAI Codex credentials.
+pub const OPENAI_CODEX_CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
+/// Credential audience of the built-in xAI deployment, for API keys and OAuth.
+pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
+
 pub const KEYRING_SERVICE: &str = "dev.qq";
 pub const MAX_CREDENTIAL_NAME_LEN: usize = 128;
 pub const MAX_STATE_BYTES: usize = 1024 * 1024;
