@@ -1,9 +1,9 @@
 # G5 — subscription-only live goal evaluation
 
-Status: five trials settled. The fifth records132.5 minutes and20 compactions
-on the earlier4851fc2e runtime. **G5 for the final stacked runtime remains open**;
-admission-time credential-isolation evidence is also missing from that receipt.
-Its useful continuation measurement task remains incomplete. ENG-1065 / ENG-809.
+Status: six trials settled; the seventh is active. The sixth has final-runtime
+source and admission isolation evidence, but stopped after 30.5 minutes. **G5
+remains open** because no current-runtime trial has met the single multi-hour
+duration requirement. Production CLI endurance work is in progress. ENG-1065 / ENG-809.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/`.
 
@@ -400,3 +400,79 @@ check/smoke were pending. Earlier test failures and excluded captures remain
 retained. No complete resource comparison, H0, storage/fsync budget, continuation
 acceptance or task implementation readiness is claimed. ENG-1058 remains open;
 G5 live acceptance does not waive those separate requirements.
+
+
+## Sixth trial — final-runtime admission and terminal result
+
+Started **2026-10-17T00:33:09.120296+00:00** on final stacked runtime
+`e84e3552ad567b72f4c72178b02ba81a9edc89e5`, frozen binary SHA-256
+`5b7635e2b7649510803f4f0552255fb5ebd75b1e12c195e25af24e1595475040`.
+The binary matches the existing 8/8 smoke receipt and its embedded version.
+Task source starts at `8e6d9572a475ccef4fcf9f1212486f225664ee78`, a separate
+local continuation candidate. Earlier trial bounds and receipts are unchanged.
+
+Before admission, the isolated home contained only `openai-codex/default` OAuth
+credentials, with metadata identifying the ChatGPT subscription endpoint. The
+launch environment has no API-key variables; paid fallback, Jev routing/advisories,
+delegation and optional model audits are disabled. The secret-free snapshot was
+fsynced before launch and embedded in the launch receipt. Credentials stay private;
+no retrospective attestation is added to an old trial.
+
+Original limits were a 4-hour deadline and 8 charged runs, each bounded to 64 model
+turns, 3,000,000 tokens and 60 minutes; context 65,536 / output 8,192. The useful
+local task integrated final foreground fixes and finished retained matched
+measurement analysis. No padding, manufactured compactions or resume occurred.
+
+The trial settled **blocked / repeated_failure**, process exit 7, after
+**1,832.913 goal-event seconds (30.5 minutes)**. Its 139 model turns and 12 real
+compactions retain all 10 checklist identities; final states are 7 done, 2 in
+progress and 1 pending. Four runs were charged: one 64-turn budget outcome, then
+three explicit context-window/summary policy failures. Limits stayed unchanged.
+
+The hardened audit passes runtime source/hash/version, subscription billing and
+admission-time isolation, workspace/session/goal identity, compactions, checklist
+retention, complete final JSONL/exit agreement and exact usage. Usage: 5,491,604
+fresh input + 936,448 cache-read input + 61,953 output tokens; cache-write 0.
+Estimated cost is null; paid API spend is USD 0 on the isolated subscription route;
+subscription value is unknown. **Only the 7,200-second duration check fails; this
+trial does not qualify G5.** Reproduce with the checked-in auditor:
+
+```sh
+python3 -B benchmarks/goals/audit_live.py \
+  /tmp/qq-goal-delivery-20261017/g5-final \
+  e84e3552ad567b72f4c72178b02ba81a9edc89e5
+```
+
+The separate `g5-terminal-audit-v2.json` preserves the original receipts. Useful
+local runtime commit `b5b93d1b` passed 2,833 workspace tests, with 16 deliberate
+skips, and 211 minimal-provider tests; binary smoke passed 8/8. Analysis/report
+commit `ed888d96` preserves the matched-analysis correction and final review;
+its analysis tests pass 8/8. These are local candidate proofs, not another public
+PR or performance acceptance. The previous long captures exercise an internal
+fixture, leaving the production CLI endurance boundary untested.
+
+## Seventh trial — production CLI endurance admission
+
+Started at epoch **1792199637.2653844**, using the same frozen public runtime and
+binary hash above. Private evidence is under
+`/tmp/qq-goal-delivery-20261017/g5-cli-endurance/`. The actual supervisor/start-time
+identity and completed model turns are verified; the trial is active, so no
+terminal or duration qualification is claimed.
+
+The exact route remains subscription-only `openai-codex/gpt-6.1-sol`, with no
+paid fallback. A fresh isolated home and credential/environment snapshot were
+recorded before admission. This fresh evaluation uses the shipped Codex catalog's
+272,000-token context window (`crates/qq-config/src/models.rs`), replacing the
+previous evaluation's artificial 65,536-token override. The failed trial is not
+modified or resumed. Deadline/run caps remain 4 hours / 8 runs; each run remains
+bounded to 64 turns, 3,000,000 tokens and 60 minutes; output cap remains 8,192.
+
+The useful task is a source-bound production CLI endurance comparison of public
+`e84e3552` and the integrated continuation candidate. It begins at task source
+`ed888d96b57a26688765b75e2340512662e9b34a`: reconcile prior reports, implement and
+negatively test a common bounded loopback harness, then capture actual foreground
+commands, faults, durable reopen, effects, budgets and terminal results. Existing
+long internal-fixture captures cannot prove that boundary. Work stops when done
+or genuinely blocked; no padding, repeated passing arms, synthetic outer
+compactions or combining durations across trials. G5 stays open pending an
+independent terminal audit and publication of the supported result.

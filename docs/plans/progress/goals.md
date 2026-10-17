@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Historical pinned trial only; current runtime and admission-time isolation evidence remain unqualified; subscription only, no paid API fallback |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Sixth final-runtime trial passes isolation/source but misses duration; seventh active; subscription only, no paid API fallback |
 
 ## Entries
 
@@ -1184,3 +1184,25 @@ publication and thread resolution remain pending.
   hardened audit against final runtime returns false. Original receipt preserved.
 - Publish fixes and resolve all five findings after the gate. No new live run,
   paid API request, runtime source change or merge in this correction.
+
+
+### 2026-10-17 — final-runtime evaluation resumed; sixth trial closed
+
+- Sixth trial on frozen `e84e3552` settled blocked/exit 7 after 1,832.913
+  goal-event seconds, 139 turns, 12 compactions and 4 charged runs. All 10
+  checklist identities survive. Hardened audit passes every check except the
+  7,200-second duration gate, including source, admission isolation and accounting.
+- Three context-window policy failures ended the goal. Usage: 5,491,604 fresh
+  input + 936,448 cache-read input + 61,953 output; paid API USD 0, estimated
+  cost/subscription value unknown. Original caps and receipts are preserved.
+- Useful local integration/analysis commits `b5b93d1b` / `ed888d96` retain full
+  candidate gate/smoke/analysis evidence. This is not a G5 or performance pass.
+- Seventh trial admitted at epoch 1792199637.2653844 on the same public runtime,
+  with isolation evidence captured first. Subscription model/fallback restriction,
+  4-hour / 8-run caps and per-run 64-turn / 3M-token / 60-minute bounds remain.
+  Fresh context uses the shipped 272K model catalog instead of the prior 64K
+  evaluation override; no failed trial is resumed or relabelled.
+- Real remaining work covers the production CLI endurance boundary missing from
+  internal-fixture captures. No padding, manufactured compactions, combining trial
+  durations or gate waiver. #332 stays draft and ENG-1065 In Progress. Terminal
+  audit and publication remain required; the delivery goal is active. No merge.
