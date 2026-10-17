@@ -28,58 +28,40 @@
   color-scheme: dark;
 }
 
+@utility light-palette {
+  --bg: #ffffff;
+  --bg-sidebar: #f6f7f9;
+  --bg-raised: #f3f4f6;
+  --bg-hover: #eceef2;
+  --bg-active: #e3e7ef;
+  --border: #e4e6ea;
+  --border-strong: #d3d7de;
+  --text: #1b1d21;
+  --text-muted: #5f6570;
+  --text-faint: #8b919b;
+  --accent: #3d6df2;
+  --accent-strong: #2c5be0;
+  --accent-soft: rgb(61 109 242 / 0.1);
+  --solid: #2c5be0;
+  --solid-hover: #234fc9;
+  --ok: #1f9d61;
+  --warn: #b7791f;
+  --warn-soft: rgb(183 121 31 / 0.1);
+  --danger: #d64545;
+  --danger-soft: rgb(214 69 69 / 0.08);
+  --diff-add: rgb(31 157 97 / 0.12);
+  --diff-del: rgb(214 69 69 / 0.1);
+  color-scheme: light;
+}
+
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg: #ffffff;
-    --bg-sidebar: #f6f7f9;
-    --bg-raised: #f3f4f6;
-    --bg-hover: #eceef2;
-    --bg-active: #e3e7ef;
-    --border: #e4e6ea;
-    --border-strong: #d3d7de;
-    --text: #1b1d21;
-    --text-muted: #5f6570;
-    --text-faint: #8b919b;
-    --accent: #3d6df2;
-    --accent-strong: #2c5be0;
-    --accent-soft: rgb(61 109 242 / 0.1);
-    --solid: #2c5be0;
-    --solid-hover: #234fc9;
-    --ok: #1f9d61;
-    --warn: #b7791f;
-    --warn-soft: rgb(183 121 31 / 0.1);
-    --danger: #d64545;
-    --danger-soft: rgb(214 69 69 / 0.08);
-    --diff-add: rgb(31 157 97 / 0.12);
-    --diff-del: rgb(214 69 69 / 0.1);
-    color-scheme: light;
+    @apply light-palette;
   }
 }
 
 :root[data-theme="light"] {
-    --bg: #ffffff;
-    --bg-sidebar: #f6f7f9;
-    --bg-raised: #f3f4f6;
-    --bg-hover: #eceef2;
-    --bg-active: #e3e7ef;
-    --border: #e4e6ea;
-    --border-strong: #d3d7de;
-    --text: #1b1d21;
-    --text-muted: #5f6570;
-    --text-faint: #8b919b;
-    --accent: #3d6df2;
-    --accent-strong: #2c5be0;
-    --accent-soft: rgb(61 109 242 / 0.1);
-    --solid: #2c5be0;
-    --solid-hover: #234fc9;
-    --ok: #1f9d61;
-    --warn: #b7791f;
-    --warn-soft: rgb(183 121 31 / 0.1);
-    --danger: #d64545;
-    --danger-soft: rgb(214 69 69 / 0.08);
-    --diff-add: rgb(31 157 97 / 0.12);
-    --diff-del: rgb(214 69 69 / 0.1);
-    color-scheme: light;
+  @apply light-palette;
 }
 
 @theme inline {

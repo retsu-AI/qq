@@ -12,9 +12,11 @@ use qq_protocol::{
     SessionId, SessionStatus, TokenUsage, ToolCallSnapshot, ToolCallState,
 };
 use serde::Serialize;
+#[cfg(test)]
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionDto {
     Starting,
@@ -25,21 +27,23 @@ pub enum ConnectionDto {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
 pub struct NoticeDto {
-    #[ts(type = "\"info\" | \"warning\" | \"error\"")]
+    #[cfg_attr(test, ts(type = "\"info\" | \"warning\" | \"error\""))]
     pub level: &'static str,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
 pub struct ModelDto {
     pub id: String,
     pub provider: String,
     pub model: String,
     pub name: Option<String>,
     pub context_window: Option<u32>,
-    #[ts(type = "string[]")]
+    #[cfg_attr(test, ts(type = "string[]"))]
     pub reasoning_efforts: Vec<qq_protocol::ReasoningEffort>,
 }
 
@@ -66,19 +70,20 @@ pub fn model_id(option: &ModelOption) -> String {
 }
 
 /// One row of the session list.
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
 pub struct SessionRowDto {
-    #[ts(type = "string")]
+    #[cfg_attr(test, ts(type = "string"))]
     pub id: SessionId,
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub parent_id: Option<SessionId>,
     pub depth: usize,
     pub title: String,
-    #[ts(type = "Group")]
+    #[cfg_attr(test, ts(type = "Group"))]
     pub group: &'static str,
-    #[ts(type = "SessionStatus")]
+    #[cfg_attr(test, ts(type = "SessionStatus"))]
     pub status: SessionStatus,
-    #[ts(type = "RunActivity | null")]
+    #[cfg_attr(test, ts(type = "RunActivity | null"))]
     pub activity: Option<RunActivity>,
     pub active_tool: Option<String>,
     pub tail: String,
@@ -86,13 +91,14 @@ pub struct SessionRowDto {
     pub awaiting_approval: usize,
     pub queued_prompts: u16,
     pub model: Option<String>,
-    #[ts(type = "number")]
+    #[cfg_attr(test, ts(type = "number"))]
     pub updated_at_ms: u64,
     pub failed: bool,
 }
 
 /// Everything the window shows for one open project.
-#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(test, derive(TS))]
 pub struct ProjectStateDto {
     pub project_id: String,
     pub path: String,
@@ -101,7 +107,7 @@ pub struct ProjectStateDto {
     pub error: Option<String>,
     pub owns_server: bool,
     pub sessions: Vec<SessionRowDto>,
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub focused: Option<SessionId>,
     pub transcript: Option<TranscriptDto>,
     pub models: Vec<ModelDto>,
@@ -109,50 +115,55 @@ pub struct ProjectStateDto {
     pub can_steer: bool,
     pub can_interrupt: bool,
     pub profiles: Vec<String>,
-    #[ts(
-        type = "Array<{ name: string; generation: number; tool_count: number; ready: boolean; message?: string }>"
+    #[cfg_attr(
+        test,
+        ts(
+            type = "Array<{ name: string; generation: number; tool_count: number; ready: boolean; message?: string }>"
+        )
     )]
     pub tool_hosts: Vec<qq_protocol::ToolHostSummary>,
     pub notice: Option<NoticeDto>,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(test, derive(TS))]
 pub struct TranscriptDto {
-    #[ts(type = "string")]
+    #[cfg_attr(test, ts(type = "string"))]
     pub session_id: SessionId,
     pub title: String,
     pub loading: bool,
-    #[ts(type = "SessionStatus")]
+    #[cfg_attr(test, ts(type = "SessionStatus"))]
     pub status: SessionStatus,
-    #[ts(type = "RunActivity | null")]
+    #[cfg_attr(test, ts(type = "RunActivity | null"))]
     pub activity: Option<RunActivity>,
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub active_run_id: Option<RunId>,
     pub model: Option<String>,
-    #[ts(type = "ApprovalMode")]
+    #[cfg_attr(test, ts(type = "ApprovalMode"))]
     pub approval_mode: ApprovalMode,
-    #[ts(type = "string")]
+    #[cfg_attr(test, ts(type = "string"))]
     pub profile: qq_protocol::AgentProfileId,
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub reasoning_effort: Option<qq_protocol::ReasoningEffort>,
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub approval_delegate: Option<qq_protocol::ApprovalDelegate>,
-    #[ts(type = "number | null")]
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub context_tokens: Option<u64>,
     pub context_window: Option<u32>,
-    #[ts(type = "number | null")]
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub cost_usd_nanos: Option<u64>,
     pub queued_prompts: u16,
     pub items: Vec<ItemDto>,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(test, derive(TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemDto {
     User {
         id: String,
         text: String,
-        #[ts(type = "MessageState")]
+        #[cfg_attr(test, ts(type = "MessageState"))]
         state: MessageState,
         steering: bool,
     },
@@ -160,7 +171,7 @@ pub enum ItemDto {
         id: String,
         text: String,
         refusal: String,
-        #[ts(type = "MessageState")]
+        #[cfg_attr(test, ts(type = "MessageState"))]
         state: MessageState,
         truncated: bool,
     },
@@ -172,56 +183,62 @@ pub enum ItemDto {
     Tool(Box<ToolDto>),
     RunEnd {
         id: String,
-        #[ts(type = "RunOutcome | null")]
+        #[cfg_attr(test, ts(type = "RunOutcome | null"))]
         outcome: Option<RunOutcome>,
-        #[ts(type = "number | null")]
+        #[cfg_attr(test, ts(type = "number | null"))]
         duration_ms: Option<u64>,
-        #[ts(type = "TokenUsage | null")]
+        #[cfg_attr(test, ts(type = "TokenUsage | null"))]
         usage: Option<TokenUsage>,
-        #[ts(type = "number | null")]
+        #[cfg_attr(test, ts(type = "number | null"))]
         cost_usd_nanos: Option<u64>,
         tool_calls: u32,
     },
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(test, derive(TS))]
 pub struct ToolDto {
     pub id: String,
-    #[ts(type = "string")]
+    #[cfg_attr(test, ts(type = "string"))]
     pub run_id: RunId,
     pub name: String,
     pub arguments: String,
-    #[ts(type = "ToolCallState")]
+    #[cfg_attr(test, ts(type = "ToolCallState"))]
     pub state: ToolCallState,
     pub result: Option<String>,
     pub is_error: bool,
     pub diff: Option<DiffDto>,
     pub live_output: Option<String>,
-    #[ts(type = "number | null")]
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub duration_ms: Option<u64>,
     pub settled: Option<String>,
     pub approval: Option<ApprovalDto>,
     /// The child session a `spawn_agent` call created, for linking.
-    #[ts(type = "string | null")]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub child_session: Option<SessionId>,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
 pub struct DiffDto {
     pub path: String,
     pub diff: String,
 }
 
 /// What a held call would do, as the server described it.
-#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(test, derive(TS))]
 pub struct ApprovalDto {
-    #[ts(type = "ShellPreview | null")]
+    #[cfg_attr(test, ts(type = "ShellPreview | null"))]
     pub shell: Option<serde_json::Value>,
-    #[ts(type = "{ path: string; diff: string } | null")]
+    #[cfg_attr(test, ts(type = "{ path: string; diff: string } | null"))]
     pub edit: Option<serde_json::Value>,
-    #[ts(type = "{ questions: Question[] } | null")]
+    #[cfg_attr(test, ts(type = "{ questions: Question[] } | null"))]
     pub question: Option<serde_json::Value>,
-    #[ts(type = "{ host: string; url: string; method?: string } | null")]
+    #[cfg_attr(
+        test,
+        ts(type = "{ host: string; url: string; method?: string } | null")
+    )]
     pub fetch: Option<serde_json::Value>,
     pub escalation: Option<String>,
     /// Whether "for session"/"for workspace" grants can be offered.
