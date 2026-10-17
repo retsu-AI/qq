@@ -16,6 +16,7 @@ to the current owner's ledger; old slice IDs and tracker issues remain valid.
 | [Jev](jev.md) | JV precision/lifecycle/qualification |
 | [multi-surface](multi-surface-clients.md) | Remote readiness and clients |
 | [v0.1.7 release](release-0.1.7.md) | Publication verification receipt still pending; bump/guide pins merged |
+| [auth providers](auth-providers.md) | AP slices: qq-auth/provider credential refactor |
 | [root](root.md) | Coordination, shared files, ADR allocation |
 | [decisions](decisions-needed.md) | Decisions and conservative defaults |
 | [performance gates](performance-gates.md) | Current measurement rules and failed/unqualified receipts |
