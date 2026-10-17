@@ -86,3 +86,20 @@ natively in the Tauri process, with a TypeScript UI that only renders.
   the app; session list over a live connection; signed-out and trust prompts;
   trust recorded identically to `qq trust` (`qq doctor`); NSIS installer
   carrying `qq.exe` as a sidecar.
+
+## Implementation evidence — desktop readiness (2026-10-17)
+
+The native project actor retains qq-client's reducer and protocol driver. Desktop
+commands now include explicit run steering/interruption, session options and
+context actions. File context reuses qq-core::mentions on a bounded blocking pool.
+Tauri plugins enforce one desktop instance and deliver optional native notifications
+from reducer Attention effects while unfocused. UI preferences and local session
+aliases/archive remain desktop-only, explicitly labelled as such.
+
+view.rs DTOs derive TypeScript declarations through ts-rs, with a checked-in drift
+test and explicit mappings for embedded protocol vocabulary. TanStack React Virtual
+mounts a measured transcript window and retains focused controls. The independent
+Windows desktop workflow checks the separate workspace and can build NSIS on manual
+dispatch. Signing and automatic updates still require release-owner inputs; the
+README documents the signing procedure. This evidence does not change the Decision
+or claim a new web/remote protocol.
