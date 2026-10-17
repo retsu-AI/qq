@@ -20,15 +20,19 @@ tauri-build = { version = "2", features = [] }
 qq-auth = { path = "../../../crates/qq-auth" }
 qq-client = { path = "../../../crates/qq-client" }
 qq-config = { path = "../../../crates/qq-config" }
+qq-core = { path = "../../../crates/qq-core" }
 qq-protocol = { path = "../../../crates/qq-protocol" }
 qq-server = { path = "../../../crates/qq-server" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
+ts-rs = { version = "11", features = ["serde-json-impl"] }
 
 # Mirrors the engine's release profile (see the root Cargo.toml).
 [profile.release]

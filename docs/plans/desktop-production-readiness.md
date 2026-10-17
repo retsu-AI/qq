@@ -1,6 +1,6 @@
 # Desktop production readiness
 
-Status: analysis complete; implementation in progress (2026-10-17).
+Status: implementation complete; release and live qualification in progress (2026-10-17).
 Ledger: [receipts](progress/desktop-production-readiness.md).
 Constraints: ADR-0062, the shared native reducer and local server, separate
 desktop Cargo workspace, no push or PR mutations. Preserve the pre-existing
@@ -65,6 +65,11 @@ sources/tests plus this plan and ledger, except the explicit shared requests.
 | MCP management edits remain through existing configuration | Capabilities expose status, but no safe mutation/trust/reload protocol. Display status and explain configuration path; do not fabricate success | Add configuration workflow after separately designed trust-safe mutation API |
 | Keep CLI-only developer commands outside desktop palette | Palette lists implemented desktop actions; shell execution of arbitrary CLI commands is not a substitute for typed controls | Add typed commands individually |
 | No separate Linear/PR writes | User explicitly prohibits pushing/opening/editing PRs; this local branch and ledger track the work | Human publishes after review |
+| Existing-session pickers; configured defaults for new sessions | Existing typed commands change a session. Avoid inventing draft-session configuration or silently overriding project defaults | Add explicit create options when the shared client supports them |
+| Defer tray, arbitrary key remapping and richer diff navigation (DP9) | Existing inline diffs, window lifecycle and documented shortcuts cover the current workflow; these P2 additions need separate interaction design and qualification | Independent desktop-only slices |
+| Isolate connected qualification from real projects | Use a throwaway project and a NoAuth loopback provider; local test-store handling stays outside git | Repeat the same fixture workflow in a clean environment |
+| Native dialog focus isolation for all overlays | Approval keys must not act behind settings/provider/palette dialogs or in editable controls; repeat/composition/modifier events are ignored | Retain equivalent tested focus isolation if dialog implementation changes |
+| Generated native DTOs with explicit embedded protocol mappings | ts-rs catches native DTO drift without coupling engine/protocol crates to a desktop generator; embedded mappings require review when protocol vocabulary changes | Extend generation at the protocol boundary in a separately reviewed slice |
 
 ## Verification and completion
 

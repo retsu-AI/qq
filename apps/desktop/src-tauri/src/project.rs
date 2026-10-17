@@ -29,7 +29,8 @@ use qq_protocol::{
     SessionEvent, SessionEventEnvelope, SessionId, ToolCallId, ToolCallSnapshot, WorkspaceId,
     WorkspaceSnapshot,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -58,6 +59,23 @@ pub enum SubmitMode {
     Interrupt,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum SessionOption {
+    Profile(qq_protocol::AgentProfileId),
+    Effort(Option<qq_protocol::ReasoningEffort>),
+    Delegate(Option<qq_protocol::ApprovalDelegate>),
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Compact,
+    Rollback,
+    Prune,
+    Child,
+}
+
 pub const STATE_EVENT: &str = "project-state";
 
 /// What the UI asks a project to do.
@@ -67,7 +85,7 @@ pub enum UiCommand {
     NewSession,
     Submit {
         session_id: Option<SessionId>,
-        text: String,
+        input: Vec<InputPart>,
         reply: SubmissionReply,
         mode: SubmitMode,
     },
@@ -78,6 +96,8 @@ pub enum UiCommand {
         decision: ApprovalChoice,
     },
     SetApprovalMode(SessionId, ApprovalMode),
+    SetOption(SessionId, SessionOption),
+    Action(Option<SessionId>, SessionAction),
     SelectModel(String),
     Delete(SessionId),
     /// Re-emit the full state (a webview reload lost it).
@@ -102,6 +122,15 @@ pub struct ProjectHandle {
     /// The canonical workspace path the server knows this project by.
     pub path: PathBuf,
     commands: mpsc::Sender<UiCommand>,
+    _lifetime: Arc<ActorLifetime>,
+}
+
+struct ActorLifetime(Arc<tokio::sync::Notify>);
+
+impl Drop for ActorLifetime {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 impl ProjectHandle {
@@ -124,13 +153,19 @@ pub fn open(
     preferred_model: Option<String>,
 ) -> ProjectHandle {
     let (commands, receiver) = mpsc::channel(MAX_COMMANDS);
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let lifetime = Arc::new(ActorLifetime(Arc::clone(&stopped)));
     let handle = ProjectHandle {
         path: path.clone(),
         commands,
+        _lifetime: lifetime,
     };
     tauri::async_runtime::spawn(async move {
-        let mut project = Project::new(app, engine, attentive, id, path, preferred_model);
-        project.run(receiver).await;
+        let mut project = Project::new(Some(app), engine, attentive, id, path, preferred_model);
+        tokio::select! {
+            _ = project.run(receiver) => {},
+            _ = stopped.notified() => {},
+        }
     });
     handle
 }
@@ -139,7 +174,7 @@ enum PendingIntent {
     /// A session this client asked for, with the prompt to submit once it
     /// exists.
     Create {
-        draft: Option<String>,
+        draft: Option<Vec<InputPart>>,
         reply: Option<SubmissionReply>,
     },
     Prompt {
@@ -170,7 +205,7 @@ struct Notice {
 }
 
 struct Project {
-    app: AppHandle,
+    app: Option<AppHandle>,
     engine: Arc<Engine>,
     attentive: Arc<AtomicBool>,
     id: String,
@@ -194,7 +229,7 @@ struct Project {
 
 impl Project {
     fn new(
-        app: AppHandle,
+        app: Option<AppHandle>,
         engine: Arc<Engine>,
         attentive: Arc<AtomicBool>,
         id: String,
@@ -227,62 +262,74 @@ impl Project {
 
     async fn run(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
         self.emit();
-        let mut client = loop {
-            match self.connect().await {
-                Ok(client) => break client,
+        loop {
+            let mut client = match self.connect().await {
+                Ok(client) => client,
                 Err(error) => {
-                    self.connection = ConnectionDto::Failed;
-                    self.error = Some(error);
-                    self.emit();
-                    loop {
-                        match commands.recv().await {
-                            Some(UiCommand::Refresh) => {
-                                self.connection = ConnectionDto::Starting;
-                                self.error = None;
-                                self.emit();
-                                break;
+                    if !self.wait_for_retry(&mut commands, error).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let mut tick = tokio::time::interval(EMIT_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    update = client.recv() => match update {
+                        Some(update) => self.apply_update(&client, update),
+                        None => {
+                            let error = self.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_else(|| "the qq client stopped".to_owned());
+                            for (_, intent) in self.pending.drain() {
+                                intent.finish(Err("connection ended before acknowledgement; check history before retrying".to_owned()));
                             }
-                            Some(UiCommand::Submit { reply, .. }) => {
-                                let _ = reply.send(Err(
-                                    "engine is unavailable; retry connection".to_owned()
-                                ));
-                            }
-                            Some(_) => {}
-                            None => return,
+                            if !self.wait_for_retry(&mut commands, error).await { return; }
+                            break;
                         }
+                    },
+                    command = commands.recv() => match command {
+                        Some(command) => self.apply_command(&client, command),
+                        None => return,
+                    },
+                    _ = tick.tick() => {
+                        if self.notice.as_ref().is_some_and(|notice| notice.level != NoticeLevel::Error && notice.at.elapsed() > NOTICE_TTL) {
+                            self.notice = None;
+                            self.dirty = true;
+                        }
+                        if self.dirty { self.emit(); }
                     }
                 }
             }
-        };
-        let mut tick = tokio::time::interval(EMIT_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        }
+    }
+
+    async fn wait_for_retry(
+        &mut self,
+        commands: &mut mpsc::Receiver<UiCommand>,
+        error: String,
+    ) -> bool {
+        self.connection = ConnectionDto::Failed;
+        self.error = Some(error);
+        self.emit();
         loop {
-            tokio::select! {
-                update = client.recv() => match update {
-                    Some(update) => self.apply_update(&client, update),
-                    None => {
-                        self.connection = ConnectionDto::Offline;
-                        self.error = Some("the qq client stopped".to_owned());
-                        self.dirty = true;
-                        self.emit();
-                        return;
-                    }
-                },
-                command = commands.recv() => match command {
-                    Some(command) => self.apply_command(&client, command),
-                    None => return,
-                },
-                _ = tick.tick() => {
-                    if self.notice.as_ref().is_some_and(|notice| {
-                        notice.level != NoticeLevel::Error && notice.at.elapsed() > NOTICE_TTL
-                    }) {
-                        self.notice = None;
-                        self.dirty = true;
-                    }
-                    if self.dirty {
-                        self.emit();
-                    }
+            match commands.recv().await {
+                Some(UiCommand::Refresh) => {
+                    self.connection = ConnectionDto::Starting;
+                    self.error = None;
+                    self.clear_error_notice();
+                    self.workspace_id = None;
+                    self.last_sequence = 0;
+                    self.recent_events.clear();
+                    self.sessions.clear();
+                    self.focused = None;
+                    self.emit();
+                    return true;
                 }
+                Some(UiCommand::Submit { reply, .. }) => {
+                    let _ = reply.send(Err("engine is unavailable; retry connection".to_owned()));
+                }
+                Some(_) => {}
+                None => return false,
             }
         }
     }
@@ -314,7 +361,7 @@ impl Project {
 
     // ---- server updates ------------------------------------------------
 
-    fn apply_update(&mut self, client: &TuiClient, update: ClientUpdate) {
+    fn apply_update(&mut self, client: &impl ClientPort, update: ClientUpdate) {
         self.dirty = true;
         match update {
             ClientUpdate::Connection(state) => {
@@ -375,7 +422,7 @@ impl Project {
                             if let Some(text) = draft {
                                 self.submit(client, *session_id, text, reply, true);
                             } else {
-                                self.adopt_created(*session_id);
+                                self.adopt_created(client, *session_id);
                                 if let Some(reply) = reply {
                                     let _ = reply.send(Ok(()));
                                 }
@@ -391,7 +438,7 @@ impl Project {
                                 },
                             ),
                         ) => {
-                            self.adopt_created(session_id);
+                            self.adopt_created(client, session_id);
                             intent.finish(Ok(()));
                         }
                         (_, Some(intent)) => intent.finish(Ok(())),
@@ -411,7 +458,7 @@ impl Project {
         }
     }
 
-    fn apply_snapshot(&mut self, client: &TuiClient, snapshot: WorkspaceSnapshot) {
+    fn apply_snapshot(&mut self, client: &impl ClientPort, snapshot: WorkspaceSnapshot) {
         let initial = self.workspace_id.is_none();
         if self
             .workspace_id
@@ -456,7 +503,7 @@ impl Project {
         self.sessions.evict_cold_bodies(self.focused);
     }
 
-    fn apply_live_event(&mut self, client: &TuiClient, event: SessionEventEnvelope) {
+    fn apply_live_event(&mut self, client: &impl ClientPort, event: SessionEventEnvelope) {
         if self
             .workspace_id
             .is_some_and(|workspace| workspace != event.cursor.workspace_id)
@@ -491,7 +538,7 @@ impl Project {
         }
     }
 
-    fn reduce_event(&mut self, client: &TuiClient, envelope: &SessionEventEnvelope) {
+    fn reduce_event(&mut self, client: &impl ClientPort, envelope: &SessionEventEnvelope) {
         let caused_by_me = envelope
             .caused_by
             .and_then(|id| self.pending.get(&id))
@@ -511,7 +558,26 @@ impl Project {
             match effect {
                 StateEffect::Notice { level, text, .. } => self.set_notice(level, text),
                 StateEffect::Attention(attention) => {
-                    let _ = self.app.emit("attention", attention.summary());
+                    if let Some(app) = &self.app {
+                        let _ = app.emit("attention", attention.summary());
+                        if app
+                            .state::<crate::AppState>()
+                            .notifications_enabled
+                            .load(Ordering::Relaxed)
+                            && !self.attentive.load(Ordering::Relaxed)
+                            && let Err(error) = app
+                                .notification()
+                                .builder()
+                                .title("QQ")
+                                .body(attention.summary())
+                                .show()
+                        {
+                            self.set_notice(
+                                NoticeLevel::Warning,
+                                format!("notification could not be shown: {error}"),
+                            );
+                        }
+                    }
                 }
                 StateEffect::RequestSnapshot(request) => {
                     self.send(client, ClientRequest::Snapshot(request));
@@ -521,7 +587,7 @@ impl Project {
                 // queued draft; the event can arrive first.
                 StateEffect::AdoptCreated(_) => {}
                 StateEffect::SubmitDraft { session_id, text } => {
-                    self.submit(client, session_id, text, None, false);
+                    self.submit(client, session_id, vec![InputPart::text(text)], None, false);
                 }
                 StateEffect::SessionRemoved { session_id, .. } => {
                     self.pending.retain(|_, intent| {
@@ -539,7 +605,7 @@ impl Project {
 
     // ---- UI commands ---------------------------------------------------
 
-    fn apply_command(&mut self, client: &TuiClient, command: UiCommand) {
+    fn apply_command(&mut self, client: &impl ClientPort, command: UiCommand) {
         self.dirty = true;
         match command {
             UiCommand::Refresh => self.last_emitted = None,
@@ -555,12 +621,11 @@ impl Project {
             UiCommand::NewSession => self.focused = None,
             UiCommand::Submit {
                 session_id,
-                text,
+                input,
                 reply,
                 mode,
             } => {
-                let text = text.trim().to_owned();
-                if let Err(error) = validate_submission(self.connection, &text) {
+                if let Err(error) = validate_submission(self.connection, &input) {
                     let _ = reply.send(Err(error));
                     return;
                 }
@@ -570,7 +635,7 @@ impl Project {
                         session_id
                             .and_then(|id| self.sessions.get(&id))
                             .and_then(|session| session.summary.active_run_id),
-                        text,
+                        input,
                         mode,
                     );
                     match result {
@@ -593,8 +658,8 @@ impl Project {
                     return;
                 }
                 match session_id {
-                    Some(session_id) => self.submit(client, session_id, text, Some(reply), false),
-                    None => self.create_session(client, Some(text), Some(reply)),
+                    Some(session_id) => self.submit(client, session_id, input, Some(reply), false),
+                    None => self.create_session(client, Some(input), Some(reply), None),
                 }
             }
             UiCommand::Cancel(session_id) => {
@@ -621,6 +686,43 @@ impl Project {
                 SessionCommand::SetApprovalMode { session_id, mode },
                 PendingIntent::Other,
             ),
+            UiCommand::SetOption(session_id, option) => {
+                let command = match option {
+                    SessionOption::Profile(profile) => SessionCommand::SetSessionProfile {
+                        session_id,
+                        profile,
+                    },
+                    SessionOption::Effort(effort) => {
+                        SessionCommand::SetSessionEffort { session_id, effort }
+                    }
+                    SessionOption::Delegate(delegate) => SessionCommand::SetApprovalDelegate {
+                        session_id,
+                        delegate,
+                    },
+                };
+                self.command(client, command, PendingIntent::Other);
+            }
+            UiCommand::Action(session_id, action) => {
+                let command = match action {
+                    SessionAction::Prune => self
+                        .workspace_id
+                        .map(|workspace_id| SessionCommand::PruneSessions { workspace_id }),
+                    SessionAction::Compact => {
+                        session_id.map(|session_id| SessionCommand::CompactSession { session_id })
+                    }
+                    SessionAction::Rollback => session_id
+                        .map(|session_id| SessionCommand::RollbackCompaction { session_id }),
+                    SessionAction::Child => {
+                        if let Some(parent) = session_id {
+                            self.create_session(client, None, None, Some(parent));
+                        }
+                        return;
+                    }
+                };
+                if let Some(command) = command {
+                    self.command(client, command, PendingIntent::Other);
+                }
+            }
             UiCommand::SelectModel(model) => {
                 let Some(option) = self.models.iter().find(|m| view::model_id(m) == model) else {
                     return;
@@ -646,7 +748,7 @@ impl Project {
         }
     }
 
-    fn focus(&mut self, client: &TuiClient, target: Option<SessionId>) {
+    fn focus(&mut self, client: &impl ClientPort, target: Option<SessionId>) {
         self.focused = target;
         let Some(session_id) = target else { return };
         self.focus_clock += 1;
@@ -664,19 +766,32 @@ impl Project {
         self.sessions.evict_cold_bodies(self.focused);
     }
 
-    fn adopt_created(&mut self, session_id: SessionId) {
-        self.sessions.warm_empty(session_id);
+    fn adopt_created(&mut self, client: &impl ClientPort, session_id: SessionId) {
         self.focused = Some(session_id);
         self.focus_clock += 1;
         self.sessions.mark_focused(session_id, self.focus_clock);
         self.sessions.evict_cold_bodies(self.focused);
+        // A receipt can precede SessionCreated; even empty child sessions need
+        // an authoritative body rather than remaining cold or losing events.
+        if !self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.is_warm())
+            && let Some(workspace_id) = self.workspace_id
+        {
+            self.send(
+                client,
+                ClientRequest::Snapshot(body_request(workspace_id, session_id)),
+            );
+        }
     }
 
     fn create_session(
         &mut self,
-        client: &TuiClient,
-        draft: Option<String>,
+        client: &impl ClientPort,
+        draft: Option<Vec<InputPart>>,
         reply: Option<SubmissionReply>,
+        parent_id: Option<SessionId>,
     ) {
         let Some(workspace_id) = self.workspace_id else {
             PendingIntent::Create { draft, reply }
@@ -703,7 +818,7 @@ impl Project {
             client,
             SessionCommand::CreateSession {
                 workspace_id,
-                parent_id: None,
+                parent_id,
                 model,
                 approval_mode: ApprovalMode::default(),
                 profile: qq_protocol::AgentProfileId::default(),
@@ -716,20 +831,28 @@ impl Project {
 
     fn submit(
         &mut self,
-        client: &TuiClient,
+        client: &impl ClientPort,
         session_id: SessionId,
-        text: String,
+        input: Vec<InputPart>,
         reply: Option<SubmissionReply>,
         adopt: bool,
     ) {
         if let Some(session) = self.sessions.get_mut(&session_id) {
+            let text = input
+                .iter()
+                .filter_map(|part| match part {
+                    InputPart::Text { text } => Some(text.as_str()),
+                    InputPart::WorkspaceFile { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             session.record_prompt(&text);
         }
         self.command(
             client,
             SessionCommand::SubmitPrompt {
                 session_id,
-                input: vec![InputPart::Text { text }],
+                input,
                 limits: RunLimits::default(),
                 correlation: Correlation::default(),
                 output: None,
@@ -744,7 +867,7 @@ impl Project {
 
     fn approve(
         &mut self,
-        client: &TuiClient,
+        client: &impl ClientPort,
         session_id: SessionId,
         tool_call_id: ToolCallId,
         choice: ApprovalChoice,
@@ -779,7 +902,12 @@ impl Project {
         );
     }
 
-    fn command(&mut self, client: &TuiClient, command: SessionCommand, intent: PendingIntent) {
+    fn command(
+        &mut self,
+        client: &impl ClientPort,
+        command: SessionCommand,
+        intent: PendingIntent,
+    ) {
         if self.pending.len() >= MAX_COMMANDS {
             intent.finish(Err(
                 "too many pending commands; wait for acknowledgement".to_owned()
@@ -813,7 +941,7 @@ impl Project {
         }
     }
 
-    fn send(&mut self, client: &TuiClient, request: ClientRequest) -> bool {
+    fn send(&mut self, client: &impl ClientPort, request: ClientRequest) -> bool {
         match client.try_send(request) {
             Ok(()) => true,
             Err(failure) => {
@@ -875,6 +1003,23 @@ impl Project {
                 .capabilities
                 .as_ref()
                 .is_some_and(|caps| caps.steering.interrupt),
+            profiles: self
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.profiles.as_ref())
+                .map(|profiles| {
+                    profiles
+                        .iter()
+                        .map(|profile| profile.id.as_str().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            tool_hosts: self
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.workspace_tools.as_ref())
+                .map(|tools| tools.hosts.clone())
+                .unwrap_or_default(),
             notice: self.notice.as_ref().map(|notice| NoticeDto {
                 level: match notice.level {
                     NoticeLevel::Info => "info",
@@ -892,14 +1037,16 @@ impl Project {
         if self.last_emitted.as_ref() == Some(&state) {
             return;
         }
-        let _ = self.app.emit(STATE_EVENT, &state);
+        if let Some(app) = &self.app {
+            let _ = app.emit(STATE_EVENT, &state);
+        }
         self.last_emitted = Some(state);
     }
 }
 
 fn steering_command(
     run_id: Option<qq_protocol::RunId>,
-    text: String,
+    input: Vec<InputPart>,
     mode: SubmitMode,
 ) -> Result<SessionCommand, String> {
     let Some(run_id) = run_id else {
@@ -907,16 +1054,16 @@ fn steering_command(
     };
     Ok(SessionCommand::SteerRun {
         run_id,
-        input: vec![InputPart::text(text)],
+        input,
         interrupt: matches!(mode, SubmitMode::Interrupt),
     })
 }
 
-fn validate_submission(connection: ConnectionDto, text: &str) -> Result<(), String> {
+fn validate_submission(connection: ConnectionDto, input: &[InputPart]) -> Result<(), String> {
     if connection != ConnectionDto::Live {
         return Err("wait until the project is connected before sending".to_owned());
     }
-    qq_protocol::validate_input(&[InputPart::text(text)]).map_err(|error| error.to_string())
+    qq_protocol::validate_input(input).map_err(|error| error.to_string())
 }
 
 /// The approve-for-session/workspace grant for a held call: shell calls
@@ -967,14 +1114,225 @@ pub fn grant_label(grant: &ApprovalGrant) -> String {
 mod submission_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn closing_the_last_handle_cancels_an_actor_even_during_connect() {
+        let stopped = Arc::new(tokio::sync::Notify::new());
+        let lifetime = Arc::new(ActorLifetime(Arc::clone(&stopped)));
+        let temporary_handle = Arc::clone(&lifetime);
+        drop(temporary_handle);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), stopped.notified())
+                .await
+                .is_err()
+        );
+        drop(lifetime);
+        tokio::time::timeout(Duration::from_millis(100), stopped.notified())
+            .await
+            .expect("final handle stops the actor");
+    }
+
+    #[tokio::test]
+    async fn failed_bootstrap_rejects_submission_and_retry_clears_stale_identity() {
+        let mut project = Project::new(
+            None,
+            Arc::new(Engine::default()),
+            Arc::new(AtomicBool::new(true)),
+            "retry".into(),
+            PathBuf::from("."),
+            None,
+        );
+        project.workspace_id = Some(WorkspaceId::from_bytes([2; 16]));
+        project.last_sequence = 90;
+        project.set_notice(NoticeLevel::Error, "old bootstrap failure");
+        let (commands, mut receiver) = mpsc::channel(2);
+        let (reply, accepted) = oneshot::channel();
+        commands
+            .try_send(UiCommand::Submit {
+                session_id: None,
+                input: vec![InputPart::text("keep")],
+                reply,
+                mode: SubmitMode::Queue,
+            })
+            .unwrap();
+        commands.try_send(UiCommand::Refresh).unwrap();
+        assert!(project.wait_for_retry(&mut receiver, "failed".into()).await);
+        assert!(accepted.await.unwrap().is_err());
+        assert_eq!(project.connection, ConnectionDto::Starting);
+        assert!(project.workspace_id.is_none());
+        assert_eq!(project.last_sequence, 0);
+        assert!(project.notice.is_none());
+    }
+
+    #[test]
+    fn session_options_reject_invalid_profile_and_effort_values() {
+        assert!(
+            serde_json::from_str::<SessionOption>(r#"{"type":"profile","value":"../escape"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SessionOption>(r#"{"type":"effort","value":"unbounded"}"#)
+                .is_err()
+        );
+        for value in ["on", "off", "by_mode"] {
+            assert!(
+                serde_json::from_value::<SessionOption>(
+                    serde_json::json!({"type":"delegate","value":value})
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_child_adoption_requests_a_body_when_receipt_precedes_summary() {
+        let client = Client::default();
+        let mut project = Project::new(
+            None,
+            Arc::new(Engine::default()),
+            Arc::new(AtomicBool::new(true)),
+            "child".into(),
+            PathBuf::from("."),
+            None,
+        );
+        let workspace_id = WorkspaceId::from_bytes([2; 16]);
+        let session_id = SessionId::from_bytes([3; 16]);
+        project.workspace_id = Some(workspace_id);
+        project.adopt_created(&client, session_id);
+        assert_eq!(project.focused, Some(session_id));
+        assert!(client.requests.lock().unwrap().iter().any(|request| matches!(request, ClientRequest::Snapshot(snapshot) if snapshot.workspace_id == workspace_id && snapshot.focused_session_id == Some(session_id))));
+    }
+
+    #[derive(Default)]
+    struct Client {
+        requests: std::sync::Mutex<Vec<ClientRequest>>,
+    }
+
+    impl ClientPort for Client {
+        fn try_send(&self, request: ClientRequest) -> Result<(), qq_client::ClientFailure> {
+            self.requests.lock().unwrap().push(request);
+            Ok(())
+        }
+        async fn recv(&mut self) -> Option<ClientUpdate> {
+            None
+        }
+    }
+
+    #[test]
+    fn receipt_before_created_event_recovers_committed_prompt_from_snapshot() {
+        let client = Client::default();
+        let mut project = Project::new(
+            None,
+            Arc::new(Engine::default()),
+            Arc::new(AtomicBool::new(true)),
+            "test".into(),
+            PathBuf::from("."),
+            None,
+        );
+        let event: SessionEventEnvelope = serde_json::from_str(include_str!(
+            "../../../../crates/qq-protocol/tests/fixtures/v32/event_prompt_queued.json"
+        ))
+        .unwrap();
+        let SessionEvent::PromptQueued {
+            session,
+            message,
+            run,
+            ..
+        } = event.event.clone()
+        else {
+            panic!("prompt fixture")
+        };
+        let session_id = session.id;
+        project.workspace_id = Some(session.workspace_id);
+        let create_id = CommandId::from_bytes([9; 16]);
+        let (reply, mut accepted) = oneshot::channel();
+        project.pending.insert(
+            create_id,
+            PendingIntent::Create {
+                draft: Some(vec![InputPart::text("hello")]),
+                reply: Some(reply),
+            },
+        );
+        project.apply_update(
+            &client,
+            ClientUpdate::CommandResult {
+                command_id: create_id,
+                result: Ok(qq_protocol::CommandReceipt {
+                    command_id: create_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::SessionCreated { session_id },
+                }),
+            },
+        );
+        let prompt_id = client
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|request| match request {
+                ClientRequest::Command(command) => Some(command.command_id),
+                _ => None,
+            })
+            .unwrap();
+        let mut created = event.clone();
+        created.cursor.sequence = 9;
+        created.caused_by = Some(create_id);
+        created.event = SessionEvent::SessionCreated {
+            session: session.clone(),
+        };
+        project.apply_live_event(&client, created);
+        project.apply_live_event(&client, event.clone());
+        assert!(!project.sessions.get(&session_id).unwrap().is_warm());
+        project.apply_update(
+            &client,
+            ClientUpdate::CommandResult {
+                command_id: prompt_id,
+                result: Ok(qq_protocol::CommandReceipt {
+                    command_id: prompt_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::PromptQueued {
+                        session_id,
+                        run_id: run.id,
+                        queue_position: 1,
+                    },
+                }),
+            },
+        );
+        assert_eq!(accepted.try_recv().unwrap(), Ok(()));
+        assert!(client.requests.lock().unwrap().iter().any(|request| matches!(request, ClientRequest::Snapshot(snapshot) if snapshot.focused_session_id == Some(session_id))));
+        project.apply_snapshot(
+            &client,
+            WorkspaceSnapshot {
+                cursor: event.cursor,
+                workspace: qq_protocol::WorkspaceSummary {
+                    id: session.workspace_id,
+                    path: ".".into(),
+                },
+                sessions: vec![*session.clone()],
+                focused: Some(qq_protocol::SessionSnapshot {
+                    side_questions: vec![],
+                    summary: *session,
+                    messages: vec![message],
+                    runs: vec![*run],
+                    tool_calls: vec![],
+                    has_older_tool_calls: false,
+                    has_older_messages: false,
+                }),
+                included: vec![],
+                has_older_sessions: false,
+            },
+        );
+        let transcript = project.state().transcript.unwrap();
+        assert!(transcript.items.iter().any(|item| matches!(item, view::ItemDto::User { text, .. } if text.contains("Fix the login redirect"))));
+    }
+
     #[test]
     fn steering_targets_the_active_run_and_rejects_finished_runs() {
         let run_id = qq_protocol::RunId::from_bytes([1; 16]);
         for (mode, expected) in [(SubmitMode::Steer, false), (SubmitMode::Interrupt, true)] {
             assert!(
-                matches!(steering_command(Some(run_id), "change course".to_owned(), mode).unwrap(), SessionCommand::SteerRun { run_id: id, interrupt, .. } if id == run_id && interrupt == expected)
+                matches!(steering_command(Some(run_id), vec![InputPart::text("change course")], mode).unwrap(), SessionCommand::SteerRun { run_id: id, interrupt, .. } if id == run_id && interrupt == expected)
             );
-            assert!(steering_command(None, "change course".to_owned(), mode).is_err());
+            assert!(steering_command(None, vec![InputPart::text("change course")], mode).is_err());
         }
     }
 
@@ -984,6 +1342,7 @@ mod submission_tests {
         let handle = ProjectHandle {
             path: PathBuf::new(),
             commands,
+            _lifetime: Arc::new(ActorLifetime(Arc::new(tokio::sync::Notify::new()))),
         };
         for _ in 0..MAX_COMMANDS {
             assert!(handle.send(UiCommand::Refresh).is_ok());
@@ -1012,17 +1371,19 @@ mod submission_tests {
             ConnectionDto::Offline,
             ConnectionDto::Failed,
         ] {
-            assert!(validate_submission(state, "hello").is_err());
+            assert!(validate_submission(state, &[InputPart::text("hello")]).is_err());
         }
-        assert!(validate_submission(ConnectionDto::Live, "  ").is_err());
+        assert!(validate_submission(ConnectionDto::Live, &[InputPart::text("  ")]).is_err());
         assert!(
             validate_submission(
                 ConnectionDto::Live,
-                &"x".repeat(qq_protocol::MAX_INPUT_TEXT_BYTES + 1)
+                &[InputPart::text(
+                    "x".repeat(qq_protocol::MAX_INPUT_TEXT_BYTES + 1)
+                )]
             )
             .is_err()
         );
-        assert!(validate_submission(ConnectionDto::Live, "hello").is_ok());
+        assert!(validate_submission(ConnectionDto::Live, &[InputPart::text("hello")]).is_ok());
     }
 
     #[test]
@@ -1030,7 +1391,7 @@ mod submission_tests {
         for result in [Ok(()), Err("server rejected input".to_owned())] {
             let (reply, mut receipt) = oneshot::channel();
             let intent = PendingIntent::Create {
-                draft: Some("keep my draft".to_owned()),
+                draft: Some(vec![InputPart::text("keep my draft")]),
                 reply: Some(reply),
             };
             assert!(matches!(
