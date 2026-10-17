@@ -4,11 +4,12 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| AP0 | Plan and ledger | In review | `docs/eng-1066-auth-provider-plan`, #341 | Three Codex review passes, 19 findings, all addressed |
+| AP0 | Plan and ledger | In review | `docs/eng-1066-auth-provider-plan`, #341 | Four Codex review passes, 24 findings, all addressed |
 | AP1 | Shared OAuth helpers | In review | `refactor/eng-1066-ap1-oauth-helpers`, #343 | |
 | AP2 | One provider operation lock | In review | `refactor/eng-1066-ap2-refresh-lock`, #345 | |
 | AP3 | Audiences defined once | In review | `refactor/eng-1066-ap3-audiences`, #346 | |
 | AP4 | State and backends split out of `lib.rs` | In review | `refactor/eng-1066-ap4-store-module`, #347 | |
+| AP4b | Request-credential perf fixtures | Planned | | Baseline for AP5/AP6 |
 | AP5 | One request-credential provider + bench | Planned | | |
 | AP6 | Header-set request credentials | Planned | | |
 | AP7 | Table-driven built-in providers (ADR) | Planned | | |
