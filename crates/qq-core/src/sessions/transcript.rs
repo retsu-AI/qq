@@ -455,11 +455,19 @@ fn assemble_model_context(
                     CASE WHEN t.tool_results_projection_json IS NULL THEN NULL
                          WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
                     length(CAST(t.tool_results_projection_json AS BLOB)),
-                    CASE WHEN json_valid(r.plan_descriptor_json)
-                         THEN CASE WHEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
+                    CASE WHEN t.tool_results_projection_json IS NOT NULL THEN 0
+                         WHEN CASE WHEN json_valid(r.plan_descriptor_json)
+                                   THEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
                                         OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
-                                   THEN 0 ELSE 1 END
-                         ELSE 1 END, t.goal_notice
+                                   ELSE 0 END THEN 0
+                         ELSE EXISTS (
+                             SELECT 1 FROM events e
+                             JOIN tool_calls c ON c.id = json_extract(e.envelope_json,'$.event.tool_call_id')
+                             WHERE e.workspace_id = (SELECT workspace_id FROM sessions WHERE id = m.session_id)
+                               AND c.run_id = t.run_id AND c.turn_ordinal = t.turn_ordinal
+                               AND json_extract(e.envelope_json,'$.run_id') = t.run_id
+                               AND json_extract(e.envelope_json,'$.event.type') = 'checkpoint_reviewed'
+                         ) END, t.goal_notice
              FROM messages m
              JOIN runs r ON r.id = m.run_id
              JOIN model_turns t ON t.run_id = r.id
