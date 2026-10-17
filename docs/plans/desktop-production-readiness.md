@@ -1,6 +1,6 @@
 # Desktop production readiness
 
-Status: implemented locally and release built; connected live qualification blocked (2026-10-17).
+Status: implemented and verified locally, including installed release and recovered-store end-to-end qualification (2026-10-17). Signing and hosted CI remain external release gates.
 Ledger: [receipts](progress/desktop-production-readiness.md).
 Constraints: ADR-0062, the shared native reducer and local server, separate
 desktop Cargo workspace, no push or PR mutations. Preserve the pre-existing
