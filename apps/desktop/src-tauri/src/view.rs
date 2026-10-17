@@ -12,8 +12,9 @@ use qq_protocol::{
     SessionId, SessionStatus, TokenUsage, ToolCallSnapshot, ToolCallState,
 };
 use serde::Serialize;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionDto {
     Starting,
@@ -24,19 +25,22 @@ pub enum ConnectionDto {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
 pub struct NoticeDto {
+    #[ts(type = "\"info\" | \"warning\" | \"error\"")]
     pub level: &'static str,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
 pub struct ModelDto {
     pub id: String,
     pub provider: String,
     pub model: String,
     pub name: Option<String>,
     pub context_window: Option<u32>,
+    #[ts(type = "string[]")]
+    pub reasoning_efforts: Vec<qq_protocol::ReasoningEffort>,
 }
 
 impl ModelDto {
@@ -47,6 +51,7 @@ impl ModelDto {
             model: option.model.clone(),
             name: option.name.clone(),
             context_window: option.context_window,
+            reasoning_efforts: option.reasoning_efforts.clone(),
         }
     }
 }
@@ -61,14 +66,19 @@ pub fn model_id(option: &ModelOption) -> String {
 }
 
 /// One row of the session list.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
 pub struct SessionRowDto {
+    #[ts(type = "string")]
     pub id: SessionId,
+    #[ts(type = "string | null")]
     pub parent_id: Option<SessionId>,
     pub depth: usize,
     pub title: String,
+    #[ts(type = "Group")]
     pub group: &'static str,
+    #[ts(type = "SessionStatus")]
     pub status: SessionStatus,
+    #[ts(type = "RunActivity | null")]
     pub activity: Option<RunActivity>,
     pub active_tool: Option<String>,
     pub tail: String,
@@ -76,12 +86,13 @@ pub struct SessionRowDto {
     pub awaiting_approval: usize,
     pub queued_prompts: u16,
     pub model: Option<String>,
+    #[ts(type = "number")]
     pub updated_at_ms: u64,
     pub failed: bool,
 }
 
 /// Everything the window shows for one open project.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 pub struct ProjectStateDto {
     pub project_id: String,
     pub path: String,
@@ -90,38 +101,58 @@ pub struct ProjectStateDto {
     pub error: Option<String>,
     pub owns_server: bool,
     pub sessions: Vec<SessionRowDto>,
+    #[ts(type = "string | null")]
     pub focused: Option<SessionId>,
     pub transcript: Option<TranscriptDto>,
     pub models: Vec<ModelDto>,
     pub selected_model: Option<String>,
     pub can_steer: bool,
     pub can_interrupt: bool,
+    pub profiles: Vec<String>,
+    #[ts(
+        type = "Array<{ name: string; generation: number; tool_count: number; ready: boolean; message?: string }>"
+    )]
+    pub tool_hosts: Vec<qq_protocol::ToolHostSummary>,
     pub notice: Option<NoticeDto>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 pub struct TranscriptDto {
+    #[ts(type = "string")]
     pub session_id: SessionId,
     pub title: String,
     pub loading: bool,
+    #[ts(type = "SessionStatus")]
     pub status: SessionStatus,
+    #[ts(type = "RunActivity | null")]
     pub activity: Option<RunActivity>,
+    #[ts(type = "string | null")]
     pub active_run_id: Option<RunId>,
     pub model: Option<String>,
+    #[ts(type = "ApprovalMode")]
     pub approval_mode: ApprovalMode,
+    #[ts(type = "string")]
+    pub profile: qq_protocol::AgentProfileId,
+    #[ts(type = "string | null")]
+    pub reasoning_effort: Option<qq_protocol::ReasoningEffort>,
+    #[ts(type = "string | null")]
+    pub approval_delegate: Option<qq_protocol::ApprovalDelegate>,
+    #[ts(type = "number | null")]
     pub context_tokens: Option<u64>,
     pub context_window: Option<u32>,
+    #[ts(type = "number | null")]
     pub cost_usd_nanos: Option<u64>,
     pub queued_prompts: u16,
     pub items: Vec<ItemDto>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemDto {
     User {
         id: String,
         text: String,
+        #[ts(type = "MessageState")]
         state: MessageState,
         steering: bool,
     },
@@ -129,6 +160,7 @@ pub enum ItemDto {
         id: String,
         text: String,
         refusal: String,
+        #[ts(type = "MessageState")]
         state: MessageState,
         truncated: bool,
     },
@@ -140,44 +172,56 @@ pub enum ItemDto {
     Tool(Box<ToolDto>),
     RunEnd {
         id: String,
+        #[ts(type = "RunOutcome | null")]
         outcome: Option<RunOutcome>,
+        #[ts(type = "number | null")]
         duration_ms: Option<u64>,
+        #[ts(type = "TokenUsage | null")]
         usage: Option<TokenUsage>,
+        #[ts(type = "number | null")]
         cost_usd_nanos: Option<u64>,
         tool_calls: u32,
     },
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 pub struct ToolDto {
     pub id: String,
+    #[ts(type = "string")]
     pub run_id: RunId,
     pub name: String,
     pub arguments: String,
+    #[ts(type = "ToolCallState")]
     pub state: ToolCallState,
     pub result: Option<String>,
     pub is_error: bool,
     pub diff: Option<DiffDto>,
     pub live_output: Option<String>,
+    #[ts(type = "number | null")]
     pub duration_ms: Option<u64>,
     pub settled: Option<String>,
     pub approval: Option<ApprovalDto>,
     /// The child session a `spawn_agent` call created, for linking.
+    #[ts(type = "string | null")]
     pub child_session: Option<SessionId>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
 pub struct DiffDto {
     pub path: String,
     pub diff: String,
 }
 
 /// What a held call would do, as the server described it.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 pub struct ApprovalDto {
+    #[ts(type = "ShellPreview | null")]
     pub shell: Option<serde_json::Value>,
+    #[ts(type = "{ path: string; diff: string } | null")]
     pub edit: Option<serde_json::Value>,
+    #[ts(type = "{ questions: Question[] } | null")]
     pub question: Option<serde_json::Value>,
+    #[ts(type = "{ host: string; url: string; method?: string } | null")]
     pub fetch: Option<serde_json::Value>,
     pub escalation: Option<String>,
     /// Whether "for session"/"for workspace" grants can be offered.
@@ -261,6 +305,9 @@ pub fn transcript(store: &SessionStore, id: SessionId) -> Option<TranscriptDto> 
         active_run_id: summary.active_run_id,
         model: summary.model.clone(),
         approval_mode: summary.approval_mode,
+        profile: summary.profile.clone(),
+        reasoning_effort: summary.reasoning_effort,
+        approval_delegate: summary.approval_delegate,
         context_tokens: summary.context_tokens,
         context_window: view.context_window,
         cost_usd_nanos: summary.estimated_cost_usd_nanos,
@@ -431,6 +478,40 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typescript_view_contract_is_current() {
+        let mut generated = String::from(
+            "// Generated from src-tauri/src/view.rs. Run QQ_EXPORT_TYPES=1 cargo test typescript_view_contract_is_current.\nimport type { SessionStatus, RunActivity, MessageState, ToolCallState, ApprovalMode, Group, RunOutcome, TokenUsage, ShellPreview, Question } from './types';\n\n",
+        );
+        for declaration in [
+            ConnectionDto::decl(),
+            NoticeDto::decl(),
+            ModelDto::decl(),
+            SessionRowDto::decl(),
+            ProjectStateDto::decl(),
+            TranscriptDto::decl(),
+            ItemDto::decl(),
+            ToolDto::decl(),
+            DiffDto::decl(),
+            ApprovalDto::decl(),
+        ] {
+            generated.push_str("export ");
+            generated.push_str(&declaration);
+            generated.push_str("\n\n");
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/generated.ts");
+        if std::env::var_os("QQ_EXPORT_TYPES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+        }
+        let checked_in = std::fs::read_to_string(&path)
+            .expect("generate the TypeScript contract with QQ_EXPORT_TYPES=1");
+        assert_eq!(
+            checked_in.replace("\r\n", "\n"),
+            generated,
+            "view DTOs changed; regenerate the TypeScript contract"
+        );
+    }
 
     #[test]
     fn display_path_hides_only_the_verbatim_prefix() {

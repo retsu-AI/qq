@@ -4,6 +4,7 @@
 
 mod auth;
 mod engine;
+mod input;
 mod project;
 mod settings;
 mod trust;
@@ -23,7 +24,7 @@ use tauri::{Emitter, Manager, State, WindowEvent};
 use crate::{
     auth::{AUTH_EVENT, AuthChanged, BrowserSignIn, PendingSignIns, ProviderDto, SignInError},
     engine::Engine,
-    project::{ApprovalChoice, ProjectHandle, SubmitMode, UiCommand},
+    project::{ApprovalChoice, ProjectHandle, SessionAction, SessionOption, SubmitMode, UiCommand},
     settings::Settings,
     trust::{PendingFileDto, TrustError},
 };
@@ -34,6 +35,8 @@ struct AppState {
     projects: Mutex<HashMap<String, ProjectHandle>>,
     settings: Mutex<Settings>,
     sign_ins: Arc<PendingSignIns>,
+    input_slots: Arc<tokio::sync::Semaphore>,
+    notifications_enabled: AtomicBool,
 }
 
 impl AppState {
@@ -130,6 +133,9 @@ fn open_project(
         settings.preferred_model.clone()
     };
     let mut projects = state.projects.lock().map_err(|_| "app state poisoned")?;
+    if !projects.contains_key(&info.id) && projects.len() >= 16 {
+        return Err("at most 16 projects may be open; close a project first".to_owned());
+    }
     match projects.get(&info.id) {
         Some(existing) => {
             let _ = existing.send(UiCommand::Refresh);
@@ -205,14 +211,32 @@ async fn submit_prompt(
     session_id: Option<String>,
     text: String,
     mode: Option<SubmitMode>,
+    files: Option<Vec<String>>,
 ) -> Result<(), String> {
     let session_id = session_id.as_deref().map(parse_session).transpose()?;
+    if text.len() > qq_protocol::MAX_INPUT_TEXT_BYTES {
+        return Err("message exceeds the 128 KiB text limit".to_owned());
+    }
+    let files = files.unwrap_or_default();
+    if files.len() > qq_protocol::MAX_INPUT_FILE_PARTS {
+        return Err("attach at most eight workspace files".to_owned());
+    }
+    let path = state.project(&project_id)?.path;
+    let permit = Arc::clone(&state.input_slots)
+        .try_acquire_owned()
+        .map_err(|_| "too many file resolutions; try again".to_owned())?;
+    let input = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        input::resolve(&path, &text, files)
+    })
+    .await
+    .map_err(|_| "file mention resolution failed".to_owned())??;
     let (reply, receipt) = tokio::sync::oneshot::channel();
     state.send(
         &project_id,
         UiCommand::Submit {
             session_id,
-            text,
+            input,
             reply,
             mode: mode.unwrap_or_default(),
         },
@@ -285,12 +309,48 @@ fn select_model(
 }
 
 #[tauri::command]
+fn set_session_option(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: String,
+    option: SessionOption,
+) -> Result<(), String> {
+    state.send(
+        &project_id,
+        UiCommand::SetOption(parse_session(&session_id)?, option),
+    )
+}
+
+#[tauri::command]
 fn delete_session(
     state: State<'_, AppState>,
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
     state.send(&project_id, UiCommand::Delete(parse_session(&session_id)?))
+}
+
+#[tauri::command]
+fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) {
+    state
+        .notifications_enabled
+        .store(enabled, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn session_action(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: Option<String>,
+    action: SessionAction,
+) -> Result<(), String> {
+    state.send(
+        &project_id,
+        UiCommand::Action(
+            session_id.as_deref().map(parse_session).transpose()?,
+            action,
+        ),
+    )
 }
 
 /// Project files whose QQ configuration waits for the user's trust; empty
@@ -415,6 +475,29 @@ fn main() {
     let engine = Arc::new(Engine::default());
     let shutdown_engine = Arc::clone(&engine);
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let paths: Vec<String> = args
+                .into_iter()
+                .skip(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .filter_map(|arg| {
+                    let path = std::path::Path::new(&cwd).join(arg);
+                    std::fs::canonicalize(path)
+                        .ok()
+                        .filter(|path| path.is_dir())
+                        .map(|path| view::display_path(&path))
+                })
+                .collect();
+            if !paths.is_empty() {
+                let _ = app.emit("open-paths", paths);
+            }
+        }))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
@@ -425,6 +508,8 @@ fn main() {
                 projects: Mutex::new(HashMap::new()),
                 settings: Mutex::new(settings),
                 sign_ins: Arc::new(PendingSignIns::default()),
+                input_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+                notifications_enabled: AtomicBool::new(false),
             });
             Ok(())
         })
@@ -449,6 +534,9 @@ fn main() {
             cancel_run,
             respond_approval,
             set_approval_mode,
+            set_session_option,
+            session_action,
+            set_notifications_enabled,
             select_model,
             delete_session,
             auth_providers,
