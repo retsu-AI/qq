@@ -101,7 +101,8 @@ export function Composer({
       <textarea
         ref={ref}
         value={text}
-        disabled={pending}
+        readOnly={pending}
+        aria-busy={pending}
         aria-label="Message"
         autoFocus={autoFocus}
         rows={1}

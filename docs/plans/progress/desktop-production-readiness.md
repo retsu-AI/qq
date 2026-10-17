@@ -220,3 +220,45 @@ support. P2 tray, arbitrary key remapping and richer diff navigation are out of 
 
 These gates are not silently waived and this receipt does not certify the app as
 fully production ready. All unaffected implementation work is committed for review.
+
+## 2026-10-17 — Resumed connected qualification
+
+- Live qualification ran against a throwaway project and a NoAuth loopback provider;
+  a corrupted local test store was handled outside git.
+- Native workspace bootstrap and provider SSE completed. A disposable @file marker
+  reached the fixture; invalid mentions retained the draft. Held approval and
+  structured question responses continued once. Settings blocked approval keys
+  while the modal was open.
+- A process-only QQ_CONFIG_CONTENT override isolated the provider fixture. No paid
+  provider or stored credentials were needed.
+
+### Native qualification and acknowledgement-focus regression
+
+- Native UI/server/loopback checks passed: valid @file, invalid mention preserving
+  the draft, held shell approval, structured question answer, profile/effort/
+  delegate options, queued follow-up, boundary steering and interrupt-and-steer.
+  Provider logs prove one queue/steer continuation, high effort on the next run,
+  and cancellation of the interrupted HTTP stream with earlier text preserved.
+- Found a real keyboard defect: disabled={pending} blurs the textarea during a
+  receipt, so immediate follow-up typing and Escape no longer reach the composer.
+  Replaced it with readOnly={pending} plus aria-busy; admission/duplicate guards
+  remain. New eight-frame browser regression fixture reported FAIL before the
+  change, PASS after. Native Escape cancelled a stream without refocusing after
+  the fix, and normal typing continued into the next request.
+- All desktop gates passed again: fmt, Clippy -D warnings, 13 Rust tests,
+  typecheck, 10 Node tests and production frontend build. Release rebuilt with
+  pnpm tauri build --config src-tauri/tauri.bundle.conf.json, using the unchanged
+  hash-verified engine sidecar; optimized native build took 5m43s and NSIS succeeded.
+- Forced exit of only the verified desktop-owned engine: UI showed Offline /
+  catching up, a new owned engine started, and the client returned Connected.
+  Reset returns to session selection; selecting the persisted session reloaded
+  history. Full integrity_check stayed ok and foreign_key_check empty afterward.
+- Empty child creation/adoption and a child model request passed. Local simulated
+  401 rejection appeared in the transcript without credentials. Compaction's first
+  fixture request was rejected by an overly strict QA tag guard; after supporting
+  the real compaction instruction/required sections, compaction committed once,
+  rollback returned the QA compaction count to zero, and transcript stayed intact.
+- Prune removed the one empty QA root, leaving populated parent/child sessions.
+  No user's original workspace/session was edited, trusted, run or pruned.
+- Fresh installation and upgrade qualification passed using disposable fixtures;
+  the installed release used its bundled engine.
