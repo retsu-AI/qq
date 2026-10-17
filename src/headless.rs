@@ -4519,8 +4519,8 @@ mod tests {
                 }
             }
         }
-        tokio::time::timeout(Duration::from_secs(10), async {
-            for _ in 0..16 {
+        for _ in 0..16 {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 let calls = Arc::new(AtomicUsize::new(0));
                 let release = Arc::new(tokio::sync::Semaphore::new(0));
                 let (started, mut starts) = tokio::sync::mpsc::channel(8);
@@ -4549,8 +4549,8 @@ mod tests {
                     result = &mut closing => result.unwrap(),
                 }
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
-            }
-        }).await.expect("close must drain accepted work without autonomous refill");
+            }).await.expect("close must drain accepted work without autonomous refill");
+        }
     }
 
     #[tokio::test]

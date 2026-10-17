@@ -67,3 +67,13 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Replaced tracing-subscriber with a bounded numeric-only local subscriber to remove five added closure crates. Six focused logging tests pass; 7/7 real-binary smoke pass including QA refusal. Full gate passed before the final typed QA diagnostic fix (273.7s); final gate rerun required.
 - Independent subscriber review corrected cross-dispatch TLS isolation, saturating reference counts and serialization/send outside the span-state lock. Further concurrency/bounds coverage remains.
 - `control-final.json` completed 77 metrics after restart; pre-restart comparison refuses different memory capacity. `lean-complete.json` restores dependency budget but minimal artifact still 43039856 > 41000000 bytes and relative tails fail versus control. This is NOT qualifying A/A or a budget pass. No budgets widened. User requests merge only after merge readiness plus current-tip Codex actual 👍.
+
+
+## AF5 current-main reconciliation and size qualification
+
+- Merged main `a9bff3ef` in `c85c0366`; resolved exact legacy sleep locations without changing ceiling. Latest three Codex threads explicitly resolved after scheduler-run persistence context and platform smoke fixes; fresh review requested.
+- Candidate package release profiles use `z` for qq/core/tui/provider and paired xtask; minimal local artifact 40194448 bytes, below unchanged 41000000 cap. These profile changes remain provisional pending latency qualification; no runtime limits changed.
+- Fresh main baseline and A/A: `.worktrees/af5-perf-baseline/target/qq-perf/af5/{baseline-current-main,baseline-aa}.json`. Candidate: `target/qq-perf/af5/compact-candidate-complete.json`. All complete 77 metrics/100 samples. Earlier partial files are not evidence. Old pre-restart reports no longer exist in target.
+- Current main and candidate have IDENTICAL normal dependency closure sets, 305 crates; current main itself fails unchanged 300 ceiling. Main A/A also fails many relative tails, so local environment cannot currently qualify latency differences. Candidate comparison remains failed, not waived.
+- Full gate failed twice at new-main headless drain fixture's shared 10-second deadline across 16 complete runtime setups; focused case passed in 5.78s. Moved the same 10-second guard inside each iteration (all 16 assertions retained). Full CI-profile gate then passed 278.8s and smoke 9/9. This is a timing-guard correction, not evidence that initial gates passed.
+- Remaining: qualify profiles and tracing on controlled host, close inherited dependency-budget violation without widening, update ADR/build rationale, final source gate/CI and actual current-tip Codex 👍 before ready/merge.
