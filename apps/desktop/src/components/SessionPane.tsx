@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
 import { showProviders } from "../lib/store";
+import { api } from "../lib/api";
 import { activityLabel, cost, modelShort, tokens } from "../lib/format";
 import type { PendingFile, ProjectState, Transcript as TranscriptData } from "../lib/types";
 import { Composer } from "./Composer";
@@ -27,6 +28,7 @@ export function SessionPane({
         <div className="max-w-md text-center">
           <h2 className="text-[16px] font-semibold">The QQ engine is unavailable</h2>
           <p className="mt-2 text-muted selectable">{project.error}</p>
+          <button className="mt-3 rounded border border-line-strong px-3 py-2" onClick={() => void api.refresh(project.project_id)}>Retry connection</button>
           <p className="mt-4 text-[12.5px] text-faint">
             Install qq on PATH, build it with <code className="font-mono">cargo build</code>, or set
             <code className="mx-1 font-mono">QQ_DESKTOP_ENGINE</code> to its path, then reopen the project.
@@ -42,6 +44,7 @@ export function SessionPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {project.connection !== "live" && <div role="status" className="border-b border-line bg-warn-soft px-5 py-2 text-warn">{project.connection === "replaying" ? "Catching up with saved history…" : "Disconnected. Sending is paused while QQ reconnects."}</div>}
       <Header project={project} transcript={transcript} />
       <TranscriptScroller project={project} transcript={transcript} />
       <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
@@ -67,9 +70,9 @@ function Landing({ project }: { project: ProjectState }) {
             in <span className="font-medium text-fg">{project.name}</span>
           </p>
           {connecting ? (
-            <div className="flex items-center justify-center gap-2 text-muted">
-              <Loader2 className="h-4 w-4 animate-spin" /> Connecting to the engine…
-            </div>
+            <><NoticeLine project={project} /><div role="status" className="flex items-center justify-center gap-2 text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" /> {project.connection === "offline" ? "Offline, reconnecting to the engine…" : "Connecting to the engine…"}
+            </div></>
           ) : signedOut ? (
             <ConnectProvider />
           ) : (
@@ -211,6 +214,7 @@ function NoticeLine({ project }: { project: ProjectState }) {
   if (!notice) return null;
   return (
     <div
+      role={notice.level === "error" ? "alert" : "status"}
       className={clsx(
         "mb-2 rounded-md px-3 py-1.5 text-[12.5px] selectable",
         notice.level === "error" && "bg-danger-soft text-danger",
