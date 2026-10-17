@@ -951,6 +951,8 @@ mod tests {
         Pack,
         /// `<global>/tui.ron`.
         Tui,
+        /// `<global>/pr.ron`.
+        Pr,
     }
 
     impl SampleFile {
@@ -960,6 +962,7 @@ mod tests {
                 "managed.ron" => Some(Self::Managed),
                 "pack.ron" => Some(Self::Pack),
                 "tui.ron" => Some(Self::Tui),
+                "pr.ron" => Some(Self::Pr),
                 other => panic!("unknown RON sample file `{other}` in a ```ron fence"),
             }
         }
@@ -1048,6 +1051,14 @@ mod tests {
                         .map(|_| Vec::new())
                         .map_err(|error| error.to_string());
                 }
+                SampleFile::Pr => {
+                    Self::write(&self.global.join("pr.ron"), sample);
+                    return self
+                        .loader
+                        .load_pr_status(&self.workspace)
+                        .map(|_| Vec::new())
+                        .map_err(|error| error.to_string());
+                }
             }
             let snapshot = self
                 .loader
@@ -1124,7 +1135,10 @@ mod tests {
                             ));
                             continue;
                         }
-                        SampleFile::Config | SampleFile::Managed | SampleFile::Tui => {
+                        SampleFile::Config
+                        | SampleFile::Managed
+                        | SampleFile::Tui
+                        | SampleFile::Pr => {
                             format!("(\n    version: 1,\n{body}\n)")
                         }
                     }
@@ -1140,7 +1154,7 @@ mod tests {
         assert!(
             failures.is_empty(),
             "these guide RON samples do not load; fix the sample, or title the fence \
-             (```ron managed.ron, ```ron pack.ron, ```ron tui.ron) if it belongs to \
+             (```ron managed.ron, ```ron pack.ron, ```ron tui.ron, ```ron pr.ron) if it belongs to \
              another file:\n{}",
             failures.join("\n")
         );
