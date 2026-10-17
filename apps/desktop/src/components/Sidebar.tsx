@@ -11,40 +11,89 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../lib/api";
-import { activate, closeProject, pickProject, showProviders } from "../lib/store";
+import {
+  activate,
+  closeProject,
+  pickProject,
+  showProviders,
+} from "../lib/store";
 import { relativeTime } from "../lib/format";
-import type { Connection, ProjectInfo, ProjectState, SessionRow } from "../lib/types";
+import type {
+  Connection,
+  ProjectInfo,
+  ProjectState,
+  SessionRow,
+} from "../lib/types";
 import { Logo } from "./Logo";
-import { matchesSession, parseSessionPreferences, updateSessionPreferences, type SessionPreferences } from "../lib/session-preferences";
+import {
+  matchesSession,
+  parseSessionPreferences,
+  updateSessionPreferences,
+  type SessionPreferences,
+} from "../lib/session-preferences";
 
 interface Props {
-  app: { open: ProjectInfo[]; projects: Record<string, ProjectState>; activeId: string | null };
+  app: {
+    open: ProjectInfo[];
+    projects: Record<string, ProjectState>;
+    activeId: string | null;
+  };
   project: ProjectState | null;
 }
 
 export function Sidebar({ app, project }: Props) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [metadata, setMetadata] = useState<SessionPreferences>(() => parseSessionPreferences(null));
+  const [metadata, setMetadata] = useState<SessionPreferences>(() =>
+    parseSessionPreferences(null),
+  );
   const [error, setError] = useState<string | null>(null);
   const storageKey = `qq.sessions:${project?.project_id ?? ""}`;
   useEffect(() => {
-    try { setMetadata(parseSessionPreferences(localStorage.getItem(storageKey))); }
-    catch { setMetadata(parseSessionPreferences(null)); }
-    setQuery(""); setShowArchived(false); setError(null);
+    try {
+      setMetadata(parseSessionPreferences(localStorage.getItem(storageKey)));
+    } catch {
+      setMetadata(parseSessionPreferences(null));
+    }
+    setQuery("");
+    setShowArchived(false);
+    setError(null);
   }, [storageKey]);
-  const change = (id: string, update: { title?: string; archived?: boolean }) => {
+  const change = (
+    id: string,
+    update: { title?: string; archived?: boolean },
+  ) => {
     try {
       const next = updateSessionPreferences(metadata, id, update);
       localStorage.setItem(storageKey, JSON.stringify(next));
-      setMetadata(next); setError(null);
-    } catch (error) { setError(String(error)); }
+      setMetadata(next);
+      setError(null);
+    } catch (error) {
+      setError(String(error));
+    }
   };
   const groups = useMemo(() => {
-    const rows = (project?.sessions ?? []).map(row => ({ ...row, title: metadata.aliases[row.id] ?? row.title }));
-    const visible = rows.filter(row => matchesSession(query, row.title, row.tail) &&
-      (showArchived ? metadata.archived.includes(row.id) : !metadata.archived.includes(row.id) || row.status !== "idle" || row.group === "needs_you"));
-    return query.trim() || showArchived ? [[showArchived ? "Archived locally" : "Search results", visible] as [string, SessionRow[]]] : groupSessions(visible);
+    const rows = (project?.sessions ?? []).map((row) => ({
+      ...row,
+      title: metadata.aliases[row.id] ?? row.title,
+    }));
+    const visible = rows.filter(
+      (row) =>
+        matchesSession(query, row.title, row.tail) &&
+        (showArchived
+          ? metadata.archived.includes(row.id)
+          : !metadata.archived.includes(row.id) ||
+            row.status !== "idle" ||
+            row.group === "needs_you"),
+    );
+    return query.trim() || showArchived
+      ? [
+          [showArchived ? "Archived locally" : "Search results", visible] as [
+            string,
+            SessionRow[],
+          ],
+        ]
+      : groupSessions(visible);
   }, [project?.sessions, metadata, query, showArchived]);
 
   return (
@@ -54,7 +103,11 @@ export function Sidebar({ app, project }: Props) {
         <span className="text-[13px] font-semibold tracking-tight">QQ</span>
       </div>
 
-      <ProjectSwitcher open={app.open} projects={app.projects} activeId={app.activeId} />
+      <ProjectSwitcher
+        open={app.open}
+        projects={app.projects}
+        activeId={app.activeId}
+      />
 
       {project && (
         <div className="px-2 pb-2">
@@ -72,12 +125,35 @@ export function Sidebar({ app, project }: Props) {
         </div>
       )}
 
-      {project && <div className="px-3 pb-2">
-        <input aria-label="Search sessions" placeholder="Search sessions…" value={query} onChange={event => setQuery(event.target.value)} className="w-full rounded border border-line bg-raised px-2 py-1 text-[13px]" />
-        <button aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)} className="mt-1 text-[11px] text-muted">{showArchived ? "Show current sessions" : `Archived locally (${metadata.archived.length})`}</button>
-        {error && <p role="alert" className="text-[12px] text-danger">{error}</p>}
-      </div>}
-      <nav aria-label="Sessions" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      {project && (
+        <div className="px-3 pb-2">
+          <input
+            aria-label="Search sessions"
+            placeholder="Search sessions…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            className="w-full rounded border border-line bg-raised px-2 py-1 text-[13px]"
+          />
+          <button
+            aria-pressed={showArchived}
+            onClick={() => setShowArchived((value) => !value)}
+            className="mt-1 text-[11px] text-muted"
+          >
+            {showArchived
+              ? "Show current sessions"
+              : `Archived locally (${metadata.archived.length})`}
+          </button>
+          {error && (
+            <p role="alert" className="text-[12px] text-danger">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
+      <nav
+        aria-label="Sessions"
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+      >
         {project &&
           groups.map(([label, rows]) =>
             rows.length === 0 ? null : (
@@ -94,16 +170,20 @@ export function Sidebar({ app, project }: Props) {
                       projectId={project.project_id}
                       active={row.id === project.focused}
                       archived={metadata.archived.includes(row.id)}
-                      onChange={update => change(row.id, update)}
+                      onChange={(update) => change(row.id, update)}
                     />
                   ))}
                 </ul>
               </section>
             ),
           )}
-        {project && project.sessions.length === 0 && project.connection === "live" && (
-          <p className="px-2.5 pt-2 text-[12.5px] text-faint">No sessions yet.</p>
-        )}
+        {project &&
+          project.sessions.length === 0 &&
+          project.connection === "live" && (
+            <p className="px-2.5 pt-2 text-[12.5px] text-faint">
+              No sessions yet.
+            </p>
+          )}
       </nav>
 
       <footer className="flex items-center gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
@@ -149,16 +229,23 @@ function ProjectSwitcher({
           <div className="truncate text-[13px] font-medium">
             {active?.name ?? "No project"}
           </div>
-          {active && <div className="truncate text-[11px] text-faint">{active.path}</div>}
+          {active && (
+            <div className="truncate text-[11px] text-faint">{active.path}</div>
+          )}
         </div>
         <ChevronDown
-          className={clsx("h-4 w-4 text-muted transition-transform", expanded && "rotate-180")}
+          className={clsx(
+            "h-4 w-4 text-muted transition-transform",
+            expanded && "rotate-180",
+          )}
         />
       </button>
       {expanded && (
         <div className="mt-1 rounded-md border border-line bg-raised py-1 shadow-lg">
           {open.map((p) => {
-            const needs = projects[p.id]?.sessions.filter((s) => s.group === "needs_you").length ?? 0;
+            const needs =
+              projects[p.id]?.sessions.filter((s) => s.group === "needs_you")
+                .length ?? 0;
             return (
               <div key={p.id} className="group flex items-center">
                 <button
@@ -234,7 +321,9 @@ function SessionItem({
             <span
               className={clsx(
                 "truncate text-[13px]",
-                row.unread > 0 || row.group === "needs_you" ? "font-medium text-fg" : "text-fg/90",
+                row.unread > 0 || row.group === "needs_you"
+                  ? "font-medium text-fg"
+                  : "text-fg/90",
               )}
             >
               {row.title}
@@ -243,7 +332,8 @@ function SessionItem({
               {working ? "" : relativeTime(row.updated_at_ms)}
             </span>
           </span>
-          {(row.awaiting_approval > 0 || (working && (row.active_tool || row.tail))) && (
+          {(row.awaiting_approval > 0 ||
+            (working && (row.active_tool || row.tail))) && (
             <span className="mt-0.5 block truncate text-[11.5px] text-muted">
               {row.awaiting_approval > 0
                 ? "Waiting for your approval"
@@ -254,13 +344,51 @@ function SessionItem({
           )}
         </span>
       </button>
-      {renaming && <form onSubmit={event => { event.preventDefault(); onChange({ title }); setRenaming(false); }} className="p-1">
-        <input autoFocus aria-label="Local session name" maxLength={160} value={title} onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setRenaming(false); }} className="w-full rounded border border-line bg-raised px-2 py-1" />
-        <button type="submit" className="px-2 text-[11px]">Save local name</button><button type="button" onClick={() => setRenaming(false)} className="text-[11px]">Cancel</button>
-      </form>}
+      {renaming && (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onChange({ title });
+            setRenaming(false);
+          }}
+          className="p-1"
+        >
+          <input
+            autoFocus
+            aria-label="Local session name"
+            maxLength={160}
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setRenaming(false);
+            }}
+            className="w-full rounded border border-line bg-raised px-2 py-1"
+          />
+          <button type="submit" className="px-2 text-[11px]">
+            Save local name
+          </button>
+          <button
+            type="button"
+            onClick={() => setRenaming(false)}
+            className="text-[11px]"
+          >
+            Cancel
+          </button>
+        </form>
+      )}
       <div className="flex justify-end gap-2 px-2 text-[11px] text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-        <button onClick={() => { setTitle(row.title); setRenaming(true); }} title="Name on this desktop only">Rename locally</button>
-        <button onClick={() => onChange({ archived: !archived })}>{archived ? "Restore" : "Archive locally"}</button>
+        <button
+          onClick={() => {
+            setTitle(row.title);
+            setRenaming(true);
+          }}
+          title="Name on this desktop only"
+        >
+          Rename locally
+        </button>
+        <button onClick={() => onChange({ archived: !archived })}>
+          {archived ? "Restore" : "Archive locally"}
+        </button>
       </div>
       <button
         title="Delete session"
@@ -280,15 +408,24 @@ function SessionItem({
 }
 
 function StatusGlyph({ row }: { row: SessionRow }) {
-  if (row.awaiting_approval > 0) return <CircleAlert className="h-3 w-3 text-warn" />;
-  if (row.status !== "idle") return <Loader2 className="h-3 w-3 animate-spin text-accent" />;
-  if (row.failed && row.group === "needs_you") return <span className="h-2 w-2 rounded-full bg-danger" />;
+  if (row.awaiting_approval > 0)
+    return <CircleAlert className="h-3 w-3 text-warn" />;
+  if (row.status !== "idle")
+    return <Loader2 className="h-3 w-3 animate-spin text-accent" />;
+  if (row.failed && row.group === "needs_you")
+    return <span className="h-2 w-2 rounded-full bg-danger" />;
   if (row.unread > 0 || row.group === "needs_you")
     return <span className="h-2 w-2 rounded-full bg-accent" />;
   return <span className="h-1.5 w-1.5 rounded-full bg-line-strong" />;
 }
 
-function Badge({ tone, children }: { tone: "warn"; children: React.ReactNode }) {
+function Badge({
+  tone,
+  children,
+}: {
+  tone: "warn";
+  children: React.ReactNode;
+}) {
   return (
     <span
       className={clsx(
@@ -308,7 +445,14 @@ function ConnectionDot({ connection }: { connection: Connection | null }) {
       : connection === "failed" || connection === "offline"
         ? "bg-danger"
         : "bg-warn animate-qq-pulse";
-  return <span className={clsx("h-2 w-2 shrink-0 rounded-full", connection ? color : "bg-line-strong")} />;
+  return (
+    <span
+      className={clsx(
+        "h-2 w-2 shrink-0 rounded-full",
+        connection ? color : "bg-line-strong",
+      )}
+    />
+  );
 }
 
 function connectionLabel(connection: Connection | null): string {

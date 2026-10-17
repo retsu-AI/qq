@@ -91,6 +91,10 @@
   This single loaded-host pair is not a qualified tail-latency benchmark.
 - Final frontend typecheck and all 10 Node tests passed. Production Vite build
   passed (486.47 kB JS before gzip). Final native and installer gates follow.
+- Final native gates passed: fmt, Clippy with -D warnings, all 13 Rust tests
+  and debug build. Existing path-dependency Windows dead-code warnings remain.
+- Native integration committed as DP4. Settings/composer integration and
+  modal approval guards are the next independently reviewable commit.
 
 ## 2026-10-17 — Qualification blockers and safety boundaries
 

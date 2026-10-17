@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import clsx from "clsx";
 import { ArrowUp, ChevronDown, Shield, Square } from "lucide-react";
 import { api } from "../lib/api";
@@ -13,8 +19,16 @@ const MANAGE = "__manage_providers__";
 const MODES: Array<{ value: ApprovalMode; label: string; hint: string }> = [
   { value: "read_only", label: "Read only", hint: "No edits or commands" },
   { value: "ask", label: "Ask", hint: "Ask before every edit and command" },
-  { value: "auto", label: "Auto", hint: "Run safe actions, ask for risky ones" },
-  { value: "full", label: "Full access", hint: "Run everything except forbidden actions" },
+  {
+    value: "auto",
+    label: "Auto",
+    hint: "Run safe actions, ask for risky ones",
+  },
+  {
+    value: "full",
+    label: "Full access",
+    hint: "Run everything except forbidden actions",
+  },
 ];
 
 export function Composer({
@@ -27,18 +41,17 @@ export function Composer({
   autoFocus?: boolean;
 }) {
   const key = transcript?.session_id ?? `new:${project.project_id}`;
-  const [text, setText] = useState(() => drafts.get(key) ?? "");
+  useSyncExternalStore(drafts.subscribe, drafts.revision);
+  const text = drafts.get(key);
+  const pending = drafts.isPending(key);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const currentKey = useRef(key);
-  currentKey.current = key;
-  const sending = useRef(false);
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState("queue");
+  const files = drafts.get(`files:${key}`);
   const running = transcript ? transcript.status !== "idle" : false;
 
   useEffect(() => {
-    setText(drafts.get(key) ?? "");
+    setError(null);
     ref.current?.focus();
   }, [key]);
 
@@ -50,29 +63,37 @@ export function Composer({
   }, [text]);
 
   const update = (value: string) => {
-    setText(value);
     drafts.set(key, value);
   };
 
   const submit = async () => {
     const value = text.trim();
-    if (!value || sending.current || project.connection !== "live") return;
-    sending.current = true;
-    setPending(true);
+    if (!value || pending || project.connection !== "live") return;
     setError(null);
     try {
-      await drafts.submit(key, value => api.submitPrompt(project.project_id, transcript?.session_id ?? null, value, running ? mode : "queue"));
-      if (currentKey.current === key) setText(drafts.get(key));
+      await drafts.submit(key, (value) =>
+        api.submitPrompt(
+          project.project_id,
+          transcript?.session_id ?? null,
+          value,
+          running ? mode : "queue",
+          files
+            .split("\n")
+            .map((path) => path.trim())
+            .filter(Boolean),
+        ),
+      );
+      if (drafts.get(`files:${key}`) === files) drafts.set(`files:${key}`, "");
     } catch (error) {
       setError(String(error));
-    } finally {
-      sending.current = false;
-      setPending(false);
     }
   };
 
   const stop = () => {
-    if (transcript) void api.cancelRun(project.project_id, transcript.session_id).catch(error => setError(String(error)));
+    if (transcript)
+      void api
+        .cancelRun(project.project_id, transcript.session_id)
+        .catch((error) => setError(String(error)));
   };
 
   return (
@@ -93,7 +114,11 @@ export function Composer({
         }
         onChange={(event) => update(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            !event.nativeEvent.isComposing
+          ) {
             event.preventDefault();
             void submit();
           } else if (event.key === "Escape" && running) {
@@ -103,15 +128,50 @@ export function Composer({
         }}
         className="block max-h-[280px] w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[14px] leading-6 outline-none placeholder:text-faint selectable"
       />
-      {error && <p role="alert" className="px-4 py-2 text-danger">{error}</p>}
-      <div className="flex items-center gap-1 px-2 pb-2">
+      {error && (
+        <p role="alert" className="px-4 py-2 text-danger">
+          {error}
+        </p>
+      )}
+      <details className="px-4 py-1 text-[12px] text-muted">
+        <summary className="cursor-pointer">
+          Attach workspace files · @file mentions supported
+        </summary>
+        <textarea
+          aria-label="Workspace files, one relative path per line"
+          placeholder="src/main.rs"
+          value={files}
+          disabled={pending}
+          onChange={(event) => drafts.set(`files:${key}`, event.target.value)}
+          className="my-2 w-full rounded border border-line bg-bg p-2"
+        />
+        <p>
+          Up to eight files. Use paths relative to this project; files are
+          checked by QQ.
+        </p>
+      </details>
+      {transcript && (
+        <SessionPickers project={project} transcript={transcript} />
+      )}
+      <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
         <ModelPicker project={project} transcript={transcript} />
         {transcript && <ModePicker project={project} transcript={transcript} />}
-        {running && <select aria-label="Send action" value={mode} onChange={event => setMode(event.target.value)} className="max-w-40 rounded bg-raised px-2 py-1 text-[12px]">
-          <option value="queue">Queue follow-up</option>
-          {project.can_steer && <option value="steer">Steer at next boundary</option>}
-          {project.can_interrupt && <option value="interrupt">Interrupt and steer</option>}
-        </select>}
+        {running && (
+          <select
+            aria-label="Send action"
+            value={mode}
+            onChange={(event) => setMode(event.target.value)}
+            className="max-w-40 rounded bg-raised px-2 py-1 text-[12px]"
+          >
+            <option value="queue">Queue follow-up</option>
+            {project.can_steer && (
+              <option value="steer">Steer at next boundary</option>
+            )}
+            {project.can_interrupt && (
+              <option value="interrupt">Interrupt and steer</option>
+            )}
+          </select>
+        )}
         <div className="flex-1" />
         {running && (
           <button
@@ -125,8 +185,22 @@ export function Composer({
         <button
           onClick={() => void submit()}
           disabled={!text.trim() || pending || project.connection !== "live"}
-          aria-label={pending ? "Waiting for acknowledgement" : running ? mode === "queue" ? "Queue follow-up" : mode === "steer" ? "Steer run" : "Interrupt and steer" : "Send message"}
-          title={running ? `${mode === "queue" ? "Queue follow-up" : mode === "steer" ? "Steer run" : "Interrupt and steer"} (Enter)` : "Send (Enter)"}
+          aria-label={
+            pending
+              ? "Waiting for acknowledgement"
+              : running
+                ? mode === "queue"
+                  ? "Queue follow-up"
+                  : mode === "steer"
+                    ? "Steer run"
+                    : "Interrupt and steer"
+                : "Send message"
+          }
+          title={
+            running
+              ? `${mode === "queue" ? "Queue follow-up" : mode === "steer" ? "Steer run" : "Interrupt and steer"} (Enter)`
+              : "Send (Enter)"
+          }
           className={clsx(
             "flex h-8 w-8 items-center justify-center rounded-lg",
             text.trim()
@@ -137,6 +211,80 @@ export function Composer({
           <ArrowUp className="h-4 w-4" />
         </button>
       </div>
+    </div>
+  );
+}
+
+function SessionPickers({
+  project,
+  transcript,
+}: {
+  project: ProjectState;
+  transcript: Transcript;
+}) {
+  const model = project.models.find(
+    (model) => model.id === (transcript.model ?? project.selected_model),
+  );
+  const select = (type: "profile" | "effort" | "delegate", value: string) =>
+    void api.setSessionOption(
+      project.project_id,
+      transcript.session_id,
+      type,
+      value || null,
+    );
+  return (
+    <div
+      className="flex flex-wrap gap-2 px-4 py-2 text-[12px] text-muted"
+      title="Profile and effort changes apply to the next run. Delegate applies to the next held call."
+    >
+      <label>
+        Profile{" "}
+        <select
+          aria-label="Session profile"
+          value={transcript.profile}
+          onChange={(event) => select("profile", event.target.value)}
+          className="rounded bg-raised"
+        >
+          {!project.profiles.includes(transcript.profile) && (
+            <option value={transcript.profile}>{transcript.profile}</option>
+          )}
+          {project.profiles.map((profile) => (
+            <option key={profile}>{profile}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Effort{" "}
+        <select
+          aria-label="Reasoning effort for next run"
+          value={transcript.reasoning_effort ?? ""}
+          onChange={(event) => select("effort", event.target.value)}
+          className="rounded bg-raised"
+        >
+          <option value="">Configured default</option>
+          {transcript.reasoning_effort &&
+            !model?.reasoning_efforts.includes(transcript.reasoning_effort) && (
+              <option>{transcript.reasoning_effort}</option>
+            )}
+          {model?.reasoning_efforts.map((effort) => (
+            <option key={effort}>{effort}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Approval delegate{" "}
+        <select
+          aria-label="Approval delegate"
+          value={transcript.approval_delegate ?? ""}
+          onChange={(event) => select("delegate", event.target.value)}
+          className="rounded bg-raised"
+        >
+          <option value="">Configured default</option>
+          <option value="by_mode">By approval mode</option>
+          <option value="off">Human only</option>
+          <option value="on">Reviewer first</option>
+        </select>
+      </label>
     </div>
   );
 }
@@ -193,7 +341,13 @@ function ModelPicker({
   );
 }
 
-function ModePicker({ project, transcript }: { project: ProjectState; transcript: Transcript }) {
+function ModePicker({
+  project,
+  transcript,
+}: {
+  project: ProjectState;
+  transcript: Transcript;
+}) {
   const mode = MODES.find((m) => m.value === transcript.approval_mode);
   return (
     <label
@@ -220,7 +374,11 @@ function ModePicker({ project, transcript }: { project: ProjectState; transcript
             {m.label} — {m.hint}
           </option>
         ))}
-        {!mode && <option value={transcript.approval_mode}>{transcript.approval_mode}</option>}
+        {!mode && (
+          <option value={transcript.approval_mode}>
+            {transcript.approval_mode}
+          </option>
+        )}
       </select>
     </label>
   );
