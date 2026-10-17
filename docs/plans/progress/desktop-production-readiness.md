@@ -282,3 +282,20 @@ fully production ready. All unaffected implementation work is committed for revi
   provider sign-in remains external; NoAuth SSE and simulated 401 cover the local
   request/error path. Deferred features and diagnostic timing limits remain in
   the plan. No push or PR mutation occurred.
+
+## 2026-10-17 — Review fixes and public-history scrub
+
+- Rewrote the local branch with privacy fixups and autosquash; the required
+  full-history scrub scan is empty. Machine-specific diagnostic details stay
+  outside public history; fixture findings and verification limits remain.
+- Steering without a selected session now replies with an actionable error;
+  regression coverage exercises both steering modes and rejects server dispatch.
+- ts-rs and its derives/attributes are test-only; production dependency inspection
+  excludes it. The DTO drift test passes and generated.ts is unchanged.
+- Light tokens have one Tailwind utility definition; production CSS is
+  byte-for-byte identical to the previous build.
+- Static gates pass: pnpm typecheck/test/check:version/build; cargo fmt --check,
+  Clippy --locked --all-targets with -D warnings, and cargo test --locked
+  (14 Rust tests, 10 Node tests). Root Cargo files and engine sources match base.
+- No application/server launch or session-store access. Protected local edits
+  remain unchanged and uncommitted; no push, PR mutation or merge.
