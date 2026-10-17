@@ -95,6 +95,9 @@
   and debug build. Existing path-dependency Windows dead-code warnings remain.
 - Native integration committed as DP4. Settings/composer integration and
   modal approval guards are the next independently reviewable commit.
+- Settings/composer and modal safeguards committed as DP5. The rendering
+  fixture and virtualized history follow separately; package metadata is checked
+  before staging the engine sidecar, with version parser regression coverage.
 
 ## 2026-10-17 — Qualification blockers and safety boundaries
 

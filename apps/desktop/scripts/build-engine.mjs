@@ -5,6 +5,9 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkVersion } from "./check-version.mjs";
+
+checkVersion();
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(app, "..", "..");
