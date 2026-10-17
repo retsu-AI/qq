@@ -10,7 +10,7 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Seventh misses duration/compactions; eighth aborted for recorder error; ninth active; subscription only, no paid API fallback |
+| G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Ninth qualifies final runtime `e84e3552`: 145.7 minutes, four compactions, 14 retained checklist identities, terminal usage reconciled; subscription only, no paid API fallback |
 
 ## Entries
 
@@ -1225,8 +1225,26 @@ publication and thread resolution remain pending.
 - Ninth admission uses unchanged public `e84e3552` / hash `5b7635e2`, with correct
   hash and actual effective-config/credential isolation recorded first. Fresh
   limits: 2.5h / 64 runs; each 8 turns / 375K tokens / 30min, 48K working context.
-  Aggregate model/token bounds remain 512 / 24M. First real compaction retains
+  Nominal direct-run products remain 512 turns / 24M tokens; internal compaction
+  and audit turns are separate and actual usage is reported. First compaction retains
   all 14 checklist identities; goal is active after recovering a context refusal.
 - Remaining useful work is final-source foreground comparison, not another PR.
   #332 remains draft, ENG-1065 In Progress; terminal qualification and publication
   are still required. No paid fallback, padded time, manual compaction or merge.
+
+### 2026-10-17 — final-runtime G5 qualified
+
+- Ninth trial on unchanged public `e84e3552` ends blocked/model with exit 7 after
+  8,744.546 durable goal-event seconds: 141 model turns, 20 charged runs and four
+  compactions. All 14 checklist IDs/texts survive every compaction and finish done.
+- Root replays the checked-in auditor: qualifies true, all 25 checks true.
+  Exact usage: 3,719,297 fresh input + 637,184 cache-read input + 62,014 output;
+  cache-write 0. Paid API USD 0; estimated/subscription token value unknown.
+  Pre-admission isolation, final binary/source, unchanged finite bounds, no
+  resume, terminal process/stream agreement and exact accounting all verify.
+- Useful local commit `546b5a0c` retains the source-correct CLI comparison and
+  13 pairs / 26 closed arms; root reruns its five tests successfully and confirms
+  collector/native-arm cleanup. Remaining 107 registered pairs and absent H0/
+  host isolation remain explicit. ENG-1058/performance acceptance stays open.
+- Plan and curated receipt now qualify G5 for the final stack. ENG-1065 moves to
+  review; #332 publication/gate evidence is recorded in its PR body. No merge.

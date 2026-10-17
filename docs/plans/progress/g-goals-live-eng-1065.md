@@ -1,9 +1,10 @@
 # G5 — subscription-only live goal evaluation
 
-Status: seven evaluation trials settled; an eighth admission was aborted for a
-recorder error. The ninth is active. **G5 remains open**: the seventh finished
-its useful local task in 104.8 minutes without compactions, so it meets neither
-live duration nor compaction acceptance. ENG-1065 / ENG-809.
+Status: trials 1–7 and 9 settled; trial 8 was aborted for a recorder error.
+**The ninth trial qualifies G5 on final runtime `e84e3552`**:
+145.7 minutes, four compactions, all 14 checklist identities retained and terminal
+accounting verified. Earlier trials remain separate historical evidence; none
+is retroactively qualified. ENG-1065 / ENG-809, in review in #332.
 This is a curated evaluation record. Raw transcripts, credentials and session
 stores remain outside Git under `/tmp/qq-goal-delivery-20261015/` and
 `/tmp/qq-goal-delivery-20261017/`.
@@ -549,9 +550,11 @@ with the CLI model override applied. Exact route remains subscription-only
 delegation are absent/disabled. The isolation snapshot is fsynced before admission.
 
 Declared limits are 2.5 hours / 64 charged runs, each bounded to 8 model turns,
-375,000 tokens and 30 minutes. Model-turn/token aggregate ceilings remain
-512 / 24,000,000, matching the prior 8 × 64 / 8 × 3,000,000 envelope; the absolute
-deadline and per-run duration are lower. The working request ceiling is 49,152
+375,000 tokens and 30 minutes. The nominal direct-run envelope is
+512 model turns / 24,000,000 tokens, matching the prior 8 × 64 / 8 × 3,000,000
+products. Internal compaction and audit turns are separate; actual turns and
+usage are reported from the event stream. The absolute deadline and per-run
+duration are lower. The working request ceiling is 49,152
 with 8,192 output tokens. This is an explicit resource ceiling below the shipped
 272K catalog capacity. Small run units make earlier units summarizable; the
 48K ceiling gives bootstrap reads more room than the aborted 32K attempt.
@@ -567,7 +570,48 @@ External work is bounded to a recorded cutoff before the goal deadline, with
 owned-process cleanup. No padding, dummy context, manual outer compactions or
 new tasks to occupy time.
 
-The supervisor identity, authorized model turns and first real compaction are
-verified. All 14 checklist identities survive that compaction; the goal recovered
-from an initial context refusal and continued productive work. **The trial is
-active; terminal duration, compactions, accounting and publication remain open.**
+At admission, supervisor identity, authorized model turns and the first real
+compaction were verified. All 14 checklist identities survived that compaction;
+the goal recovered from an initial context refusal and continued productive work.
+The terminal result below supersedes that active admission status.
+
+## Ninth terminal result — final-runtime G5 qualified
+
+Ended **2026-10-17T05:50:17.069143+00:00**. Durable goal-event duration is
+**8,744.546 seconds (145.7 minutes)**, independently scoped to one workspace,
+session and goal. The supervisor stopped and its exit **7** matches the single,
+last `blocked/model` final record. The model explicitly reported the remaining
+experimental prerequisites instead of claiming the entire study achieved.
+
+- **141 model turns, 20 charged runs, four real compactions**. All 14 checklist
+  IDs/texts survive each compaction and are done at termination. Identity digest:
+  `0fbe3fc15b6b696f405a4cb24c2a477775db75b788889195b5a6be198e4ff31a`.
+- Exact usage reconciles completed model-turn events with durable counters:
+  **3,719,297 fresh input + 637,184 cache-read input + 62,014 output tokens**;
+  cache-write input 0. Estimated cost is null; subscription token value is unknown.
+  Isolated paid API spend is **USD 0**, with no paid fallback.
+- Original 2.5-hour/64-run bounds and per-run limits remain unchanged; no resume,
+  reset, padding or manual outer compaction. Source, executable hash/version and
+  pre-admission OAuth/environment isolation all verify against public `e84e3552`.
+- Useful local commit `546b5a0c` delivers the production-CLI comparison pipeline
+  and **13 registered pairs / 26 closed arms**, all independently audited by the
+  task. Root independently reran its five behavioral/receipt tests successfully
+  and confirmed no owned collector/native arm remained live. The original
+  30-pairs-per-group requirement leaves **107 of 120 pairs** outstanding; H0 and
+  host isolation prerequisites remain absent. This is bounded partial comparison
+  evidence, **not ENG-1058, H0 or resource/performance qualification**.
+
+Replayed using the checked-in [auditor](../../../benchmarks/goals/audit_live.py):
+
+```sh
+python3 -B benchmarks/goals/audit_live.py \
+  /tmp/qq-goal-delivery-20261017/g5-bounded-foreground-corrected \
+  e84e3552ad567b72f4c72178b02ba81a9edc89e5
+```
+
+Result: **`qualifies: true`; all 25 checks true**. The separate private output is
+`g5-terminal-audit-v2.json`; auditor SHA-256 is
+`e0d4c1182be87eae7da899bcd6b748c6d0a696ea2d0860f4b5ddc375ba3be55d`.
+Input and audit formats remain as documented above. This establishes acceptance
+5 for the final public runtime; it neither combines earlier trials nor waives
+the separate study's incomplete statistical and performance requirements.
