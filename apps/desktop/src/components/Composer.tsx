@@ -4,13 +4,11 @@ import { ArrowUp, ChevronDown, Shield, Square } from "lucide-react";
 import { api } from "../lib/api";
 import { modelShort } from "../lib/format";
 import { showProviders } from "../lib/store";
+import { drafts } from "../lib/drafts";
 import type { ApprovalMode, ProjectState, Transcript } from "../lib/types";
 
 /** Model-picker entry that opens the provider dialog instead of selecting. */
 const MANAGE = "__manage_providers__";
-
-/** Unsent text per session (or per project for a new session). */
-const drafts = new Map<string, string>();
 
 const MODES: Array<{ value: ApprovalMode; label: string; hint: string }> = [
   { value: "read_only", label: "Read only", hint: "No edits or commands" },
@@ -31,6 +29,12 @@ export function Composer({
   const key = transcript?.session_id ?? `new:${project.project_id}`;
   const [text, setText] = useState(() => drafts.get(key) ?? "");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  const sending = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState("queue");
   const running = transcript ? transcript.status !== "idle" : false;
 
   useEffect(() => {
@@ -50,15 +54,25 @@ export function Composer({
     drafts.set(key, value);
   };
 
-  const submit = () => {
+  const submit = async () => {
     const value = text.trim();
-    if (!value) return;
-    void api.submitPrompt(project.project_id, transcript?.session_id ?? null, value);
-    update("");
+    if (!value || sending.current || project.connection !== "live") return;
+    sending.current = true;
+    setPending(true);
+    setError(null);
+    try {
+      await drafts.submit(key, value => api.submitPrompt(project.project_id, transcript?.session_id ?? null, value, running ? mode : "queue"));
+      if (currentKey.current === key) setText(drafts.get(key));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      sending.current = false;
+      setPending(false);
+    }
   };
 
   const stop = () => {
-    if (transcript) void api.cancelRun(project.project_id, transcript.session_id);
+    if (transcript) void api.cancelRun(project.project_id, transcript.session_id).catch(error => setError(String(error)));
   };
 
   return (
@@ -66,6 +80,8 @@ export function Composer({
       <textarea
         ref={ref}
         value={text}
+        disabled={pending}
+        aria-label="Message"
         autoFocus={autoFocus}
         rows={1}
         placeholder={
@@ -79,7 +95,7 @@ export function Composer({
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
-            submit();
+            void submit();
           } else if (event.key === "Escape" && running) {
             event.preventDefault();
             stop();
@@ -87,9 +103,15 @@ export function Composer({
         }}
         className="block max-h-[280px] w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[14px] leading-6 outline-none placeholder:text-faint selectable"
       />
+      {error && <p role="alert" className="px-4 py-2 text-danger">{error}</p>}
       <div className="flex items-center gap-1 px-2 pb-2">
         <ModelPicker project={project} transcript={transcript} />
         {transcript && <ModePicker project={project} transcript={transcript} />}
+        {running && <select aria-label="Send action" value={mode} onChange={event => setMode(event.target.value)} className="max-w-40 rounded bg-raised px-2 py-1 text-[12px]">
+          <option value="queue">Queue follow-up</option>
+          {project.can_steer && <option value="steer">Steer at next boundary</option>}
+          {project.can_interrupt && <option value="interrupt">Interrupt and steer</option>}
+        </select>}
         <div className="flex-1" />
         {running && (
           <button
@@ -101,9 +123,10 @@ export function Composer({
           </button>
         )}
         <button
-          onClick={submit}
-          disabled={!text.trim()}
-          title={running ? "Queue follow-up (Enter)" : "Send (Enter)"}
+          onClick={() => void submit()}
+          disabled={!text.trim() || pending || project.connection !== "live"}
+          aria-label={pending ? "Waiting for acknowledgement" : running ? mode === "queue" ? "Queue follow-up" : mode === "steer" ? "Steer run" : "Interrupt and steer" : "Send message"}
+          title={running ? `${mode === "queue" ? "Queue follow-up" : mode === "steer" ? "Steer run" : "Interrupt and steer"} (Enter)` : "Send (Enter)"}
           className={clsx(
             "flex h-8 w-8 items-center justify-center rounded-lg",
             text.trim()
@@ -182,6 +205,7 @@ function ModePicker({ project, transcript }: { project: ProjectState; transcript
       <ChevronDown className="h-3.5 w-3.5" />
       <select
         value={transcript.approval_mode}
+        aria-label="Approval mode"
         onChange={(event) =>
           void api.setApprovalMode(
             project.project_id,

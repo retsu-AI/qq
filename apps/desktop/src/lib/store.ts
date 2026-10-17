@@ -136,6 +136,10 @@ let started = false;
 export async function start() {
   if (started) return;
   started = true;
+  window.addEventListener("unhandledrejection", event => {
+    event.preventDefault();
+    set({ error: String(event.reason) });
+  });
   await listen<ProjectState>("project-state", (event) => {
     const state = event.payload;
     if (!snapshot.open.some((p) => p.id === state.project_id)) return;

@@ -94,6 +94,8 @@ pub struct ProjectStateDto {
     pub transcript: Option<TranscriptDto>,
     pub models: Vec<ModelDto>,
     pub selected_model: Option<String>,
+    pub can_steer: bool,
+    pub can_interrupt: bool,
     pub notice: Option<NoticeDto>,
 }
 

@@ -19,8 +19,8 @@ export const api = {
   focusSession: (projectId: string, sessionId: string | null) =>
     invoke<void>("focus_session", { projectId, sessionId }),
   newSession: (projectId: string) => invoke<void>("new_session", { projectId }),
-  submitPrompt: (projectId: string, sessionId: string | null, text: string) =>
-    invoke<void>("submit_prompt", { projectId, sessionId, text }),
+  submitPrompt: (projectId: string, sessionId: string | null, text: string, mode = "queue") =>
+    invoke<void>("submit_prompt", { projectId, sessionId, text, mode }),
   cancelRun: (projectId: string, sessionId: string) =>
     invoke<void>("cancel_run", { projectId, sessionId }),
   respondApproval: (
