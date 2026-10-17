@@ -1244,7 +1244,7 @@ impl RuntimeFactory {
                             "openai-codex/{}",
                             profile.as_deref().unwrap_or("default")
                         )),
-                        Some("https://chatgpt.com"),
+                        Some(qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
                     )
                     .is_ok(),
                 HttpCredential::XAi { api_key, profile } => {
@@ -1255,7 +1255,7 @@ impl RuntimeFactory {
                         api_key.as_ref(),
                         &stored,
                         "XAI_API_KEY",
-                        Some(qq_config::XAI_CREDENTIAL_ENDPOINT),
+                        Some(qq_auth::XAI_CREDENTIAL_ENDPOINT),
                     )
                     .is_ok()
                 }
