@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::{
     AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
-    resolve_provider_credential,
+    oauth::OAuthProvider, resolve_provider_credential,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
@@ -433,9 +433,7 @@ impl CredentialStore {
             ));
         }
 
-        let _refresh = self
-            .lock_xai_operation(&name)?
-            .expect("xAI credential names always require the xAI lock");
+        let _refresh = self.lock_oauth_operation(OAuthProvider::XAi)?;
         let credential = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -533,7 +531,7 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    oauth::profile_credential_name("xai", profile)
+    oauth::profile_credential_name(OAuthProvider::XAi, profile)
 }
 
 fn unix_time() -> Result<u64, XaiAuthError> {

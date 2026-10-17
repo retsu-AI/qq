@@ -30,6 +30,8 @@ mod codex;
 mod oauth;
 mod xai;
 
+use oauth::OAuthProvider;
+
 pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
 
@@ -45,8 +47,6 @@ const MAX_ENDPOINT_LEN: usize = 4096;
 const INDEX_FILE_NAME: &str = "credentials.ron";
 const FALLBACK_FILE_NAME: &str = "auth.ron";
 const LOCK_FILE_NAME: &str = "auth.lock";
-const CODEX_LOCK_FILE_NAME: &str = "openai-codex.lock";
-const XAI_LOCK_FILE_NAME: &str = "xai.lock";
 const WINDOWS_CREDENTIAL_DIRECTORY_NAME: &str = "windows-credentials";
 #[cfg(windows)]
 const WINDOWS_PROTECTED_MAGIC: &[u8] = b"QQDPAPI\x01";
@@ -136,8 +136,7 @@ pub struct CredentialPaths {
     index_file: PathBuf,
     fallback_file: PathBuf,
     lock_file: PathBuf,
-    codex_lock_file: PathBuf,
-    xai_lock_file: PathBuf,
+    oauth_lock_files: [PathBuf; OAuthProvider::ALL.len()],
     windows_credential_dir: PathBuf,
 }
 
@@ -149,8 +148,8 @@ impl CredentialPaths {
             index_file: data_dir.join(INDEX_FILE_NAME),
             fallback_file: data_dir.join(FALLBACK_FILE_NAME),
             lock_file: data_dir.join(LOCK_FILE_NAME),
-            codex_lock_file: data_dir.join(CODEX_LOCK_FILE_NAME),
-            xai_lock_file: data_dir.join(XAI_LOCK_FILE_NAME),
+            oauth_lock_files: OAuthProvider::ALL
+                .map(|provider| data_dir.join(provider.lock_file_name())),
             windows_credential_dir: data_dir.join(WINDOWS_CREDENTIAL_DIRECTORY_NAME),
             data_dir,
         }
@@ -176,14 +175,8 @@ impl CredentialPaths {
         &self.lock_file
     }
 
-    #[must_use]
-    pub fn codex_lock_file(&self) -> &Path {
-        &self.codex_lock_file
-    }
-
-    #[must_use]
-    pub fn xai_lock_file(&self) -> &Path {
-        &self.xai_lock_file
+    pub(crate) fn oauth_lock_file(&self, provider: OAuthProvider) -> &Path {
+        &self.oauth_lock_files[provider.index()]
     }
 
     #[must_use]
@@ -339,9 +332,8 @@ pub struct CredentialStore {
     windows_protected: Arc<dyn WindowsProtectedBackend>,
     codex_device_client: Arc<dyn codex::CodexDeviceClient>,
     codex_client: Arc<dyn codex::CodexTokenClient>,
-    codex_refresh: Arc<Mutex<()>>,
     xai_client: Arc<dyn xai::XaiTokenClient>,
-    xai_refresh: Arc<Mutex<()>>,
+    oauth_operations: Arc<[Mutex<()>; OAuthProvider::ALL.len()]>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
     stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
 
@@ -631,8 +623,7 @@ impl CredentialStore {
         let kind = normalize_kind(kind)?;
         let endpoint = endpoint.map(normalize_endpoint).transpose()?;
         let secret = secret.as_ref();
-        let _codex_lock = self.lock_codex_operation(name)?;
-        let _xai_lock = self.lock_xai_operation(name)?;
+        let _oauth_lock = self.lock_oauth_operation_for(name)?;
         self.set_with_metadata_normalized(name, secret, allow_file_fallback, kind, endpoint)
     }
 
@@ -824,8 +815,7 @@ impl CredentialStore {
     /// Removes a registered credential. Returns `false` when no index record existed.
     pub fn remove(&self, name: &str) -> Result<bool, AuthError> {
         validate_credential_name(name)?;
-        let _codex_lock = self.lock_codex_operation(name)?;
-        let _xai_lock = self.lock_xai_operation(name)?;
+        let _oauth_lock = self.lock_oauth_operation_for(name)?;
         let _lock = self.lock_state()?;
         let mut index = self.load_index()?;
         let Some(record) = index.find(name).cloned() else {
@@ -890,9 +880,8 @@ impl CredentialStore {
             windows_protected,
             codex_device_client: Arc::new(codex::SystemCodexDeviceClient),
             codex_client: Arc::new(codex::SystemCodexTokenClient),
-            codex_refresh: Arc::new(Mutex::new(())),
             xai_client: Arc::new(xai::SystemXaiTokenClient),
-            xai_refresh: Arc::new(Mutex::new(())),
+            oauth_operations: Arc::new(OAuthProvider::ALL.map(|_| Mutex::new(()))),
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
@@ -1470,48 +1459,38 @@ impl CredentialStore {
         Ok(StateLock { _file: file })
     }
 
-    fn lock_codex_operation(&self, name: &str) -> Result<Option<CodexStateLock<'_>>, AuthError> {
-        if !name.starts_with("openai-codex/") {
-            return Ok(None);
-        }
-        let process = self
-            .codex_refresh
-            .lock()
-            .map_err(|_| codex::CodexAuthError::RefreshLockUnavailable)?;
-        ensure_data_directory(self.paths.data_dir())?;
-        let file = open_lock_file(self.paths.codex_lock_file())?;
-        file.lock().map_err(|source| AuthError::Io {
-            operation: "lock",
-            path: self.paths.codex_lock_file().to_owned(),
-            source,
-        })?;
-        verify_open_regular_file(self.paths.codex_lock_file(), &file, true)?;
-        Ok(Some(CodexStateLock {
-            _process: process,
-            _file: file,
-        }))
+    /// Serialises logins, refreshes, rotations and removals of the OAuth
+    /// credential `name`, across threads and processes. `None` when `name`
+    /// is not stored under a built-in OAuth provider.
+    fn lock_oauth_operation_for(
+        &self,
+        name: &str,
+    ) -> Result<Option<OAuthOperationLock<'_>>, AuthError> {
+        OAuthProvider::for_credential(name)
+            .map(|provider| self.lock_oauth_operation(provider))
+            .transpose()
     }
 
-    fn lock_xai_operation(&self, name: &str) -> Result<Option<CodexStateLock<'_>>, AuthError> {
-        if !name.starts_with("xai/") {
-            return Ok(None);
-        }
-        let process = self
-            .xai_refresh
+    fn lock_oauth_operation(
+        &self,
+        provider: OAuthProvider,
+    ) -> Result<OAuthOperationLock<'_>, AuthError> {
+        let process = self.oauth_operations[provider.index()]
             .lock()
-            .map_err(|_| xai::XaiAuthError::RefreshLockUnavailable)?;
+            .map_err(|_| provider.lock_unavailable())?;
+        let path = self.paths.oauth_lock_file(provider);
         ensure_data_directory(self.paths.data_dir())?;
-        let file = open_lock_file(self.paths.xai_lock_file())?;
+        let file = open_lock_file(path)?;
         file.lock().map_err(|source| AuthError::Io {
             operation: "lock",
-            path: self.paths.xai_lock_file().to_owned(),
+            path: path.to_owned(),
             source,
         })?;
-        verify_open_regular_file(self.paths.xai_lock_file(), &file, true)?;
-        Ok(Some(CodexStateLock {
+        verify_open_regular_file(path, &file, true)?;
+        Ok(OAuthOperationLock {
             _process: process,
             _file: file,
-        }))
+        })
     }
 
     fn load_index(&self) -> Result<IndexState, AuthError> {
@@ -2601,7 +2580,7 @@ enum LockMode {
     Shared,
 }
 
-struct CodexStateLock<'a> {
+struct OAuthOperationLock<'a> {
     _process: MutexGuard<'a, ()>,
     _file: File,
 }

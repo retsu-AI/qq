@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use super::{
     AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
+    oauth::OAuthProvider,
 };
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
@@ -1193,9 +1194,7 @@ impl CredentialStore {
             return Ok((credential.runtime_credential(), epoch));
         }
 
-        let _refresh = self
-            .lock_codex_operation(&name)?
-            .expect("OpenAI Codex credential names always require the Codex lock");
+        let _refresh = self.lock_oauth_operation(OAuthProvider::OpenAiCodex)?;
         let (mut credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -1388,7 +1387,7 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    oauth::profile_credential_name("openai-codex", profile)
+    oauth::profile_credential_name(OAuthProvider::OpenAiCodex, profile)
 }
 
 fn unix_time() -> Result<u64, CodexAuthError> {
